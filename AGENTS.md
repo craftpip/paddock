@@ -1,5 +1,16 @@
 # VM Friends Project — Agent Learnings
 
+## How to Use This File
+
+When the user says "remember" or "write this down in AGENTS.md", or whenever you encounter a problem, solve it, and learn something new — **write it here**. This includes:
+- Commands that worked (or didn't work)
+- Bug fixes and their root causes
+- Project structure details
+- Configuration quirks
+- Any decision the user makes about how things should work
+
+Append new entries under the relevant section or add a new section. Keep it concise but actionable so future agent sessions benefit.
+
 ## Project Structure
 
 - **`docker-compose.yml`** defines services (vm-ozden, vm-pranav).
@@ -72,4 +83,4 @@ The `npm/` folder is OpenClaw's internal plugin cache (not project dependencies)
 sudo find instances/ -name '.git' -type d -exec rm -rf {} + 2>/dev/null
 ```
 
-## PLACEHOLDER
+
