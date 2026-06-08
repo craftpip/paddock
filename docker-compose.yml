@@ -1,0 +1,29 @@
+services:
+  vm-ozden:
+    build:
+      context: ./vm_openclaw
+    image: vm-friends-vm-openclaw:latest
+    container_name: vm-ozden
+    restart: unless-stopped
+    ports:
+      - "43817:22"
+    volumes:
+      - ./instances/vm-ozden/openclaw:/root/.openclaw
+      - /tmp/screenshots:/tmp/screenshots
+    environment:
+      TZ: Asia/Kolkata
+      ROOT_PASSWORD: ozden
+
+  vm-pranav:
+    build:
+      context: ./vm_openclaw
+    image: vm-friends-vm-openclaw:latest
+    container_name: vm-pranav
+    restart: unless-stopped
+    ports:
+      - "43818:22"
+    volumes:
+      - ./instances/vm-pranav/openclaw:/root/.openclaw
+    environment:
+      TZ: Asia/Kolkata
+      ROOT_PASSWORD: pranav
