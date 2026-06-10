@@ -1,3 +1,4 @@
 instances/*/openclaw/npm/
 **/node_modules/
 **/.tmp/
+**/codex-home/
