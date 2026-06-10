@@ -1,0 +1,3 @@
+timestamp,hourly_usage,hourly_pct_left,hourly_reset_in,weekly_pct_left,weekly_reset_in,total_tokens_k,tokens_delta_k
+2026-06-10T06:58:16Z,5h,80,2h 5m,0,17h 36m,487,0
+2026-06-10T06:58:28Z,5h,80,2h 5m,0,17h 35m,487,0
