@@ -47,6 +47,12 @@ Append new entries under the relevant section or add a new section. Keep it conc
 - Instance files are owned by `root` (Docker creates them). Must use `sudo` for git operations on them.
 - Example: `sudo git add -A && sudo git commit -m "msg"`
 
+### Executable Bit Loss on Commit
+
+- `sudo git add -A` resets executable bits to whatever git has in its index. A script made executable via `chmod +x` will lose that bit on the next commit if git tracks it as mode 100644.
+- **Fix**: `sudo git update-index --chmod=+x <file>` to update the index, then commit. This permanently sets the mode to 100755.
+- Affected: `scripts/record-usage.sh` kept losing its executable bit every daily commit until fixed in git's index.
+
 ### Embedded Git Repos
 
 - OpenClaw creates nested git repos in:
@@ -66,7 +72,35 @@ instances/*/openclaw/npm/
 
 The `npm/` folder is OpenClaw's internal plugin cache (not project dependencies). `node_modules/` lives inside it and is equally unnecessary to version.
 
+
+
+## Usage Tracking (OpenAI API)
+
+- **Cron**: `0 * * * * /home/boniface/www/vm-friends/scripts/record-usage.sh` — runs every hour.
+- **Script**: `scripts/record-usage.sh` runs `docker exec vm-ozden openclaw models status` and `openclaw status` to extract hourly/weekly usage percentages, reset times, and session token totals.
+- **Output**: Appends one row to `usage_data.csv` at project root.
+- **CSV columns**: `timestamp`, `hourly_usage`, `hourly_pct_left`, `hourly_reset_in`, `weekly_pct_left`, `weekly_reset_in`, `total_tokens_k`, `tokens_delta_k`.
+- **Delta tracking**: Computes `tokens_delta_k` as difference from last row's `total_tokens_k`.
+- **Auto-commit**: `0 18 * * * /home/boniface/www/vm-friends/scripts/daily-commit.sh` commits and pushes `usage_data.csv` daily.
+
+## Daily Commit
+
+- `scripts/daily-commit.sh` runs at 18:00 daily via crontab.
+- Does `sudo git add -A && sudo git commit -m "auto: daily commit" && sudo git push`.
+
 ## Known Issues & Fixes
+
+### File Ownership
+
+- `AGENTS.md` at project root is owned by `root` (like instance files). Cannot use the `edit` tool — must use `sudo python3` or `sudo sed` to modify it.
+- When using `sudo python3` with embedded code, use `<< 'PYEOF'` (single-quoted heredoc delimiter) to prevent bash from interpreting backticks and `$` inside the Python code.
+
+### Issue: Usage tracking cron misses hours silently
+
+**Cause**: `scripts/record-usage.sh` uses `set -euo pipefail`. When `grep` finds no match (e.g., container down, output format change), the pipeline exits non-zero and `set -e` kills the script before writing to CSV — no error visible, no row logged.
+
+**Fix**: Added `|| true` to all `docker exec` and `grep` pipelines so no-match doesn't abort. Added an early-exit guard that logs a warning to stderr and exits 0 when the usage line can't be parsed.
+
 
 ### Issue: Cron jobs exist in `jobs.json` but not in `openclaw cron list`
 
@@ -82,5 +116,4 @@ The `npm/` folder is OpenClaw's internal plugin cache (not project dependencies)
 ```bash
 sudo find instances/ -name '.git' -type d -exec rm -rf {} + 2>/dev/null
 ```
-
 

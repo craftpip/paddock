@@ -7,27 +7,32 @@ CSV_FILE="$PROJECT_DIR/usage_data.csv"
 CONTAINER="vm-ozden"
 
 # --- OpenAI usage limits ---
-MODELS_OUTPUT=$(docker exec "$CONTAINER" openclaw models status 2>&1)
+MODELS_OUTPUT=$(docker exec "$CONTAINER" openclaw models status 2>&1 || true)
 
-RAW=$(echo "$MODELS_OUTPUT" | grep -- '- openai usage:' | sed 's/.*openai usage: //')
+RAW=$(echo "$MODELS_OUTPUT" | grep -- '- openai usage:' | sed 's/.*openai usage: //' || true)
 
 HOURLY=$(echo "$RAW" | sed 's/ ·.*//')
 WEEKLY=$(echo "$RAW" | sed 's/.*· //')
 
 HOURLY_USAGE=$(echo "$HOURLY" | awk '{print $1}')
-HOURLY_PCT=$(echo "$HOURLY" | grep -oP '\d+(?=% left)')
-HOURLY_RESET=$(echo "$HOURLY" | grep -oP '(?<=⏱).+')
+HOURLY_PCT=$(echo "$HOURLY" | grep -oP '\d+(?=% left)' || true)
+HOURLY_RESET=$(echo "$HOURLY" | grep -oP '(?<=⏱).+' || true)
 
-WEEKLY_PCT=$(echo "$WEEKLY" | grep -oP '\d+(?=% left)')
-WEEKLY_RESET=$(echo "$WEEKLY" | grep -oP '(?<=⏱).+')
+WEEKLY_PCT=$(echo "$WEEKLY" | grep -oP '\d+(?=% left)' || true)
+WEEKLY_RESET=$(echo "$WEEKLY" | grep -oP '(?<=⏱).+' || true)
+
+if [[ -z "$RAW" ]]; then
+    echo "[record-usage] WARN: no 'openai usage' line in models status output — skipping write" >&2
+    exit 0
+fi
 
 # --- Session token usage ---
-STATUS_OUTPUT=$(docker exec "$CONTAINER" openclaw status 2>&1)
+STATUS_OUTPUT=$(docker exec "$CONTAINER" openclaw status 2>&1 || true)
 
 TOTAL_TOKENS_K=0
 while IFS= read -r val; do
     TOTAL_TOKENS_K=$((TOTAL_TOKENS_K + val))
-done < <(echo "$STATUS_OUTPUT" | grep -oP '\b[0-9]+(?=k/)')
+done < <(echo "$STATUS_OUTPUT" | grep -oP '\b[0-9]+(?=k/)' || true)
 
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
