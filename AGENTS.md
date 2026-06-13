@@ -117,3 +117,22 @@ The `npm/` folder is OpenClaw's internal plugin cache (not project dependencies)
 sudo find instances/ -name '.git' -type d -exec rm -rf {} + 2>/dev/null
 ```
 
+## Project Learnings
+
+### Updating vm-ozden OpenClaw to latest
+
+**Created:** 2026-06-13  
+**Last updated:** 2026-06-13
+
+**Trigger:** User asked to update the OpenClaw instance inside `vm-ozden`, wanted latest only, and then asked to learn it.
+
+**Mistake / Problem:** A backup was started even though the user already had one. Also, OpenClaw `:latest` updates can trigger state migrations, and after updating to `2026.6.6` the Gateway accepted Telegram messages but agent replies failed because OpenAI auth had to be refreshed.
+
+**Correct Approach:** First record the current version with `docker exec vm-ozden openclaw --version`. If the user says they already have a backup, do not create another backup. Update only `vm-ozden` with `docker compose build --pull vm-ozden && docker compose up -d --no-deps --force-recreate vm-ozden`. Then record the new version and image digest. After update, check OpenAI auth; if needed, have the user complete interactive device auth because non-TTY tool sessions cannot run `docker exec -it`.
+
+**Verification:** Check `docker compose ps vm-ozden`, `docker exec vm-ozden openclaw --version`, `docker exec vm-ozden openclaw cron list`, recent `docker logs --since 2m vm-ozden`, and send a Telegram test using `docker exec vm-ozden openclaw message send --channel telegram --target 7283352340 --message "Test from vm-ozden after OpenClaw update"`. Also verify agent/OpenAI auth with `docker exec vm-ozden openclaw models status` and `docker exec vm-ozden openclaw agent --agent dev --message "Reply with OK only"`. If Telegram can send messages but replies fail with `401 Unauthorized: Missing bearer or basic authentication`, ask the user to run `docker exec -it vm-ozden openclaw models auth login --provider openai --force --device-code`, then re-run the auth and agent checks.
+
+**Scope:** Applies when updating the OpenClaw Docker image/container for `vm-ozden` in this repo.
+
+**Related terms:** openclaw update, vm-ozden, docker compose build --pull, latest, version record, telegram test, no backup, OpenAI auth, 401 Unauthorized, device-code
+
