@@ -77,9 +77,11 @@ The `npm/` folder is OpenClaw's internal plugin cache (not project dependencies)
 ## Usage Tracking (OpenAI API)
 
 - **Cron**: `0 * * * * /home/boniface/www/vm-friends/scripts/record-usage.sh` — runs every hour.
-- **Script**: `scripts/record-usage.sh` runs `docker exec vm-ozden openclaw models status` and `openclaw status` to extract hourly/weekly usage percentages, reset times, and session token totals.
+- **Script**: `scripts/record-usage.sh` uses `openclaw status --usage --json` for clean JSON with `usedPercent`/`resetAt`, and `openclaw sessions list --json` for per-session `totalTokens`. No more fragile grep parsing.
+- **Budget script**: `scripts/usage-budget.sh` — interactive report showing weekly %, burn rate, projection, session breakdown by kind (direct/cron/telegram), and headroom.
+- **Data source**: `openclaw status --usage --json` returns `usage.providers[].windows[]` with `label` ("5h" / "Week"), `usedPercent`, and `resetAt` (Unix ms).
 - **Output**: Appends one row to `usage_data.csv` at project root.
-- **CSV columns**: `timestamp`, `hourly_usage`, `hourly_pct_left`, `hourly_reset_in`, `weekly_pct_left`, `weekly_reset_in`, `total_tokens_k`, `tokens_delta_k`.
+- **CSV columns**: `timestamp`, `hourly_usage`, `hourly_pct_left`, `hourly_reset_in`, `weekly_pct_left`, `weekly_reset_in`, `total_tokens_k`, `tokens_delta_k`, `plan`.
 - **Delta tracking**: Computes `tokens_delta_k` as difference from last row's `total_tokens_k`.
 - **Auto-commit**: `0 18 * * * /home/boniface/www/vm-friends/scripts/daily-commit.sh` commits and pushes `usage_data.csv` daily.
 
@@ -136,3 +138,39 @@ sudo find instances/ -name '.git' -type d -exec rm -rf {} + 2>/dev/null
 
 **Related terms:** openclaw update, vm-ozden, docker compose build --pull, latest, version record, telegram test, no backup, OpenAI auth, 401 Unauthorized, device-code
 
+
+
+### Issue: Usage tracking broke after OpenClaw 2026.6.6 — grep pattern for provider name changed
+
+**Created:** 2026-06-15
+**Last updated:** 2026-06-15
+
+**Trigger:** User reported usage tracking cron was running but CSV columns were empty.
+
+**Mistake / Problem:** The script `scripts/record-usage.sh` greps for `- openai-codex usage:` to parse the usage line from `openclaw models status`. OpenClaw 2026.6.6 renamed the provider from `openai-codex` to `openai` in the output. The grep found no match, `|| true` prevented a crash, but the usage variables stayed empty — silent data loss.
+
+**Correct Approach:** When OpenClaw updates, always check `docker exec vm-ozden openclaw models status` output for provider name changes. The usage line format is: `- openai usage: 5h 97% left ⏱3h 36m · Week 48% left ⏱2d 7h`. Update grep to match `- openai usage:`.
+
+**Verification:** Run the script manually and check `tail -1 usage_data.csv` — all usage columns should be populated, not empty.
+
+**Scope:** Applies to `scripts/record-usage.sh` in this repo after any OpenClaw version update.
+
+**Related terms:** record-usage.sh, openclaw models status, openai-codex, openai usage, grep pattern, usage tracking breaking
+
+
+### vm-ozden Telegram failures can come from host-side Telegram reachability
+
+**Created:** 2026-06-16  
+**Last updated:** 2026-06-16
+
+**Trigger:** User asked why OpenClaw in `vm-ozden` was failing and later asked to learn the result.
+
+**Mistake / Problem:** Time was wasted looking at container-specific causes before verifying whether the host itself could reach Telegram. `vm-ozden` does not route through gluetun, so host-side reachability problems to `api.telegram.org` affect OpenClaw Telegram sends directly.
+
+**Correct Approach:** When `vm-ozden` shows Telegram send failures like `Network request for 'sendMessage' failed!` or `UND_ERR_CONNECT_TIMEOUT`, first test Telegram from the host with `curl -sv --connect-timeout 5 https://api.telegram.org`. If the host also times out while normal HTTPS still works, treat it as a host/network or regional restriction issue, not a Docker/container issue. For this incident, an Economic Times article reported temporary Telegram access restrictions in India until `2026-06-22`, which matched the observed host timeout.
+
+**Verification:** Confirm `curl -sv --connect-timeout 5 https://api.telegram.org` times out on the host, confirm `curl -s -o /dev/null -w '%{http_code}\n' --connect-timeout 5 https://example.com` still succeeds, and check `docker logs --since 30m vm-ozden` for Telegram timeout errors.
+
+**Scope:** Applies when diagnosing sudden Telegram failures in `vm-ozden` or other containers that use the host's normal outbound path.
+
+**Related terms:** vm-ozden, telegram, api.telegram.org, timeout, UND_ERR_CONNECT_TIMEOUT, host network, regional restriction, India, Economic Times
