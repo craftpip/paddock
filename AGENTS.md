@@ -174,3 +174,42 @@ sudo find instances/ -name '.git' -type d -exec rm -rf {} + 2>/dev/null
 **Scope:** Applies when diagnosing sudden Telegram failures in `vm-ozden` or other containers that use the host's normal outbound path.
 
 **Related terms:** vm-ozden, telegram, api.telegram.org, timeout, UND_ERR_CONNECT_TIMEOUT, host network, regional restriction, India, Economic Times
+
+
+### Treat apparent praise as possible sarcasm during failures
+
+**Created:** 2026-06-16  
+**Last updated:** 2026-06-16
+
+**Trigger:** User said `This is great. learn` after a frustrating Telegram outage investigation, then clarified it was sarcasm.
+
+**Mistake / Problem:** The response treated praise literally even though the surrounding context was a broken system and user frustration. That led to recording the learning with the wrong emotional framing.
+
+**Correct Approach:** When the user uses positive phrases like `great` or similar immediately after a failure, outage, or frustrating debugging session, treat them as possible sarcasm and confirm the actual lesson from the technical outcome rather than the literal praise.
+
+**Verification:** Before recording a learning or summarizing success, check whether the surrounding context indicates frustration, breakage, or complaint. If so, phrase the learning around the real problem and fix, not around apparent praise.
+
+**Scope:** Applies to user communication and project learning updates in this repo, especially during incident debugging.
+
+**Related terms:** sarcasm, praise, frustration, learn, AGENTS, outage, debugging, wording
+
+### Usage-budget.sh — burn rate breakdown by day and 3h block
+
+**Created:** 2026-06-16  
+**Last updated:** 2026-06-16
+
+**Trigger:** User wanted to understand the 1.5%/h burn rate and see consumption broken down by time of day and day of week.
+
+**Old version:** `usage-budget.sh` only showed a single overall burn rate (e.g., 1.5%/h). Without breakdown by time/day, it looked like every hour consumed that much — misleading since it's a spread average over busy and quiet periods.
+
+**Correct Approach:** `scripts/usage-budget.sh` now:
+- Records each burn rate reading with its IST day-of-week, hour, and 3-hour block
+- Prints a Day × 3h block matrix (Mon-Sun rows × 8 IST time blocks)
+- Prints by-day-of-week and by-3h-block summaries alongside the existing outputs
+
+**Verification:** Run `bash scripts/usage-budget.sh` and check the "Burn rate breakdown" section at the bottom.
+
+**Scope:** Applies to `scripts/usage-budget.sh` in this repo. CSV needs >1 week of data for the matrix to fill meaningfully.
+
+**Related terms:** usage-budget.sh, burn rate, breakdown, day of week, 3-hour block, IST, weekly_pct_left
+

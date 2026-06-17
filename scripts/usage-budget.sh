@@ -7,7 +7,7 @@ CSV="/home/boniface/www/vm-friends/usage_data.csv"
 
 python3 << 'PYEOF'
 import json, subprocess, os, csv
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 container = "vm-ozden"
 csv_file = "/home/boniface/www/vm-friends/usage_data.csv"
@@ -87,6 +87,7 @@ except Exception:
 sessions_data["total"] = total_tokens
 
 # --- Read CSV history for burn rate ---
+breakdown_data = []
 weekly_vals = []
 prev_weekly_left = None
 prev_ts = None
@@ -105,7 +106,14 @@ try:
                         if 0 < hours < 72:
                             drop = prev_weekly_left - val
                             if drop > 0:
-                                weekly_vals.append((hours, drop, drop / hours))
+                                rate = drop / hours
+                                weekly_vals.append((hours, drop, rate))
+                                ts_local = ts.astimezone(timezone(timedelta(hours=5, minutes=30)))
+                                dow = ts_local.weekday()
+                                hour_local = ts_local.hour
+                                block_start = (hour_local // 3) * 3
+                                block_label = f"{block_start:02d}-{block_start+3:02d}"
+                                breakdown_data.append((dow, hour_local, block_label, rate))
                     prev_weekly_left = val
                     prev_ts = ts
                 except:
@@ -199,6 +207,57 @@ if weekly_left > 0 and total_tokens > 0:
     remaining_tokens = weekly_cap - total_tokens
     print(f"  💡 Estimated weekly cap:  ~{weekly_cap:,.0f} tokens")
     print(f"     Headroom remaining:    ~{remaining_tokens:,.0f} tokens")
+    print()
+
+# --- Breakdown by day and hour ---
+if breakdown_data:
+    dow_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    block_labels = [f"{h:02d}-{h+3:02d}" for h in range(0, 24, 3)]
+
+    dow_rates = {d: [] for d in range(7)}
+    block_rates = {b: [] for b in block_labels}
+    dow_block_rates = {(d, b): [] for d in range(7) for b in block_labels}
+
+    for dow, hour, block, rate in breakdown_data:
+        dow_rates[dow].append(rate)
+        block_rates[block].append(rate)
+        dow_block_rates[(dow, block)].append(rate)
+
+    # Day × 3h block matrix
+    print("  📊 Burn rate breakdown")
+    print()
+    print("  Day × 3h block (IST, %/h):")
+    print(f"  {'Day':<6}  " + "  ".join(f"{b:>6}" for b in block_labels))
+    print(f"  {'─'*6}  " + "  ".join("──────" for _ in block_labels))
+    for d in range(7):
+        cells = []
+        for b in block_labels:
+            r = dow_block_rates[(d, b)]
+            avg_r = sum(r) / len(r) if r else None
+            cells.append(f"{avg_r:>6.2f}" if avg_r is not None else "     -")
+        print(f"  {dow_names[d]:<6}  " + "  ".join(cells))
+    print()
+
+    # By day of week
+    print("  By day of week:")
+    for d in range(7):
+        r = dow_rates[d]
+        if r:
+            a = sum(r) / len(r)
+            print(f"    {dow_names[d]:>3}:  {a:.2f}%/h  ({len(r)} reading{'s' if len(r)!=1 else ''})")
+        else:
+            print(f"    {dow_names[d]:>3}:  no data")
+    print()
+
+    # By 3h block
+    print("  By 3h block (IST):")
+    for b in block_labels:
+        r = block_rates[b]
+        if r:
+            a = sum(r) / len(r)
+            print(f"    {b:>5}:  {a:.2f}%/h  ({len(r)} reading{'s' if len(r)!=1 else ''})")
+        else:
+            print(f"    {b:>5}:  no data")
     print()
 
 print()
