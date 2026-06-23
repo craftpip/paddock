@@ -4,7 +4,6 @@ services:
       context: ./vm_openclaw
     image: vm-friends-vm-openclaw:latest
     container_name: vm-ozden
-    network_mode: "container:gluetun-global"
     restart: unless-stopped
     volumes:
       - ./instances/vm-ozden/openclaw:/root/.openclaw
