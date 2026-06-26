@@ -30,7 +30,11 @@ if [ -n "$TZ" ]; then
     echo $TZ > /etc/timezone
 fi
 /usr/sbin/sshd &
-openclaw gateway run --allow-unconfigured || tail -f /dev/null
+if [ -f /root/.openclaw/openclaw.json ] && grep -q '"gateway"' /root/.openclaw/openclaw.json 2>/dev/null; then
+    openclaw gateway run || tail -f /dev/null
+else
+    openclaw gateway run --allow-unconfigured || tail -f /dev/null
+fi
 EOF
 RUN chmod +x /usr/local/bin/start.sh
 

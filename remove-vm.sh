@@ -87,8 +87,8 @@ if compgen -G "$INSTANCES_DIR"'/*/meta.env' > /dev/null; then
     image: $image
     container_name: $name
     restart: unless-stopped
-    ports:
-      - "${PORT}:22"
+$(if [[ -n "${PORT:-}" ]]; then echo "    ports:
+      - \"${PORT}:22\""; fi)
     volumes:
       - ./instances/$name/$agent:$(container_data_dir_for_agent "$agent")
     environment:

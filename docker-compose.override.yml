@@ -1,12 +1,25 @@
 services:
+  vm-jake:
+    build:
+      context: ./vm_openclaw
+    image: vm-friends-vm-openclaw:latest
+    container_name: vm-jake
+    restart: unless-stopped
+    ports:
+      - "43821:22"
+    volumes:
+      - ./instances/vm-jake/openclaw:/root/.openclaw
+    environment:
+      TZ: Asia/Kolkata
+      ROOT_PASSWORD: jake
   vm-ozden:
     build:
       context: ./vm_openclaw
     image: vm-friends-vm-openclaw:latest
     container_name: vm-ozden
     restart: unless-stopped
-#    ports:
-#      - "43817:22"
+    ports:
+      - "43817:22"
     volumes:
       - ./instances/vm-ozden/openclaw:/root/.openclaw
     environment:
@@ -51,3 +64,16 @@ services:
     environment:
       TZ: Asia/Kolkata
       ROOT_PASSWORD: reze
+  vm-test:
+    build:
+      context: ./vm_openclaw
+    image: vm-friends-vm-openclaw:latest
+    container_name: vm-test
+    restart: unless-stopped
+    ports:
+      - "43821:22"
+    volumes:
+      - ./instances/vm-test/openclaw:/root/.openclaw
+    environment:
+      TZ: Asia/Kolkata
+      ROOT_PASSWORD: test

@@ -60,8 +60,9 @@ Options:
   --fresh              Create empty workspace (default)
   --clone [vm-name]    Clone from existing VM or most recent instance
   --agent NAME         Assistant profile: openclaw, picoclaw, nanobot, or hermes (default: openclaw)
+  --ssh                Enable SSH port (default: off)
   --password PASS      Root password (default: vm suffix)
-  --port PORT          SSH port (default: next free port)
+  --port PORT          SSH port (implies --ssh, default: next free port)
   --default-config     Auto-apply Telegram + Ollama defaults after first start
   --bot-token TOKEN    Telegram bot token (used with --default-config)
   --allow-from ID      Telegram user id allowlist entry (default: ${DEFAULT_ALLOW_FROM})
@@ -69,6 +70,7 @@ Options:
 
 Examples:
   ./add-vm.sh vm-alice --fresh
+  ./add-vm.sh vm-alice --ssh
   ./add-vm.sh vm-alice --agent picoclaw
   ./add-vm.sh vm-alice --agent nanobot
   ./add-vm.sh vm-alice --agent hermes
@@ -123,6 +125,7 @@ parse_args() {
   MODE="fresh"
   CLONE_SOURCE=""
   AGENT="openclaw"
+  SSH_ENABLED=""
   PASSWORD=""
   PORT=""
   DEFAULT_CONFIG="false"
@@ -140,8 +143,9 @@ parse_args() {
                 AGENT="$2"
                 shift 2
                 ;;
+            --ssh) SSH_ENABLED="yes"; shift ;;
             --password) PASSWORD="$2"; shift 2 ;;
-            --port) PORT="$2"; shift 2 ;;
+            --port) SSH_ENABLED="yes"; PORT="$2"; shift 2 ;;
             --default-config) DEFAULT_CONFIG="true"; shift ;;
             --bot-token) BOT_TOKEN="$2"; shift 2 ;;
             --allow-from) ALLOW_FROM="$2"; shift 2 ;;
@@ -189,8 +193,8 @@ $(for d in "$INSTANCES_DIR"/*; do
     image: $image
     container_name: $name
     restart: unless-stopped
-    ports:
-      - "${PORT}:22"
+$(if [[ -n "${PORT:-}" ]]; then echo "    ports:
+      - \"${PORT}:22\""; fi)
     volumes:
       - ./instances/$name/$agent:$(container_data_dir_for_agent "$agent")
     environment:
@@ -389,8 +393,10 @@ main() {
         error "VM '$VM_NAME' already exists"
     fi
 
-    if [[ -z "$PORT" ]]; then PORT="$(next_port)"; fi
-    if used_ports | grep -qx "$PORT"; then error "Port $PORT is already in use"; fi
+    if [[ -n "$SSH_ENABLED" ]]; then
+        if [[ -z "$PORT" ]]; then PORT="$(next_port)"; fi
+        if used_ports | grep -qx "$PORT"; then error "Port $PORT is already in use"; fi
+    fi
 
     inst_dir="$INSTANCES_DIR/$VM_NAME"
     workspace_dir="$inst_dir/$AGENT"
@@ -423,8 +429,8 @@ main() {
 
     cat > "$inst_dir/meta.env" <<EOF
 ROOT_PASSWORD=$PASSWORD
-PORT=$PORT
 AGENT=$AGENT
+$(if [[ -n "$SSH_ENABLED" ]]; then echo "PORT=$PORT"; fi)
 EOF
 
     regenerate_override
@@ -436,7 +442,7 @@ EOF
             echo "Warning: --default-config is not yet supported for hermes; skipping auto-patch"
             echo "Run: docker exec -it $VM_NAME hermes setup"
             echo "Or set up /opt/data/.env and /opt/data/config.yaml manually"
-            echo "Done: $VM_NAME on port $PORT"
+            if [[ -n "$SSH_ENABLED" ]]; then echo "Done: $VM_NAME on port $PORT"; else echo "Done: $VM_NAME"; fi
             exit 0
         fi
 
@@ -468,7 +474,11 @@ EOF
         fi
     fi
 
-    echo "Done: $VM_NAME on port $PORT"
+    local done_msg="Done: $VM_NAME"
+    if [[ -n "$SSH_ENABLED" ]]; then
+        done_msg="$done_msg on port $PORT"
+    fi
+    echo "$done_msg"
 }
 
 main "$@"
