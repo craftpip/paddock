@@ -2,14 +2,14 @@
 # Usage Budget — shows current OpenAI usage, burn rate, and headroom
 set -euo pipefail
 
-CONTAINER="vm-ozden"
+CONTAINER="vm-jake"
 CSV="/home/boniface/www/vm-friends/usage_data.csv"
 
 python3 << 'PYEOF'
 import json, subprocess, os, csv
 from datetime import datetime, timezone, timedelta
 
-container = "vm-ozden"
+container = "vm-jake"
 csv_file = "/home/boniface/www/vm-friends/usage_data.csv"
 
 # --- Fetch live usage from openclaw status --usage --json ---
@@ -169,7 +169,7 @@ bar = "█" * filled + "░" * (bar_len - filled)
 
 # --- Output ---
 print()
-print("  📊 Usage Budget (vm-ozden)")
+print("  📊 Usage Budget (vm-jake)")
 print("  ─────────────────────────")
 print(f"  Provider:    OpenAI {plan}")
 print(f"  Weekly:      {bar}")

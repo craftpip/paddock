@@ -4,14 +4,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 CSV_FILE="$PROJECT_DIR/usage_data.csv"
-CONTAINER="vm-ozden"
+CONTAINER="vm-jake"
 
 python3 << 'PYEOF'
 import json, subprocess, os, csv
 from datetime import datetime, timezone
 
 csv_file = "/home/boniface/www/vm-friends/usage_data.csv"
-container = "vm-ozden"
+container = "vm-jake"
 ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 HOURLY_PCT = ""
