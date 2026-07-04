@@ -579,6 +579,9 @@ setup_api_key() {
         elif [[ "$provider" == "ollama-cloud" ]]; then
             container_exec "openclaw config set agents.defaults.model.primary 'ollama-cloud/gemma4:31b'" >/dev/null
             ok "Default model set to ollama-cloud/gemma4:31b"
+        elif [[ "$provider" == "openrouter" ]]; then
+            container_exec "openclaw config set agents.defaults.model.primary 'openrouter/deepseek/deepseek-v4-flash'" >/dev/null
+            ok "Default model set to openrouter/deepseek/deepseek-v4-flash"
         fi
     fi
 }
@@ -619,7 +622,7 @@ interactive_setup_api_key() {
         local suggested=""
         case "$provider" in
             ollama-cloud) suggested="ollama-cloud/gemma4:31b" ;;
-            openrouter)   suggested="" ;;
+            openrouter)   suggested="openrouter/deepseek/deepseek-v4-flash" ;;
         esac
 
         setup_api_key "$provider" "$key" "$suggested"
@@ -710,6 +713,7 @@ main() {
             local suggested=""
             case "$prov" in
                 ollama-cloud) suggested="ollama-cloud/gemma4:31b" ;;
+                openrouter)   suggested="openrouter/deepseek/deepseek-v4-flash" ;;
             esac
             setup_api_key "$prov" "$key" "$suggested"
         done
