@@ -5,12 +5,38 @@ set -euo pipefail
 CONTAINER="vm-jake"
 CSV="/home/boniface/www/vm-friends/usage_data.csv"
 
+show_help() {
+    cat << 'HELP'
+Usage: ./scripts/usage-budget.sh [options]
+
+Options:
+  -h, --help       Show this help message and exit
+  -c, --compact    Show compact output (day + 3h block + position per reading)
+
+Without options, shows the full usage budget dashboard.
+HELP
+    exit 0
+}
+
+COMPACT=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help) show_help ;;
+        -c|--compact) COMPACT=1 ;;
+        *) echo "Unknown option: $1"; show_help ;;
+    esac
+    shift
+done
+
+export COMPACT
+
 python3 << 'PYEOF'
 import json, subprocess, os, csv
 from datetime import datetime, timezone, timedelta
 
 container = "vm-jake"
 csv_file = "/home/boniface/www/vm-friends/usage_data.csv"
+compact = os.environ.get("COMPACT", "0") == "1"
 
 # --- Fetch live usage from openclaw status --usage --json ---
 live = {}
@@ -214,51 +240,62 @@ if breakdown_data:
     dow_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     block_labels = [f"{h:02d}-{h+3:02d}" for h in range(0, 24, 3)]
 
-    dow_rates = {d: [] for d in range(7)}
-    block_rates = {b: [] for b in block_labels}
-    dow_block_rates = {(d, b): [] for d in range(7) for b in block_labels}
+    if compact:
+        now_local = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+        cur_dow = now_local.weekday()
+        cur_hour = now_local.hour
+        block_start = (cur_hour // 3) * 3
+        cur_block = f"{block_start:02d}-{block_start+3:02d}"
+        cur_rates = [r for d, _, b, r in breakdown_data if d == cur_dow and b == cur_block]
+        avg_rate = sum(cur_rates) / len(cur_rates) if cur_rates else 0
+        print(f"  📍 Now: {dow_names[cur_dow]}  {cur_block}  —  avg burn {avg_rate:.2f}%/h  ({len(cur_rates)} readings)")
+        print()
+    else:
+        dow_rates = {d: [] for d in range(7)}
+        block_rates = {b: [] for b in block_labels}
+        dow_block_rates = {(d, b): [] for d in range(7) for b in block_labels}
 
-    for dow, hour, block, rate in breakdown_data:
-        dow_rates[dow].append(rate)
-        block_rates[block].append(rate)
-        dow_block_rates[(dow, block)].append(rate)
+        for dow, hour, block, rate in breakdown_data:
+            dow_rates[dow].append(rate)
+            block_rates[block].append(rate)
+            dow_block_rates[(dow, block)].append(rate)
 
-    # Day × 3h block matrix
-    print("  📊 Burn rate breakdown")
-    print()
-    print("  Day × 3h block (IST, %/h):")
-    print(f"  {'Day':<6}  " + "  ".join(f"{b:>6}" for b in block_labels))
-    print(f"  {'─'*6}  " + "  ".join("──────" for _ in block_labels))
-    for d in range(7):
-        cells = []
+        # Day × 3h block matrix
+        print("  📊 Burn rate breakdown")
+        print()
+        print("  Day × 3h block (IST, %/h):")
+        print(f"  {'Day':<6}  " + "  ".join(f"{b:>6}" for b in block_labels))
+        print(f"  {'─'*6}  " + "  ".join("──────" for _ in block_labels))
+        for d in range(7):
+            cells = []
+            for b in block_labels:
+                r = dow_block_rates[(d, b)]
+                avg_r = sum(r) / len(r) if r else None
+                cells.append(f"{avg_r:>6.2f}" if avg_r is not None else "     -")
+            print(f"  {dow_names[d]:<6}  " + "  ".join(cells))
+        print()
+
+        # By day of week
+        print("  By day of week:")
+        for d in range(7):
+            r = dow_rates[d]
+            if r:
+                a = sum(r) / len(r)
+                print(f"    {dow_names[d]:>3}:  {a:.2f}%/h  ({len(r)} reading{'s' if len(r)!=1 else ''})")
+            else:
+                print(f"    {dow_names[d]:>3}:  no data")
+        print()
+
+        # By 3h block
+        print("  By 3h block (IST):")
         for b in block_labels:
-            r = dow_block_rates[(d, b)]
-            avg_r = sum(r) / len(r) if r else None
-            cells.append(f"{avg_r:>6.2f}" if avg_r is not None else "     -")
-        print(f"  {dow_names[d]:<6}  " + "  ".join(cells))
-    print()
-
-    # By day of week
-    print("  By day of week:")
-    for d in range(7):
-        r = dow_rates[d]
-        if r:
-            a = sum(r) / len(r)
-            print(f"    {dow_names[d]:>3}:  {a:.2f}%/h  ({len(r)} reading{'s' if len(r)!=1 else ''})")
-        else:
-            print(f"    {dow_names[d]:>3}:  no data")
-    print()
-
-    # By 3h block
-    print("  By 3h block (IST):")
-    for b in block_labels:
-        r = block_rates[b]
-        if r:
-            a = sum(r) / len(r)
-            print(f"    {b:>5}:  {a:.2f}%/h  ({len(r)} reading{'s' if len(r)!=1 else ''})")
-        else:
-            print(f"    {b:>5}:  no data")
-    print()
+            r = block_rates[b]
+            if r:
+                a = sum(r) / len(r)
+                print(f"    {b:>5}:  {a:.2f}%/h  ({len(r)} reading{'s' if len(r)!=1 else ''})")
+            else:
+                print(f"    {b:>5}:  no data")
+        print()
 
 print()
 PYEOF

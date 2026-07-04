@@ -23,16 +23,3 @@ services:
     environment:
       TZ: Asia/Kolkata
       ROOT_PASSWORD: jake
-  vm-ozden2:
-    build:
-      context: ./vm_openclaw
-    image: vm-friends-vm-openclaw:latest
-    container_name: vm-ozden2
-    restart: unless-stopped
-    ports:
-      - "43820:22"
-    volumes:
-      - ./instances/vm-ozden2/openclaw:/root/.openclaw
-    environment:
-      TZ: Asia/Kolkata
-      ROOT_PASSWORD: ozden2
