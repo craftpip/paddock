@@ -48,9 +48,12 @@ for attempt in range(2):
     try:
         raw = subprocess.check_output(
             ["docker", "exec", container, "openclaw", "status", "--usage", "--json"],
-            stderr=subprocess.STDOUT, timeout=30
+            timeout=30
         )
-        data = json.loads(raw)
+        # Strip any non-JSON prefix (e.g. [state-migrations] warnings on stderr)
+        text = raw.decode()
+        brace = text.find("{")
+        data = json.loads(text[brace:] if brace >= 0 else text)
         for prov in data.get("usage", {}).get("providers", []):
             if prov.get("provider") == "openai":
                 PLAN = prov.get("plan") or ""

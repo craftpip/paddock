@@ -1,30 +1,28 @@
 services:
+  vm-jake2:
+    build:
+      context: ./vm_openclaw
+    image: vm-friends-vm-openclaw:latest
+    container_name: vm-jake2
+    restart: unless-stopped
+
+    volumes:
+      - ./instances/vm-jake2/openclaw:/root/.openclaw
+    environment:
+      TZ: Asia/Kolkata
+      ROOT_PASSWORD: jake2
   vm-jake:
     build:
       context: ./vm_openclaw
     image: vm-friends-vm-openclaw:latest
     container_name: vm-jake
     restart: unless-stopped
-    ports:
-      - "43821:22"
+
     volumes:
       - ./instances/vm-jake/openclaw:/root/.openclaw
     environment:
       TZ: Asia/Kolkata
       ROOT_PASSWORD: jake
-  vm-ozden:
-    build:
-      context: ./vm_openclaw
-    image: vm-friends-vm-openclaw:latest
-    container_name: vm-ozden
-    restart: unless-stopped
-    ports:
-      - "43817:22"
-    volumes:
-      - ./instances/vm-ozden/openclaw:/root/.openclaw
-    environment:
-      TZ: Asia/Kolkata
-      ROOT_PASSWORD: ozden
   vm-ozden2:
     build:
       context: ./vm_openclaw
@@ -38,42 +36,3 @@ services:
     environment:
       TZ: Asia/Kolkata
       ROOT_PASSWORD: ozden2
-  vm-pranav:
-    build:
-      context: ./vm_openclaw
-    image: vm-friends-vm-openclaw:latest
-    container_name: vm-pranav
-    restart: unless-stopped
-    ports:
-      - "43818:22"
-    volumes:
-      - ./instances/vm-pranav/openclaw:/root/.openclaw
-    environment:
-      TZ: Asia/Kolkata
-      ROOT_PASSWORD: pranav
-  vm-reze:
-    build:
-      context: ./vm_nanobot
-    image: vm-friends-vm-nanobot:latest
-    container_name: vm-reze
-    restart: unless-stopped
-    ports:
-      - "43819:22"
-    volumes:
-      - ./instances/vm-reze/nanobot:/root/.nanobot
-    environment:
-      TZ: Asia/Kolkata
-      ROOT_PASSWORD: reze
-  vm-test:
-    build:
-      context: ./vm_openclaw
-    image: vm-friends-vm-openclaw:latest
-    container_name: vm-test
-    restart: unless-stopped
-    ports:
-      - "43821:22"
-    volumes:
-      - ./instances/vm-test/openclaw:/root/.openclaw
-    environment:
-      TZ: Asia/Kolkata
-      ROOT_PASSWORD: test

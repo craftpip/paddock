@@ -89,6 +89,68 @@ The `npm/` folder is OpenClaw's internal plugin cache (not project dependencies)
 - `scripts/daily-commit.sh` runs at 18:00 daily via crontab.
 - Does `sudo git add -A && sudo git commit -m "auto: daily commit" && sudo git push`.
 
+
+
+## Onboard Bot Script
+
+- **Script**: `scripts/onboard-bot.sh` — automates `openclaw onboard` + Telegram + API key setup for a running VM.
+- **Flow**:
+  1. First run: generates skeleton config, adds Telegram channel with allowlist.
+  2. Saves/reads credentials from `bot-prefixes.json` (gitignored).
+  3. Supports API key providers (`--api-key`, `--setup-api-key`).
+  4. OAuth and device-code flows are disabled in the script but kept for future debugging.
+- **Telegram credentials**: Stored in `bot-prefixes.json` at project root (gitignored).
+- **Structure**:
+  ```json
+  {
+    "bots": { "wilmaa_bot": "8775500299:AAF__..." },
+    "users": { "boniface": "532156945" }
+  }
+  ```
+
+### Save credentials with a name (persists to bot-prefixes.json):
+  ```bash
+  --add-bot <name>=<token>     Save a Telegram bot token
+  --add-user <name>=<id>       Save a Telegram user ID
+  ```
+
+### Use by saved name:
+  ```bash
+  --bot <name>       Look up bot token from bot-prefixes.json
+  --user <name>      Look up user ID from bot-prefixes.json
+  ```
+
+### Other flags:
+  ```bash
+  --bot-token <token>     Direct bot token (no save)
+  --allow-from <id>       Direct user ID (no save)
+  --api-key <prov>=<key>  Set provider API key (repeatable)
+  --setup-api-key         Interactive provider API key setup
+  --reset                 Wipe config + kill stale auth
+  --continue              Finalize after device-code auth
+  --redirect-url <url>    Complete OAuth with redirect URL
+  ```
+
+### Full workflow for a new VM:
+  1. `sudo bash add-vm.sh vm-xxx`
+  2. Save credentials (one-time): `--add-bot mybot=123:ABC --add-user alice=987`
+  3. Onboard: `sudo bash scripts/onboard-bot.sh vm-xxx --bot mybot --user alice`
+  4. Set API keys: `sudo bash scripts/onboard-bot.sh vm-xxx --api-key ollama-cloud=<key>`
+
+### Legacy (OAuth / Device-code) — kept for debugging:
+- **OAuth process**: Writes `/tmp/oauth-helper-<vm>.py` inside the container. The helper uses a PTY, strips ANSI/control output, waits until the OAuth URL is detected before blocking on the FIFO, and writes raw debug output to `/tmp/onboard-oauth-<vm>.url.repr`.
+- **OAuth failure-path rule**: Keep all OAuth temp paths defined in both `setup_auth_oauth` and `complete_auth_oauth`; with `set -u`, completion error-reporting must not reference setup-local variables such as `c_log` unless redefined locally. Verify failed-auth paths as well as success paths.
+- **Device-code process**: Uses `script -q -c` inside `docker exec` to create a pseudo-TTY for `openclaw models auth login --device-code`, then runs it in background with `nohup` + `disown` so it survives script exit.
+- **Requirements**: VM must already exist (created with `add-vm.sh`) and be running.
+
+## Provider API Keys via `--api-key`
+
+- Uses `openclaw models auth paste-api-key --provider <name>` inside the container.
+- For `ollama-cloud`, automatically sets `ollama-cloud/gemma4:31b` as default model when no model is configured.
+- Providers confirmed working: `openrouter`, `ollama-cloud`.
+- To verify: `docker exec <vm> openclaw models auth list --json`
+
+
 ## Known Issues & Fixes
 
 ### File Ownership
