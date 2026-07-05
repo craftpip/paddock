@@ -3,3 +3,8 @@ instances/*/openclaw/npm/
 **/.tmp/
 **/codex-home/
 bot-prefixes.json
+**/*-backup/
+*.dll
+*.so
+*.node
+*.wasm

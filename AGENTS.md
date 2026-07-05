@@ -17,7 +17,8 @@ Append new entries under the relevant section or add a new section. Keep it conc
 - **`docker-compose.override.yml`** adds vm-jake, vm-ozden2, vm-reze, vm-test.
 - **`vm_openclaw/`** Docker image builds from `ghcr.io/openclaw/openclaw:latest`.
 - **`instances/<vm>/openclaw/`** is bind-mounted to `/root/.openclaw` inside each container.
-- Scripts: `add-vm.sh`, `remove-vm.sh`, `reset-vm.sh`.
+- Scripts: `add-vm.sh`, `remove-vm.sh`, `reset-vm.sh`, `manage_backups.sh`.
+- **`backups/`** — stores timestamped backup archives per agent.
 
 ## OpenClaw Cron System
 
@@ -27,6 +28,12 @@ Append new entries under the relevant section or add a new section. Keep it conc
 - **`cron/jobs.json` is legacy** — the Gateway no longer reads from it on startup. It is **not** auto-imported.
 - To import old `jobs.json` entries into SQLite, run: `openclaw doctor --fix`
 - New jobs added via `openclaw cron add` or the Gateway cron tool call go **only** to SQLite.
+
+### Cron Jobs Capture Model at Creation Time
+
+- Cron jobs store the model string at creation time and **do not** auto-update when `agents.defaults.model.primary` changes.
+- To update cron jobs to a new model, use `openclaw cron update <id> --model <new-model>` or delete and recreate.
+- Check current model per job with `openclaw cron list` (look at the Model column).
 
 ### Persistence Across Container Recreates
 
@@ -179,6 +186,43 @@ The `npm/` folder is OpenClaw's internal plugin cache (not project dependencies)
 sudo find instances/ -name '.git' -type d -exec rm -rf {} + 2>/dev/null
 ```
 
+## Backup & Restore (save_backups.sh)
+
+**Path:** `./manage_backups.sh`
+
+A self-aware script that discovers agents from `instances/vm-*/` and uses `openclaw backup create` inside each running container.
+
+**Commands:**
+
+- `sudo ./manage_backups.sh backup [agent]` — backup all agents or a specific one.
+- `sudo ./manage_backups.sh restore <agent>` — restore from the latest backup in `backups/`.
+
+**Backup flow:**
+1. Run `openclaw backup create --output /tmp/{name}_{timestamp}.tar.gz` inside the container.
+2. Copy archive from container to host `backups/` dir.
+3. Clean up temp file.
+
+**Restore flow:**
+1. Find latest `backups/{agent}_*.tar.gz`.
+2. Copy into container, extract to `/root/.openclaw`.
+3. Restart container.
+
+**Bot Clone / Copy flow:**
+To clone an existing bot into a new one:
+1. Create the new VM: `sudo bash add-vm.sh <new-vm>`
+2. Backup source bot: `sudo ./manage_backups.sh backup <source-vm>`
+3. Stop the new VM so its bind mount is writable
+4. Extract the source backup into the new VM's instance dir:
+   ```
+   sudo tar -xzf backups/<source-vm>_*.tar.gz -C instances/<new-vm>/openclaw/
+   ```
+5. Start the new VM: `sudo docker compose up -d <new-vm>`
+6. Optionally onboard for Telegram with `sudo bash scripts/onboard-bot.sh <new-vm> ...`
+
+**Known issues:**
+- Large workspaces can make the backup command slow.
+- Backup copies the full state including SQLite databases (cron, auth, session store).
+
 ## Project Learnings
 
 ### Updating OpenClaw to latest (vm-ozden / vm-jake pattern)
@@ -218,3 +262,38 @@ sudo find instances/ -name '.git' -type d -exec rm -rf {} + 2>/dev/null
 **Details:** `scripts/usage-budget.sh` records each burn rate reading with IST day-of-week, hour, and 3-hour block. Prints a Day by 3h block matrix, by-day, and by-block summaries. CSV needs >1 week of data for the matrix to fill meaningfully.
 
 **Related terms:** usage-budget.sh, burn rate, breakdown, day of week, 3-hour block
+
+
+### Local Vector Memory (Semantic Search) for OpenClaw Bots
+
+**Last updated:** 2026-07-05
+
+**Goal:** Self-contained local semantic memory using ChromaDB + local GGUF embeddings (no cloud API).
+
+**Steps:**
+1. Install the llama-cpp provider plugin inside the container:
+   ```
+   openclaw plugins install @openclaw/llama-cpp-provider
+   ```
+2. Add plugin entry to `plugins.entries` in `openclaw.json`:
+   ```json
+   "llama-cpp": { "enabled": true }
+   ```
+3. Configure `memorySearch` under `agents.defaults` with the correct structure:
+   ```json
+   "memorySearch": {
+     "provider": "local",
+     "local": {
+       "modelPath": "hf:ggml-org/embeddinggemma-300m-qat-q8_0-GGUF/embeddinggemma-300m-qat-Q8_0.gguf"
+     }
+   }
+   ```
+4. Restart the container: `docker compose restart <vm>`
+5. Run the index: `openclaw memory index`
+
+**Notes:**
+- The default model is `embeddinggemma-300m-qat-Q8_0.gguf` -- the `modelPath` can also point at a local `.gguf` file.
+- Everything runs CPU-only inside the container; no host-side installs needed.
+- Changing the embedding provider/model invalidates the existing vector index. Rebuild with `openclaw memory index --force`.
+- The `active-memory` plugin should also be enabled for interactive semantic recall during chats.
+- Official docs: https://docs.openclaw.ai/plugins/llama-cpp
