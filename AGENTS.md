@@ -209,15 +209,18 @@ A self-aware script that discovers agents from `instances/vm-*/` and uses `openc
 
 **Bot Clone / Copy flow:**
 To clone an existing bot into a new one:
-1. Create the new VM: `sudo bash add-vm.sh <new-vm>`
-2. Backup source bot: `sudo ./manage_backups.sh backup <source-vm>`
-3. Stop the new VM so its bind mount is writable
-4. Extract the source backup into the new VM's instance dir:
-   ```
-   sudo tar -xzf backups/<source-vm>_*.tar.gz -C instances/<new-vm>/openclaw/
-   ```
-5. Start the new VM: `sudo docker compose up -d <new-vm>`
+1. Clone directly: `sudo bash add-vm.sh <new-vm> --clone <source-vm>` (this handles backup + copy in one step)
+2. Optionally onboard for Telegram with `sudo bash scripts/onboard-bot.sh <new-vm> ...`
+
+**Alternative (manual) flow:**
+1. Backup source: `sudo ./manage_backups.sh backup <source-vm>`
+2. Create target: `sudo bash add-vm.sh <new-vm> --fresh`
+3. Stop target: `sudo docker compose stop <new-vm>`
+4. Restore into target: `sudo ./manage_backups.sh restore <new-vm>` (after renaming backup to match target name)
+5. Start target: `sudo docker compose up -d <new-vm>`
 6. Optionally onboard for Telegram with `sudo bash scripts/onboard-bot.sh <new-vm> ...`
+
+**Do NOT** use manual `tar -xzf` extraction when `manage_backups.sh restore` exists.
 
 **Known issues:**
 - Large workspaces can make the backup command slow.
