@@ -31,7 +31,7 @@ done
 export COMPACT
 
 python3 << 'PYEOF'
-import json, subprocess, os, csv
+import json, subprocess, os, csv, re
 from datetime import datetime, timezone, timedelta
 
 container = "vm-jake"
@@ -39,6 +39,15 @@ csv_file = "/home/boniface/www/vm-friends/usage_data.csv"
 compact = os.environ.get("COMPACT", "0") == "1"
 
 # --- Fetch live usage from openclaw status --usage --json ---
+def window_hours(label):
+    text = (label or "").strip().lower()
+    if text == "week":
+        return 168
+    match = re.fullmatch(r"(\d+)\s*h", text)
+    if match:
+        return int(match.group(1))
+    return None
+
 live = {}
 for attempt in range(2):
     try:
@@ -46,21 +55,33 @@ for attempt in range(2):
             ["docker", "exec", container, "openclaw", "status", "--usage", "--json"],
             stderr=subprocess.STDOUT, timeout=30
         )
-        data = json.loads(raw)
+        text = raw.decode()
+        brace = text.find("{")
+        data = json.loads(text[brace:] if brace >= 0 else text)
         for prov in data.get("usage", {}).get("providers", []):
             if prov.get("provider") == "openai":
                 live["plan"] = prov.get("plan") or "unknown"
                 error = prov.get("error")
                 if error:
                     break
+                hourly_window = None
+                weekly_window = None
                 for w in prov.get("windows", []):
-                    label = w.get("label", "")
-                    if label == "5h":
-                        live["hourly_left"] = 100 - w.get("usedPercent", 0)
-                        live["hourly_reset_ts"] = w.get("resetAt", 0)
-                    elif label == "Week":
-                        live["weekly_left"] = 100 - w.get("usedPercent", 0)
-                        live["weekly_reset_ts"] = w.get("resetAt", 0)
+                    hours = window_hours(w.get("label", ""))
+                    if hours is None:
+                        continue
+                    if hours <= 6 and (hourly_window is None or hours < hourly_window[0]):
+                        hourly_window = (hours, w)
+                    if hours >= 24 and (weekly_window is None or hours > weekly_window[0]):
+                        weekly_window = (hours, w)
+                if hourly_window:
+                    w = hourly_window[1]
+                    live["hourly_left"] = 100 - w.get("usedPercent", 0)
+                    live["hourly_reset_ts"] = w.get("resetAt", 0)
+                if weekly_window:
+                    w = weekly_window[1]
+                    live["weekly_left"] = 100 - w.get("usedPercent", 0)
+                    live["weekly_reset_ts"] = w.get("resetAt", 0)
         if "weekly_left" in live:
             break
     except Exception:
@@ -81,6 +102,12 @@ if "weekly_left" not in live and os.path.exists(csv_file):
             live.setdefault("weekly_left", int(last["weekly_pct_left"]))
             live.setdefault("hourly_left", int(last.get("hourly_pct_left", "0") or "0"))
             live.setdefault("plan", last.get("plan", "unknown"))
+            reset_at = (last.get("weekly_reset_at", "") or "").strip()
+            if reset_at:
+                try:
+                    live.setdefault("weekly_reset_ts", int(datetime.fromisoformat(reset_at.replace("Z", "+00:00")).timestamp() * 1000))
+                except Exception:
+                    pass
     except Exception:
         pass
 

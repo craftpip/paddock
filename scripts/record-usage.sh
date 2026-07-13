@@ -7,7 +7,7 @@ CSV_FILE="$PROJECT_DIR/usage_data.csv"
 CONTAINER="vm-jake"
 
 python3 << 'PYEOF'
-import json, subprocess, os, csv
+import json, subprocess, os, csv, re
 from datetime import datetime, timezone
 
 csv_file = "/home/boniface/www/vm-friends/usage_data.csv"
@@ -16,10 +16,29 @@ ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 HOURLY_PCT = ""
 HOURLY_RESET = ""
+HOURLY_RESET_AT = ""
 WEEKLY_PCT = ""
 WEEKLY_RESET = ""
+WEEKLY_RESET_AT = ""
 PLAN = ""
 TOTAL_TOKENS_K = 0
+
+def format_reset_at(ms):
+    if not ms:
+        return ""
+    try:
+        return datetime.fromtimestamp(int(ms) / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        return ""
+
+def window_hours(label):
+    text = (label or "").strip().lower()
+    if text == "week":
+        return 168
+    match = re.fullmatch(r"(\d+)\s*h", text)
+    if match:
+        return int(match.group(1))
+    return None
 
 def ms_to_readable(ms):
     """Convert Unix ms timestamp to human-readable 'Xh Ym' or 'Xd Yh'."""
@@ -59,16 +78,32 @@ for attempt in range(2):
                 PLAN = prov.get("plan") or ""
                 if prov.get("error"):
                     break
+                hourly_window = None
+                weekly_window = None
                 for w in prov.get("windows", []):
-                    label = w.get("label", "")
+                    hours = window_hours(w.get("label", ""))
+                    if hours is None:
+                        continue
+                    if hours <= 6 and (hourly_window is None or hours < hourly_window[0]):
+                        hourly_window = (hours, w)
+                    if hours >= 24 and (weekly_window is None or hours > weekly_window[0]):
+                        weekly_window = (hours, w)
+
+                if hourly_window:
+                    w = hourly_window[1]
                     used = w.get("usedPercent", 0)
                     reset = w.get("resetAt", 0)
-                    if label == "5h":
-                        HOURLY_PCT = str(100 - used)
-                        HOURLY_RESET = ms_to_readable(reset)
-                    elif label == "Week":
-                        WEEKLY_PCT = str(100 - used)
-                        WEEKLY_RESET = ms_to_readable(reset)
+                    HOURLY_PCT = str(100 - used)
+                    HOURLY_RESET = ms_to_readable(reset)
+                    HOURLY_RESET_AT = format_reset_at(reset)
+
+                if weekly_window:
+                    w = weekly_window[1]
+                    used = w.get("usedPercent", 0)
+                    reset = w.get("resetAt", 0)
+                    WEEKLY_PCT = str(100 - used)
+                    WEEKLY_RESET = ms_to_readable(reset)
+                    WEEKLY_RESET_AT = format_reset_at(reset)
         if WEEKLY_PCT:
             break
     except Exception:
@@ -103,13 +138,41 @@ if os.path.exists(csv_file) and TOTAL_TOKENS_K > 0:
         pass
 
 # --- Write CSV (compatible format) ---
-HEADER = "timestamp,hourly_usage,hourly_pct_left,hourly_reset_in,weekly_pct_left,weekly_reset_in,total_tokens_k,tokens_delta_k,plan"
+OLD_HEADER = "timestamp,hourly_usage,hourly_pct_left,hourly_reset_in,weekly_pct_left,weekly_reset_in,total_tokens_k,tokens_delta_k,plan"
+HEADER = "timestamp,hourly_usage,hourly_pct_left,hourly_reset_in,hourly_reset_at,weekly_pct_left,weekly_reset_in,weekly_reset_at,total_tokens_k,tokens_delta_k,plan"
+
+if os.path.exists(csv_file):
+    try:
+        with open(csv_file, newline="") as f:
+            first_line = f.readline().strip()
+        if first_line == OLD_HEADER:
+            with open(csv_file, newline="") as f:
+                rows = list(csv.DictReader(f))
+            with open(csv_file, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=HEADER.split(","))
+                writer.writeheader()
+                for old_row in rows:
+                    writer.writerow({
+                        "timestamp": old_row.get("timestamp", ""),
+                        "hourly_usage": old_row.get("hourly_usage", ""),
+                        "hourly_pct_left": old_row.get("hourly_pct_left", ""),
+                        "hourly_reset_in": old_row.get("hourly_reset_in", ""),
+                        "hourly_reset_at": "",
+                        "weekly_pct_left": old_row.get("weekly_pct_left", ""),
+                        "weekly_reset_in": old_row.get("weekly_reset_in", ""),
+                        "weekly_reset_at": "",
+                        "total_tokens_k": old_row.get("total_tokens_k", ""),
+                        "tokens_delta_k": old_row.get("tokens_delta_k", ""),
+                        "plan": old_row.get("plan", ""),
+                    })
+    except Exception:
+        pass
 
 needs_header = not os.path.exists(csv_file)
-with open(csv_file, "a") as f:
+with open(csv_file, "a", newline="") as f:
     if needs_header:
         f.write(HEADER + "\n")
     # hourly_usage is left empty (we track pct_left instead)
-    row = f"{ts},,{HOURLY_PCT},{HOURLY_RESET},{WEEKLY_PCT},{WEEKLY_RESET},{TOTAL_TOKENS_K},{TOKENS_DELTA_K},{PLAN}"
+    row = f"{ts},,{HOURLY_PCT},{HOURLY_RESET},{HOURLY_RESET_AT},{WEEKLY_PCT},{WEEKLY_RESET},{WEEKLY_RESET_AT},{TOTAL_TOKENS_K},{TOKENS_DELTA_K},{PLAN}"
     f.write(row + "\n")
 PYEOF
