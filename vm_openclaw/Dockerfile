@@ -5,12 +5,14 @@ USER root
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Asia/Kolkata
 
-RUN apt-get update && \
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
     openssh-server \
     cmake \
     make \
     build-essential \
+    jq \
     python3 && \
     rm -rf /var/lib/apt/lists/*
 
