@@ -37,7 +37,10 @@
     html.light [class*="bg-emerald-9"],html.light [class*="bg-amber-9"],html.light [class*="bg-red-9"],html.light [class*="bg-purple-9"],html.light [class*="bg-cyan-9"],html.light [class*="bg-orange-9"],html.light [class*="bg-slate-9"]:not(.bg-slate-900){background-color:var(--bg-card);border-color:var(--border)}
 
     .skeleton{background:linear-gradient(90deg,#1e293b 25%,#334155 50%,#1e293b 75%);background-size:200% 100%;animation:shimmer 1.5s infinite;border-radius:0.5rem}
+    .agent-card.htmx-request{opacity:0.5;pointer-events:none;position:relative}
+    .agent-card.htmx-request::after{content:'';position:absolute;inset:0;background:rgba(0,0,0,.2);border-radius:inherit}
     html.light .skeleton{background:linear-gradient(90deg,#e2e8f0 25%,#f1f5f9 50%,#e2e8f0 75%);background-size:200% 100%}
+    html.light .agent-card.htmx-request::after{background:rgba(255,255,255,.3)}
     @keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
 
     .toast-enter{animation:toastIn 0.3s ease-out}
@@ -45,8 +48,12 @@
     @keyframes toastIn{from{opacity:0;transform:translateY(1rem)}to{opacity:1;transform:translateY(0)}}
     @keyframes toastOut{from{opacity:1;transform:translateY(0)}to{opacity:0;transform:translateY(1rem)}}
   </style>
+  <script src="/xterm.js"></script>
+  <link rel="stylesheet" href="/xterm.css">
+  <script src="/xterm-addon-fit.js"></script>
+  <script src="/xterm-addon-web-links.js"></script>
 </head>
-<body class="bg-slate-900 text-slate-100 font-sans antialiased min-h-screen">
+<body class="bg-slate-900 text-slate-100 font-sans antialiased <%= (typeof fullHeight !== 'undefined' && fullHeight) ? 'h-screen flex flex-col overflow-hidden' : 'min-h-screen' %>">
   <nav class="border-b border-slate-800 bg-slate-900/80 sticky top-0 z-50 backdrop-blur-lg">
     <div class="max-w-7xl mx-auto px-4 sm:px-6">
       <div class="flex items-center justify-between h-14">
@@ -57,7 +64,6 @@
         <div class="flex items-center gap-0.5">
           <a href="/agents" class="px-3 py-1.5 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-slate-800 transition-colors">Agents</a>
           <a href="/agents/create" class="px-3 py-1.5 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-slate-800 transition-colors">+ Agent</a>
-          <a href="/usage" class="px-3 py-1.5 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-slate-800 transition-colors">Usage</a>
           <a href="/credentials" class="px-3 py-1.5 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-slate-800 transition-colors">Creds</a>
           <a href="/backups" class="px-3 py-1.5 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-slate-800 transition-colors">Backups</a>
           <span class="w-px h-5 bg-slate-700 mx-1.5"></span>
@@ -70,7 +76,7 @@
     </div>
   </nav>
 
-  <main class="<%= (typeof fullWidth !== 'undefined' && fullWidth) ? 'w-full px-4 sm:px-6 lg:px-8 py-6' : 'max-w-7xl mx-auto px-4 sm:px-6 py-8' %>">
+  <main class="<%= (typeof fullHeight !== 'undefined' && fullHeight) ? 'flex-1 overflow-hidden flex flex-col' : ((typeof fullWidth !== 'undefined' && fullWidth) ? 'w-full px-4 sm:px-6 lg:px-8 py-6' : 'max-w-7xl mx-auto px-4 sm:px-6 py-8') %>">
     <%- body %>
   </main>
 
@@ -129,11 +135,153 @@
       form.submit();
     }
   };
+  if (window._flash) { VMF.toast(window._flash.message, window._flash.type); }
+  VMF.initTerminal = function(container) {
+    var agentName = container.getAttribute('data-agent-name');
+    if (!agentName || !window.Terminal) return;
+    if (container._termInit) return;
+    container._termInit = true;
 
+    var fitAddon = new FitAddon.FitAddon();
+    var webLinksAddon = new WebLinksAddon.WebLinksAddon();
+
+    var term = new Terminal({
+      cursorBlink: true,
+      cursorStyle: 'bar',
+      fontSize: 14,
+      fontFamily: '"Cascadia Code", "Fira Code", "JetBrains Mono", Menlo, monospace',
+      fontWeight: '400',
+      fontWeightBold: '700',
+      scrollback: 10000,
+      theme: {
+        background: '#0f172a',
+        foreground: '#e2e8f0',
+        cursor: '#22d3ee',
+        cursorAccent: '#0f172a',
+        selectionBackground: '#334155',
+        selectionForeground: '#f1f5f9',
+        black: '#1e293b',
+        red: '#f87171',
+        green: '#34d399',
+        yellow: '#fbbf24',
+        blue: '#60a5fa',
+        magenta: '#c084fc',
+        cyan: '#22d3ee',
+        white: '#e2e8f0',
+        brightBlack: '#475569',
+        brightRed: '#fca5a5',
+        brightGreen: '#6ee7b7',
+        brightYellow: '#fde68a',
+        brightBlue: '#93c5fd',
+        brightMagenta: '#d8b4fe',
+        brightCyan: '#67e8f9',
+        brightWhite: '#f8fafc'
+      },
+      allowProposedApi: true,
+      minimumContrastRatio: 1
+    });
+    term.loadAddon(fitAddon);
+    term.loadAddon(webLinksAddon);
+    term.open(container);
+
+    var cols = 80;
+    var rows = 24;
+
+    function doFit() {
+      try { fitAddon.fit(); } catch(e) {}
+      cols = term.cols || 80;
+      rows = term.rows || 24;
+    }
+
+    var protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    var ws = null;
+    var connected = false;
+
+    function connectWs() {
+      if (ws) return;
+      doFit();
+      ws = new WebSocket(protocol + '//' + location.host + '/ws/terminal/' + agentName + '?cols=' + cols + '&rows=' + rows);
+      ws.onopen = function() { connected = true; term.focus(); };
+      ws.onmessage = function(evt) { term.write(evt.data); };
+      ws.onclose = function() { connected = false; term.write('\r\n\x1b[31m[Connection closed]\x1b[0m\r\n'); };
+      ws.onerror = function() { term.write('\r\n\x1b[31m[Connection error]\x1b[0m\r\n'); };
+    }
+
+    term.onData(function(data) { if (connected) ws.send(data); });
+    term.onResize(function(size) {
+      if (connected) ws.send(JSON.stringify({ type: 'resize', cols: size.cols, rows: size.rows }));
+    });
+
+    var resizeTimer;
+    var onResize = function() {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(function() {
+        doFit();
+        if (ws && connected) {
+          ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+        }
+      }, 100);
+    };
+    window.addEventListener('resize', onResize);
+    new ResizeObserver(onResize).observe(container);
+
+    var visObs = new IntersectionObserver(function(entries) {
+      entries.forEach(function(e) {
+        if (e.isIntersecting) {
+          connectWs();
+          setTimeout(doFit, 50);
+        }
+      });
+    });
+    visObs.observe(container);
+
+    container._termCleanup = function() {
+      window.removeEventListener('resize', onResize);
+      visObs.disconnect();
+      clearTimeout(resizeTimer);
+    };
+  };
+
+
+  // Re-execute <script> tags in HTMX-swapped content
   document.addEventListener('htmx:afterSwap', function(evt) {
+    // Re-run scripts in the swapped content
+    var el = evt.detail.target;
+    if (el.nodeType === 1) { // Element node
+      var scripts = el.querySelectorAll('script');
+      scripts.forEach(function(old) {
+        var s = document.createElement('script');
+        if (old.src) { s.src = old.src; }
+        else { s.textContent = old.textContent; }
+        document.body.appendChild(s);
+      });
+    }
+    // Toast cleanup
     if (evt.detail.target.id === 'toast' && document.getElementById('toast').children.length > 0) {
       setTimeout(function() { document.getElementById('toast').innerHTML = ''; }, 5000);
     }
+    // Init terminal if present
+    var termEl = evt.detail.target.querySelector ? evt.detail.target.querySelector('#terminal-container') : null;
+    if (termEl && VMF.initTerminal) VMF.initTerminal(termEl);
+  });
+  // Re-execute global htmx scripts (non-inline) after swap
+  document.addEventListener('htmx:afterSwap', function(evt) {
+    var scripts = document.querySelectorAll('script[src]');
+    scripts.forEach(function(old) {
+      if (!old.dataset.hmxGlobal) {
+        old.dataset.hmxGlobal = '1';
+        var s = document.createElement('script');
+        s.src = old.src;
+        s.dataset.hmxGlobal = '1';
+        document.body.appendChild(s);
+      }
+    });
+  });
+
+  // Also init terminal on direct page load
+  document.addEventListener('DOMContentLoaded', function() {
+    var termEl = document.querySelector('#terminal-container');
+    if (termEl && VMF.initTerminal) VMF.initTerminal(termEl);
   });
 
   (function() {

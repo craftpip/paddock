@@ -11,3 +11,17 @@ bot-prefixes.json
 src/data/app.db
 src/data/app.db-wal
 src/data/app.db-shm
+
+# Instance runtime data
+instances/*/openclaw/state/
+instances/*/openclaw/agents/*/agent/
+instances/*/openclaw/agents/*/sessions/
+instances/*/openclaw/devices/
+instances/*/openclaw/identity/
+instances/*/openclaw/workspace-attestations/
+
+# Backups
+backups/
+
+# OpenCode config
+opencode.json

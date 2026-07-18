@@ -5,6 +5,7 @@
   "scripts": {
     "start": "node app.js",
     "dev": "node --watch app.js",
+    "dev:watch": "nodemon --watch . --ext js,ejs,json app.js",
     "test": "node --test test/"
   },
   "dependencies": {

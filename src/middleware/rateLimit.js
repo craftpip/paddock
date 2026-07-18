@@ -1,6 +1,6 @@
 const hits = new Map();
 const WINDOW_MS = 60 * 1000;
-const MAX_HITS = 30;
+const MAX_HITS = 300;
 
 function rateLimit(req, res, next) {
   const ip = req.ip || req.connection.remoteAddress;

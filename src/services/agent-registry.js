@@ -2,7 +2,8 @@ const fs = require('fs');
 const path = require('path');
 const { getDb } = require('./db');
 
-const INSTANCES_DIR = path.join(__dirname, '..', '..', 'instances');
+const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
+const INSTANCES_DIR = path.join(WORKSPACE, 'instances');
 const VM_NAME_RE = /^vm-[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
 
 let _dockerCache = { data: null, ts: 0 };

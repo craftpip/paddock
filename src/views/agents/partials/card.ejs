@@ -1,0 +1,67 @@
+<div class="card border border-slate-800 rounded-xl p-5 hover:border-slate-600 transition-all agent-card group" data-name="<%= agent.name %>" data-display="<%= agent.display_name.toLowerCase() %>">
+  <div class="flex items-start justify-between mb-3">
+    <div class="flex items-center gap-3 flex-1 min-w-0">
+      <div class="w-10 h-10 rounded-lg bg-slate-800 flex items-center justify-center text-lg font-bold text-cyan-400 flex-shrink-0">
+        <%= agent.display_name.charAt(0) %>
+      </div>
+      <div class="min-w-0">
+        <a href="/agents/<%= agent.name %>" class="font-semibold text-white hover:text-cyan-400 transition-colors block truncate"><%= agent.display_name %></a>
+        <p class="text-xs text-slate-500 truncate"><%= agent.name %></p>
+      </div>
+    </div>
+    <span class="px-2 py-0.5 rounded-full text-xs font-medium flex-shrink-0 ml-3
+      <%= agent.status === 'running' ? 'bg-emerald-900/50 text-emerald-400 border border-emerald-800' :
+          agent.status === 'exited' ? 'bg-red-900/50 text-red-400 border border-red-800' :
+          'bg-slate-800 text-slate-400 border border-slate-700' %>">
+      <%= agent.status %>
+    </span>
+  </div>
+  <div class="text-xs text-slate-500 space-y-1 mb-4">
+    <div class="flex justify-between">
+      <span>Type</span>
+      <span class="text-slate-300"><%= agent.agent_type %></span>
+    </div>
+    <% if (agent.default_model) { %>
+    <div class="flex justify-between">
+      <span>Model</span>
+      <span class="text-slate-300 truncate ml-4 max-w-[180px]" title="<%= agent.default_model %>"><%= agent.default_model %></span>
+    </div>
+    <% } %>
+
+  </div>
+  <div class="flex items-center justify-between pt-3 border-t border-slate-800">
+    <a href="/agents/<%= agent.name %>" class="text-xs font-medium text-slate-400 hover:text-cyan-400 transition-colors">Details &rarr;</a>
+    <div class="flex items-center gap-1">
+      <% if (agent.status === 'running') { %>
+        <button hx-post="/agents/<%= agent.name %>/stop"
+                hx-target="closest .agent-card"
+                hx-swap="outerHTML"
+                hx-headers='{"x-csrf-token": "<%= csrfToken %>"}'
+                hx-indicator="closest .agent-card"
+                class="p-2 rounded-lg text-amber-400 hover:text-white hover:bg-amber-900/30 transition-colors"
+                title="Stop agent">
+          <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M6 6h12v12H6z"/></svg>
+        </button>
+        <button hx-post="/agents/<%= agent.name %>/restart"
+                hx-target="closest .agent-card"
+                hx-swap="outerHTML"
+                hx-headers='{"x-csrf-token": "<%= csrfToken %>"}'
+                hx-indicator="closest .agent-card"
+                class="p-2 rounded-lg text-cyan-400 hover:text-white hover:bg-cyan-900/30 transition-colors"
+                title="Restart agent">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+        </button>
+      <% } else { %>
+        <button hx-post="/agents/<%= agent.name %>/start"
+                hx-target="closest .agent-card"
+                hx-swap="outerHTML"
+                hx-headers='{"x-csrf-token": "<%= csrfToken %>"}'
+                hx-indicator="closest .agent-card"
+                class="p-2 rounded-lg text-emerald-400 hover:text-white hover:bg-emerald-900/30 transition-colors"
+                title="Start agent">
+          <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+        </button>
+      <% } %>
+    </div>
+  </div>
+</div>

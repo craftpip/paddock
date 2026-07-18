@@ -2,13 +2,15 @@ const express = require('express');
 const layouts = require('express-ejs-layouts');
 const { WebSocketServer } = require('ws');
 const cookieParser = require('cookie-parser');
-const { execFile, spawn } = require('child_process');
+const { execFile, execSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const { once } = require('events');
 
 const creds = require('./creds');
 const agentRoutes = require('./routes/agents');
+const vm = require('./services/vm-manager');
+const backup = require('./services/backup-manager');
 const { getDb } = require('./services/db');
 const { setupSession, requireAuth, handleLogin, handleLogout, csrfToken, AUTH_PASSWORD } = require('./middleware/auth');
 const { rateLimit } = require('./middleware/rateLimit');
@@ -17,7 +19,6 @@ const WORKSPACE = '/workspace';
 const BACKUPS_DIR = path.join(WORKSPACE, 'backups');
 const INSTANCES_DIR = path.join(WORKSPACE, 'instances');
 const SCRIPTS_DIR = path.join(WORKSPACE, 'scripts');
-const USAGE_CSV = path.join(WORKSPACE, 'usage_data.csv');
 const ENV_FILE = path.join(WORKSPACE, '.env');
 const VM_NAME_RE = /^vm-[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
 
@@ -48,8 +49,8 @@ app.use(rateLimit);
 // ─── Auth (session-based, replaces Basic Auth) ──────────────
 
 app.get('/login', (req, res) => {
-  if (!AUTH_PASSWORD) return res.redirect('/');
-  if (req.session && req.session.authenticated) return res.redirect('/');
+  if (!AUTH_PASSWORD) return res.redirect('/agents');
+  if (req.session && req.session.authenticated) return res.redirect('/agents');
   res.render('login', { error: null });
 });
 
@@ -61,6 +62,18 @@ app.use((req, res, next) => {
   if (req.path === '/login' || req.path === '/logout') return next();
   if (req.path.startsWith('/ws/')) return next();
   requireAuth(req, res, next);
+});
+
+app.use((req, res, next) => {
+  if (req.headers['hx-request']) {
+    if (!res.__origRender) res.__origRender = res.render;
+    res.render = function(view, options, fn) {
+      options = options || {};
+      options.layout = false;
+      return res.__origRender(view, options, fn);
+    };
+  }
+  next();
 });
 
 let envCache = null;
@@ -101,47 +114,6 @@ function runCmd(cmd, args, options = {}) {
       }
     });
   });
-}
-
-function stripContainerCheck(content) {
-  const lines = content.split('\n');
-  const result = [];
-  let skip = false;
-  let depth = 0;
-  for (const line of lines) {
-    const stripped = line.trim();
-    if (!skip && stripped.includes('if') && stripped.includes('/.dockerenv') && stripped.includes('/proc/1/cgroup')) {
-      skip = true;
-      depth = 1;
-      continue;
-    }
-    if (skip) {
-      if (stripped.startsWith('if ') || stripped.startsWith('elif ')) depth++;
-      if (stripped === 'fi' || stripped === 'fi;' || stripped === 'fi') {
-        depth--;
-        if (depth <= 0) skip = false;
-      }
-      continue;
-    }
-    result.push(line);
-  }
-  return result.join('\n');
-}
-
-async function runWorkspaceScript(scriptRel, args, timeout = 120) {
-  const scriptPath = path.join(WORKSPACE, scriptRel);
-  if (!fs.existsSync(scriptPath)) throw new Error(`Script not found: ${scriptPath}`);
-  let content = fs.readFileSync(scriptPath, 'utf8');
-  content = stripContainerCheck(content);
-  const tmpDir = fs.mkdtempSync('/tmp/vmwebui-');
-  const tmp = path.join(tmpDir, 'script.sh');
-  fs.writeFileSync(tmp, content);
-  fs.chmodSync(tmp, 0o755);
-  try {
-    return await runCmd('bash', [tmp, ...args], { timeout });
-  } finally {
-    try { fs.rmSync(tmpDir, { recursive: true }); } catch (e) {}
-  }
 }
 
 async function dockerPsList(force = false) {
@@ -245,26 +217,6 @@ function fmtSize(size) {
   return `${size.toFixed(1)}TB`;
 }
 
-function readUsageCsv() {
-  if (!fs.existsSync(USAGE_CSV)) return [];
-  try {
-    const content = fs.readFileSync(USAGE_CSV, 'utf8').trim();
-    if (!content) return [];
-    const lines = content.split('\n');
-    const headers = lines[0].split(',');
-    const rows = [];
-    for (let i = 1; i < lines.length; i++) {
-      const vals = lines[i].split(',');
-      const row = {};
-      headers.forEach((h, idx) => { row[h.trim()] = (vals[idx] || '').trim(); });
-      rows.push(row);
-    }
-    return rows;
-  } catch (e) {
-    return [];
-  }
-}
-
 async function dockerExec(vmName, cmd, timeout = 30000) {
   return runCmd('docker', ['exec', '-i', vmName, 'sh', '-lc', cmd], { timeout });
 }
@@ -276,10 +228,8 @@ async function dockerLogs(vmName, tail = 100) {
 
 // ─── Routes: Dashboard ──────────────────────────────────────
 
-app.get('/', async (req, res) => {
-  const vms = await getAllVms();
-  const running = vms.filter(v => v.status === 'running').length;
-  res.render('dashboard', { vms, running, total: vms.length });
+app.get('/', (req, res) => {
+  res.redirect('/agents');
 });
 
 app.get('/hx/vm-status/:name', async (req, res) => {
@@ -291,9 +241,8 @@ app.get('/hx/vm-status/:name', async (req, res) => {
 
 // ─── Routes: VM Create ──────────────────────────────────────
 
-app.get('/vm/create', async (req, res) => {
-  const existing = await getAllVms();
-  res.render('vm_create', { existing, bots: creds.botTokens(), users: creds.userIDs(), apikeys: creds.apiKeys() });
+app.get('/vm/create', (req, res) => {
+  res.redirect('/agents/create');
 });
 
 app.post('/vm/create', async (req, res) => {
@@ -305,7 +254,7 @@ app.post('/vm/create', async (req, res) => {
   const cloneSource = req.body.clone_source || '';
   const sshEnabled = req.body.ssh_enabled === 'yes';
   const port = (req.body.port || '').trim();
-  const password = (req.body.password || '').trim() || name.slice(3);
+  const password = (req.body.password || '').trim();
 
   const botToken = (req.body.bot_token || '').trim();
   const userId = (req.body.user_id || '').trim();
@@ -316,36 +265,20 @@ app.post('/vm/create', async (req, res) => {
   const savedApikey = req.body.saved_api_key || '';
 
   const defaultConfig = !!(botToken || savedBot || userId || savedUser || apiKeyValue || savedApikey);
-
-  const args = [name, '--agent', agent];
-  if (mode === 'clone' && cloneSource) {
-    args.push('--clone', cloneSource);
-  } else {
-    args.push('--fresh');
-  }
-  if (sshEnabled) {
-    args.push('--ssh');
-    if (port) args.push('--port', port);
-  }
-  if (password) args.push('--password', password);
-
   const token = botToken || creds.botTokens()[savedBot] || '';
   const uid = userId || creds.userIDs()[savedUser] || '';
 
-  if (defaultConfig) {
-    if (token) args.push('--bot-token', token);
-    if (uid) args.push('--allow-from', uid);
-    args.push('--default-config');
-    if (!token && !uid && !apiKeyValue && !savedApikey) {
-      return res.status(400).render('partials/error', { msg: 'Provide a bot token, user ID, or API key' });
-    }
+  if (defaultConfig && !token && !uid && !apiKeyValue && !savedApikey) {
+    return res.status(400).render('partials/error', { msg: 'Provide a bot token, user ID, or API key' });
   }
 
   try {
-    const result = await runWorkspaceScript('add-vm.sh', args, 180000);
-    if (result.code !== 0) {
-      return res.status(500).render('partials/error', { msg: result.stderr || result.stdout || 'add-vm.sh failed' });
-    }
+    await vm.createVm(name, {
+      agent, mode, cloneSource, sshEnabled, port, password,
+      botToken: token,
+      allowFrom: uid || undefined,
+      defaultConfig,
+    });
 
     let finalProvider = apiKeyProvider;
     let finalValue = apiKeyValue;
@@ -357,11 +290,15 @@ app.post('/vm/create', async (req, res) => {
 
     if (finalProvider && finalValue) {
       await new Promise(r => setTimeout(r, 3000));
-      await runWorkspaceScript('scripts/onboard-bot.sh', [name, '--api-key', `${finalProvider}=${finalValue}`], 60000);
+      try {
+        await runCmd('docker', ['exec', '-i', name, 'openclaw', 'models', 'auth', 'paste-api-key', '--provider', finalProvider], { input: finalValue, timeout: 30000 });
+      } catch (e) {
+        console.error(`API key setup failed for ${finalProvider}:`, e.message);
+      }
     }
 
     dockerCache.ts = 0;
-    res.redirect('/');
+    res.redirect('/agents');
   } catch (e) {
     res.status(500).render('partials/error', { msg: e.message });
   }
@@ -369,24 +306,8 @@ app.post('/vm/create', async (req, res) => {
 
 // ─── Routes: VM Detail ──────────────────────────────────────
 
-app.get('/vm/:name', async (req, res) => {
-  const vms = await getAllVms();
-  const vm = vms.find(v => v.name === req.params.name);
-  if (!vm) return res.status(404).render('partials/error', { msg: 'VM not found' });
-  const meta = readMeta(req.params.name);
-  const agent = meta.AGENT || 'openclaw';
-  const configPath = path.join(INSTANCES_DIR, req.params.name, agent, 'openclaw.json');
-  let configContent = '';
-  if (fs.existsSync(configPath)) {
-    try {
-      configContent = JSON.stringify(JSON.parse(fs.readFileSync(configPath, 'utf8')), null, 2);
-    } catch (e) {
-      configContent = fs.readFileSync(configPath, 'utf8');
-    }
-  }
-  const backups = getBackups(req.params.name);
-  const logPreview = await dockerLogs(req.params.name, 50);
-  res.render('vm_detail', { vm, meta, configContent, backups, logPreview });
+app.get('/vm/:name', (req, res) => {
+  res.redirect('/agents/' + req.params.name);
 });
 
 app.post('/vm/:name/start', async (req, res) => {
@@ -409,10 +330,7 @@ app.post('/vm/:name/restart', async (req, res) => {
 
 app.post('/vm/:name/remove', async (req, res) => {
   try {
-    const result = await runWorkspaceScript('remove-vm.sh', [req.params.name], 60000);
-    if (result.code !== 0) {
-      return res.status(500).render('partials/error', { msg: result.stderr || 'remove-vm.sh failed' });
-    }
+    await vm.removeVm(req.params.name);
     dockerCache.ts = 0;
     res.status(204).end();
   } catch (e) {
@@ -422,10 +340,7 @@ app.post('/vm/:name/remove', async (req, res) => {
 
 app.post('/vm/:name/reset', async (req, res) => {
   try {
-    const result = await runWorkspaceScript('reset-vm.sh', [req.params.name], 120000);
-    if (result.code !== 0) {
-      return res.status(500).render('partials/error', { msg: result.stderr || 'reset-vm.sh failed' });
-    }
+    await vm.resetVm(req.params.name);
     res.status(204).end();
   } catch (e) {
     res.status(500).render('partials/error', { msg: e.message });
@@ -499,10 +414,7 @@ app.get('/backups', async (req, res) => {
 app.post('/backups/:name/create', async (req, res) => {
   if (!safeVmName(req.params.name)) return res.status(400).render('partials/error', { msg: 'Invalid VM name' });
   try {
-    const result = await runWorkspaceScript('manage_backups.sh', ['backup', req.params.name], 180000);
-    if (result.code !== 0 && result.stdout.includes('Failed')) {
-      return res.status(500).render('partials/error', { msg: result.stdout });
-    }
+    await backup.backupAgent(req.params.name);
     dockerCache.ts = 0;
     res.status(204).end();
   } catch (e) {
@@ -513,10 +425,7 @@ app.post('/backups/:name/create', async (req, res) => {
 app.post('/backups/:name/restore', async (req, res) => {
   if (!safeVmName(req.params.name)) return res.status(400).render('partials/error', { msg: 'Invalid VM name' });
   try {
-    const result = await runWorkspaceScript('manage_backups.sh', ['restore', req.params.name], 180000);
-    if (result.code !== 0) {
-      return res.status(500).render('partials/error', { msg: result.stdout || result.stderr || 'restore failed' });
-    }
+    await backup.restoreAgent(req.params.name);
     res.status(204).end();
   } catch (e) {
     res.status(500).render('partials/error', { msg: e.message });
@@ -570,74 +479,45 @@ app.post('/onboard/:name/run', async (req, res) => {
   if (userIdName && !userId) userId = creds.userIDs()[userIdName] || '';
   if (apiKeyName && !apiKeyVal) {
     const ak = creds.apiKeys()[apiKeyName];
-    if (ak) {
-      apiKeyProv = ak.provider;
-      apiKeyVal = ak.key;
-    }
+    if (ak) { apiKeyProv = ak.provider; apiKeyVal = ak.key; }
   }
-
-  const args = [req.params.name];
-  if (botToken) args.push('--bot-token', botToken);
-  if (userId) args.push('--allow-from', userId);
-  if (apiKeyProv && apiKeyVal) args.push('--api-key', `${apiKeyProv}=${apiKeyVal}`);
 
   if (!botToken && !apiKeyVal) {
     return res.status(400).render('partials/error', { msg: 'Provide at least a bot token or API key' });
   }
 
+  const name = req.params.name;
   res.type('text/plain');
   try {
-    const result = await runWorkspaceScript('scripts/onboard-bot.sh', args, 120000);
-    let output = 'Starting onboard process...\n';
-    output += result.stdout;
-    if (result.stderr) output += result.stderr;
-    if (result.code !== 0) {
-      output += `\nOnboard finished with exit code ${result.code}\n`;
-    } else {
-      output += '\nOnboard completed successfully!\n';
+    let output = '';
+
+    if (botToken) {
+      await runCmd('docker', ['exec', name, 'openclaw', 'channels', 'add', '--channel', 'telegram', '--token', botToken], { timeout: 30000 });
+      await runCmd('docker', ['exec', name, 'openclaw', 'config', 'set', 'channels.telegram.allowFrom', JSON.stringify([userId || process.env.DEFAULT_ALLOW_FROM || '532156945'])], { timeout: 15000 });
+      await runCmd('docker', ['exec', name, 'openclaw', 'config', 'set', 'channels.telegram.dmPolicy', 'allowlist'], { timeout: 15000 });
+      output += 'Telegram configured.\n';
     }
+
+    if (apiKeyProv && apiKeyVal) {
+      const r = await runCmd('docker', ['exec', '-i', name, 'openclaw', 'models', 'auth', 'paste-api-key', '--provider', apiKeyProv], { input: apiKeyVal, timeout: 30000 });
+      if (r.stdout.toLowerCase().includes('auth profile')) {
+        const currentModel = await runCmd('docker', ['exec', name, 'openclaw', 'config', 'get', 'agents.defaults.model.primary'], { timeout: 15000 }).catch(() => ({ stdout: '' }));
+        if (!currentModel.stdout.trim() || currentModel.stdout.trim() === 'openai/gpt-5.5') {
+          const sugg = { 'ollama-cloud': 'ollama-cloud/gemma4:31b', 'openrouter': 'openrouter/deepseek/deepseek-v4-flash' }[apiKeyProv];
+          if (sugg) {
+            await runCmd('docker', ['exec', name, 'openclaw', 'config', 'set', 'agents.defaults.model.primary', sugg], { timeout: 15000 });
+          }
+        }
+        output += `API key configured for ${apiKeyProv}.\n`;
+      } else {
+        output += `Warning: ${r.stdout}\n`;
+      }
+    }
+
+    output += 'Done.\n';
     res.send(output);
   } catch (e) {
     res.send(`\nError: ${e.message}\n`);
-  }
-});
-
-// ─── Routes: Usage ──────────────────────────────────────────
-
-app.get('/usage', (req, res) => {
-  const rows = readUsageCsv();
-  const latest = rows.length > 0 ? rows[rows.length - 1] : {};
-  const chartLabels = [];
-  const chartWeekly = [];
-  const chartHourly = [];
-  const chartTokens = [];
-  const recent = rows.slice(-168);
-  for (const row of recent) {
-    chartLabels.push((row.timestamp || '').slice(-5));
-    const w = row.weekly_pct_left;
-    chartWeekly.push(w ? parseFloat(w) : null);
-    const h = row.hourly_pct_left;
-    chartHourly.push(h ? parseFloat(h) : null);
-    const t = row.total_tokens_k;
-    chartTokens.push(t ? parseFloat(t) : null);
-  }
-  res.render('usage', {
-    rows, latest,
-    chart_labels: JSON.stringify(chartLabels),
-    chart_weekly: JSON.stringify(chartWeekly),
-    chart_hourly: JSON.stringify(chartHourly),
-    chart_tokens: JSON.stringify(chartTokens),
-  });
-});
-
-app.post('/usage/refresh', async (req, res) => {
-  try {
-    await runWorkspaceScript('scripts/record-usage.sh', [], 60000);
-    const rows = readUsageCsv();
-    const latest = rows.length > 0 ? rows[rows.length - 1] : {};
-    res.render('partials/usage_stats', { latest, rows });
-  } catch (e) {
-    res.status(500).render('partials/error', { msg: e.message });
   }
 });
 
@@ -718,11 +598,8 @@ app.post('/credentials/import', (req, res) => {
 
 // ─── Routes: Terminal ───────────────────────────────────────
 
-app.get('/terminal/:name', async (req, res) => {
-  const vms = await getAllVms();
-  const vm = vms.find(v => v.name === req.params.name);
-  if (!vm) return res.status(404).render('partials/error', { msg: 'VM not found' });
-  res.render('terminal', { vm, fullWidth: true });
+app.get('/terminal/:name', (req, res) => {
+  res.redirect('/agents/' + req.params.name);
 });
 
 // ─── Routes: API ────────────────────────────────────────────
@@ -733,15 +610,6 @@ app.get('/api/vms', async (req, res) => {
 
 app.get('/api/backups', (req, res) => {
   res.json(getBackups());
-});
-
-app.get('/api/usage', (req, res) => {
-  res.json(readUsageCsv());
-});
-
-app.get('/api/usage/stats', (req, res) => {
-  const rows = readUsageCsv();
-  res.json(rows.length > 0 ? rows[rows.length - 1] : {});
 });
 
 // ─── Agent Routes (new) ─────────────────────────────────────
@@ -818,9 +686,16 @@ wss.on('connection', async (ws, req) => {
   });
 
   ws.on('message', (data) => {
-    if (!docker.stdin.destroyed) {
-      docker.stdin.write(data.toString());
-    }
+    if (docker.stdin.destroyed) return;
+    const msg = data.toString();
+    try {
+      const parsed = JSON.parse(msg);
+      if (parsed.type === 'resize' && parsed.cols && parsed.rows) {
+        try { execSync(`docker exec ${vmName} stty cols ${parsed.cols} rows ${parsed.rows}`, { timeout: 2000 }); } catch {}
+        return;
+      }
+    } catch {}
+    docker.stdin.write(msg);
   });
 
   ws.on('close', cleanup);

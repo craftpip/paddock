@@ -6,9 +6,9 @@ const MAX_UPLOAD_SIZE = 100 * 1024 * 1024; // 100MB
 
 function resolveSafePath(workspaceRoot, relativePath) {
   if (!relativePath || relativePath === '/') return workspaceRoot;
-  const cleaned = relativePath.replace(/\.\./g, '').replace(/^\/+/, '');
+  const cleaned = path.normalize(relativePath).replace(/^\/+/, '');
   const resolved = path.resolve(workspaceRoot, cleaned);
-  if (!resolved.startsWith(workspaceRoot)) {
+  if (!resolved.startsWith(workspaceRoot + path.sep) && resolved !== workspaceRoot) {
     throw new Error('Path traversal rejected');
   }
   return resolved;
@@ -71,6 +71,24 @@ function readFile(agentId, relativePath) {
     size: stat.size,
     modified: stat.mtime.toISOString(),
     name: path.basename(absPath),
+  };
+}
+
+function writeFile(agentId, relativePath, content) {
+  const agent = getAgent(agentId);
+  if (!agent) throw new Error('Agent not found');
+  const absPath = resolveSafePath(agent.workspace_root, relativePath);
+
+  if (fs.existsSync(absPath)) {
+    const stat = fs.statSync(absPath);
+    if (stat.isDirectory()) throw new Error('Cannot write to directory');
+  }
+
+  fs.writeFileSync(absPath, content, 'utf8');
+  return {
+    name: path.basename(absPath),
+    size: Buffer.byteLength(content, 'utf8'),
+    modified: fs.statSync(absPath).mtime.toISOString(),
   };
 }
 
@@ -194,6 +212,7 @@ function getMimeType(filename) {
 module.exports = {
   listDir,
   readFile,
+  writeFile,
   statFile,
   createFolder,
   renameEntry,

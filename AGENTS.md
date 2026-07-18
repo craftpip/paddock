@@ -15,10 +15,10 @@ Append new entries under the relevant section or add a new section. Keep it conc
 
 - **`docker-compose.yml`** defines services (vm-ozden, vm-pranav).
 - **`docker-compose.override.yml`** adds vm-jake, vm-ozden2, vm-reze, vm-test.
-- **`src/`** — Management dashboard container. Runs gunicorn + Flask on port 5050. **This is the control plane VM** — it manages all other containers via `/var/run/docker.sock`. Uses `strip_container_check()` to bypass container-detection guards in scripts.
+- **`src/`** — Management dashboard container. Runs Node.js/Express on port 5050. **This is the control plane VM** — it manages all other containers via `/var/run/docker.sock`.
 - **`vm_openclaw/`** Docker image builds from `ghcr.io/openclaw/openclaw:latest`.
 - **`instances/<vm>/openclaw/`** is bind-mounted to `/root/.openclaw` inside each container.
-- Scripts: `add-vm.sh`, `remove-vm.sh`, `reset-vm.sh`, `manage_backups.sh`.
+- **`scripts/`** — Kept external scripts: `daily-commit.sh`, `record-usage.sh`, `usage-budget*.sh`
 - **`backups/`** — stores timestamped backup archives per agent.
 
 ## OpenClaw Cron System
@@ -80,24 +80,10 @@ instances/*/openclaw/npm/
 
 The `npm/` folder is OpenClaw's internal plugin cache (not project dependencies). `node_modules/` lives inside it and is equally unnecessary to version.
 
-## Usage Tracking (OpenAI API)
-
-- **Cron**: `*/15 * * * * /home/boniface/www/vm-friends/scripts/record-usage.sh` — runs every 15 minutes.
-- **Target container**: `vm-jake` — both `record-usage.sh` and `usage-budget.sh` read from vm-jake (migrated from vm-ozden on 2026-07-01).
-- **Script**: `scripts/record-usage.sh` uses `openclaw status --usage --json` for clean JSON with `usedPercent`/`resetAt`, and `openclaw sessions list --json` for per-session `totalTokens`.
-- **Budget script**: `scripts/usage-budget.sh` — interactive report showing weekly %, burn rate, projection, session breakdown by kind (direct/cron/telegram), and headroom.
-- **Data source**: `openclaw status --usage --json` returns `usage.providers[].windows[]` with `label` ("5h" / "Week"), `usedPercent`, and `resetAt` (Unix ms).
-- **Output**: Appends one row to `usage_data.csv` at project root.
-- **CSV columns**: `timestamp`, `hourly_usage`, `hourly_pct_left`, `hourly_reset_in`, `weekly_pct_left`, `weekly_reset_in`, `total_tokens_k`, `tokens_delta_k`, `plan`.
-- **Delta tracking**: Computes `tokens_delta_k` as difference from last row's `total_tokens_k`.
-- **Auto-commit**: `0 18 * * * /home/boniface/www/vm-friends/scripts/daily-commit.sh` commits and pushes `usage_data.csv` daily.
-
 ## Daily Commit
 
 - `scripts/daily-commit.sh` runs at 18:00 daily via crontab.
 - Does `sudo git add -A && sudo git commit -m "auto: daily commit" && sudo git push`.
-
-
 
 ## Onboard Bot Script
 
@@ -166,18 +152,6 @@ The `npm/` folder is OpenClaw's internal plugin cache (not project dependencies)
 - `AGENTS.md` at project root is owned by `root` (like instance files). Cannot use the `edit` tool — must use `sudo python3` or `sudo sed` to modify it.
 - When using `sudo python3` with embedded code, use `<< 'PYEOF'` (single-quoted heredoc delimiter) to prevent bash from interpreting backticks and `$` inside the Python code.
 
-### Issue: Usage tracking cron misses hours silently
-
-**Cause**: `scripts/record-usage.sh` uses `set -euo pipefail`. When a command fails (e.g., container down, output format change), the pipeline exits non-zero and `set -e` kills the script before writing to CSV — no error visible, no row logged.
-
-**Fix**: Added `|| true` to all `docker exec` and pipelines so no-match doesn't abort. Added an early-exit guard that logs a warning to stderr and exits 0 when the usage data can't be parsed.
-
-### Issue: Cron jobs exist in `jobs.json` but not in `openclaw cron list`
-
-**Cause**: The Gateway (v2026.4.x+) reads from SQLite, not `jobs.json`. The `jobs.json` is legacy and was never migrated.
-
-**Fix**: `openclaw doctor --fix` inside the container.
-
 ### Issue: Embedded git repos inside `instances/` prevent `git add`
 
 **Cause**: OpenClaw creates temporary git repos in `.tmp/` and `workspace/` directories.
@@ -239,16 +213,6 @@ To clone an existing bot into a new one:
 
 **Related terms:** openclaw update, docker compose build --pull, latest, version record, telegram test, no backup, OpenAI auth, 401 Unauthorized, device-code
 
-### Issue: Usage tracking broke after OpenClaw 2026.6.6 — provider name changed
-
-**Last updated:** 2026-07-01
-
-**Problem:** `openclaw models status` renamed the provider from `openai-codex` to `openai`. The grep for `- openai-codex usage:` found no match — script survived but data was empty.
-
-**Fix:** When OpenClaw updates, always check `docker exec <vm> openclaw models status` output for provider name changes. Current pattern: `- openai usage:`.
-
-**Verify:** Run the script manually and check `tail -1 usage_data.csv` — all usage columns should be populated.
-
 ### Host-side Telegram reachability affects containers without gluetun
 
 **Last updated:** 2026-07-01
@@ -258,15 +222,6 @@ To clone an existing bot into a new one:
 **Correct Approach:** When Telegram send failures happen (`Network request for 'sendMessage' failed!`, `UND_ERR_CONNECT_TIMEOUT`), first test from the host: `curl -sv --connect-timeout 5 https://api.telegram.org`. If the host also times out while normal HTTPS works, it's a host/network or regional restriction issue.
 
 **Verify:** Check `docker logs --since 30m <vm>` for Telegram timeout errors, and confirm host can/cannot reach `api.telegram.org`.
-
-### Usage-budget.sh — burn rate breakdown by day and 3h block
-
-**Last updated:** 2026-07-01
-
-**Details:** `scripts/usage-budget.sh` records each burn rate reading with IST day-of-week, hour, and 3-hour block. Prints a Day by 3h block matrix, by-day, and by-block summaries. CSV needs >1 week of data for the matrix to fill meaningfully.
-
-**Related terms:** usage-budget.sh, burn rate, breakdown, day of week, 3-hour block
-
 
 ### Local Vector Memory (Semantic Search) for OpenClaw Bots
 
@@ -302,7 +257,6 @@ To clone an existing bot into a new one:
 - The `active-memory` plugin should also be enabled for interactive semantic recall during chats.
 - Official docs: https://docs.openclaw.ai/plugins/llama-cpp
 
-
 ## Node.js/Express Rewrite (src/ 2026-07-18)
 
 ### Why
@@ -320,9 +274,7 @@ To clone an existing bot into a new one:
 - **WebSocket terminal**: Uses `ws` library + `docker exec -i` (no -t) to avoid PTY issues. Simple stdin/stdout piping.
 - **Helper functions**: `runCmd()` wraps `child_process.execFile()` in a Promise. `runWorkspaceScript()` uses `fs.mkdtemp()` + `fs.chmodSync()` for temp script files.
 - **Docker cache**: Same 3-second TTL on `docker ps -a` results (module-level variable).
-- **CSV parsing**: Manual split (no csv-parse dependency needed) for `usage_data.csv`.
-- **Auth**: Basic auth middleware checking `AUTH_PASSWORD` env var — same as Flask version.
-- **`creds.js` matches `creds.py` interface exactly**: `load()`, `save()`, `apiKeys()`, `botTokens()`, `userIDs()`, `profiles()`, `addApiKey()`, `addBotToken()`, `addUserId()`, `addProfile()`, `delete*()`, `getProfile()`, `maskKey()`, `importFromBotPrefixes()`.
+- **Auth**: Session-based auth with CSRF tokens replacing Basic Auth.
 
 ### Template Conversion Rules (Jinja2 → EJS)
 | Jinja2 | EJS |
@@ -344,8 +296,10 @@ To clone an existing bot into a new one:
 docker compose build vm-webui && docker compose up -d --no-deps --force-recreate vm-webui
 ```
 
-### Cleanup Remaining
-- Delete `src/requirements.txt`, `src/creds.py`, `src/app.py`, `src/templates/` after Node.js is verified working.
+### Common EJS Template Mistakes
+- **Stray `<% } %>`** (orphaned closing brace) causes `Missing catch or finally after try` — EJS interprets it as an unmatched `try`.
+- Always match `{` with `}` inside `<% %>` blocks.
+- When embedding flash messages, escape single quotes: `<%= flash.message.replace(/'/g, "\\'") %>`.
 
 ### Terminal: xterm.js sends \r but docker exec -i without PTY needs \n
 
@@ -357,25 +311,6 @@ docker.stdin.write(data.toString().replace(/\r/g, '\n'));
 ```
 
 **Verify:** Send a command ending with `\r` via WebSocket — the shell should execute it immediately.
-
-## Web UI Rework (2026-07-18)
-
-### What Changed
-- **Profiles removed**: Entire profile CRUD system deleted from `creds.js`, `app.js`, and `profiles.ejs` (3 files deleted).
-- **Logs pages consolidated**: Standalone `/logs` index and `/logs/:name` pages removed. Logs accessible from VM detail page.
-- **Onboarding simplified**: Profile select removed; two modes remain: saved credentials dropdown or direct custom input.
-- **Security hardening**:
-  - `VM_NAME_RE` regex (`^vm-[a-zA-Z0-9][a-zA-Z0-9_-]*$`) validates VM names on WebSocket terminal, backup create/restore.
-  - `safeBackupPath()` uses `path.basename()` + `path.resolve()` + prefix check to prevent path traversal in backup delete/download.
-  - `/vm/:name/meta` strips `ROOT_PASSWORD` from response.
-  - `/vm/:name/config` redacts `api_keys`, `telegram.bot_token`, and plugin keys.
-- **UI polish**: Removed emojis from empty states and credential section headers. Cleaner nav with separator. Consistent form patterns.
-- **Backup restore**: Removed misleading `hx-vals='{"file":"..."}'` (backend ignored it; restore always uses latest backup).
-- **Pages kept**: dashboard, create VM, VM detail, terminal, credentials, backups, usage, onboard.
-- **Pages removed**: profiles, logs index, VM logs standalone.
-
-### Nav Items (in order)
-Dashboard, +VM, Backups, Usage, Creds
 
 ## Agent Management System (v2 — 2026-07-18)
 
@@ -418,7 +353,7 @@ src/
 ### Key Design Decisions
 
 - **Agent-first, not VM-first**: All new routes use `/agents/:id` instead of `/vm/:name`
-- **Legacy routes preserved**: `/vm/*`, `/backups`, `/credentials`, `/usage` still work
+- **Legacy routes preserved**: `/vm/*`, `/backups`, `/credentials` still work
 - **SQLite metadata store**: `src/data/app.db` stores agents, activity events, sessions
 - **Filesystem-derived state**: Agents discovered from `instances/*/meta.env` + Docker state
 - **Session-based auth**: Replaces Basic Auth. Uses `express-session` with CSRF tokens
@@ -430,44 +365,6 @@ src/
 - **Skeleton loading**: Tabs show shimmer placeholders while HTMX loads content
 - **Responsive design**: Tables hide columns on mobile, forms stack vertically
 
-### Routes
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/agents` | Fleet dashboard with search |
-| GET | `/agents/create` | Create agent form |
-| POST | `/agents/create` | Create agent (CSRF protected) |
-| GET | `/agents/:id` | Agent detail (8 tabs) |
-| POST | `/agents/:id/start` | Start agent |
-| POST | `/agents/:id/stop` | Stop agent |
-| POST | `/agents/:id/restart` | Restart agent |
-| GET | `/agents/:id/workspace` | File browser |
-| GET | `/agents/:id/workspace/tree` | File listing (JSON) |
-| GET | `/agents/:id/workspace/file` | Read file |
-| POST | `/agents/:id/workspace/upload` | Upload file |
-| POST | `/agents/:id/workspace/folder` | Create folder |
-| POST | `/agents/:id/workspace/rename` | Rename entry |
-| POST | `/agents/:id/workspace/delete` | Delete entry |
-| POST | `/agents/:id/workspace/move` | Move entry |
-| GET | `/agents/:id/workspace/download` | Download file |
-| GET | `/agents/:id/terminal` | Terminal page |
-| GET | `/agents/:id/logs` | Container logs |
-| GET | `/agents/:id/config` | Config (redacted) |
-| GET | `/agents/:id/sessions` | Session list |
-| GET | `/agents/:id/activity` | Activity timeline |
-| GET | `/agents/:id/backups` | Backup list |
-| POST | `/agents/:id/backups/create` | Create backup |
-| POST | `/agents/:id/backups/restore` | Restore backup |
-| GET | `/login` | Login page |
-| POST | `/login` | Authenticate |
-| GET | `/logout` | Destroy session |
-
-### Deploy
-
-```bash
-docker compose build vm-webui && docker compose up -d --no-deps --force-recreate vm-webui
-```
-
 ### Environment Variables
 
 | Variable | Required | Description |
@@ -478,9 +375,158 @@ docker compose build vm-webui && docker compose up -d --no-deps --force-recreate
 ### Testing
 
 ```bash
-# Run from host (requires Node.js 20+):
-cd src && node --test test/
-
-# Run inside container:
 docker exec vm-webui node --test test/
 ```
+
+## Development Workflow — Live Editing without Rebuild
+
+### Key Insight
+Bind-mount the entire `src/` directory over `/app` so any file change (JS, EJS, JSON, etc.) is reflected instantly — no image rebuild needed.
+
+### Volumes Setup (`docker-compose.yml` for `vm-webui`)
+```yaml
+volumes:
+  - /home/boniface/www/vm-friends:/workspace:rw
+  - /home/boniface/www/vm-friends/src:/app:rw
+  - /var/run/docker.sock:/var/run/docker.sock:ro
+```
+
+Two mounts only: project root (for agent discovery, instances, scripts) and `src/` (for live code).
+
+### node_modules
+`node_modules` must exist on the host for the bind mount to work (the image's `/app/node_modules` is hidden by the mount). Copy it once:
+```bash
+docker cp vm-webui:/app/node_modules /workspace/src/node_modules
+```
+And **`.gitignore`** must keep `**/node_modules/` (already done).
+
+### Rate Limiter
+- `src/middleware/rateLimit.js` defaults to 30 requests/minute per IP.
+- 30 is too tight for page loads + HTMX tab loads (8 tabs per detail page = 9 requests). Bumped to 300 for normal browsing.
+
+### Restart Command (no rebuild needed)
+```bash
+docker compose up -d --no-deps --force-recreate vm-webui
+```
+
+### Nav Items (current order)
+Dashboard, +VM, Backups, Creds
+- **Usage tab removed** — it was an external OpenAI report, not useful in the panel.
+
+### Cleanup Completed
+- `src/views/usage.ejs` and `src/views/partials/usage_stats.ejs` deleted.
+- Read-only `usage/usage_data.csv` reading code and all `/usage` / `/api/usage` routes removed from `app.js`.
+
+
+## Agent Dashboard — HTMX Action Buttons (2026-07-18)
+
+### Pattern: Inline Start/Stop/Restart on Dashboard Cards
+- Dashboard now has compact SVG icon buttons (play/stop/restart) per agent card using **HTMX** (, , ).
+- Actions do a full card swap (no page reload) — the card re-renders with updated status.
+- Loading state:  CSS dims the card during the request.
+- CSRF sent via  — no hidden form fields needed with HTMX.
+
+### Agent Card Partial
+- Card markup lives in  and is included by the dashboard.
+- Route handlers check  — if true, render the card partial (no layout); otherwise redirect.
+- The partial is self-contained: receives  and  as locals.
+
+### What Changed
+-  — now uses 
+-  — new file, extracted card partial with HTMX buttons
+-  — start/stop/restart routes now support HTMX responses (return card partial instead of redirect)
+-  — added  CSS for loading state
+
+### EJS Include Pitfall
+- Include paths in EJS are **relative to the current template**, not the views root.
+- From , include  (not ).
+
+
+## Agent Dashboard — HTMX Action Buttons (2026-07-18)
+
+### Pattern: Inline Start/Stop/Restart on Dashboard Cards
+- Dashboard now has compact SVG icon buttons (play/stop/restart) per agent card using **HTMX** (`hx-post`, `hx-target`, `hx-swap`).
+- Actions do a full card swap (no page reload) — the card re-renders with updated status.
+- Loading state: `.agent-card.htmx-request` CSS dims the card during the request.
+- CSRF sent via `hx-headers='{"x-csrf-token": "<%= csrfToken %>"}'` — no hidden form fields needed with HTMX.
+
+### Agent Card Partial
+- Card markup lives in `src/views/agents/partials/card.ejs` and is included by the dashboard.
+- Route handlers check `req.headers['hx-request']` — if true, render the card partial (no layout); otherwise redirect.
+- The partial is self-contained: receives `agent` and `csrfToken` as locals.
+
+### What Changed
+- `src/views/agents/dashboard.ejs` — now uses `<%- include('partials/card', { agent, csrfToken }) %>`
+- `src/views/agents/partials/card.ejs` — new file, extracted card partial with HTMX buttons
+- `src/routes/agents.js` — start/stop/restart routes now support HTMX responses (return card partial instead of redirect)
+- `src/views/layout.ejs` — added `.agent-card.htmx-request` CSS for loading state
+
+### EJS Include Pitfall
+- Include paths in EJS are **relative to the current template**, not the views root.
+- From `views/agents/dashboard.ejs`, include `partials/card` (not `../partials/card`).
+
+
+## Script Absorption into Node.js (2026-07-18)
+
+### What Changed
+All bash/Python scripts that were external to src/ have been absorbed into Node.js service modules:
+
+- **`add-vm.sh`** → `src/services/vm-manager.js` (createVm, removeVm, resetVm)
+- **`remove-vm.sh`** → `src/services/vm-manager.js` (removeVm)
+- **`reset-vm.sh`** → `src/services/vm-manager.js` (resetVm)
+- **`manage_backups.sh`** → `src/services/backup-manager.js` (backupAgent, restoreAgent)
+- **`scripts/onboard-bot.sh`** + **`scripts/.oauth-helper.py`** → inlined into route handlers in `app.js` and config patching in `vm-manager.js`
+
+### Removed Dependencies
+- `runWorkspaceScript()` removed from both `app.js` and `routes/agents.js`
+- `stripContainerCheck()` removed from `app.js`
+- `os` import removed from `routes/agents.js`
+
+### Kept External Scripts
+- `scripts/daily-commit.sh` — daily git commit
+- `scripts/record-usage.sh` — usage tracking
+- `scripts/usage-budget-compact.sh` / `scripts/usage-budget.sh` — budget reports
+
+### Key Files Created
+- `src/services/vm-manager.js` — createVm, removeVm, resetVm, docker-compose override YAML generation, config patching
+- `src/services/backup-manager.js` — backupAgent, restoreAgent via docker exec + docker cp
+
+### Pattern for Post-Creation Config
+- Instead of a separate "onboard" service, Telegram + API key setup is done inline with direct `runCmd('docker', [...])` calls in route handlers
+- Config patching (Telegram bot token, model provider) is a pure JS function in `vm-manager.js` — no Python scripts needed
+
+## MCP Browser Testing (2026-07-18)
+
+### Accessing vm-webui from Browser MCP
+- Browser MCP runs on the host, so it accesses the webui at `http://172.19.0.1:5050` (Docker gateway IP).
+- `localhost:5050` does **NOT** work from browser MCP — it connects to a different network context.
+- OP-friends container shares gluetun's network namespace — cannot be connected to other Docker networks.
+- vm-webui is on `workspace_default` (172.30.0.2) and `browser-search-mcp_default` (172.23.0.3).
+- Quick restart (no rebuild): `docker restart vm-webui`
+
+### MCP Config
+- Created `/workspace/opencode.json` with MCP browser config pointing at `http://localhost:3000/mcp`.
+
+## Terminal Sizing Fix (2026-07-18)
+
+### Problem
+Terminal appeared small/constrained because xterm.js FitAddon calls `fit()` before the terminal tab is visible (HTMX loads tabs lazily).
+
+### Fix
+- Added **IntersectionObserver** in `src/views/layout.ejs` that defers `fit()` until the terminal container is actually visible in the viewport.
+- Also added **ResizeObserver** on the terminal container for continuous auto-resize.
+- Added `IntersectionObserver` to pause/resume logs auto-refresh when tab is hidden/visible.
+
+### xterm.js Addons
+- FitAddon and WebLinksAddon are loaded via `<script>` tags from `/app/public/xterm-addon-fit.js` and `xterm-addon-web-links.js`.
+- They are NOT npm packages installed in node_modules — they're standalone browser bundles.
+- Download with `curl -o <path> <cdn-url>` into `src/public/`.
+
+### Terminal Theme
+- Professional dark theme with cyan accents matching the UI color scheme.
+- Defined in `VMF.initTerminal()` in `src/views/layout.ejs`.
+- 10000 scrollback lines.
+
+### Terminal Resize to Docker
+- When the terminal resizes, send `docker exec resize` via WebSocket.
+- Done in the ResizeObserver callback after fit().

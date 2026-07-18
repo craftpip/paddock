@@ -1,93 +1,323 @@
-<div class="mb-4">
-  <div class="flex items-center gap-2 text-sm text-slate-500 mb-3 overflow-x-auto">
+<div id="workspace-root" data-agent="<%= agent.name %>" data-csrf="<%= csrfToken %>" data-path="<%= currentPath %>">
+  <!-- Breadcrumbs -->
+  <div class="flex items-center gap-1 text-sm text-slate-500 mb-4 overflow-x-auto" id="workspace-breadcrumbs">
     <% for (const crumb of breadcrumbs) { %>
-      <a href="/agents/<%= agent.name %>/workspace?path=<%= encodeURIComponent(crumb.path) %>" class="hover:text-slate-300 transition-colors whitespace-nowrap"><%= crumb.name %></a>
+      <a href="/agents/<%= agent.name %>/workspace?path=<%= encodeURIComponent(crumb.path) %>"
+         class="hover:text-slate-300 transition-colors whitespace-nowrap"
+         hx-get="/agents/<%= agent.name %>/workspace?path=<%= encodeURIComponent(crumb.path) %>"
+         hx-target="#workspace-root"
+         hx-swap="outerHTML"><%= crumb.name %></a>
       <% if (crumb !== breadcrumbs[breadcrumbs.length - 1]) { %>
         <span class="text-slate-600">/</span>
       <% } %>
     <% } %>
   </div>
 
-  <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+  <!-- Actions Bar -->
+  <div class="flex flex-wrap items-center gap-2 mb-4">
+    <!-- Create File -->
+    <form method="POST" action="/agents/<%= agent.name %>/workspace/create-file" class="flex items-center gap-2">
+      <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+      <input type="hidden" name="path" value="<%= currentPath %>">
+      <input type="text" name="name" placeholder="new-file.md" required class="px-2 py-1.5 bg-slate-950 border border-slate-700 rounded text-sm text-white w-36 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500">
+      <button class="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded text-sm transition-colors whitespace-nowrap">+ File</button>
+    </form>
+
+    <!-- Create Folder -->
     <form method="POST" action="/agents/<%= agent.name %>/workspace/folder" class="flex items-center gap-2">
       <input type="hidden" name="_csrf" value="<%= csrfToken %>">
       <input type="hidden" name="path" value="<%= currentPath %>">
-      <input type="text" name="name" placeholder="New folder" required class="px-2 py-1.5 bg-slate-950 border border-slate-700 rounded text-sm text-white w-40 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500">
+      <input type="text" name="name" placeholder="new-folder" required class="px-2 py-1.5 bg-slate-950 border border-slate-700 rounded text-sm text-white w-36 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500">
       <button class="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded text-sm transition-colors whitespace-nowrap">+ Folder</button>
     </form>
-    <form method="POST" action="/agents/<%= agent.name %>/workspace/upload" enctype="multipart/form-data" class="flex items-center gap-2">
-      <input type="hidden" name="_csrf" value="<%= csrfToken %>">
-      <input type="hidden" name="path" value="<%= currentPath %>">
-      <input type="file" name="file" required class="text-sm text-slate-400 file:mr-3 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-sm file:bg-cyan-600 file:text-white file:cursor-pointer file:hover:bg-cyan-500">
-      <button class="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded text-sm transition-colors whitespace-nowrap">Upload</button>
-    </form>
+
+    <span class="w-px h-5 bg-slate-700"></span>
+
+    <!-- Upload -->
+    <div id="upload-zone"
+         class="flex items-center gap-2 px-3 py-1.5 border border-dashed border-slate-600 rounded-lg hover:border-cyan-500 hover:bg-slate-800/50 transition-colors cursor-pointer"
+         onclick="document.getElementById('upload-input').click()">
+      <svg class="w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+      <span class="text-sm text-slate-400">Upload</span>
+      <input type="file" id="upload-input" class="hidden" onchange="handleUpload(this)">
+    </div>
+
+    <div id="upload-progress" class="hidden flex items-center gap-2">
+      <div class="w-32 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+        <div id="upload-bar" class="h-full bg-cyan-500 rounded-full transition-all" style="width:0%"></div>
+      </div>
+      <span id="upload-status" class="text-xs text-slate-400"></span>
+    </div>
+  </div>
+
+  <!-- File Table -->
+  <div class="border border-slate-800 rounded-xl overflow-hidden">
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="border-b border-slate-800 text-left text-slate-500">
+            <th class="px-4 py-2 font-medium">Name</th>
+            <th class="px-4 py-2 font-medium w-24 hidden sm:table-cell">Size</th>
+            <th class="px-4 py-2 font-medium w-40 hidden md:table-cell">Modified</th>
+            <th class="px-4 py-2 font-medium w-32">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% if (currentPath !== '/') { %>
+            <tr class="border-b border-slate-800/50">
+              <td colspan="4" class="px-4 py-2">
+                <a href="/agents/<%= agent.name %>/workspace?path=<%= encodeURIComponent(breadcrumbs[breadcrumbs.length - 2]?.path || '/') %>"
+                   class="text-slate-400 hover:text-slate-200 transition-colors"
+                   hx-get="/agents/<%= agent.name %>/workspace?path=<%= encodeURIComponent(breadcrumbs[breadcrumbs.length - 2]?.path || '/') %>"
+                   hx-target="#workspace-root"
+                   hx-swap="outerHTML">&larr; Up</a>
+              </td>
+            </tr>
+          <% } %>
+          <% for (const entry of listing.entries) { %>
+            <% const entryPath = currentPath === '/' ? '/' + entry.name : currentPath + '/' + entry.name; %>
+            <tr class="border-b border-slate-800/50 hover:bg-slate-800/30 group">
+              <td class="px-4 py-2">
+                <% if (entry.type === 'directory') { %>
+                  <a href="/agents/<%= agent.name %>/workspace?path=<%= encodeURIComponent(entryPath) %>"
+                     class="text-cyan-400 hover:text-cyan-300 transition-colors"
+                     hx-get="/agents/<%= agent.name %>/workspace?path=<%= encodeURIComponent(entryPath) %>"
+                     hx-target="#workspace-root"
+                     hx-swap="outerHTML">
+                    <span class="mr-1.5 text-slate-500">&#128193;</span><%= entry.name %>
+                  </a>
+                <% } else { %>
+                  <button onclick="openFile('<%= entryPath.replace(/'/g, "\\'") %>')"
+                     class="text-slate-200 hover:text-cyan-300 transition-colors text-left">
+                    <span class="mr-1.5 text-slate-500">&#128196;</span><%= entry.name %>
+                  </button>
+                <% } %>
+              </td>
+              <td class="px-4 py-2 text-slate-500 hidden sm:table-cell"><%= entry.type === 'file' ? fmtSize(entry.size) : '-' %></td>
+              <td class="px-4 py-2 text-slate-500 hidden md:table-cell text-xs"><%= entry.modified ? new Date(entry.modified).toLocaleString() : '-' %></td>
+              <td class="px-4 py-2">
+                <div class="flex items-center gap-1 opacity-50 group-hover:opacity-100 transition-opacity">
+                  <% if (entry.type === 'file') { %>
+                    <a href="/agents/<%= agent.name %>/workspace/download?path=<%= encodeURIComponent(entryPath) %>"
+                       class="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors" title="Download">DL</a>
+                  <% } %>
+                  <button onclick="renameEntry('<%= entryPath.replace(/'/g, "\\'") %>')"
+                     class="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors" title="Rename">MV</button>
+                  <button onclick="VMF.confirm({title:'Delete',message:'Delete <%= entry.name %>? This cannot be undone.',danger:true,confirmText:'Delete'},function(){VMF.post('/agents/<%= agent.name %>/workspace/delete',{_csrf:'<%= csrfToken %>',path:'<%= entryPath.replace(/'/g, "\\'") %>'})})"
+                     class="px-2 py-1 text-xs text-red-400 hover:text-red-300 hover:bg-slate-700 rounded transition-colors" title="Delete">RM</button>
+                </div>
+              </td>
+            </tr>
+          <% } %>
+          <% if (listing.entries.length === 0) { %>
+            <tr>
+              <td colspan="4" class="px-4 py-12 text-center">
+                <svg class="w-8 h-8 mx-auto mb-2 text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>
+                <p class="text-slate-500">Empty directory</p>
+              </td>
+            </tr>
+          <% } %>
+        </tbody>
+      </table>
+    </div>
   </div>
 </div>
 
-<div class="border border-slate-800 rounded-xl overflow-hidden">
-  <div class="overflow-x-auto">
-    <table class="w-full text-sm">
-      <thead>
-        <tr class="border-b border-slate-800 text-left text-slate-500">
-          <th class="px-4 py-2 font-medium">Name</th>
-          <th class="px-4 py-2 font-medium w-24 hidden sm:table-cell">Size</th>
-          <th class="px-4 py-2 font-medium w-40 hidden md:table-cell">Modified</th>
-          <th class="px-4 py-2 font-medium w-32">Actions</th>
-        </tr>
-      </thead>
-      <tbody>
-        <% if (currentPath !== '/') { %>
-          <tr class="border-b border-slate-800/50">
-            <td colspan="4" class="px-4 py-2">
-              <a href="/agents/<%= agent.name %>/workspace?path=<%= encodeURIComponent(breadcrumbs[breadcrumbs.length - 2]?.path || '/') %>" class="text-slate-400 hover:text-slate-200 transition-colors">&larr; Up</a>
-            </td>
-          </tr>
-        <% } %>
-        <% for (const entry of listing.entries) { %>
-          <tr class="border-b border-slate-800/50 hover:bg-slate-800/30 group">
-            <td class="px-4 py-2">
-              <% if (entry.type === 'directory') { %>
-                <a href="/agents/<%= agent.name %>/workspace?path=<%= encodeURIComponent(currentPath === '/' ? '/' + entry.name : currentPath + '/' + entry.name) %>" class="text-cyan-400 hover:text-cyan-300 transition-colors">
-                  <span class="mr-1.5 text-slate-500">&#128193;</span><%= entry.name %>
-                </a>
-              <% } else { %>
-                <span class="text-slate-200">
-                  <span class="mr-1.5 text-slate-500">&#128196;</span><%= entry.name %>
-                </span>
-              <% } %>
-            </td>
-            <td class="px-4 py-2 text-slate-500 hidden sm:table-cell"><%= entry.type === 'file' ? fmtSize(entry.size) : '-' %></td>
-            <td class="px-4 py-2 text-slate-500 hidden md:table-cell text-xs"><%= entry.modified ? new Date(entry.modified).toLocaleString() : '-' %></td>
-            <td class="px-4 py-2">
-              <div class="flex items-center gap-1 opacity-50 group-hover:opacity-100 transition-opacity">
-                <% if (entry.type === 'file') { %>
-                  <a href="/agents/<%= agent.name %>/workspace/download?path=<%= encodeURIComponent(currentPath === '/' ? '/' + entry.name : currentPath + '/' + entry.name) %>" class="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors" title="Download">DL</a>
-                <% } %>
-                <button onclick="renameEntry('<%= (currentPath === '/' ? '/' + entry.name : currentPath + '/' + entry.name).replace(/'/g, "\\'") %>')" class="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors" title="Rename">MV</button>
-                <button onclick="VMF.confirm({title:'Delete',message:'Delete <%= entry.name %>? This cannot be undone.',danger:true,confirmText:'Delete'},function(){VMF.post('/agents/<%= agent.name %>/workspace/delete',{_csrf:'<%= csrfToken %>',path:'<%= (currentPath === '/' ? '/' + entry.name : currentPath + '/' + entry.name).replace(/'/g, "\\'") %>'})})" class="px-2 py-1 text-xs text-red-400 hover:text-red-300 hover:bg-slate-700 rounded transition-colors" title="Delete">RM</button>
-              </div>
-            </td>
-          </tr>
-        <% } %>
-        <% if (listing.entries.length === 0) { %>
-          <tr>
-            <td colspan="4" class="px-4 py-12 text-center">
-              <svg class="w-8 h-8 mx-auto mb-2 text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>
-              <p class="text-slate-500">Empty directory</p>
-            </td>
-          </tr>
-        <% } %>
-      </tbody>
-    </table>
+<!-- File Viewer/Editor Modal -->
+<div id="file-modal-overlay" class="fixed inset-0 z-[60] bg-black/60 hidden items-center justify-center" onclick="if(event.target===this)closeFileModal()">
+  <div id="file-modal" class="bg-slate-800 border border-slate-700 rounded-xl shadow-2xl flex flex-col" style="width:80vw;max-width:900px;height:80vh;">
+    <div class="flex items-center justify-between px-4 py-3 border-b border-slate-700">
+      <div class="flex items-center gap-3 min-w-0">
+        <span id="file-modal-icon" class="text-slate-400">&#128196;</span>
+        <span id="file-modal-name" class="text-sm font-medium text-white truncate"></span>
+        <span id="file-modal-size" class="text-xs text-slate-500"></span>
+      </div>
+      <div class="flex items-center gap-2">
+        <button id="file-modal-save" onclick="saveFile()" class="hidden px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded text-sm transition-colors">Save</button>
+        <button id="file-modal-download" onclick="downloadCurrentFile()" class="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded text-sm transition-colors">Download</button>
+        <button onclick="closeFileModal()" class="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded text-sm transition-colors">Close</button>
+      </div>
+    </div>
+    <div id="file-modal-body" class="flex-1 overflow-auto p-4">
+      <div class="flex items-center justify-center h-full">
+        <div class="text-slate-500 text-sm">Loading...</div>
+      </div>
+    </div>
   </div>
 </div>
 
 <script>
-function renameEntry(currentPath) {
-  var currentName = currentPath.split('/').pop();
-  var newName = prompt('Rename "' + currentName + '" to:', currentName);
-  if (newName && newName !== currentName) {
-    VMF.post('/agents/<%= agent.name %>/workspace/rename', { _csrf: '<%= csrfToken %>', path: currentPath, new_name: newName });
+(function() {
+  var currentFilePath = null;
+  var currentFileContent = null;
+  var isEditable = false;
+
+  var previewableExts = ['.txt','.md','.json','.js','.ts','.jsx','.tsx','.py','.rb','.go','.rs','.java','.c','.cpp','.h','.hpp','.css','.scss','.html','.xml','.yaml','.yml','.toml','.ini','.cfg','.conf','.sh','.bash','.env','.log','.csv','.sql','.ejs','.hbs','.pug','.vue','.svelte','.gitignore','.dockerfile','.makefile','.readme','.license'];
+
+  window.openFile = function(filePath) {
+    currentFilePath = filePath;
+    var overlay = document.getElementById('file-modal-overlay');
+    var body = document.getElementById('file-modal-body');
+    var nameEl = document.getElementById('file-modal-name');
+    var sizeEl = document.getElementById('file-modal-size');
+    var saveBtn = document.getElementById('file-modal-save');
+
+    nameEl.textContent = filePath.split('/').pop();
+    sizeEl.textContent = '';
+    body.innerHTML = '<div class="flex items-center justify-center h-full"><div class="text-slate-500 text-sm">Loading...</div></div>';
+    saveBtn.classList.add('hidden');
+    overlay.classList.remove('hidden');
+    overlay.classList.add('flex');
+
+    fetch('/agents/<%= agent.name %>/workspace/file?path=' + encodeURIComponent(filePath))
+      .then(function(r) { return r.json(); })
+      .then(function(file) {
+        if (file.error) {
+          body.innerHTML = '<div class="text-red-400 text-sm text-center">' + file.error + '</div>';
+          return;
+        }
+        currentFileContent = file.content;
+        sizeEl.textContent = file.size + ' bytes';
+        var ext = ('.' + file.name.split('.').pop()).toLowerCase();
+        isEditable = previewableExts.indexOf(ext) !== -1 || ext === '';
+
+        if (isEditable) {
+          saveBtn.classList.remove('hidden');
+          var textarea = document.createElement('textarea');
+          textarea.id = 'file-editor';
+          textarea.value = file.content;
+          textarea.className = 'w-full h-full bg-slate-900 text-slate-200 font-mono text-sm p-4 rounded-lg border border-slate-700 focus:border-cyan-500 focus:outline-none resize-none';
+          textarea.style.minHeight = '100%';
+          body.innerHTML = '';
+          body.appendChild(textarea);
+          textarea.focus();
+        } else {
+          var pre = document.createElement('pre');
+          pre.className = 'text-xs text-slate-300 font-mono whitespace-pre-wrap';
+          pre.textContent = file.content;
+          body.innerHTML = '';
+          body.appendChild(pre);
+        }
+      })
+      .catch(function(err) {
+        body.innerHTML = '<div class="text-red-400 text-sm text-center">Failed to load file</div>';
+      });
+  };
+
+  window.saveFile = function() {
+    if (!currentFilePath) return;
+    var editor = document.getElementById('file-editor');
+    if (!editor) return;
+    var content = editor.value;
+    var saveBtn = document.getElementById('file-modal-save');
+    saveBtn.textContent = 'Saving...';
+    saveBtn.disabled = true;
+
+    fetch('/agents/<%= agent.name %>/workspace/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: currentFilePath, content: content, _csrf: '<%= csrfToken %>' })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(result) {
+      saveBtn.textContent = 'Saved!';
+      currentFileContent = content;
+      setTimeout(function() { saveBtn.textContent = 'Save'; saveBtn.disabled = false; }, 1500);
+      VMF.toast('File saved.', 'success');
+    })
+    .catch(function(err) {
+      saveBtn.textContent = 'Save';
+      saveBtn.disabled = false;
+      VMF.toast('Failed to save: ' + err.message, 'error');
+    });
+  };
+
+  window.downloadCurrentFile = function() {
+    if (!currentFilePath) return;
+    window.location.href = '/agents/<%= agent.name %>/workspace/download?path=' + encodeURIComponent(currentFilePath);
+  };
+
+  window.closeFileModal = function() {
+    document.getElementById('file-modal-overlay').classList.add('hidden');
+    document.getElementById('file-modal-overlay').classList.remove('flex');
+    currentFilePath = null;
+  };
+
+  window.renameEntry = function(currentPath) {
+    var currentName = currentPath.split('/').pop();
+    var newName = prompt('Rename "' + currentName + '" to:', currentName);
+    if (newName && newName !== currentName) {
+      VMF.post('/agents/<%= agent.name %>/workspace/rename', { _csrf: '<%= csrfToken %>', path: currentPath, new_name: newName });
+    }
+  };
+
+  window.handleUpload = function(input) {
+    var file = input.files[0];
+    if (!file) return;
+    var fd = new FormData();
+    fd.append('file', file);
+    fd.append('path', '<%= currentPath %>');
+    fd.append('_csrf', '<%= csrfToken %>');
+
+    var progress = document.getElementById('upload-progress');
+    var bar = document.getElementById('upload-bar');
+    var status = document.getElementById('upload-status');
+    progress.classList.remove('hidden');
+    status.textContent = 'Uploading...';
+    bar.style.width = '0%';
+
+    var xhr = new XMLHttpRequest();
+    xhr.upload.addEventListener('progress', function(e) {
+      if (e.lengthComputable) {
+        var pct = Math.round((e.loaded / e.total) * 100);
+        bar.style.width = pct + '%';
+        status.textContent = pct + '%';
+      }
+    });
+    xhr.onload = function() {
+      bar.style.width = '100%';
+      status.textContent = 'Done';
+      VMF.toast('File uploaded.', 'success');
+      setTimeout(function() {
+        progress.classList.add('hidden');
+        location.reload();
+      }, 800);
+    };
+    xhr.onerror = function() {
+      status.textContent = 'Failed';
+      VMF.toast('Upload failed.', 'error');
+    };
+    xhr.open('POST', '/agents/<%= agent.name %>/workspace/upload');
+    xhr.send(fd);
+    input.value = '';
+  };
+
+  // Drag and drop
+  var zone = document.getElementById('upload-zone');
+  if (zone) {
+    zone.addEventListener('dragover', function(e) { e.preventDefault(); zone.classList.add('border-cyan-400', 'bg-slate-800/50'); });
+    zone.addEventListener('dragleave', function(e) { zone.classList.remove('border-cyan-400', 'bg-slate-800/50'); });
+    zone.addEventListener('drop', function(e) {
+      e.preventDefault();
+      zone.classList.remove('border-cyan-400', 'bg-slate-800/50');
+      if (e.dataTransfer.files.length > 0) {
+        var input = document.getElementById('upload-input');
+        input.files = e.dataTransfer.files;
+        handleUpload(input);
+      }
+    });
   }
-}
+
+  // Keyboard shortcut: Ctrl+S to save in editor
+  document.addEventListener('keydown', function(e) {
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+      var editor = document.getElementById('file-editor');
+      if (editor && document.activeElement === editor) {
+        e.preventDefault();
+        saveFile();
+      }
+    }
+    if (e.key === 'Escape') closeFileModal();
+  });
+})();
 </script>

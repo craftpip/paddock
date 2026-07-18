@@ -1,11 +1,18 @@
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
+const { execFile } = require('child_process');
 const multer = require('multer');
 const registry = require('../services/agent-registry');
 const workspace = require('../services/workspace');
+const vm = require('../services/vm-manager');
+const backup = require('../services/backup-manager');
 const { getDb } = require('../services/db');
 const { csrfCheck } = require('../middleware/auth');
+
+const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
+const COMPOSE_PREFIX = ['compose', '-p', 'vm-friends', '--project-directory', WORKSPACE];
+const BACKUPS_DIR = path.join(WORKSPACE, 'backups');
 
 const router = express.Router();
 
@@ -18,6 +25,7 @@ const ALLOWED_UPLOAD_TYPES = new Set([
 ]);
 
 const upload = multer({
+  storage: multer.memoryStorage(),
   limits: { fileSize: workspace.MAX_UPLOAD_SIZE },
   fileFilter: (req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
@@ -53,7 +61,9 @@ function audit(agentId, category, action, status, details, resourceRef) {
 router.get('/', (req, res) => {
   const agents = registry.discoverAgents();
   const stats = registry.getAgentStats();
-  res.render('agents/dashboard', { agents, stats });
+  const flash = req.session.flash || null;
+  delete req.session.flash;
+  res.render('agents/dashboard', { agents, stats, flash });
 });
 
 // ─── Create Agent ───────────────────────────────────────────────────────────
@@ -75,13 +85,21 @@ router.post('/create', csrfCheck, async (req, res) => {
   }
 
   const args = [name];
+  if (clone_source && !registry.VM_NAME_RE.test(clone_source)) {
+    return res.status(400).render('partials/error', { message: 'Invalid clone source', code: 400 });
+  }
   if (clone_source) args.push('--clone', clone_source);
   else args.push('--fresh');
   if (agent_type) args.push('--agent', agent_type);
   if (password) args.push('--password', password);
 
   try {
-    await runWorkspaceScript('add-vm.sh', args, 120000);
+    await vm.createVm(name, {
+      agent: agent_type || 'openclaw',
+      mode: clone_source ? 'clone' : 'fresh',
+      cloneSource: clone_source,
+      password,
+    });
     audit(name, 'lifecycle', 'create', 'ok', `Agent created (type=${agent_type || 'openclaw'})`);
     req.session.flash = { type: 'success', message: `Agent ${name} created successfully.` };
     res.redirect(`/agents/${name}`);
@@ -100,45 +118,59 @@ router.get('/:agentId', validateAgent, (req, res) => {
   const config = readAgentConfig(agent);
   const flash = req.session.flash || null;
   delete req.session.flash;
+  res.locals.fullHeight = true;
   res.render('agents/detail', { agent, activity, backups, config, flash });
 });
 
 // ─── Runtime Actions ────────────────────────────────────────────────────────
 
+function renderAgentCard(agent, req, res) {
+  res.render('agents/partials/card', { agent, csrfToken: req.session.csrfToken, layout: false });
+}
+
 router.post('/:agentId/start', validateAgent, csrfCheck, async (req, res) => {
+  const isHx = !!req.headers['hx-request'];
   try {
-    await runCmd('docker', ['compose', 'up', '-d', req.agent.runtime_ref]);
+    await runCmd('docker', [...COMPOSE_PREFIX, 'up', '-d', req.agent.runtime_ref]);
     audit(req.agent.name, 'lifecycle', 'start', 'ok', 'Agent started');
+    if (isHx) return renderAgentCard(registry.getAgent(req.agent.name), req, res);
     req.session.flash = { type: 'success', message: 'Agent started.' };
     res.redirect(`/agents/${req.agent.name}`);
   } catch (err) {
     audit(req.agent.name, 'lifecycle', 'start', 'error', err.message);
+    if (isHx) return renderAgentCard(registry.getAgent(req.agent.name), req, res);
     req.session.flash = { type: 'error', message: `Failed to start: ${err.message}` };
     res.redirect(`/agents/${req.agent.name}`);
   }
 });
 
 router.post('/:agentId/stop', validateAgent, csrfCheck, async (req, res) => {
+  const isHx = !!req.headers['hx-request'];
   try {
-    await runCmd('docker', ['compose', 'stop', req.agent.runtime_ref]);
+    await runCmd('docker', [...COMPOSE_PREFIX, 'stop', req.agent.runtime_ref]);
     audit(req.agent.name, 'lifecycle', 'stop', 'ok', 'Agent stopped');
+    if (isHx) return renderAgentCard(registry.getAgent(req.agent.name), req, res);
     req.session.flash = { type: 'success', message: 'Agent stopped.' };
     res.redirect(`/agents/${req.agent.name}`);
   } catch (err) {
     audit(req.agent.name, 'lifecycle', 'stop', 'error', err.message);
+    if (isHx) return renderAgentCard(registry.getAgent(req.agent.name), req, res);
     req.session.flash = { type: 'error', message: `Failed to stop: ${err.message}` };
     res.redirect(`/agents/${req.agent.name}`);
   }
 });
 
 router.post('/:agentId/restart', validateAgent, csrfCheck, async (req, res) => {
+  const isHx = !!req.headers['hx-request'];
   try {
-    await runCmd('docker', ['compose', 'restart', req.agent.runtime_ref]);
+    await runCmd('docker', [...COMPOSE_PREFIX, 'restart', req.agent.runtime_ref]);
     audit(req.agent.name, 'lifecycle', 'restart', 'ok', 'Agent restarted');
+    if (isHx) return renderAgentCard(registry.getAgent(req.agent.name), req, res);
     req.session.flash = { type: 'success', message: 'Agent restarted.' };
     res.redirect(`/agents/${req.agent.name}`);
   } catch (err) {
     audit(req.agent.name, 'lifecycle', 'restart', 'error', err.message);
+    if (isHx) return renderAgentCard(registry.getAgent(req.agent.name), req, res);
     req.session.flash = { type: 'error', message: `Failed to restart: ${err.message}` };
     res.redirect(`/agents/${req.agent.name}`);
   }
@@ -149,10 +181,11 @@ router.post('/:agentId/restart', validateAgent, csrfCheck, async (req, res) => {
 router.get('/:agentId/workspace', validateAgent, (req, res) => {
   const agent = req.agent;
   const relativePath = req.query.path || '/';
+  const isHx = !!req.headers['hx-request'];
   try {
     const listing = workspace.listDir(agent.name, relativePath);
     const breadcrumbs = workspace.getBreadcrumbs(relativePath);
-    res.render('agents/workspace', { agent, listing, breadcrumbs, currentPath: relativePath });
+    res.render('agents/workspace', { agent, listing, breadcrumbs, currentPath: relativePath, layout: isHx ? false : undefined });
   } catch (err) {
     res.status(400).render('partials/error', { message: err.message, code: 400 });
   }
@@ -214,7 +247,7 @@ router.post('/:agentId/workspace/upload', validateAgent, csrfCheck, upload.singl
     fs.writeFileSync(destPath, req.file.buffer);
     audit(agent.name, 'workspace', 'upload', 'ok', `Uploaded ${safeName} (${req.file.size} bytes) to ${targetDir}`);
     req.session.flash = { type: 'success', message: `Uploaded ${safeName}` };
-    res.redirect(`/agents/${agent.name}/workspace?path=${encodeURIComponent(targetDir)}`);
+    res.redirect(`/agents/${agent.name}#workspace`);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -227,10 +260,10 @@ router.post('/:agentId/workspace/folder', validateAgent, csrfCheck, (req, res) =
     workspace.createFolder(agent.name, relativePath, folderName);
     audit(agent.name, 'workspace', 'create_folder', 'ok', `Created folder ${folderName}`);
     req.session.flash = { type: 'success', message: `Folder "${folderName}" created.` };
-    res.redirect(`/agents/${agent.name}/workspace?path=${encodeURIComponent(relativePath || '/')}`);
+    res.redirect(`/agents/${agent.name}#workspace`);
   } catch (err) {
     req.session.flash = { type: 'error', message: err.message };
-    res.redirect(`/agents/${agent.name}/workspace?path=${encodeURIComponent(relativePath || '/')}`);
+    res.redirect(`/agents/${agent.name}#workspace`);
   }
 });
 
@@ -241,10 +274,10 @@ router.post('/:agentId/workspace/rename', validateAgent, csrfCheck, (req, res) =
     workspace.renameEntry(agent.name, relativePath, new_name);
     audit(agent.name, 'workspace', 'rename', 'ok', `Renamed to ${new_name}`);
     req.session.flash = { type: 'success', message: `Renamed to "${new_name}".` };
-    res.redirect(`/agents/${agent.name}/workspace?path=${encodeURIComponent(path.dirname(relativePath))}`);
+    res.redirect(`/agents/${agent.name}#workspace`);
   } catch (err) {
     req.session.flash = { type: 'error', message: err.message };
-    res.redirect(`/agents/${agent.name}/workspace?path=${encodeURIComponent(path.dirname(relativePath))}`);
+    res.redirect(`/agents/${agent.name}#workspace`);
   }
 });
 
@@ -255,10 +288,10 @@ router.post('/:agentId/workspace/delete', validateAgent, csrfCheck, (req, res) =
     workspace.deleteEntry(agent.name, relativePath);
     audit(agent.name, 'workspace', 'delete', 'ok', `Deleted ${relativePath}`);
     req.session.flash = { type: 'success', message: `Deleted "${path.basename(relativePath)}".` };
-    res.redirect(`/agents/${agent.name}/workspace?path=${encodeURIComponent(path.dirname(relativePath))}`);
+    res.redirect(`/agents/${agent.name}#workspace`);
   } catch (err) {
     req.session.flash = { type: 'error', message: err.message };
-    res.redirect(`/agents/${agent.name}/workspace?path=${encodeURIComponent(path.dirname(relativePath))}`);
+    res.redirect(`/agents/${agent.name}#workspace`);
   }
 });
 
@@ -269,10 +302,43 @@ router.post('/:agentId/workspace/move', validateAgent, csrfCheck, (req, res) => 
     workspace.moveEntry(agent.name, fromPath, to_dir);
     audit(agent.name, 'workspace', 'move', 'ok', `Moved ${fromPath} to ${to_dir}`);
     req.session.flash = { type: 'success', message: 'File moved.' };
-    res.redirect(`/agents/${agent.name}/workspace?path=${encodeURIComponent(to_dir || '/')}`);
+    res.redirect(`/agents/${agent.name}#workspace`);
   } catch (err) {
     req.session.flash = { type: 'error', message: err.message };
-    res.redirect(`/agents/${agent.name}/workspace?path=${encodeURIComponent(to_dir || '/')}`);
+    res.redirect(`/agents/${agent.name}#workspace`);
+  }
+});
+
+router.post('/:agentId/workspace/save', validateAgent, csrfCheck, (req, res) => {
+  const agent = req.agent;
+  const { path: relativePath, content } = req.body;
+  if (!relativePath) return res.status(400).json({ error: 'path required' });
+  try {
+    const result = workspace.writeFile(agent.name, relativePath, content || '');
+    audit(agent.name, 'workspace', 'save', 'ok', `Saved ${relativePath}`);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/:agentId/workspace/create-file', validateAgent, csrfCheck, (req, res) => {
+  const agent = req.agent;
+  const { path: relativePath, name: fileName } = req.body;
+  if (!fileName) {
+    req.session.flash = { type: 'error', message: 'File name required.' };
+    return res.redirect(`/agents/${agent.name}#workspace`);
+  }
+  try {
+    const dir = relativePath || '/';
+    const filePath = dir === '/' ? '/' + fileName : dir + '/' + fileName;
+    workspace.writeFile(agent.name, filePath, '');
+    audit(agent.name, 'workspace', 'create_file', 'ok', `Created file ${fileName}`);
+    req.session.flash = { type: 'success', message: `File "${fileName}" created.` };
+    res.redirect(`/agents/${agent.name}#workspace`);
+  } catch (err) {
+    req.session.flash = { type: 'error', message: err.message };
+    res.redirect(`/agents/${agent.name}#workspace`);
   }
 });
 
@@ -284,11 +350,11 @@ router.get('/:agentId/terminal', validateAgent, (req, res) => {
 
 // ─── Logs ───────────────────────────────────────────────────────────────────
 
-router.get('/:agentId/logs', validateAgent, (req, res) => {
+router.get('/:agentId/logs', validateAgent, async (req, res) => {
   const agent = req.agent;
   const tail = parseInt(req.query.tail) || 100;
   try {
-    const logs = dockerLogs(agent.runtime_ref, tail);
+    const logs = await dockerLogs(agent.runtime_ref, tail);
     if (req.query.raw === '1') return res.type('text').send(logs);
     res.render('agents/logs', { agent, logs });
   } catch (err) {
@@ -322,27 +388,31 @@ router.get('/:agentId/backups', validateAgent, (req, res) => {
 
 router.post('/:agentId/backups/create', validateAgent, csrfCheck, async (req, res) => {
   try {
-    await runWorkspaceScript('manage_backups.sh', ['backup', req.agent.name], 120000);
+    await backup.backupAgent(req.agent.name);
     audit(req.agent.name, 'backup', 'create', 'ok', 'Backup created');
+    console.error('BACKUP CREATE: setting flash, sessID:', req.sessionID);
     req.session.flash = { type: 'success', message: 'Backup created.' };
-    res.redirect(`/agents/${req.agent.name}/backups`);
+    req.session.save(() => {
+      console.error('BACKUP CREATE: save callback, redirecting');
+      res.redirect(`/agents/${req.agent.name}#backups`);
+    });
   } catch (err) {
     audit(req.agent.name, 'backup', 'create', 'error', err.message);
     req.session.flash = { type: 'error', message: `Backup failed: ${err.message}` };
-    res.redirect(`/agents/${req.agent.name}/backups`);
+    req.session.save(() => res.redirect(`/agents/${req.agent.name}#backups`));
   }
 });
 
 router.post('/:agentId/backups/restore', validateAgent, csrfCheck, async (req, res) => {
   try {
-    await runWorkspaceScript('manage_backups.sh', ['restore', req.agent.name], 120000);
+    await backup.restoreAgent(req.agent.name);
     audit(req.agent.name, 'backup', 'restore', 'ok', 'Backup restored');
     req.session.flash = { type: 'success', message: 'Backup restored. Container will restart.' };
-    res.redirect(`/agents/${req.agent.name}/backups`);
+    req.session.save(() => res.redirect(`/agents/${req.agent.name}#backups`));
   } catch (err) {
     audit(req.agent.name, 'backup', 'restore', 'error', err.message);
     req.session.flash = { type: 'error', message: `Restore failed: ${err.message}` };
-    res.redirect(`/agents/${req.agent.name}/backups`);
+    req.session.save(() => res.redirect(`/agents/${req.agent.name}#backups`));
   }
 });
 
@@ -350,7 +420,7 @@ router.get('/:agentId/backups/download', validateAgent, (req, res) => {
   const file = req.query.file;
   if (!file) return res.status(400).send('file required');
   const safeName = path.basename(file);
-  const backupPath = path.join(__dirname, '..', '..', 'backups', safeName);
+  const backupPath = path.join(BACKUPS_DIR, safeName);
   if (!fs.existsSync(backupPath)) return res.status(404).send('Not found');
   res.download(backupPath);
 });
@@ -359,13 +429,13 @@ router.post('/:agentId/backups/delete', validateAgent, csrfCheck, (req, res) => 
   const file = req.body.file;
   if (!file) return res.status(400).send('file required');
   const safeName = path.basename(file);
-  const backupPath = path.join(__dirname, '..', '..', 'backups', safeName);
+  const backupPath = path.join(BACKUPS_DIR, safeName);
   if (fs.existsSync(backupPath)) {
     fs.unlinkSync(backupPath);
     audit(req.agent.name, 'backup', 'delete', 'ok', `Deleted backup ${safeName}`);
   }
   req.session.flash = { type: 'success', message: 'Backup deleted.' };
-  res.redirect(`/agents/${req.agent.name}/backups`);
+  res.redirect(`/agents/${req.agent.name}#backups`);
 });
 
 // ─── Sessions ───────────────────────────────────────────────────────────────
@@ -398,50 +468,30 @@ function readAgentConfig(agent) {
 }
 
 function getBackups(vmName) {
-  const backupsDir = path.join(__dirname, '..', '..', 'backups');
-  if (!fs.existsSync(backupsDir)) return [];
-  return fs.readdirSync(backupsDir)
+  if (!fs.existsSync(BACKUPS_DIR)) return [];
+  return fs.readdirSync(BACKUPS_DIR)
     .filter(f => f.startsWith(vmName + '_') && f.endsWith('.tar.gz'))
     .map(f => {
-      const stat = fs.statSync(path.join(backupsDir, f));
+      const stat = fs.statSync(path.join(BACKUPS_DIR, f));
       return { name: f, size: stat.size, created: stat.mtime.toISOString() };
     })
     .sort((a, b) => new Date(b.created) - new Date(a.created));
 }
 
 function dockerLogs(vmName, tail = 100) {
-  const { execSync } = require('child_process');
-  try {
-    return execSync(`docker logs --tail ${tail} ${vmName} 2>&1`, { timeout: 10000 }).toString();
-  } catch {
-    return 'Unable to fetch logs.';
-  }
+  return new Promise((resolve) => {
+    execFile('docker', ['logs', '--tail', String(tail), vmName], { timeout: 10000 }, (err, stdout, stderr) => {
+      resolve((stdout || '') + (stderr || ''));
+    });
+  });
 }
 
 function runCmd(cmd, args, timeout = 30000) {
-  const { execFile } = require('child_process');
   return new Promise((resolve, reject) => {
     execFile(cmd, args, { timeout, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) reject(err);
       else resolve(stdout.toString());
     });
-  });
-}
-
-function runWorkspaceScript(scriptName, args = [], timeout = 60000) {
-  const os = require('os');
-  const scriptPath = path.join(__dirname, '..', '..', scriptName);
-  if (!fs.existsSync(scriptPath)) {
-    return Promise.reject(new Error(`Script ${scriptName} not found`));
-  }
-  let content = fs.readFileSync(scriptPath, 'utf8');
-  content = content.replace(/\/\.dockerenv/g, '/.dockerenv-dummy');
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-'));
-  const tmpScript = path.join(tmpDir, scriptName);
-  fs.writeFileSync(tmpScript, content);
-  fs.chmodSync(tmpScript, '755');
-  return runCmd('bash', [tmpScript, ...args], timeout).finally(() => {
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
   });
 }
 
