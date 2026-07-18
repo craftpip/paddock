@@ -1,0 +1,40 @@
+<div class="w-full border border-slate-800 rounded-xl overflow-hidden" id="terminal-container" style="height: 500px;"></div>
+<script src="/xterm.js"></script>
+<link rel="stylesheet" href="/xterm.css">
+<script>
+(function() {
+  var term = new Terminal({ cursorBlink: true, fontSize: 14, fontFamily: 'monospace' });
+  var container = document.getElementById('terminal-container');
+  term.open(container);
+
+  var protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  var ws = new WebSocket(protocol + '//' + location.host + '/ws/terminal/<%= agent.name %>');
+  var connected = false;
+
+  ws.onopen = function() {
+    connected = true;
+    term.focus();
+  };
+
+  ws.onmessage = function(evt) {
+    term.write(evt.data);
+  };
+
+  ws.onclose = function() {
+    connected = false;
+    term.write('\r\n\x1b[31m[Connection closed]\x1b[0m\r\n');
+  };
+
+  ws.onerror = function() {
+    term.write('\r\n\x1b[31m[Connection error]\x1b[0m\r\n');
+  };
+
+  term.onData(function(data) {
+    if (connected) ws.send(data);
+  });
+
+  term.onResize(function(size) {
+    if (connected) ws.send(JSON.stringify({ type: 'resize', cols: size.cols, rows: size.rows }));
+  });
+})();
+</script>

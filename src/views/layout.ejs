@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VM Friends — Agent Manager</title>
+  <script>window.tailwind={config:{darkMode:'class'}}</script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>">
+  <style>
+    html.light{--bg-page:#f8fafc;--bg-card:#ffffff;--bg-nav:#f1f5f9;--bg-elevated:#ffffff;--bg-input:#f1f5f9;--text-primary:#1e293b;--text-secondary:#475569;--text-muted:#64748b;--text-dim:#94a3b8;--border:#e2e8f0;--border-light:#f1f5f9}
+    html.light body{background-color:var(--bg-page);color:var(--text-primary)}
+    html.light nav{background-color:var(--bg-nav);border-color:var(--border)}
+    html.light nav a{color:var(--text-secondary)}
+    html.light nav a:hover{color:var(--text-primary)}
+    html.light .card,html.light [class*="bg-slate-800"]{background-color:var(--bg-card);border-color:var(--border)}
+    html.light .bg-slate-900{background-color:var(--bg-page)}
+    html.light .bg-slate-950{background-color:var(--bg-input)}
+    html.light [class*="border-slate-7"],html.light [class*="border-slate-8"]{border-color:var(--border)}
+    html.light .text-slate-100,html.light .text-white{color:var(--text-primary)}
+    html.light .text-slate-200,html.light .text-slate-300{color:var(--text-secondary)}
+    html.light .text-slate-400{color:var(--text-muted)}
+    html.light .text-slate-500{color:var(--text-dim)}
+    html.light [class*="bg-slate-7"]:not(nav *){background-color:var(--bg-input)}
+    html.light select option{background-color:var(--bg-card);color:var(--text-primary)}
+    html.light input,html.light select{background-color:var(--bg-input);border-color:var(--border);color:var(--text-primary)}
+    html.light input::placeholder{color:var(--text-dim)}
+    html.light .hover\:bg-slate-700:hover{background-color:var(--bg-input)}
+    html.light pre{color:var(--text-secondary)}
+    html.light table{color:var(--text-secondary)}
+    html.light .text-cyan-400{color:#0891b2}
+    html.light .text-emerald-400{color:#059669}
+    html.light .text-amber-400{color:#d97706}
+    html.light .text-purple-400{color:#7c3aed}
+    html.light .text-red-400{color:#dc2626}
+    html.light [class*="bg-emerald-9"],html.light [class*="bg-amber-9"],html.light [class*="bg-red-9"],html.light [class*="bg-purple-9"],html.light [class*="bg-cyan-9"],html.light [class*="bg-orange-9"],html.light [class*="bg-slate-9"]:not(.bg-slate-900){background-color:var(--bg-card);border-color:var(--border)}
+
+    .skeleton{background:linear-gradient(90deg,#1e293b 25%,#334155 50%,#1e293b 75%);background-size:200% 100%;animation:shimmer 1.5s infinite;border-radius:0.5rem}
+    html.light .skeleton{background:linear-gradient(90deg,#e2e8f0 25%,#f1f5f9 50%,#e2e8f0 75%);background-size:200% 100%}
+    @keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+
+    .toast-enter{animation:toastIn 0.3s ease-out}
+    .toast-exit{animation:toastOut 0.3s ease-in forwards}
+    @keyframes toastIn{from{opacity:0;transform:translateY(1rem)}to{opacity:1;transform:translateY(0)}}
+    @keyframes toastOut{from{opacity:1;transform:translateY(0)}to{opacity:0;transform:translateY(1rem)}}
+  </style>
+</head>
+<body class="bg-slate-900 text-slate-100 font-sans antialiased min-h-screen">
+  <nav class="border-b border-slate-800 bg-slate-900/80 sticky top-0 z-50 backdrop-blur-lg">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6">
+      <div class="flex items-center justify-between h-14">
+        <a href="/agents" class="flex items-center gap-2.5 text-base font-bold tracking-tight text-cyan-400 hover:text-cyan-300 transition-colors">
+          <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+          VM Friends
+        </a>
+        <div class="flex items-center gap-0.5">
+          <a href="/agents" class="px-3 py-1.5 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-slate-800 transition-colors">Agents</a>
+          <a href="/agents/create" class="px-3 py-1.5 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-slate-800 transition-colors">+ Agent</a>
+          <a href="/usage" class="px-3 py-1.5 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-slate-800 transition-colors">Usage</a>
+          <a href="/credentials" class="px-3 py-1.5 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-slate-800 transition-colors">Creds</a>
+          <a href="/backups" class="px-3 py-1.5 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-slate-800 transition-colors">Backups</a>
+          <span class="w-px h-5 bg-slate-700 mx-1.5"></span>
+          <button id="theme-toggle" class="p-2 rounded-lg text-slate-500 hover:text-white hover:bg-slate-800 transition-colors text-xs" title="Toggle theme">●</button>
+          <a href="/logout" class="px-3 py-1.5 rounded-lg text-sm text-slate-500 hover:text-red-400 hover:bg-slate-800 transition-colors" title="Sign out">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>
+          </a>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <main class="<%= (typeof fullWidth !== 'undefined' && fullWidth) ? 'w-full px-4 sm:px-6 lg:px-8 py-6' : 'max-w-7xl mx-auto px-4 sm:px-6 py-8' %>">
+    <%- body %>
+  </main>
+
+  <div id="toast-container" class="fixed bottom-6 right-6 z-50 space-y-2"></div>
+
+  <div id="modal-overlay" class="fixed inset-0 z-[60] bg-black/50 hidden items-center justify-center" onclick="if(event.target===this)closeModal()">
+    <div id="modal-content" class="bg-slate-800 border border-slate-700 rounded-xl p-6 max-w-md mx-4 shadow-2xl"></div>
+  </div>
+
+  <script>
+  var VMF = {
+    toast: function(msg, type) {
+      type = type || 'info';
+      var colors = { success: 'border-emerald-600 bg-emerald-900/50 text-emerald-200', error: 'border-red-600 bg-red-900/50 text-red-200', info: 'border-cyan-600 bg-cyan-900/50 text-cyan-200', warning: 'border-amber-600 bg-amber-900/50 text-amber-200' };
+      var icons = { success: '&#10003;', error: '&#10007;', info: '&#9432;', warning: '&#9888;' };
+      var el = document.createElement('div');
+      el.className = 'toast-enter border rounded-lg px-4 py-3 text-sm flex items-center gap-2 min-w-[280px] shadow-lg ' + (colors[type] || colors.info);
+      el.innerHTML = '<span>' + (icons[type] || icons.info) + '</span><span>' + msg + '</span>';
+      document.getElementById('toast-container').appendChild(el);
+      setTimeout(function() { el.classList.replace('toast-enter', 'toast-exit'); setTimeout(function() { el.remove(); }, 300); }, 4000);
+    },
+    confirm: function(opts, onConfirm) {
+      var overlay = document.getElementById('modal-overlay');
+      var content = document.getElementById('modal-content');
+      var danger = opts.danger ? 'bg-red-600 hover:bg-red-500' : 'bg-cyan-600 hover:bg-cyan-500';
+      content.innerHTML = '<h3 class="text-lg font-semibold text-white mb-2">' + (opts.title || 'Confirm') + '</h3>' +
+        '<p class="text-sm text-slate-400 mb-6">' + (opts.message || 'Are you sure?') + '</p>' +
+        '<div class="flex justify-end gap-3">' +
+        '<button onclick="VMF.closeModal()" class="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm transition-colors">Cancel</button>' +
+        '<button id="modal-confirm-btn" class="px-4 py-2 ' + danger + ' text-white rounded-lg text-sm transition-colors">' + (opts.confirmText || 'Confirm') + '</button></div>';
+      overlay.classList.remove('hidden');
+      overlay.classList.add('flex');
+      document.getElementById('modal-confirm-btn').onclick = function() { VMF.closeModal(); onConfirm(); };
+    },
+    closeModal: function() {
+      var overlay = document.getElementById('modal-overlay');
+      overlay.classList.add('hidden');
+      overlay.classList.remove('flex');
+    },
+    post: function(url, body) {
+      var form = document.createElement('form');
+      form.method = 'POST';
+      form.action = url;
+      if (body) {
+        for (var k in body) {
+          if (body.hasOwnProperty(k)) {
+            var input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = k;
+            input.value = body[k];
+            form.appendChild(input);
+          }
+        }
+      }
+      document.body.appendChild(form);
+      form.submit();
+    }
+  };
+
+  document.addEventListener('htmx:afterSwap', function(evt) {
+    if (evt.detail.target.id === 'toast' && document.getElementById('toast').children.length > 0) {
+      setTimeout(function() { document.getElementById('toast').innerHTML = ''; }, 5000);
+    }
+  });
+
+  (function() {
+    var html = document.documentElement;
+    var btn = document.getElementById('theme-toggle');
+    var theme = localStorage.getItem('theme');
+    if (theme === 'light') {
+      html.classList.add('light');
+      btn.textContent = '\u2600\uFE0F';
+    }
+    btn.addEventListener('click', function() {
+      html.classList.toggle('light');
+      var isLight = html.classList.contains('light');
+      localStorage.setItem('theme', isLight ? 'light' : 'dark');
+      btn.textContent = isLight ? '\u2600\uFE0F' : '\uD83C\uDF19';
+    });
+
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') VMF.closeModal();
+      if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+        e.preventDefault();
+        var searchInput = document.getElementById('global-search');
+        if (searchInput) searchInput.focus();
+      }
+    });
+  })();
+  </script>
+</body>
+</html>

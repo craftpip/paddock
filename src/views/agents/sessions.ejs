@@ -1,0 +1,32 @@
+<% if (sessions.length > 0) { %>
+<div class="border border-slate-800 rounded-xl overflow-hidden">
+  <table class="w-full text-sm">
+    <thead>
+      <tr class="border-b border-slate-800 text-left text-slate-500">
+        <th class="px-4 py-2 font-medium">ID</th>
+        <th class="px-4 py-2 font-medium">Kind</th>
+        <th class="px-4 py-2 font-medium">Status</th>
+        <th class="px-4 py-2 font-medium">Model</th>
+        <th class="px-4 py-2 font-medium">Tokens</th>
+        <th class="px-4 py-2 font-medium">Started</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% for (const s of sessions) { %>
+        <tr class="border-b border-slate-800/50 hover:bg-slate-800/30">
+          <td class="px-4 py-2 text-slate-200 text-xs font-mono"><%= s.id.substring(0, 12) %></td>
+          <td class="px-4 py-2 text-xs"><span class="px-2 py-0.5 bg-slate-800 text-slate-300 rounded"><%= s.kind %></span></td>
+          <td class="px-4 py-2 text-xs">
+            <span class="px-2 py-0.5 rounded <%= s.status === 'active' ? 'bg-emerald-900/50 text-emerald-400' : 'bg-slate-800 text-slate-400' %>"><%= s.status %></span>
+          </td>
+          <td class="px-4 py-2 text-slate-400 text-xs"><%= s.model || '-' %></td>
+          <td class="px-4 py-2 text-slate-400 text-xs"><%= ((s.tokens_in || 0) + (s.tokens_out || 0)).toLocaleString() %></td>
+          <td class="px-4 py-2 text-slate-500 text-xs"><%= new Date(s.started_at).toLocaleString() %></td>
+        </tr>
+      <% } %>
+    </tbody>
+  </table>
+</div>
+<% } else { %>
+<p class="text-slate-500 text-sm">No sessions recorded yet.</p>
+<% } %>

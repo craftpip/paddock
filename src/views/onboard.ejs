@@ -1,0 +1,84 @@
+<div class="max-w-2xl mx-auto">
+  <div class="flex items-center gap-3 mb-6">
+    <a href="/vm/<%= vm.name %>" class="text-slate-400 hover:text-white">&larr; <%= vm.name %></a>
+    <h1 class="text-2xl font-bold">Onboard Bot</h1>
+  </div>
+
+  <div class="bg-slate-800/60 border border-slate-700 rounded-xl p-5 space-y-4 mb-4">
+    <div class="flex items-center justify-between">
+      <span class="text-sm text-slate-300">Status</span>
+      <%- include('partials/status_badge', { vm }) %>
+    </div>
+    <div class="text-sm text-slate-300">
+      Agent: <span class="font-semibold"><%= vm.agent %></span>
+    </div>
+  </div>
+
+  <form hx-post="/onboard/<%= vm.name %>/run" hx-target="#output" hx-swap="innerHTML"
+        class="space-y-4"
+        hx-indicator="#spinner">
+
+    <div class="bg-slate-800/60 border border-slate-700 rounded-xl p-5 space-y-4">
+      <h2 class="text-sm font-semibold text-slate-400 uppercase tracking-wider">Telegram Bot</h2>
+
+      <div>
+        <label class="block text-sm text-slate-300 mb-1">Bot Token (or pick saved)</label>
+        <input type="text" name="bot_token" placeholder="123456:ABCdef..."
+               class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-500 placeholder-slate-500 mb-2">
+        <select name="bot_token_name" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white">
+          <option value="">-- Saved tokens --</option>
+          <% for (const [name, token] of Object.entries(bot_tokens)) { %>
+          <option value="<%= name %>"><%= name %></option>
+          <% } %>
+        </select>
+      </div>
+
+      <div>
+        <label class="block text-sm text-slate-300 mb-1">Allow User ID (or pick saved)</label>
+        <input type="text" name="user_id" placeholder="532156945"
+               class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-500 placeholder-slate-500 mb-2">
+        <select name="user_id_name" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white">
+          <option value="">-- Saved users --</option>
+          <% for (const [name, uid] of Object.entries(user_ids)) { %>
+          <option value="<%= name %>"><%= name %> (<%= uid %>)</option>
+          <% } %>
+        </select>
+      </div>
+    </div>
+
+    <div class="bg-slate-800/60 border border-slate-700 rounded-xl p-5 space-y-4">
+      <h2 class="text-sm font-semibold text-slate-400 uppercase tracking-wider">Provider API Key</h2>
+
+      <div>
+        <label class="block text-sm text-slate-300 mb-1">API Key — custom value or pick saved</label>
+        <div class="flex gap-2 mb-2">
+          <select name="api_key_provider" class="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-500">
+            <option value="">Provider</option>
+            <option value="openai">OpenAI</option>
+            <option value="openrouter">OpenRouter</option>
+            <option value="ollama-cloud">Ollama Cloud</option>
+            <option value="anthropic">Anthropic</option>
+          </select>
+          <input type="text" name="api_key_value" placeholder="sk-..."
+                 class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-500 placeholder-slate-500 font-mono">
+        </div>
+        <select name="api_key_name" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white">
+          <option value="">-- Or pick from saved --</option>
+          <% for (const [name, ak] of Object.entries(api_keys)) { %>
+          <option value="<%= name %>"><%= name %> (<%= ak.provider || '?' %>)</option>
+          <% } %>
+        </select>
+      </div>
+    </div>
+
+    <button type="submit" class="w-full bg-purple-600 hover:bg-purple-500 text-white font-semibold py-3 rounded-xl transition-colors">
+      <span id="spinner" class="htmx-indicator">⏳</span> Run Onboard
+    </button>
+  </form>
+
+  <div id="output" class="mt-4 bg-slate-900 border border-slate-700 rounded-xl p-4 text-xs font-mono text-slate-300 overflow-auto max-h-96 whitespace-pre-wrap">
+    Output will appear here...
+  </div>
+</div>
+
+

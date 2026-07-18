@@ -1,0 +1,8 @@
+<tr id="uid-<%= name %>" class="border-b border-slate-700">
+  <td class="py-2 px-3"><%= name %></td>
+  <td class="py-2 px-3 font-mono text-xs"><%= uid %></td>
+  <td class="py-2 px-3 text-right">
+    <button hx-post="/credentials/user-ids/<%= name %>/delete" hx-target="#uid-<%= name %>" hx-swap="delete"
+            class="text-red-400 hover:text-red-300 text-xs" onclick="return confirm('Delete user ID <%= name %>?')">Delete</button>
+  </td>
+</tr>

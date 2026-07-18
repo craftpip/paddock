@@ -1,0 +1,93 @@
+<div class="mb-4">
+  <div class="flex items-center gap-2 text-sm text-slate-500 mb-3 overflow-x-auto">
+    <% for (const crumb of breadcrumbs) { %>
+      <a href="/agents/<%= agent.name %>/workspace?path=<%= encodeURIComponent(crumb.path) %>" class="hover:text-slate-300 transition-colors whitespace-nowrap"><%= crumb.name %></a>
+      <% if (crumb !== breadcrumbs[breadcrumbs.length - 1]) { %>
+        <span class="text-slate-600">/</span>
+      <% } %>
+    <% } %>
+  </div>
+
+  <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+    <form method="POST" action="/agents/<%= agent.name %>/workspace/folder" class="flex items-center gap-2">
+      <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+      <input type="hidden" name="path" value="<%= currentPath %>">
+      <input type="text" name="name" placeholder="New folder" required class="px-2 py-1.5 bg-slate-950 border border-slate-700 rounded text-sm text-white w-40 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500">
+      <button class="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded text-sm transition-colors whitespace-nowrap">+ Folder</button>
+    </form>
+    <form method="POST" action="/agents/<%= agent.name %>/workspace/upload" enctype="multipart/form-data" class="flex items-center gap-2">
+      <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+      <input type="hidden" name="path" value="<%= currentPath %>">
+      <input type="file" name="file" required class="text-sm text-slate-400 file:mr-3 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-sm file:bg-cyan-600 file:text-white file:cursor-pointer file:hover:bg-cyan-500">
+      <button class="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded text-sm transition-colors whitespace-nowrap">Upload</button>
+    </form>
+  </div>
+</div>
+
+<div class="border border-slate-800 rounded-xl overflow-hidden">
+  <div class="overflow-x-auto">
+    <table class="w-full text-sm">
+      <thead>
+        <tr class="border-b border-slate-800 text-left text-slate-500">
+          <th class="px-4 py-2 font-medium">Name</th>
+          <th class="px-4 py-2 font-medium w-24 hidden sm:table-cell">Size</th>
+          <th class="px-4 py-2 font-medium w-40 hidden md:table-cell">Modified</th>
+          <th class="px-4 py-2 font-medium w-32">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% if (currentPath !== '/') { %>
+          <tr class="border-b border-slate-800/50">
+            <td colspan="4" class="px-4 py-2">
+              <a href="/agents/<%= agent.name %>/workspace?path=<%= encodeURIComponent(breadcrumbs[breadcrumbs.length - 2]?.path || '/') %>" class="text-slate-400 hover:text-slate-200 transition-colors">&larr; Up</a>
+            </td>
+          </tr>
+        <% } %>
+        <% for (const entry of listing.entries) { %>
+          <tr class="border-b border-slate-800/50 hover:bg-slate-800/30 group">
+            <td class="px-4 py-2">
+              <% if (entry.type === 'directory') { %>
+                <a href="/agents/<%= agent.name %>/workspace?path=<%= encodeURIComponent(currentPath === '/' ? '/' + entry.name : currentPath + '/' + entry.name) %>" class="text-cyan-400 hover:text-cyan-300 transition-colors">
+                  <span class="mr-1.5 text-slate-500">&#128193;</span><%= entry.name %>
+                </a>
+              <% } else { %>
+                <span class="text-slate-200">
+                  <span class="mr-1.5 text-slate-500">&#128196;</span><%= entry.name %>
+                </span>
+              <% } %>
+            </td>
+            <td class="px-4 py-2 text-slate-500 hidden sm:table-cell"><%= entry.type === 'file' ? fmtSize(entry.size) : '-' %></td>
+            <td class="px-4 py-2 text-slate-500 hidden md:table-cell text-xs"><%= entry.modified ? new Date(entry.modified).toLocaleString() : '-' %></td>
+            <td class="px-4 py-2">
+              <div class="flex items-center gap-1 opacity-50 group-hover:opacity-100 transition-opacity">
+                <% if (entry.type === 'file') { %>
+                  <a href="/agents/<%= agent.name %>/workspace/download?path=<%= encodeURIComponent(currentPath === '/' ? '/' + entry.name : currentPath + '/' + entry.name) %>" class="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors" title="Download">DL</a>
+                <% } %>
+                <button onclick="renameEntry('<%= (currentPath === '/' ? '/' + entry.name : currentPath + '/' + entry.name).replace(/'/g, "\\'") %>')" class="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors" title="Rename">MV</button>
+                <button onclick="VMF.confirm({title:'Delete',message:'Delete <%= entry.name %>? This cannot be undone.',danger:true,confirmText:'Delete'},function(){VMF.post('/agents/<%= agent.name %>/workspace/delete',{_csrf:'<%= csrfToken %>',path:'<%= (currentPath === '/' ? '/' + entry.name : currentPath + '/' + entry.name).replace(/'/g, "\\'") %>'})})" class="px-2 py-1 text-xs text-red-400 hover:text-red-300 hover:bg-slate-700 rounded transition-colors" title="Delete">RM</button>
+              </div>
+            </td>
+          </tr>
+        <% } %>
+        <% if (listing.entries.length === 0) { %>
+          <tr>
+            <td colspan="4" class="px-4 py-12 text-center">
+              <svg class="w-8 h-8 mx-auto mb-2 text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>
+              <p class="text-slate-500">Empty directory</p>
+            </td>
+          </tr>
+        <% } %>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+function renameEntry(currentPath) {
+  var currentName = currentPath.split('/').pop();
+  var newName = prompt('Rename "' + currentName + '" to:', currentName);
+  if (newName && newName !== currentName) {
+    VMF.post('/agents/<%= agent.name %>/workspace/rename', { _csrf: '<%= csrfToken %>', path: currentPath, new_name: newName });
+  }
+}
+</script>

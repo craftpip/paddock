@@ -1,0 +1,9 @@
+<tr id="ak-<%= name %>" class="border-b border-slate-700">
+  <td class="py-2 px-3"><%= name %></td>
+  <td class="py-2 px-3"><%= ak.provider %></td>
+  <td class="py-2 px-3 font-mono text-xs"><%= mask_key(ak.key) %></td>
+  <td class="py-2 px-3 text-right">
+    <button hx-post="/credentials/api-keys/<%= name %>/delete" hx-target="#ak-<%= name %>" hx-swap="delete"
+            class="text-red-400 hover:text-red-300 text-xs" onclick="return confirm('Delete API key <%= name %>?')">Delete</button>
+  </td>
+</tr>

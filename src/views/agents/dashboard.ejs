@@ -1,0 +1,87 @@
+<div class="flex items-center justify-between mb-8">
+  <div>
+    <h1 class="text-2xl font-bold text-white">Agent Fleet</h1>
+    <p class="text-slate-400 text-sm mt-1"><%= stats.total %> agents &middot; <%= stats.running %> running &middot; <%= stats.stopped %> stopped</p>
+  </div>
+  <div class="flex items-center gap-3">
+    <input type="text" id="global-search" placeholder="Search agents..."
+      class="px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white w-48 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+      oninput="filterAgents(this.value)">
+    <a href="/agents/create" class="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-sm font-medium transition-colors whitespace-nowrap">
+      + New Agent
+    </a>
+  </div>
+</div>
+
+<div id="agent-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+  <% for (const agent of agents) { %>
+    <a href="/agents/<%= agent.name %>" class="card block border border-slate-800 rounded-xl p-5 hover:border-slate-600 transition-all group agent-card" data-name="<%= agent.name %>" data-display="<%= agent.display_name.toLowerCase() %>">
+      <div class="flex items-start justify-between mb-3">
+        <div class="flex items-center gap-3">
+          <div class="w-10 h-10 rounded-lg bg-slate-800 flex items-center justify-center text-lg font-bold text-cyan-400">
+            <%= agent.display_name.charAt(0) %>
+          </div>
+          <div>
+            <h3 class="font-semibold text-white group-hover:text-cyan-400 transition-colors"><%= agent.display_name %></h3>
+            <p class="text-xs text-slate-500"><%= agent.name %></p>
+          </div>
+        </div>
+        <span class="px-2 py-0.5 rounded-full text-xs font-medium
+          <%= agent.status === 'running' ? 'bg-emerald-900/50 text-emerald-400 border border-emerald-800' :
+              agent.status === 'exited' ? 'bg-red-900/50 text-red-400 border border-red-800' :
+              'bg-slate-800 text-slate-400 border border-slate-700' %>">
+          <%= agent.status %>
+        </span>
+      </div>
+      <div class="text-xs text-slate-500 space-y-1">
+        <div class="flex justify-between">
+          <span>Type</span>
+          <span class="text-slate-300"><%= agent.agent_type %></span>
+        </div>
+        <% if (agent.default_model) { %>
+        <div class="flex justify-between">
+          <span>Model</span>
+          <span class="text-slate-300 truncate ml-4 max-w-[180px]" title="<%= agent.default_model %>"><%= agent.default_model %></span>
+        </div>
+        <% } %>
+        <% if (agent.last_activity_at) { %>
+        <div class="flex justify-between">
+          <span>Last activity</span>
+          <span class="text-slate-300"><%= new Date(agent.last_activity_at).toLocaleDateString() %></span>
+        </div>
+        <% } %>
+      </div>
+    </a>
+  <% } %>
+</div>
+
+<% if (agents.length === 0) { %>
+  <div class="text-center py-20 text-slate-500">
+    <svg class="w-12 h-12 mx-auto mb-4 text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+    <p class="text-lg mb-2">No agents yet</p>
+    <p class="text-sm mb-4">Create your first agent to get started.</p>
+    <a href="/agents/create" class="inline-block px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-sm transition-colors">+ New Agent</a>
+  </div>
+<% } %>
+
+<% if (agents.length > 0) { %>
+  <div id="no-results" class="text-center py-20 text-slate-500 hidden">
+    <p class="text-lg mb-2">No matching agents</p>
+    <p class="text-sm">Try a different search term.</p>
+  </div>
+<% } %>
+
+<script>
+function filterAgents(query) {
+  var cards = document.querySelectorAll('.agent-card');
+  var q = query.toLowerCase();
+  var visible = 0;
+  cards.forEach(function(card) {
+    var match = card.dataset.name.toLowerCase().includes(q) || card.dataset.display.includes(q);
+    card.style.display = match ? '' : 'none';
+    if (match) visible++;
+  });
+  var noResults = document.getElementById('no-results');
+  if (noResults) noResults.classList.toggle('hidden', visible > 0);
+}
+</script>

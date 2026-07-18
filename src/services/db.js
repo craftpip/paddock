@@ -1,0 +1,82 @@
+const Database = require('better-sqlite3');
+const path = require('path');
+const fs = require('fs');
+
+const DB_PATH = path.join(__dirname, '..', 'data', 'app.db');
+
+let _db = null;
+
+function getDb() {
+  if (_db) return _db;
+  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+  _db = new Database(DB_PATH);
+  _db.pragma('journal_mode = WAL');
+  _db.pragma('foreign_keys = ON');
+  migrate(_db);
+  return _db;
+}
+
+function migrate(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS agents (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      display_name TEXT,
+      agent_type TEXT NOT NULL DEFAULT 'openclaw',
+      runtime_type TEXT NOT NULL DEFAULT 'docker',
+      runtime_ref TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'unknown',
+      workspace_root TEXT,
+      config_root TEXT,
+      default_model TEXT,
+      default_provider TEXT,
+      tags TEXT DEFAULT '[]',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_activity_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS activity_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent_id TEXT NOT NULL,
+      category TEXT NOT NULL,
+      action TEXT NOT NULL,
+      actor TEXT DEFAULT 'system',
+      status TEXT NOT NULL DEFAULT 'ok',
+      timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+      details TEXT,
+      resource_ref TEXT,
+      FOREIGN KEY (agent_id) REFERENCES agents(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'direct',
+      status TEXT NOT NULL DEFAULT 'active',
+      summary TEXT,
+      model TEXT,
+      provider TEXT,
+      tokens_in INTEGER DEFAULT 0,
+      tokens_out INTEGER DEFAULT 0,
+      cost_estimate REAL DEFAULT 0,
+      source TEXT,
+      started_at TEXT NOT NULL DEFAULT (datetime('now')),
+      ended_at TEXT,
+      FOREIGN KEY (agent_id) REFERENCES agents(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_activity_agent ON activity_events(agent_id);
+    CREATE INDEX IF NOT EXISTS idx_activity_ts ON activity_events(timestamp);
+    CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id);
+  `);
+}
+
+function close() {
+  if (_db) {
+    _db.close();
+    _db = null;
+  }
+}
+
+module.exports = { getDb, close };

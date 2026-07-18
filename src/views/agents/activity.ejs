@@ -1,0 +1,23 @@
+<% if (activity.length > 0) { %>
+<div class="space-y-2">
+  <% for (const event of activity) { %>
+    <div class="border border-slate-800 rounded-lg px-4 py-3 flex items-start justify-between">
+      <div class="flex items-start gap-3">
+        <span class="w-2 h-2 rounded-full mt-1.5 flex-shrink-0 <%= event.status === 'ok' ? 'bg-emerald-400' : 'bg-red-400' %>"></span>
+        <div>
+          <div class="flex items-center gap-2">
+            <span class="text-sm text-white font-medium"><%= event.action %></span>
+            <span class="px-1.5 py-0.5 bg-slate-800 text-slate-400 rounded text-xs"><%= event.category %></span>
+          </div>
+          <% if (event.details) { %>
+            <p class="text-xs text-slate-500 mt-1"><%= event.details %></p>
+          <% } %>
+        </div>
+      </div>
+      <span class="text-xs text-slate-600 flex-shrink-0"><%= new Date(event.timestamp).toLocaleString() %></span>
+    </div>
+  <% } %>
+</div>
+<% } else { %>
+<p class="text-slate-500 text-sm">No activity recorded yet.</p>
+<% } %>

@@ -1,0 +1,136 @@
+<div class="max-w-none">
+<div class="flex items-center justify-between gap-4 mb-4">
+  <div class="flex items-center gap-3 min-w-0">
+  <a href="/" class="text-slate-400 hover:text-white">&larr; Dashboard</a>
+  <h1 class="text-xl font-bold"><%= vm.name %> Terminal</h1>
+  <%- include('partials/status_badge', { vm }) %>
+</div>
+  <div class="text-xs text-slate-500 hidden sm:block">Auto-sizing terminal</div>
+</div>
+
+<% if (vm.status !== 'running') { %>
+<div class="bg-amber-900/30 border border-amber-700 text-amber-200 px-4 py-3 rounded-lg text-sm mb-4">
+  Container is not running. Start it to use the terminal.
+</div>
+<% } else { %>
+
+<div class="bg-slate-950 border border-slate-700 rounded-xl overflow-hidden shadow-2xl shadow-slate-950/40">
+  <div class="flex items-center justify-between px-4 py-2 bg-slate-800 border-b border-slate-700">
+    <span class="text-xs text-slate-400"><%= vm.name %>: bash</span>
+    <div class="flex items-center gap-3 text-xs text-slate-500">
+      <span>Ctrl+D or type <span class="font-mono text-slate-400">exit</span> to close</span>
+    </div>
+  </div>
+  <div id="terminal-container" class="w-full" style="height: 72vh; min-height: 520px;"></div>
+</div>
+
+<link href="/xterm.css" rel="stylesheet">
+<script src="/xterm.js"></script>
+
+<script>
+(function() {
+  const term = new Terminal({
+    cursorBlink: true,
+    fontSize: 13,
+    fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+    scrollback: 5000,
+    convertEol: true,
+    theme: {
+      background: '#020617',
+      foreground: '#e2e8f0',
+      cursor: '#38bdf8',
+      selectionBackground: '#334155',
+      black: '#000000',
+      red: '#ef4444',
+      green: '#22c55e',
+      yellow: '#eab308',
+      blue: '#3b82f6',
+      magenta: '#a855f7',
+      cyan: '#06b6d4',
+      white: '#e2e8f0',
+      brightBlack: '#64748b',
+      brightRed: '#f87171',
+      brightGreen: '#4ade80',
+      brightYellow: '#facc15',
+      brightBlue: '#60a5fa',
+      brightMagenta: '#c084fc',
+      brightCyan: '#22d3ee',
+      brightWhite: '#f8fafc',
+    },
+  });
+
+  const container = document.getElementById('terminal-container');
+  term.open(container);
+  term.focus();
+  container.addEventListener('click', () => term.focus());
+
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+
+  let ws = null;
+  let reconnectTimer = null;
+
+  function getTerminalSize() {
+    const dims = term._core && term._core._renderService && term._core._renderService.dimensions;
+    const cellWidth = dims && dims.css && dims.css.cell && dims.css.cell.width ? dims.css.cell.width : 9;
+    const cellHeight = dims && dims.css && dims.css.cell && dims.css.cell.height ? dims.css.cell.height : 18;
+    const cols = Math.max(40, Math.floor((container.clientWidth - 8) / cellWidth));
+    const rows = Math.max(12, Math.floor((container.clientHeight - 8) / cellHeight));
+    return { cols: cols, rows: rows };
+  }
+
+  function fitTerminal() {
+    const next = getTerminalSize();
+    if (next.cols !== term.cols || next.rows !== term.rows) {
+      term.resize(next.cols, next.rows);
+    }
+    return next;
+  }
+
+  function connect() {
+    const size = fitTerminal();
+    const wsUrl = protocol + '//' + window.location.host + '/ws/terminal/<%= vm.name %>?cols=' + size.cols + '&rows=' + size.rows;
+    if (ws) { ws.close(); }
+    ws = new WebSocket(wsUrl);
+
+    ws.onopen = function() {
+      term.focus();
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    };
+
+    ws.onmessage = function(e) {
+      term.write(e.data);
+    };
+
+    ws.onclose = function() {
+      term.write('\r\n\x1b[31mConnection closed\x1b[0m\r\n');
+      term.focus();
+      reconnectTimer = setTimeout(connect, 3000);
+    };
+
+    ws.onerror = function() {
+      term.write('\r\n\x1b[31mConnection error\x1b[0m\r\n');
+    };
+  }
+
+  term.onData(function(data) {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
+  });
+
+  term.onResize(function(dims) {
+  });
+
+  fitTerminal();
+  window.addEventListener('resize', fitTerminal);
+  if (window.ResizeObserver) {
+    new ResizeObserver(fitTerminal).observe(container);
+  }
+
+  connect();
+
+  window.addEventListener('beforeunload', function() {
+    if (ws) { ws.close(); }
+  });
+})();
+</script>
+<% } %>
+</div>

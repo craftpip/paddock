@@ -1,0 +1,11 @@
+<span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium
+  <%= vm.status === 'running' ? 'bg-emerald-900/50 text-emerald-300 border border-emerald-700' : '' %>
+  <%= (vm.status === 'exited' || vm.status === 'stopped') ? 'bg-red-900/50 text-red-300 border border-red-700' : '' %>
+  <%= (vm.status !== 'running' && vm.status !== 'exited' && vm.status !== 'stopped') ? 'bg-amber-900/50 text-amber-300 border border-amber-700' : '' %>">
+  <span class="w-1.5 h-1.5 rounded-full
+    <%= vm.status === 'running' ? 'bg-emerald-400' : '' %>
+    <%= (vm.status === 'exited' || vm.status === 'stopped') ? 'bg-red-400' : '' %>
+    <%= (vm.status !== 'running' && vm.status !== 'exited' && vm.status !== 'stopped') ? 'bg-amber-400' : '' %>">
+  </span>
+  <%= vm.status %>
+</span>

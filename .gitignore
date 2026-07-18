@@ -8,3 +8,6 @@ bot-prefixes.json
 *.so
 *.node
 *.wasm
+src/data/app.db
+src/data/app.db-wal
+src/data/app.db-shm

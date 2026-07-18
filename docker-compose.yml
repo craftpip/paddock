@@ -1,4 +1,20 @@
 services:
+  vm-webui:
+    build:
+      context: ./src
+    image: vm-friends-vm-webui:latest
+    container_name: vm-webui
+    restart: unless-stopped
+    ports:
+      - "5050:5050"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /home/boniface/www/vm-friends:/workspace:rw
+      - /home/boniface/www/vm-friends/src/data:/app/data:rw
+    environment:
+      TZ: Asia/Kolkata
+      AUTH_PASSWORD: "${WEBUI_PASSWORD:-}"
+
   vm-ozden:
     build:
       context: ./vm_openclaw

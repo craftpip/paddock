@@ -1,0 +1,196 @@
+<% if (typeof flash !== 'undefined' && flash) { %>
+  <script>document.addEventListener('DOMContentLoaded', function() { VMF.toast('<%= flash.message.replace(/'/g, "\\'") %>', '<%= flash.type %>'); });</script>
+<% } %>
+
+<div class="mb-6">
+  <a href="/agents" class="text-sm text-slate-500 hover:text-slate-300 transition-colors">&larr; Back to fleet</a>
+</div>
+
+<div class="flex flex-col sm:flex-row items-start justify-between gap-4 mb-8">
+  <div class="flex items-center gap-4">
+    <div class="w-14 h-14 rounded-xl bg-slate-800 flex items-center justify-center text-2xl font-bold text-cyan-400 border border-slate-700">
+      <%= agent.display_name.charAt(0) %>
+    </div>
+    <div>
+      <h1 class="text-2xl font-bold text-white"><%= agent.display_name %></h1>
+      <div class="flex items-center gap-3 mt-1">
+        <span class="text-sm text-slate-500"><%= agent.name %></span>
+        <span class="px-2 py-0.5 rounded-full text-xs font-medium
+          <%= agent.status === 'running' ? 'bg-emerald-900/50 text-emerald-400 border border-emerald-800' :
+              agent.status === 'exited' ? 'bg-red-900/50 text-red-400 border border-red-800' :
+              'bg-slate-800 text-slate-400 border border-slate-700' %>">
+          <%= agent.status %>
+        </span>
+      </div>
+    </div>
+  </div>
+  <div class="flex items-center gap-2 flex-shrink-0">
+    <% if (agent.status === 'running') { %>
+      <form method="POST" action="/agents/<%= agent.name %>/stop" class="inline">
+        <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+        <button type="submit" class="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-sm transition-colors">Stop</button>
+      </form>
+      <form method="POST" action="/agents/<%= agent.name %>/restart" class="inline">
+        <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+        <button type="submit" class="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm transition-colors">Restart</button>
+      </form>
+    <% } else { %>
+      <form method="POST" action="/agents/<%= agent.name %>/start" class="inline">
+        <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+        <button type="submit" class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm transition-colors">Start</button>
+      </form>
+    <% } %>
+  </div>
+</div>
+
+<!-- Tab Navigation -->
+<div class="border-b border-slate-800 mb-6 overflow-x-auto">
+  <div class="flex gap-0.5 -mb-px min-w-max" id="tabs">
+    <button class="tab-btn px-4 py-2.5 text-sm font-medium border-b-2 border-cyan-400 text-cyan-400 whitespace-nowrap" data-tab="overview">Overview</button>
+    <button class="tab-btn px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200 whitespace-nowrap" data-tab="workspace">Workspace</button>
+    <button class="tab-btn px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200 whitespace-nowrap" data-tab="terminal">Terminal</button>
+    <button class="tab-btn px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200 whitespace-nowrap" data-tab="logs">Logs</button>
+    <button class="tab-btn px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200 whitespace-nowrap" data-tab="sessions">Sessions</button>
+    <button class="tab-btn px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200 whitespace-nowrap" data-tab="config">Config</button>
+    <button class="tab-btn px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200 whitespace-nowrap" data-tab="backups">Backups</button>
+    <button class="tab-btn px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200 whitespace-nowrap" data-tab="activity">Activity</button>
+  </div>
+</div>
+
+<!-- Tab Content -->
+<div id="tab-content">
+  <div id="tab-overview" class="tab-panel">
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+      <div class="border border-slate-800 rounded-xl p-4">
+        <p class="text-xs text-slate-500 mb-1">Type</p>
+        <p class="text-lg font-semibold text-white"><%= agent.agent_type %></p>
+      </div>
+      <div class="border border-slate-800 rounded-xl p-4">
+        <p class="text-xs text-slate-500 mb-1">Runtime</p>
+        <p class="text-lg font-semibold text-white"><%= agent.runtime_type %></p>
+      </div>
+      <div class="border border-slate-800 rounded-xl p-4">
+        <p class="text-xs text-slate-500 mb-1">Model</p>
+        <p class="text-lg font-semibold text-white truncate text-sm" title="<%= agent.default_model || 'Not configured' %>"><%= agent.default_model || 'Not configured' %></p>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
+      <a href="/agents/<%= agent.name %>/workspace" class="border border-slate-800 rounded-xl p-4 hover:border-slate-600 transition-colors group">
+        <div class="flex items-center gap-3">
+          <div class="w-10 h-10 rounded-lg bg-cyan-900/30 flex items-center justify-center text-cyan-400">
+            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>
+          </div>
+          <div>
+            <p class="font-medium text-white group-hover:text-cyan-400 transition-colors">Workspace</p>
+            <p class="text-xs text-slate-500">Browse and manage files</p>
+          </div>
+        </div>
+      </a>
+      <a href="/agents/<%= agent.name %>/terminal" class="border border-slate-800 rounded-xl p-4 hover:border-slate-600 transition-colors group">
+        <div class="flex items-center gap-3">
+          <div class="w-10 h-10 rounded-lg bg-emerald-900/30 flex items-center justify-center text-emerald-400">
+            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+          </div>
+          <div>
+            <p class="font-medium text-white group-hover:text-cyan-400 transition-colors">Terminal</p>
+            <p class="text-xs text-slate-500">Open a shell session</p>
+          </div>
+        </div>
+      </a>
+    </div>
+
+    <% if (activity.length > 0) { %>
+    <div class="border border-slate-800 rounded-xl p-4">
+      <h3 class="text-sm font-medium text-slate-300 mb-3">Recent Activity</h3>
+      <div class="space-y-2">
+        <% for (const event of activity.slice(0, 5)) { %>
+          <div class="flex items-center justify-between text-xs gap-4">
+            <div class="flex items-center gap-2 min-w-0">
+              <span class="w-1.5 h-1.5 rounded-full flex-shrink-0 <%= event.status === 'ok' ? 'bg-emerald-400' : 'bg-red-400' %>"></span>
+              <span class="text-slate-300"><%= event.action %></span>
+              <% if (event.details) { %>
+                <span class="text-slate-500 truncate"><%= event.details %></span>
+              <% } %>
+            </div>
+            <span class="text-slate-600 flex-shrink-0"><%= new Date(event.timestamp).toLocaleDateString() %></span>
+          </div>
+        <% } %>
+      </div>
+    </div>
+    <% } %>
+  </div>
+
+  <div id="tab-workspace" class="tab-panel hidden">
+    <div hx-get="/agents/<%= agent.name %>/workspace" hx-trigger="load" hx-swap="innerHTML">
+      <div class="space-y-3">
+        <div class="skeleton h-10 w-full"></div>
+        <div class="skeleton h-8 w-3/4"></div>
+        <div class="skeleton h-8 w-1/2"></div>
+        <div class="skeleton h-8 w-2/3"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="tab-terminal" class="tab-panel hidden">
+    <div hx-get="/agents/<%= agent.name %>/terminal" hx-trigger="load" hx-swap="innerHTML">
+      <div class="skeleton h-[500px] w-full"></div>
+    </div>
+  </div>
+
+  <div id="tab-logs" class="tab-panel hidden">
+    <div hx-get="/agents/<%= agent.name %>/logs" hx-trigger="load" hx-swap="innerHTML">
+      <div class="skeleton h-64 w-full"></div>
+    </div>
+  </div>
+
+  <div id="tab-sessions" class="tab-panel hidden">
+    <div hx-get="/agents/<%= agent.name %>/sessions" hx-trigger="load" hx-swap="innerHTML">
+      <div class="space-y-3">
+        <div class="skeleton h-12 w-full"></div>
+        <div class="skeleton h-12 w-full"></div>
+        <div class="skeleton h-12 w-full"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="tab-config" class="tab-panel hidden">
+    <div hx-get="/agents/<%= agent.name %>/config" hx-trigger="load" hx-swap="innerHTML">
+      <div class="skeleton h-64 w-full"></div>
+    </div>
+  </div>
+
+  <div id="tab-backups" class="tab-panel hidden">
+    <div hx-get="/agents/<%= agent.name %>/backups" hx-trigger="load" hx-swap="innerHTML">
+      <div class="space-y-3">
+        <div class="skeleton h-12 w-full"></div>
+        <div class="skeleton h-12 w-full"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="tab-activity" class="tab-panel hidden">
+    <div hx-get="/agents/<%= agent.name %>/activity" hx-trigger="load" hx-swap="innerHTML">
+      <div class="space-y-3">
+        <div class="skeleton h-12 w-full"></div>
+        <div class="skeleton h-12 w-full"></div>
+        <div class="skeleton h-12 w-full"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+document.querySelectorAll('.tab-btn').forEach(function(btn) {
+  btn.addEventListener('click', function() {
+    document.querySelectorAll('.tab-btn').forEach(function(b) {
+      b.classList.remove('border-cyan-400', 'text-cyan-400');
+      b.classList.add('border-transparent', 'text-slate-400');
+    });
+    this.classList.remove('border-transparent', 'text-slate-400');
+    this.classList.add('border-cyan-400', 'text-cyan-400');
+    document.querySelectorAll('.tab-panel').forEach(function(p) { p.classList.add('hidden'); });
+    document.getElementById('tab-' + this.dataset.tab).classList.remove('hidden');
+  });
+});
+</script>

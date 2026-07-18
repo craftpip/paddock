@@ -15,6 +15,7 @@ Append new entries under the relevant section or add a new section. Keep it conc
 
 - **`docker-compose.yml`** defines services (vm-ozden, vm-pranav).
 - **`docker-compose.override.yml`** adds vm-jake, vm-ozden2, vm-reze, vm-test.
+- **`src/`** — Management dashboard container. Runs gunicorn + Flask on port 5050. **This is the control plane VM** — it manages all other containers via `/var/run/docker.sock`. Uses `strip_container_check()` to bypass container-detection guards in scripts.
 - **`vm_openclaw/`** Docker image builds from `ghcr.io/openclaw/openclaw:latest`.
 - **`instances/<vm>/openclaw/`** is bind-mounted to `/root/.openclaw` inside each container.
 - Scripts: `add-vm.sh`, `remove-vm.sh`, `reset-vm.sh`, `manage_backups.sh`.
@@ -300,3 +301,186 @@ To clone an existing bot into a new one:
 - Changing the embedding provider/model invalidates the existing vector index. Rebuild with `openclaw memory index --force`.
 - The `active-memory` plugin should also be enabled for interactive semantic recall during chats.
 - Official docs: https://docs.openclaw.ai/plugins/llama-cpp
+
+
+## Node.js/Express Rewrite (src/ 2026-07-18)
+
+### Why
+- Python Flask + gunicorn had persistent WebSocket issues (terminal blocked workers).
+- Node.js/Express handles WebSocket natively without workarounds.
+
+### Files Created
+- `src/app.js` — Express server with all routes, helpers, auth middleware, WebSocket terminal
+- `src/creds.js` — Credential manager ported from `creds.py` (already existed)
+- `src/views/` — 18 EJS templates (layout + 11 pages + 6 partials), replacing Jinja2 `templates/`
+- `src/package.json` — dependencies (express, ejs, express-ejs-layouts, ws, cookie-parser)
+- `src/Dockerfile` — `node:20-slim` with docker-ce-cli installed
+
+### Key Implementation Details
+- **WebSocket terminal**: Uses `ws` library + `docker exec -i` (no -t) to avoid PTY issues. Simple stdin/stdout piping.
+- **Helper functions**: `runCmd()` wraps `child_process.execFile()` in a Promise. `runWorkspaceScript()` uses `fs.mkdtemp()` + `fs.chmodSync()` for temp script files.
+- **Docker cache**: Same 3-second TTL on `docker ps -a` results (module-level variable).
+- **CSV parsing**: Manual split (no csv-parse dependency needed) for `usage_data.csv`.
+- **Auth**: Basic auth middleware checking `AUTH_PASSWORD` env var — same as Flask version.
+- **`creds.js` matches `creds.py` interface exactly**: `load()`, `save()`, `apiKeys()`, `botTokens()`, `userIDs()`, `profiles()`, `addApiKey()`, `addBotToken()`, `addUserId()`, `addProfile()`, `delete*()`, `getProfile()`, `maskKey()`, `importFromBotPrefixes()`.
+
+### Template Conversion Rules (Jinja2 → EJS)
+| Jinja2 | EJS |
+|--------|-----|
+| `{{ var }}` | `<%= var %>` |
+| `{% if cond %}` | `<% if (cond) { %>` |
+| `{% endif %}` | `<% } %>` |
+| `{% for x in list %}` | `<% for (const x of list) { %>` |
+| `{% endfor %}` | `<% } %>` |
+| `{% include "x.html" %}` | `<%- include('partials/x') %>` |
+| `{% block content %}{% endblock %}` | `<%- body %>` (in layout) |
+| `{% extends "base.html" %}` | N/A (layout handled by `express-ejs-layouts`) |
+| `{{ var.get('key', 'default') }}` | `<%= var.key || 'default' %>` |
+| `{{ var.property }}` | `<%= var.property %>` |
+| `{% for k, v in dict.items() %}` | `<% for (const [k, v] of Object.entries(dict)) { %>` |
+
+### Deploy
+```bash
+docker compose build vm-webui && docker compose up -d --no-deps --force-recreate vm-webui
+```
+
+### Cleanup Remaining
+- Delete `src/requirements.txt`, `src/creds.py`, `src/app.py`, `src/templates/` after Node.js is verified working.
+
+### Terminal: xterm.js sends \r but docker exec -i without PTY needs \n
+
+**Root cause:** xterm.js fires `\r` (carriage return) on Enter key. `docker exec -i` (no `-t`) does not allocate a PTY, so there's no terminal line discipline to convert `\r` to `\n`. The shell hangs waiting for a recognized command terminator.
+
+**Fix:** In the WebSocket `on('message')` handler in `src/app.js`, convert `\r` to `\n` before writing to docker stdin:
+```js
+docker.stdin.write(data.toString().replace(/\r/g, '\n'));
+```
+
+**Verify:** Send a command ending with `\r` via WebSocket — the shell should execute it immediately.
+
+## Web UI Rework (2026-07-18)
+
+### What Changed
+- **Profiles removed**: Entire profile CRUD system deleted from `creds.js`, `app.js`, and `profiles.ejs` (3 files deleted).
+- **Logs pages consolidated**: Standalone `/logs` index and `/logs/:name` pages removed. Logs accessible from VM detail page.
+- **Onboarding simplified**: Profile select removed; two modes remain: saved credentials dropdown or direct custom input.
+- **Security hardening**:
+  - `VM_NAME_RE` regex (`^vm-[a-zA-Z0-9][a-zA-Z0-9_-]*$`) validates VM names on WebSocket terminal, backup create/restore.
+  - `safeBackupPath()` uses `path.basename()` + `path.resolve()` + prefix check to prevent path traversal in backup delete/download.
+  - `/vm/:name/meta` strips `ROOT_PASSWORD` from response.
+  - `/vm/:name/config` redacts `api_keys`, `telegram.bot_token`, and plugin keys.
+- **UI polish**: Removed emojis from empty states and credential section headers. Cleaner nav with separator. Consistent form patterns.
+- **Backup restore**: Removed misleading `hx-vals='{"file":"..."}'` (backend ignored it; restore always uses latest backup).
+- **Pages kept**: dashboard, create VM, VM detail, terminal, credentials, backups, usage, onboard.
+- **Pages removed**: profiles, logs index, VM logs standalone.
+
+### Nav Items (in order)
+Dashboard, +VM, Backups, Usage, Creds
+
+## Agent Management System (v2 — 2026-07-18)
+
+### Architecture
+
+The system has been rewritten from a VM-centric dashboard to an agent-first management platform.
+
+**New directory structure:**
+```
+src/
+├── app.js                    # Express server, legacy routes, WS terminal
+├── creds.js                  # Credential manager
+├── middleware/
+│   ├── auth.js               # Session-based auth, CSRF, login/logout
+│   └── rateLimit.js          # IP-based rate limiter
+├── routes/
+│   └── agents.js             # All /agents/* routes (CRUD, workspace, runtime)
+├── services/
+│   ├── agent-registry.js     # Agent discovery from filesystem, SQLite sync
+│   ├── db.js                 # SQLite metadata store (agents, activity, sessions)
+│   └── workspace.js          # Safe file operations with path traversal protection
+├── views/
+│   ├── login.ejs             # Session-based login page
+│   ├── agents/
+│   │   ├── dashboard.ejs     # Fleet view with search/filter
+│   │   ├── create.ejs        # Create agent form
+│   │   ├── detail.ejs        # Tabbed detail (8 tabs)
+│   │   ├── workspace.ejs     # File browser with upload/download/rename/delete
+│   │   ├── terminal.ejs      # xterm.js terminal
+│   │   ├── logs.ejs          # Container logs
+│   │   ├── config.ejs        # Redacted config viewer
+│   │   ├── backups.ejs       # Backup management
+│   │   ├── sessions.ejs      # Session list
+│   │   └── activity.ejs      # Activity timeline
+│   └── partials/             # Shared components
+└── test/
+    └── services.test.js      # Unit tests
+```
+
+### Key Design Decisions
+
+- **Agent-first, not VM-first**: All new routes use `/agents/:id` instead of `/vm/:name`
+- **Legacy routes preserved**: `/vm/*`, `/backups`, `/credentials`, `/usage` still work
+- **SQLite metadata store**: `src/data/app.db` stores agents, activity events, sessions
+- **Filesystem-derived state**: Agents discovered from `instances/*/meta.env` + Docker state
+- **Session-based auth**: Replaces Basic Auth. Uses `express-session` with CSRF tokens
+- **CSRF on all POST routes**: Every form includes `_csrf` hidden field
+- **Path traversal protection**: `workspace.resolveSafePath()` canonicalizes all paths against workspace root
+- **Secret redaction**: Config API responses strip `api_keys`, `bot_token`, plugin keys
+- **Flash messages**: Session-based flash for action feedback (success/error toasts)
+- **Confirmation modals**: Destructive actions (delete, restore, stop) use `VMF.confirm()`
+- **Skeleton loading**: Tabs show shimmer placeholders while HTMX loads content
+- **Responsive design**: Tables hide columns on mobile, forms stack vertically
+
+### Routes
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/agents` | Fleet dashboard with search |
+| GET | `/agents/create` | Create agent form |
+| POST | `/agents/create` | Create agent (CSRF protected) |
+| GET | `/agents/:id` | Agent detail (8 tabs) |
+| POST | `/agents/:id/start` | Start agent |
+| POST | `/agents/:id/stop` | Stop agent |
+| POST | `/agents/:id/restart` | Restart agent |
+| GET | `/agents/:id/workspace` | File browser |
+| GET | `/agents/:id/workspace/tree` | File listing (JSON) |
+| GET | `/agents/:id/workspace/file` | Read file |
+| POST | `/agents/:id/workspace/upload` | Upload file |
+| POST | `/agents/:id/workspace/folder` | Create folder |
+| POST | `/agents/:id/workspace/rename` | Rename entry |
+| POST | `/agents/:id/workspace/delete` | Delete entry |
+| POST | `/agents/:id/workspace/move` | Move entry |
+| GET | `/agents/:id/workspace/download` | Download file |
+| GET | `/agents/:id/terminal` | Terminal page |
+| GET | `/agents/:id/logs` | Container logs |
+| GET | `/agents/:id/config` | Config (redacted) |
+| GET | `/agents/:id/sessions` | Session list |
+| GET | `/agents/:id/activity` | Activity timeline |
+| GET | `/agents/:id/backups` | Backup list |
+| POST | `/agents/:id/backups/create` | Create backup |
+| POST | `/agents/:id/backups/restore` | Restore backup |
+| GET | `/login` | Login page |
+| POST | `/login` | Authenticate |
+| GET | `/logout` | Destroy session |
+
+### Deploy
+
+```bash
+docker compose build vm-webui && docker compose up -d --no-deps --force-recreate vm-webui
+```
+
+### Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `AUTH_PASSWORD` | Yes | Password for session-based login |
+| `SESSION_SECRET` | No | Auto-generated if not set. Set for persistence across restarts |
+
+### Testing
+
+```bash
+# Run from host (requires Node.js 20+):
+cd src && node --test test/
+
+# Run inside container:
+docker exec vm-webui node --test test/
+```

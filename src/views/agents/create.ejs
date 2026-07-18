@@ -1,0 +1,53 @@
+<div class="max-w-2xl mx-auto">
+  <div class="mb-8">
+    <a href="/agents" class="text-sm text-slate-500 hover:text-slate-300 transition-colors">&larr; Back to fleet</a>
+    <h1 class="text-2xl font-bold text-white mt-3">Create Agent</h1>
+    <p class="text-slate-400 text-sm mt-1">Set up a new AI agent runtime.</p>
+  </div>
+
+  <form method="POST" action="/agents/create" class="space-y-6">
+    <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+
+    <div>
+      <label class="block text-sm font-medium text-slate-300 mb-2">Agent Name</label>
+      <div class="flex items-center">
+        <span class="px-3 py-2 bg-slate-800 border border-r-0 border-slate-700 rounded-l-lg text-sm text-slate-500">vm-</span>
+        <input type="text" name="agent_name" required pattern="[a-zA-Z0-9][a-zA-Z0-9_-]*"
+          class="flex-1 px-3 py-2 bg-slate-950 border border-slate-700 rounded-r-lg text-white text-sm focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+          placeholder="my-agent">
+      </div>
+      <p class="text-xs text-slate-500 mt-1">Letters, numbers, dashes, and underscores.</p>
+    </div>
+
+    <div>
+      <label class="block text-sm font-medium text-slate-300 mb-2">Agent Type</label>
+      <select name="agent_type" class="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white text-sm focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500">
+        <option value="openclaw">OpenClaw</option>
+        <option value="picoclaw">PicoClaw</option>
+        <option value="hermes">Hermes</option>
+      </select>
+    </div>
+
+    <div>
+      <label class="block text-sm font-medium text-slate-300 mb-2">Clone From (optional)</label>
+      <select name="clone_source" class="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white text-sm focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500">
+        <option value="">Fresh install</option>
+        <% for (const name of existing) { %>
+          <option value="<%= name %>"><%= name %></option>
+        <% } %>
+      </select>
+      <p class="text-xs text-slate-500 mt-1">Clone an existing agent's workspace and config.</p>
+    </div>
+
+    <div>
+      <label class="block text-sm font-medium text-slate-300 mb-2">Root Password (optional)</label>
+      <input type="text" name="password"
+        class="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white text-sm focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+        placeholder="Auto-generated if empty">
+    </div>
+
+    <button type="submit" class="w-full px-4 py-2.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-sm font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:ring-offset-2 focus:ring-offset-slate-900">
+      Create Agent
+    </button>
+  </form>
+</div>

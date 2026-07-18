@@ -1,0 +1,70 @@
+<div class="flex items-center justify-between mb-6">
+  <div>
+    <h1 class="text-2xl font-bold">Dashboard</h1>
+    <p class="text-slate-400 text-sm mt-1"><%= total %> VM<%= total !== 1 ? 's' : '' %> · <%= running %> running</p>
+  </div>
+  <a href="/vm/create" class="bg-cyan-600 hover:bg-cyan-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors">
+    + New VM
+  </a>
+</div>
+
+<% if (!vms || vms.length === 0) { %>
+<div class="text-center py-20 text-slate-500">
+  <p class="text-lg font-semibold">No VMs yet</p>
+  <p class="text-sm mt-2">Create your first VM to get started.</p>
+  <a href="/vm/create" class="inline-block mt-4 bg-cyan-600 hover:bg-cyan-500 text-white px-4 py-2 rounded-lg text-sm">+ Create VM</a>
+</div>
+<% } else { %>
+
+<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+  <% for (const vm of vms) { %>
+  <div class="bg-slate-800/60 border border-slate-700 rounded-xl p-4 hover:border-slate-600 transition-colors" id="vm-card-<%= vm.name %>">
+    <div class="flex items-start justify-between mb-3">
+      <div>
+        <a href="/vm/<%= vm.name %>" class="font-semibold text-base hover:text-cyan-400 transition-colors"><%= vm.name %></a>
+        <div class="flex items-center gap-2 mt-1">
+          <%- include('partials/status_badge', { vm }) %>
+          <span class="text-xs px-2 py-0.5 rounded bg-slate-700 text-slate-300"><%= vm.agent %></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="text-xs text-slate-400 space-y-1 mb-3">
+      <% if (vm.port) { %><div>SSH: port <%= vm.port %></div><% } %>
+      <div>Password: <span class="font-mono text-slate-300"><%= vm.password %></span></div>
+    </div>
+
+    <div class="flex flex-wrap gap-1.5 mt-2">
+      <% if (vm.status !== 'running') { %>
+      <button hx-post="/vm/<%= vm.name %>/start" hx-target="#vm-card-<%= vm.name %>" hx-swap="outerHTML"
+              class="bg-emerald-700 hover:bg-emerald-600 text-white px-3 py-1.5 rounded text-xs font-medium transition-colors">
+        ▶ Start
+      </button>
+      <% } %>
+      <% if (vm.status === 'running') { %>
+      <button hx-post="/vm/<%= vm.name %>/stop" hx-target="#vm-card-<%= vm.name %>" hx-swap="outerHTML"
+              class="bg-amber-700 hover:bg-amber-600 text-white px-3 py-1.5 rounded text-xs font-medium transition-colors">
+        ⏹ Stop
+      </button>
+      <button hx-post="/vm/<%= vm.name %>/restart" hx-target="#vm-card-<%= vm.name %>" hx-swap="outerHTML"
+              class="bg-slate-600 hover:bg-slate-500 text-white px-3 py-1.5 rounded text-xs font-medium transition-colors">
+        ↻ Restart
+      </button>
+      <% } %>
+      <a href="/vm/<%= vm.name %>"
+         class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-1.5 rounded text-xs font-medium transition-colors">
+        Details
+      </a>
+      <a href="/terminal/<%= vm.name %>"
+         class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-1.5 rounded text-xs font-medium transition-colors">
+        Terminal
+      </a>
+      <a href="/onboard/<%= vm.name %>"
+         class="bg-purple-700 hover:bg-purple-600 text-white px-3 py-1.5 rounded text-xs font-medium transition-colors">
+        Onboard
+      </a>
+    </div>
+  </div>
+  <% } %>
+</div>
+<% } %>
