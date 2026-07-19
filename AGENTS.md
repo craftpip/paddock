@@ -145,6 +145,13 @@ The `npm/` folder is OpenClaw's internal plugin cache (not project dependencies)
 - To verify: `docker exec <vm> openclaw models auth list --json`
 
 
+## Critical: `paste-api-key` Destroys Config
+
+- Running `openclaw models auth paste-api-key` inside a container **overwrites the entire `openclaw.json`** with only auth info, destroying agents config, gateway config, plugins, etc.
+- **Fix**: Always save the config before invoking `paste-api-key` and merge it back after.
+- Also: `paste-api-key` reads the API key from stdin. Using `child_process.execFile` (which doesn't pipe stdin) causes the command to hang until timeout. Use `spawn` and write to `child.stdin` instead.
+- The `meta.env` files in `instances/*/` are **critical** — without them, the agent discovery system returns 0 agents and all detail pages show "Agent not found".
+
 ## Known Issues & Fixes
 
 ### File Ownership
@@ -530,3 +537,33 @@ Terminal appeared small/constrained because xterm.js FitAddon calls `fit()` befo
 ### Terminal Resize to Docker
 - When the terminal resizes, send `docker exec resize` via WebSocket.
 - Done in the ResizeObserver callback after fit().
+
+## Critical: Always Test Before Delivering
+
+**Rule:** Never hand code to the user for testing without testing it yourself first.
+
+- You have browser MCP tools (Target, navigate, screenshot, DOM query, click, evaluate JS) — use them.
+- After every code change: restart the service, open the browser, navigate to the affected page, and verify it works.
+- If something is broken, fix it before telling the user. Do not ask the user to test unless you cannot access the thing yourself.
+- "It works on my end" is not acceptable — prove it works by testing it live.
+- The user has given you everything you need. No excuses.
+
+### Test VMs Available
+- `vm-test` — general testing
+- `vm-test2` — general testing
+- `vm-ramsey` — general testing
+- Navigate to `http://10.69.1.164:5050/agents/<vm-name>#<tab>` to test specific pages.
+- Always test tab switching, HTMX loading, and WebSocket connections — these are the most fragile parts.
+
+### Rule: Never Deliver Broken Things
+- The user expects every change to work on the first try.
+- No "fix it later" or "try it and let me know" — fix it NOW before delivering.
+- If you're unsure whether something works, TEST it before responding.
+
+## Critical: Terminal WebSocket Bug (2026-07-19)
+
+### Root Cause
+- `dockerPsList()` in `src/app.js` stores the **full JSON object** per container (`containers[c.Names] = c`), not just the state string.
+- The WebSocket handler compared `containers[vmName] !== 'running'` — comparing an **object** to a string, which always returns `true`.
+- This caused every WebSocket connection to be **immediately rejected** with `ws.close()`.
+- The fix: `(containers[vmName]?.State || '').toLowerCase() !== 'running'`.

@@ -1,0 +1,83 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": "/root/.openclaw/workspace",
+      "model": {
+        "primary": "ollama-cloud/gemma4:31b"
+      },
+      "memorySearch": {
+        "provider": "local",
+        "local": {
+          "modelPath": "hf:ggml-org/embeddinggemma-300m-qat-q8_0-GGUF/embeddinggemma-300m-qat-Q8_0.gguf"
+        }
+      }
+    }
+  },
+  "gateway": {
+    "mode": "local",
+    "auth": {
+      "mode": "token",
+      "token": "318a0f227a97afdd83a79a571f1fd4323adce17ffc653094"
+    },
+    "port": 18789,
+    "bind": "loopback",
+    "tailscale": {
+      "mode": "off",
+      "resetOnExit": false
+    }
+  },
+  "session": {
+    "dmScope": "per-channel-peer"
+  },
+  "tools": {
+    "profile": "coding"
+  },
+  "wizard": {
+    "lastRunAt": "2026-07-04T22:09:51.114Z",
+    "lastRunVersion": "2026.6.11",
+    "lastRunCommand": "onboard",
+    "lastRunMode": "local"
+  },
+  "meta": {
+    "lastTouchedVersion": "2026.6.11",
+    "lastTouchedAt": "2026-07-04T22:36:39.281Z"
+  },
+  "plugins": {
+    "entries": {
+      "telegram": {
+        "enabled": true
+      },
+      "active-memory": {
+        "enabled": true
+      },
+      "llama-cpp": {
+        "enabled": true
+      }
+    }
+  },
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "botToken": "8885638316:AAGUBB_KBjQkBunnXi9xEvA5ZBEBb29UKig",
+      "allowFrom": [
+        "532156945"
+      ],
+      "dmPolicy": "allowlist"
+    }
+  },
+  "auth": {
+    "profiles": {
+      "ollama-cloud:manual": {
+        "provider": "ollama-cloud",
+        "mode": "api_key"
+      }
+    }
+  },
+  "models": {
+    "providers": {
+      "openrouter": {
+        "models": []
+      }
+    }
+  }
+}

@@ -3,8 +3,38 @@ const path = require('path');
 const { execFile } = require('child_process');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
+const INSTANCES_DIR = path.join(WORKSPACE, 'instances');
 const COMPOSE_PREFIX = ['compose', '-p', 'vm-friends', '--project-directory', WORKSPACE];
 const BACKUPS_DIR = path.join(WORKSPACE, 'backups');
+const META_FILE = path.join(BACKUPS_DIR, 'backup-meta.json');
+
+function loadMeta() {
+  try {
+    if (fs.existsSync(META_FILE)) return JSON.parse(fs.readFileSync(META_FILE, 'utf8'));
+  } catch {}
+  return {};
+}
+
+function saveMeta(meta) {
+  fs.writeFileSync(META_FILE, JSON.stringify(meta, null, 2));
+}
+
+function detectAgentType(agentName) {
+  const metaFile = path.join(INSTANCES_DIR, agentName, 'meta.env');
+  if (fs.existsSync(metaFile)) {
+    const content = fs.readFileSync(metaFile, 'utf8');
+    const match = content.match(/^AGENT=(.+)$/m);
+    if (match) return match[1].trim();
+  }
+  return 'openclaw';
+}
+
+function getBackupType(backupFile) {
+  const meta = loadMeta();
+  if (meta[backupFile]) return meta[backupFile].type;
+  const vmName = backupFile.split('_')[0];
+  return detectAgentType(vmName);
+}
 
 function runCmd(cmd, args, options = {}) {
   const { timeout = 120000, input } = options;
@@ -40,22 +70,38 @@ async function backupAgent(agentName) {
 
   try { await runCmd('docker', ['exec', agentName, 'rm', tmpFile], { timeout: 10000 }); } catch {}
 
+  const type = detectAgentType(agentName);
+  const meta = loadMeta();
+  meta[`${agentName}_${ts}.tar.gz`] = { type, agent: agentName, created: new Date().toISOString() };
+  saveMeta(meta);
+
   return destFile;
 }
 
-async function restoreAgent(agentName) {
-  const files = fs.readdirSync(BACKUPS_DIR)
-    .filter(f => f.startsWith(agentName + '_') && f.endsWith('.tar.gz'))
-    .sort()
-    .reverse();
+async function restoreAgent(agentName, backupFile) {
+  let restorePath;
+  if (backupFile) {
+    restorePath = path.join(BACKUPS_DIR, backupFile);
+    if (!fs.existsSync(restorePath)) throw new Error(`Backup file not found: ${backupFile}`);
+  } else {
+    const files = fs.readdirSync(BACKUPS_DIR)
+      .filter(f => f.startsWith(agentName + '_') && f.endsWith('.tar.gz'))
+      .sort()
+      .reverse();
+    if (files.length === 0) throw new Error(`No backup found for '${agentName}'`);
+    restorePath = path.join(BACKUPS_DIR, files[0]);
+  }
 
-  if (files.length === 0) throw new Error(`No backup found for '${agentName}'`);
+  const backupType = getBackupType(path.basename(restorePath));
+  const containerType = detectAgentType(agentName);
+  if (backupType !== containerType) {
+    throw new Error(`Type mismatch: backup is ${backupType} but container is ${containerType}`);
+  }
 
-  const latest = path.join(BACKUPS_DIR, files[0]);
-  await runCmd('docker', ['cp', latest, `${agentName}:/tmp/restore.tar.gz`], { timeout: 60000 });
+  await runCmd('docker', ['cp', restorePath, `${agentName}:/tmp/restore.tar.gz`], { timeout: 60000 });
   await runCmd('docker', ['exec', agentName, 'tar', '-xzf', '/tmp/restore.tar.gz', '-C', '/root/.openclaw'], { timeout: 60000 });
   try { await runCmd('docker', ['exec', agentName, 'rm', '/tmp/restore.tar.gz'], { timeout: 10000 }); } catch {}
   await runCmd('docker', [...COMPOSE_PREFIX, 'restart', agentName], { timeout: 60000 });
 }
 
-module.exports = { backupAgent, restoreAgent };
+module.exports = { backupAgent, restoreAgent, getBackupType, loadMeta };

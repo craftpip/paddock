@@ -12,7 +12,7 @@ const agentRoutes = require('./routes/agents');
 const vm = require('./services/vm-manager');
 const backup = require('./services/backup-manager');
 const { getDb } = require('./services/db');
-const { setupSession, requireAuth, handleLogin, handleLogout, csrfToken, AUTH_PASSWORD } = require('./middleware/auth');
+const { setupSession, requireAuth, handleLogin, handleLogout, csrfToken, csrfCheck, AUTH_PASSWORD } = require('./middleware/auth');
 const { rateLimit } = require('./middleware/rateLimit');
 
 const WORKSPACE = '/workspace';
@@ -179,32 +179,30 @@ async function getAllVms() {
 
 function getBackups(vmName) {
   if (!fs.existsSync(BACKUPS_DIR)) return [];
-  const pattern = vmName ? `${vmName}_*.tar.gz` : '*.tar.gz';
-  let files;
-  try {
-    const all = fs.readdirSync(BACKUPS_DIR).filter(f => f.endsWith('.tar.gz'));
-    if (vmName) {
-      files = all.filter(f => f.startsWith(vmName + '_'));
-    } else {
-      files = all;
-    }
-    files.sort().reverse();
-  } catch (e) {
-    return [];
-  }
+  const all = fs.readdirSync(BACKUPS_DIR).filter(f => f.endsWith('.tar.gz'));
+  const files = vmName ? all.filter(f => f.startsWith(vmName + '_')) : all;
+  files.sort().reverse();
   return files.map(f => {
     const p = path.join(BACKUPS_DIR, f);
     const parts = f.split('_');
     const vm = parts[0];
     const ts = parts.slice(1, 3).join('_').replace('.tar.gz', '');
     const stat = fs.statSync(p);
+    const type = backup.getBackupType(f);
+    const containerExists = fs.existsSync(path.join(INSTANCES_DIR, vm));
+    const formatted = formatBackupTimestamp(ts);
     return {
       file: f,
       path: p,
       vm,
       timestamp: ts,
+      displayDate: formatted.date,
+      displayTime: formatted.time,
+      relativeTime: formatted.relative,
       size: stat.size,
       size_hr: fmtSize(stat.size),
+      type,
+      containerExists,
     };
   });
 }
@@ -215,6 +213,38 @@ function fmtSize(size) {
     size /= 1024;
   }
   return `${size.toFixed(1)}TB`;
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+function formatBackupTimestamp(ts) {
+  const [datePart, timePart] = ts.split('_');
+  const y = parseInt(datePart.slice(0, 4));
+  const mo = parseInt(datePart.slice(4, 6)) - 1;
+  const d = parseInt(datePart.slice(6, 8));
+  const h = parseInt(timePart.slice(0, 2));
+  const mi = parseInt(timePart.slice(2, 4));
+  const s = parseInt(timePart.slice(4, 6));
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
+  const pad = n => String(n).padStart(2, '0');
+  const date = new Date(y, mo, d, h, mi, s);
+  const now = new Date();
+  const diffMs = now - date;
+  const mins = Math.floor(diffMs / 60000);
+  const hours = Math.floor(diffMs / 3600000);
+  const days = Math.floor(diffMs / 86400000);
+  let relative;
+  if (mins < 1) relative = 'just now';
+  else if (mins < 60) relative = `${mins}m ago`;
+  else if (hours < 24) relative = `${hours}h ago`;
+  else if (days < 30) relative = `${days}d ago`;
+  else relative = `${Math.floor(days / 30)}mo ago`;
+  return {
+    date: `${MONTHS[mo]} ${d}, ${y}`,
+    time: `${h12}:${pad(mi)}:${pad(s)} ${ampm}`,
+    relative,
+  };
 }
 
 async function dockerExec(vmName, cmd, timeout = 30000) {
@@ -403,14 +433,9 @@ app.get('/vm/:name/logs/hx', async (req, res) => {
 // ─── Routes: Backups ────────────────────────────────────────
 
 app.get('/backups', async (req, res) => {
-  const allBackups = getBackups();
+  const backups = getBackups();
   const vms = await getAllVms();
-  const grouped = {};
-  for (const b of allBackups) {
-    if (!grouped[b.vm]) grouped[b.vm] = [];
-    grouped[b.vm].push(b);
-  }
-  res.render('backups', { grouped, vms });
+  res.render('backups', { backups, vms, csrfToken: req.session.csrfToken });
 });
 
 app.post('/backups/:name/create', async (req, res) => {
@@ -617,6 +642,13 @@ app.get('/api/api-keys', (req, res) => {
   res.json(masked);
 });
 
+app.get('/api/api-keys/:name/raw', (req, res) => {
+  const keys = creds.apiKeys();
+  const entry = keys[req.params.name];
+  if (!entry) return res.status(404).json({ error: 'not found' });
+  res.json({ provider: entry.provider, key: entry.key });
+});
+
 app.post('/api/user-ids', (req, res) => {
   const { name, uid } = req.body;
   if (!uid) return res.status(400).json({ error: 'uid required' });
@@ -636,6 +668,51 @@ app.post('/api/user-ids', (req, res) => {
   res.json({ ok: true, name: finalName, uid });
 });
 
+app.post('/api/config/backup/:agent', (req, res) => {
+  const agent = req.params.agent;
+  const meta = readMeta(agent);
+  const agentType = meta.AGENT || 'openclaw';
+  const configPath = path.join(INSTANCES_DIR, agent, agentType, 'openclaw.json');
+  const backupPath = configPath + '.bak';
+  try {
+    if (fs.existsSync(configPath)) fs.copyFileSync(configPath, backupPath);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/config/restore/:agent', (req, res) => {
+  const agent = req.params.agent;
+  const meta = readMeta(agent);
+  const agentType = meta.AGENT || 'openclaw';
+  const configPath = path.join(INSTANCES_DIR, agent, agentType, 'openclaw.json');
+  const backupPath = configPath + '.bak';
+  try {
+    let savedConfig = {};
+    if (fs.existsSync(backupPath)) {
+      try { savedConfig = JSON.parse(fs.readFileSync(backupPath, 'utf8')); } catch (e) {}
+      fs.unlinkSync(backupPath);
+    }
+    let newAuthConfig = {};
+    if (fs.existsSync(configPath)) {
+      try { newAuthConfig = JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch (e) {}
+    }
+    const merged = savedConfig;
+    if (newAuthConfig.auth) merged.auth = newAuthConfig.auth;
+    if (newAuthConfig.meta) merged.meta = newAuthConfig.meta;
+    merged.models = merged.models || {};
+    merged.models.providers = merged.models.providers || {};
+    if (req.body.provider && !merged.models.providers[req.body.provider]) {
+      merged.models.providers[req.body.provider] = { models: [] };
+    }
+    fs.writeFileSync(configPath, JSON.stringify(merged, null, 2) + '\n');
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/api/providers/add', async (req, res) => {
   const { agent, provider, api_key, cred_name, name } = req.body;
   if (!agent || !provider) return res.status(400).json({ error: 'agent and provider required' });
@@ -652,13 +729,42 @@ app.post('/api/providers/add', async (req, res) => {
       }
     }
     if (!keyValue) return res.status(400).json({ error: 'API key or credential name required' });
-    const { execFile: ef } = require('child_process');
+
+    // Save config before paste-api-key (which overwrites the file)
+    const meta = readMeta(agent);
+    const agentType = meta.AGENT || 'openclaw';
+    const configPath = path.join(INSTANCES_DIR, agent, agentType, 'openclaw.json');
+    let savedConfig = null;
+    if (fs.existsSync(configPath)) {
+      try { savedConfig = JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch (e) { savedConfig = {}; }
+    }
+
+    const { spawn: sp } = require('child_process');
     await new Promise((resolve, reject) => {
-      ef('docker', ['exec', '-i', agent, 'openclaw', 'models', 'auth', 'paste-api-key', '--provider', provider],
-        { timeout: 30000 }, (err, stdout, stderr) => {
-          if (err) reject(err); else resolve(stdout);
-        });
+      const child = sp('docker', ['exec', '-i', agent, 'openclaw', 'models', 'auth', 'paste-api-key', '--provider', provider],
+        { timeout: 30000 });
+      let buf = '';
+      child.stdout.on('data', d => buf += d);
+      child.stderr.on('data', d => buf += d);
+      child.on('error', reject);
+      child.on('close', code => code === 0 ? resolve(buf) : reject(new Error(buf || 'exit ' + code)));
+      child.stdin.write(keyValue + '\n');
+      child.stdin.end();
     }).catch(() => {});
+
+    // Restore saved config and merge in auth profile from paste-api-key
+    let newAuthConfig = {};
+    if (fs.existsSync(configPath)) {
+      try { newAuthConfig = JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch (e) {}
+    }
+    const merged = savedConfig || {};
+    if (newAuthConfig.auth) merged.auth = newAuthConfig.auth;
+    if (newAuthConfig.meta) merged.meta = newAuthConfig.meta;
+    merged.models = merged.models || {};
+    merged.models.providers = merged.models.providers || {};
+    if (!merged.models.providers[provider]) merged.models.providers[provider] = { models: [] };
+    try { fs.writeFileSync(configPath, JSON.stringify(merged, null, 2) + '\n'); } catch (e) { console.error('Failed to write config:', e.message); }
+
     const existing = creds.apiKeys();
     if (!existing[credLabel] || existing[credLabel].key === keyValue) {
       try { creds.addApiKey(credLabel, provider, keyValue); } catch (e) { /* exists same key */ }
@@ -721,7 +827,7 @@ wss.on('connection', async (ws, req) => {
   const rows = Math.max(12, Math.min(120, parseInt(url.searchParams.get('rows') || '32', 10) || 32));
   const containers = await dockerPsList(true);
 
-  if (parts[0] !== 'ws' || parts[1] !== 'terminal' || !safeVmName(vmName) || containers[vmName] !== 'running') {
+  if (parts[0] !== 'ws' || parts[1] !== 'terminal' || !safeVmName(vmName) || (containers[vmName]?.State || '').toLowerCase() !== 'running') {
     ws.close();
     return;
   }

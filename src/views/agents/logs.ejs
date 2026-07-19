@@ -23,6 +23,7 @@
   var logOutput = document.getElementById('log-output');
   var scrollBtn = document.getElementById('log-scroll-btn');
   var autoScroll = true;
+  var scrollReady = false;
 
   function isAtBottom() {
     return logOutput.scrollHeight - logOutput.scrollTop - logOutput.clientHeight < 30;
@@ -49,6 +50,7 @@
   }
 
   logOutput.addEventListener('scroll', function() {
+    if (!scrollReady) return;
     if (autoScroll && !isAtBottom()) {
       autoScroll = false;
       updateScrollBtn();
@@ -79,7 +81,7 @@
   window.refreshLogs = refreshLogs;
   window.toggleAutoScroll = toggleAutoScroll;
   startAutoRefresh();
-  setTimeout(function() { scrollToBottom(); updateScrollBtn(); }, 100);
+  setTimeout(function() { scrollToBottom(); updateScrollBtn(); scrollReady = true; }, 100);
 
   var observer = new IntersectionObserver(function(entries) {
     entries.forEach(function(e) {

@@ -51,38 +51,8 @@
 
       <!-- Provider (API Key) -->
       <div id="provider-api-section">
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <label class="block text-xs font-medium text-slate-400 mb-1">Provider</label>
-            <select id="provider-api-name"
-              class="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white text-sm focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500">
-              <option value="openrouter">OpenRouter</option>
-              <option value="ollama-cloud">Ollama Cloud</option>
-              <option value="anthropic">Anthropic</option>
-              <option value="google">Google</option>
-              <option value="mistral">Mistral</option>
-              <option value="xai">xAI</option>
-              <option value="together">Together</option>
-              <option value="huggingface">HuggingFace</option>
-              <option value="voyage">Voyage</option>
-              <option value="cohere">Cohere</option>
-              <option value="nvidia">NVIDIA</option>
-              <option value="novita">Novita</option>
-              <option value="lmstudio">LM Studio</option>
-              <option value="litellm">LiteLLM</option>
-              <option value="vllm">vLLM</option>
-              <option value="sglang">SGLang</option>
-              <option value="custom">Custom provider...</option>
-            </select>
-          </div>
-          <div id="provider-api-custom-wrap" class="hidden">
-            <label class="block text-xs font-medium text-slate-400 mb-1">Custom Provider ID</label>
-            <input type="text" id="provider-api-custom"
-              class="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white text-sm font-mono focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
-              placeholder="my-provider">
-          </div>
-        </div>
-        <div class="mt-4">
+        <!-- Credentials dropdown (always shown first) -->
+        <div>
           <label class="block text-xs font-medium text-slate-400 mb-1">API Key</label>
           <div class="flex items-center gap-2">
             <select id="provider-api-cred-select"
@@ -94,22 +64,65 @@
             </button>
           </div>
         </div>
-        <div id="provider-api-custom-key-wrap" class="mt-4 hidden">
-          <label class="block text-xs font-medium text-slate-400 mb-1">API Key Value</label>
-          <input type="password" id="provider-api-key"
-            class="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white text-sm font-mono focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
-            placeholder="sk-...">
+
+        <!-- Custom creds fields (hidden by default, shown only on "Enter myself") -->
+        <div id="provider-api-custom-creds-wrap" class="mt-4 space-y-4 hidden">
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label class="block text-xs font-medium text-slate-400 mb-1">Provider</label>
+              <select id="provider-api-name"
+                class="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white text-sm focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500">
+                <option value="openrouter">OpenRouter</option>
+                <option value="ollama-cloud">Ollama Cloud</option>
+                <option value="anthropic">Anthropic</option>
+                <option value="google">Google</option>
+                <option value="mistral">Mistral</option>
+                <option value="xai">xAI</option>
+                <option value="together">Together</option>
+                <option value="huggingface">HuggingFace</option>
+                <option value="voyage">Voyage</option>
+                <option value="cohere">Cohere</option>
+                <option value="nvidia">NVIDIA</option>
+                <option value="novita">Novita</option>
+                <option value="lmstudio">LM Studio</option>
+                <option value="litellm">LiteLLM</option>
+                <option value="vllm">vLLM</option>
+                <option value="sglang">SGLang</option>
+                <option value="custom">Custom provider...</option>
+              </select>
+            </div>
+            <div id="provider-api-custom-wrap" class="hidden">
+              <label class="block text-xs font-medium text-slate-400 mb-1">Custom Provider ID</label>
+              <input type="text" id="provider-api-custom"
+                class="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white text-sm font-mono focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+                placeholder="my-provider">
+            </div>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1">API Key Value</label>
+            <input type="password" id="provider-api-key"
+              class="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white text-sm font-mono focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+              placeholder="sk-...">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1">Save as (credentials)</label>
+            <input type="text" id="provider-api-cred-name"
+              class="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white text-sm focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+              placeholder="unnamed">
+            <p class="text-xs text-slate-500 mt-1">Name for this key in the credential store. Defaults to "unnamed".</p>
+          </div>
         </div>
-        <div id="provider-api-cred-name-wrap" class="mt-4 hidden">
-          <label class="block text-xs font-medium text-slate-400 mb-1">Save as (credentials)</label>
-          <input type="text" id="provider-api-cred-name"
-            class="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white text-sm focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
-            placeholder="unnamed">
-          <p class="text-xs text-slate-500 mt-1">Name for this key in the credential store. Defaults to "unnamed".</p>
-        </div>
+
         <div class="mt-4 flex items-center gap-3">
           <button id="provider-api-add-btn" onclick="addApiKeyProvider()" class="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-sm font-medium transition-colors">Add Provider</button>
           <span id="provider-api-status" class="text-xs text-slate-500"></span>
+        </div>
+        <div id="provider-api-terminal-wrap" class="mt-4 hidden">
+          <div id="provider-api-terminal" class="border border-slate-700 rounded-lg bg-[#0f172a] overflow-hidden" style="height: 400px;"></div>
+          <div class="mt-3">
+            <button onclick="refreshApiModels()" class="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white text-xs rounded transition-colors">Refresh Available Models</button>
+            <span id="provider-api-refresh-status" class="text-xs text-slate-500 ml-2"></span>
+          </div>
         </div>
         <div id="provider-api-picker" class="hidden mt-4 border-t border-slate-700 pt-4">
           <label class="block text-xs font-medium text-slate-400 mb-2">Select a model to use</label>
@@ -189,14 +202,17 @@
     renderProviders();
   }
 
-  function loadSavedKeys() {
+  if (typeof window._credLoadGen === 'undefined') window._credLoadGen = 0;
+  function loadSavedKeys(skipToggle) {
     var select = document.getElementById('provider-api-cred-select');
     if (!select) return;
     var currentVal = select.value;
+    var gen = ++window._credLoadGen;
     select.innerHTML = '<option value="__custom__">Enter custom key...</option>';
     fetch('/api/api-keys')
       .then(function(r) { return r.json(); })
       .then(function(keys) {
+        if (gen !== window._credLoadGen) return;
         for (var name in keys) {
           (function(name, info) {
             var opt = document.createElement('option');
@@ -210,18 +226,16 @@
         } else {
           select.value = '__custom__';
         }
-        toggleCustomInput();
+        if (!skipToggle) toggleCustomInput();
       })
       .catch(function() {});
   }
 
   function toggleCustomInput() {
+    var wrap = document.getElementById('provider-api-custom-creds-wrap');
     var select = document.getElementById('provider-api-cred-select');
-    var customKeyWrap = document.getElementById('provider-api-custom-key-wrap');
-    var credNameWrap = document.getElementById('provider-api-cred-name-wrap');
     var isCustom = select.value === '__custom__';
-    customKeyWrap.classList.toggle('hidden', !isCustom);
-    credNameWrap.classList.toggle('hidden', !isCustom);
+    wrap.classList.toggle('hidden', !isCustom);
     if (!isCustom) {
       document.getElementById('provider-api-key').value = '';
       document.getElementById('provider-api-cred-name').value = select.value;
@@ -337,9 +351,11 @@
 
   document.getElementById('provider-api-cred-select').addEventListener('change', toggleCustomInput);
 
-  // ── Add API key provider ───────────────────────────────────────────────
+  // ── Add API key provider (terminal-based) ────────────────────────────
+  var apiWs = null;
+
   window.addApiKeyProvider = function() {
-    var provider = apiProviderEl.value === 'custom'
+    var manualProvider = apiProviderEl.value === 'custom'
       ? document.getElementById('provider-api-custom').value.trim()
       : apiProviderEl.value;
     var apiKey = document.getElementById('provider-api-key').value.trim();
@@ -349,51 +365,136 @@
     var btn = document.getElementById('provider-api-add-btn');
     var st = document.getElementById('provider-api-status');
 
-    if (!provider) { VMF.toast('Select a provider', 'error'); return; }
     if (!apiKey && !selectedSavedKey) { VMF.toast('Enter an API key or select a saved one', 'error'); return; }
 
-    btn.textContent = 'Adding...';
-    btn.disabled = true;
-    st.textContent = 'Running paste-api-key...';
-    st.className = 'text-xs text-amber-400';
-
-    var body = { agent: '<%= agent.name %>', provider: provider, name: credName };
     if (selectedSavedKey && !apiKey) {
-      body.cred_name = selectedSavedKey;
+      fetch('/api/api-keys/' + encodeURIComponent(selectedSavedKey) + '/raw')
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+          var provider = d.provider || manualProvider;
+          if (!provider) { VMF.toast('Select a provider', 'error'); return; }
+          if (!d.key) { VMF.toast('Could not resolve API key', 'error'); return; }
+          openApiKeyTerminal(provider, d.key, credName);
+        })
+        .catch(function(e) { VMF.toast('Failed to resolve key: ' + e.message, 'error'); });
     } else {
-      body.api_key = apiKey;
+      var provider = manualProvider;
+      if (!provider) { VMF.toast('Select a provider', 'error'); return; }
+      if (!apiKey) { VMF.toast('Enter an API key', 'error'); return; }
+      openApiKeyTerminal(provider, apiKey, credName);
+    }
+  };
+
+  function openApiKeyTerminal(provider, apiKey, credName) {
+    var wrap = document.getElementById('provider-api-terminal-wrap');
+    var termEl = document.getElementById('provider-api-terminal');
+    var st = document.getElementById('provider-api-status');
+    var btn = document.getElementById('provider-api-add-btn');
+
+    if (!window.Terminal || !window.FitAddon) {
+      st.textContent = 'xterm.js not loaded. Reload the page.';
+      st.className = 'text-xs text-red-400';
+      return;
     }
 
-    fetch('/api/providers/add', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    })
-    .then(function(r) { return r.json(); })
-    .then(function(result) {
-      if (result.error) {
-        VMF.toast('Error: ' + result.error, 'error');
-        st.textContent = 'Failed';
-        st.className = 'text-xs text-red-400';
-      } else {
-        st.textContent = 'Added as ' + (result.name || credName);
-        st.className = 'text-xs text-emerald-400';
-        VMF.toast('Provider ' + provider + ' added.', 'success');
-        document.getElementById('provider-api-key').value = '';
-        document.getElementById('provider-api-cred-name').value = '';
-        credSelect.value = '__custom__';
-        toggleCustomInput();
-        showModelPicker('provider-api-picker', 'provider-api-picker-list', provider);
-      }
-      btn.textContent = 'Add Provider';
-      btn.disabled = false;
-    })
-    .catch(function(err) {
-      VMF.toast('Failed: ' + err.message, 'error');
-      btn.textContent = 'Add Provider';
-      btn.disabled = false;
-      st.textContent = '';
+    if (apiWs) { try { apiWs.close(); } catch(e){} apiWs = null; }
+    termEl.innerHTML = '';
+    wrap.classList.remove('hidden');
+    btn.textContent = 'Adding...';
+    btn.disabled = true;
+    st.textContent = 'Saving config...';
+    st.className = 'text-xs text-amber-400';
+
+    fetch('/api/config/backup/<%= agent.name %>', { method: 'POST' }).then(function() {
+      st.textContent = 'Connecting...';
+      var term = new window.Terminal({ theme: { background: '#0f172a', foreground: '#e2e8f0' }, fontSize: 13, fontFamily: 'monospace', cursorBlink: true, scrollback: 5000 });
+      var fitAddon = new window.FitAddon.FitAddon();
+      term.loadAddon(fitAddon);
+      term.open(termEl);
+
+      setTimeout(function() {
+        fitAddon.fit();
+        var protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        var wsUrl = protocol + '//' + location.host + '/ws/terminal/<%= agent.name %>?cols=' + term.cols + '&rows=' + term.rows;
+        var ws = new WebSocket(wsUrl);
+        apiWs = ws;
+
+        ws.onerror = function() {
+          st.textContent = 'WebSocket error';
+          st.className = 'text-xs text-red-400';
+          btn.textContent = 'Add Provider';
+          btn.disabled = false;
+        };
+
+        ws.onopen = function() {
+          st.textContent = 'Connected. Running paste-api-key...';
+          st.className = 'text-xs text-amber-400';
+          setTimeout(function() {
+            ws.send('openclaw models auth paste-api-key --provider ' + provider + '\n');
+          }, 1500);
+          setTimeout(function() {
+            if (!keySent) { keySent = true; ws.close(); }
+          }, 15000);
+        };
+
+        var output = '';
+        var keySent = false;
+        var closeTimer = null;
+        ws.onmessage = function(evt) {
+          term.write(evt.data);
+          output += evt.data;
+          if (!keySent && /paste\s+api\s+key/i.test(output)) {
+            keySent = true;
+            setTimeout(function() {
+              ws.send(apiKey + '\n');
+              closeTimer = setTimeout(function() {
+                ws.close();
+              }, 12000);
+            }, 500);
+          }
+        };
+
+        ws.onclose = function() {
+          if (ws._restored) return;
+          ws._restored = true;
+          if (closeTimer) clearTimeout(closeTimer);
+          st.textContent = 'Restoring config...';
+          st.className = 'text-xs text-amber-400';
+          fetch('/api/config/restore/<%= agent.name %>', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ provider: provider })
+          }).then(function() {
+            btn.textContent = 'Add Provider';
+            btn.disabled = false;
+            if (output.indexOf('Error') !== -1 || output.indexOf('error') !== -1 || output.indexOf('failed') !== -1) {
+              st.textContent = 'Failed — check terminal output';
+              st.className = 'text-xs text-red-400';
+            } else {
+              st.textContent = 'Provider added successfully';
+              st.className = 'text-xs text-emerald-400';
+              showModelPicker('provider-api-picker', 'provider-api-picker-list', provider);
+            }
+          });
+        };
+
+        term.onData(function(data) { if (ws.readyState === WebSocket.OPEN) ws.send(data); });
+        term.onResize(function(size) {
+          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'resize', cols: size.cols, rows: size.rows }));
+        });
+      }, 200);
     });
+  }
+
+  window.refreshApiModels = function() {
+    var provider = apiProviderEl.value === 'custom'
+      ? document.getElementById('provider-api-custom').value.trim()
+      : apiProviderEl.value;
+    var st = document.getElementById('provider-api-refresh-status');
+    st.textContent = 'Refreshing...';
+    st.className = 'text-xs text-amber-400 ml-2';
+    showModelPicker('provider-api-picker', 'provider-api-picker-list', provider);
+    setTimeout(function() { st.textContent = ''; }, 2000);
   };
 
   // ── OAuth terminal ─────────────────────────────────────────────────────
@@ -529,7 +630,8 @@
   // ── Init ───────────────────────────────────────────────────────────────
   setTimeout(function() {
     loadFields();
-    loadSavedKeys();
+    loadSavedKeys(true);
+    _skipToggleInit = false;
     originalSnapshot = snapshot();
   }, 0);
 })();

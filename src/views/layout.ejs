@@ -4,7 +4,6 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>VM Friends — Agent Manager</title>
-  <script>window.tailwind={config:{darkMode:'class'}}</script>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/htmx.org@2.0.4"></script>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>">
@@ -36,9 +35,6 @@
     .cm-config .cm-variable { color: #e2e8f0; }
     .cm-config .cm-variable-2 { color: #e2e8f0; }
     .cm-config .CodeMirror-matchingbracket { color: #22d3ee !important; font-weight: bold; }
-    html.light .cm-config.CodeMirror { background: #f8fafc; color: #1e293b; }
-    html.light .cm-config .CodeMirror-gutters { background: #f1f5f9; border-right-color: #e2e8f0; }
-    html.light .cm-config .CodeMirror-linenumber { color: #94a3b8; }
     #config-editor-wrapper { max-height: 498px; overflow: hidden; }
     .cm-workspace.CodeMirror {
       background: #0f172a;
@@ -67,43 +63,11 @@
     .cm-workspace .cm-variable { color: #e2e8f0; }
     .cm-workspace .cm-variable-2 { color: #e2e8f0; }
     .cm-workspace .CodeMirror-matchingbracket { color: #22d3ee !important; font-weight: bold; }
-    html.light .cm-workspace.CodeMirror { background: #f8fafc; color: #1e293b; }
-    html.light .cm-workspace .CodeMirror-gutters { background: #f1f5f9; border-right-color: #e2e8f0; }
-    html.light .cm-workspace .CodeMirror-linenumber { color: #94a3b8; }
   </style>
   <style>
-    html.light{--bg-page:#f8fafc;--bg-card:#ffffff;--bg-nav:#f1f5f9;--bg-elevated:#ffffff;--bg-input:#f1f5f9;--text-primary:#1e293b;--text-secondary:#475569;--text-muted:#64748b;--text-dim:#94a3b8;--border:#e2e8f0;--border-light:#f1f5f9}
-    html.light body{background-color:var(--bg-page);color:var(--text-primary)}
-    html.light nav{background-color:var(--bg-nav);border-color:var(--border)}
-    html.light nav a{color:var(--text-secondary)}
-    html.light nav a:hover{color:var(--text-primary)}
-    html.light .card,html.light [class*="bg-slate-800"]{background-color:var(--bg-card);border-color:var(--border)}
-    html.light .bg-slate-900{background-color:var(--bg-page)}
-    html.light .bg-slate-950{background-color:var(--bg-input)}
-    html.light [class*="border-slate-7"],html.light [class*="border-slate-8"]{border-color:var(--border)}
-    html.light .text-slate-100,html.light .text-white{color:var(--text-primary)}
-    html.light .text-slate-200,html.light .text-slate-300{color:var(--text-secondary)}
-    html.light .text-slate-400{color:var(--text-muted)}
-    html.light .text-slate-500{color:var(--text-dim)}
-    html.light [class*="bg-slate-7"]:not(nav *){background-color:var(--bg-input)}
-    html.light select option{background-color:var(--bg-card);color:var(--text-primary)}
-    html.light input,html.light select{background-color:var(--bg-input);border-color:var(--border);color:var(--text-primary)}
-    html.light input::placeholder{color:var(--text-dim)}
-    html.light .hover\:bg-slate-700:hover{background-color:var(--bg-input)}
-    html.light pre{color:var(--text-secondary)}
-    html.light table{color:var(--text-secondary)}
-    html.light .text-cyan-400{color:#0891b2}
-    html.light .text-emerald-400{color:#059669}
-    html.light .text-amber-400{color:#d97706}
-    html.light .text-purple-400{color:#7c3aed}
-    html.light .text-red-400{color:#dc2626}
-    html.light [class*="bg-emerald-9"],html.light [class*="bg-amber-9"],html.light [class*="bg-red-9"],html.light [class*="bg-purple-9"],html.light [class*="bg-cyan-9"],html.light [class*="bg-orange-9"],html.light [class*="bg-slate-9"]:not(.bg-slate-900){background-color:var(--bg-card);border-color:var(--border)}
-
     .skeleton{background:linear-gradient(90deg,#1e293b 25%,#334155 50%,#1e293b 75%);background-size:200% 100%;animation:shimmer 1.5s infinite;border-radius:0.5rem}
     .agent-card.htmx-request{opacity:0.5;pointer-events:none;position:relative}
     .agent-card.htmx-request::after{content:'';position:absolute;inset:0;background:rgba(0,0,0,.2);border-radius:inherit}
-    html.light .skeleton{background:linear-gradient(90deg,#e2e8f0 25%,#f1f5f9 50%,#e2e8f0 75%);background-size:200% 100%}
-    html.light .agent-card.htmx-request::after{background:rgba(255,255,255,.3)}
     @keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
 
     .toast-enter{animation:toastIn 0.3s ease-out}
@@ -139,7 +103,6 @@
           <a href="/credentials" class="px-3 py-1.5 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-slate-800 transition-colors">Creds</a>
           <a href="/backups" class="px-3 py-1.5 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-slate-800 transition-colors">Backups</a>
           <span class="w-px h-5 bg-slate-700 mx-1.5"></span>
-          <button id="theme-toggle" class="p-2 rounded-lg text-slate-500 hover:text-white hover:bg-slate-800 transition-colors text-xs" title="Toggle theme">●</button>
           <a href="/logout" class="px-3 py-1.5 rounded-lg text-sm text-slate-500 hover:text-red-400 hover:bg-slate-800 transition-colors" title="Sign out">
             <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>
           </a>
@@ -331,19 +294,13 @@
 
     var visObs = new IntersectionObserver(function(entries) {
       entries.forEach(function(e) {
-        if (e.isIntersecting) {
+        if (e.isIntersecting && !connected) {
           connectWs();
           setTimeout(doFit, 50);
         }
       });
     });
     visObs.observe(container);
-
-    container._termCleanup = function() {
-      window.removeEventListener('resize', onResize);
-      visObs.disconnect();
-      clearTimeout(resizeTimer);
-    };
 
     // Font size controls
     var fontSize = 14;
@@ -414,20 +371,6 @@
   });
 
   (function() {
-    var html = document.documentElement;
-    var btn = document.getElementById('theme-toggle');
-    var theme = localStorage.getItem('theme');
-    if (theme === 'light') {
-      html.classList.add('light');
-      btn.textContent = '\u2600\uFE0F';
-    }
-    btn.addEventListener('click', function() {
-      html.classList.toggle('light');
-      var isLight = html.classList.contains('light');
-      localStorage.setItem('theme', isLight ? 'light' : 'dark');
-      btn.textContent = isLight ? '\u2600\uFE0F' : '\uD83C\uDF19';
-    });
-
     document.addEventListener('keydown', function(e) {
       if (e.key === 'Escape') VMF.closeModal();
       if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
