@@ -6,7 +6,8 @@
          class="hover:text-slate-300 transition-colors whitespace-nowrap"
          hx-get="/agents/<%= agent.name %>/workspace?path=<%= encodeURIComponent(crumb.path) %>"
          hx-target="#workspace-root"
-         hx-swap="outerHTML"><%= crumb.name %></a>
+         hx-swap="outerHTML"
+         hx-push-url="/agents/<%= agent.name %>?workspacePath=<%= encodeURIComponent(crumb.path) %>"><%= crumb.name %></a>
       <% if (crumb !== breadcrumbs[breadcrumbs.length - 1]) { %>
         <span class="text-slate-600">/</span>
       <% } %>
@@ -70,7 +71,8 @@
                    class="text-slate-400 hover:text-slate-200 transition-colors"
                    hx-get="/agents/<%= agent.name %>/workspace?path=<%= encodeURIComponent(breadcrumbs[breadcrumbs.length - 2]?.path || '/') %>"
                    hx-target="#workspace-root"
-                   hx-swap="outerHTML">&larr; Up</a>
+                   hx-swap="outerHTML"
+                   hx-push-url="/agents/<%= agent.name %>?workspacePath=<%= encodeURIComponent(breadcrumbs[breadcrumbs.length - 2]?.path || '/') %>">&larr; Up</a>
               </td>
             </tr>
           <% } %>
@@ -83,7 +85,8 @@
                      class="text-cyan-400 hover:text-cyan-300 transition-colors"
                      hx-get="/agents/<%= agent.name %>/workspace?path=<%= encodeURIComponent(entryPath) %>"
                      hx-target="#workspace-root"
-                     hx-swap="outerHTML">
+                     hx-swap="outerHTML"
+                     hx-push-url="/agents/<%= agent.name %>?workspacePath=<%= encodeURIComponent(entryPath) %>">
                     <span class="mr-1.5 text-slate-500">&#128193;</span><%= entry.name %>
                   </a>
                 <% } else { %>
@@ -177,20 +180,57 @@
           return;
         }
         currentFileContent = file.content;
-        sizeEl.textContent = file.size + ' bytes';
         var ext = ('.' + file.name.split('.').pop()).toLowerCase();
+        sizeEl.textContent = file.size + ' bytes · ' + ext.replace('.','').toUpperCase();
         isEditable = previewableExts.indexOf(ext) !== -1 || ext === '';
 
         if (isEditable) {
           saveBtn.classList.remove('hidden');
-          var textarea = document.createElement('textarea');
-          textarea.id = 'file-editor';
-          textarea.value = file.content;
-          textarea.className = 'w-full h-full bg-slate-900 text-slate-200 font-mono text-sm p-4 rounded-lg border border-slate-700 focus:border-cyan-500 focus:outline-none resize-none';
-          textarea.style.minHeight = '100%';
-          body.innerHTML = '';
-          body.appendChild(textarea);
-          textarea.focus();
+          var isJson = ext === '.json';
+          var isYaml = ext === '.yaml' || ext === '.yml';
+          if ((isJson || isYaml) && typeof CodeMirror !== 'undefined') {
+            var wrapper = document.createElement('div');
+            wrapper.className = 'w-full h-full overflow-hidden rounded-lg border border-slate-700';
+            body.innerHTML = '';
+            body.appendChild(wrapper);
+            var mode = isJson ? 'application/json' : 'text/x-yaml';
+            var cm = CodeMirror(wrapper, {
+              value: file.content,
+              mode: mode,
+              theme: 'default',
+              lineNumbers: true,
+              matchBrackets: true,
+              autoCloseBrackets: true,
+              lineWrapping: true,
+              indentUnit: 2,
+              tabSize: 2,
+              readOnly: false
+            });
+            cm.getWrapperElement().classList.add('cm-config', 'cm-workspace');
+            cm.refresh();
+            setTimeout(function() { cm.refresh(); }, 100);
+            cm.focus();
+            window._workspaceCM = cm;
+            cm.on('blur', function() {
+              var status = document.getElementById('file-modal-size');
+              try {
+                if (isJson) { JSON.parse(cm.getValue()); status.textContent = 'Valid JSON'; status.className = 'text-xs text-emerald-400 ml-2'; }
+                else { jsyaml.load(cm.getValue()); status.textContent = 'Valid YAML'; status.className = 'text-xs text-emerald-400 ml-2'; }
+              } catch (e) {
+                status.textContent = (isJson ? 'Invalid JSON' : 'Invalid YAML') + ': ' + e.message;
+                status.className = 'text-xs text-red-400 ml-2';
+              }
+            });
+          } else {
+            var textarea = document.createElement('textarea');
+            textarea.id = 'file-editor';
+            textarea.value = file.content;
+            textarea.className = 'w-full h-full bg-slate-900 text-slate-200 font-mono text-sm p-4 rounded-lg border border-slate-700 focus:border-cyan-500 focus:outline-none resize-none';
+            textarea.style.minHeight = '100%';
+            body.innerHTML = '';
+            body.appendChild(textarea);
+            textarea.focus();
+          }
         } else {
           var pre = document.createElement('pre');
           pre.className = 'text-xs text-slate-300 font-mono whitespace-pre-wrap';
@@ -206,9 +246,23 @@
 
   window.saveFile = function() {
     if (!currentFilePath) return;
-    var editor = document.getElementById('file-editor');
-    if (!editor) return;
-    var content = editor.value;
+    var content;
+    var cm = window._workspaceCM;
+    if (cm) {
+      content = cm.getValue();
+      var ext = '.' + currentFilePath.split('.').pop().toLowerCase();
+      try {
+        if (ext === '.json') { JSON.parse(content); }
+        else if (ext === '.yaml' || ext === '.yml') { jsyaml.load(content); }
+      } catch (e) {
+        VMF.toast('Cannot save: ' + (ext === '.json' ? 'Invalid JSON' : 'Invalid YAML') + ': ' + e.message, 'error');
+        return;
+      }
+    } else {
+      var editor = document.getElementById('file-editor');
+      if (!editor) return;
+      content = editor.value;
+    }
     var saveBtn = document.getElementById('file-modal-save');
     saveBtn.textContent = 'Saving...';
     saveBtn.disabled = true;
@@ -241,6 +295,7 @@
     document.getElementById('file-modal-overlay').classList.add('hidden');
     document.getElementById('file-modal-overlay').classList.remove('flex');
     currentFilePath = null;
+    if (window._workspaceCM) { window._workspaceCM = null; }
   };
 
   window.renameEntry = function(currentPath) {
@@ -280,7 +335,7 @@
       VMF.toast('File uploaded.', 'success');
       setTimeout(function() {
         progress.classList.add('hidden');
-        location.reload();
+        window.location.href = '/agents/<%= agent.name %>?workspacePath=' + encodeURIComponent('<%= currentPath %>');
       }, 800);
     };
     xhr.onerror = function() {
@@ -311,8 +366,8 @@
   // Keyboard shortcut: Ctrl+S to save in editor
   document.addEventListener('keydown', function(e) {
     if ((e.ctrlKey || e.metaKey) && e.key === 's') {
-      var editor = document.getElementById('file-editor');
-      if (editor && document.activeElement === editor) {
+      var overlay = document.getElementById('file-modal-overlay');
+      if (overlay && !overlay.classList.contains('hidden')) {
         e.preventDefault();
         saveFile();
       }

@@ -61,7 +61,9 @@
       .then(function(r) { return r.text(); })
       .then(function(text) {
         logOutput.textContent = text;
-        if (autoScroll) scrollToBottom();
+        requestAnimationFrame(function() {
+          if (autoScroll) scrollToBottom();
+        });
       });
   }
 

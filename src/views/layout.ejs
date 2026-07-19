@@ -8,6 +8,69 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/htmx.org@2.0.4"></script>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>">
+  <link rel="stylesheet" href="/codemirror/codemirror.min.css">
+  <style>
+    .cm-config.CodeMirror {
+      background: #0f172a;
+      color: #e2e8f0;
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+      font-size: 12px;
+      line-height: 1.6;
+      height: 500px;
+    }
+    .cm-config .CodeMirror-gutters {
+      background: #0f172a;
+      border-right: 1px solid #1e293b;
+    }
+    .cm-config .CodeMirror-linenumber { color: #475569; }
+    .cm-config .CodeMirror-cursor { border-left: 2px solid #22d3ee; }
+    .cm-config .CodeMirror-selected { background: #1e3a5f !important; }
+    .cm-config .CodeMirror-activeline-background { background: #1e293b; }
+    .cm-config .cm-string { color: #34d399; }
+    .cm-config .cm-number { color: #f59e0b; }
+    .cm-config .cm-atom { color: #f59e0b; }
+    .cm-config .cm-keyword { color: #c084fc; }
+    .cm-config .cm-property { color: #7dd3fc; }
+    .cm-config .cm-def { color: #93c5fd; }
+    .cm-config .cm-meta { color: #64748b; }
+    .cm-config .cm-variable { color: #e2e8f0; }
+    .cm-config .cm-variable-2 { color: #e2e8f0; }
+    .cm-config .CodeMirror-matchingbracket { color: #22d3ee !important; font-weight: bold; }
+    html.light .cm-config.CodeMirror { background: #f8fafc; color: #1e293b; }
+    html.light .cm-config .CodeMirror-gutters { background: #f1f5f9; border-right-color: #e2e8f0; }
+    html.light .cm-config .CodeMirror-linenumber { color: #94a3b8; }
+    #config-editor-wrapper { max-height: 498px; overflow: hidden; }
+    .cm-workspace.CodeMirror {
+      background: #0f172a;
+      color: #e2e8f0;
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+      font-size: 13px;
+      line-height: 1.6;
+      height: 100%;
+      min-height: 300px;
+    }
+    .cm-workspace .CodeMirror-gutters {
+      background: #0f172a;
+      border-right: 1px solid #1e293b;
+    }
+    .cm-workspace .CodeMirror-linenumber { color: #475569; }
+    .cm-workspace .CodeMirror-cursor { border-left: 2px solid #22d3ee; }
+    .cm-workspace .CodeMirror-selected { background: #1e3a5f !important; }
+    .cm-workspace .CodeMirror-activeline-background { background: #1e293b; }
+    .cm-workspace .cm-string { color: #34d399; }
+    .cm-workspace .cm-number { color: #f59e0b; }
+    .cm-workspace .cm-atom { color: #f59e0b; }
+    .cm-workspace .cm-keyword { color: #c084fc; }
+    .cm-workspace .cm-property { color: #7dd3fc; }
+    .cm-workspace .cm-def { color: #93c5fd; }
+    .cm-workspace .cm-meta { color: #64748b; }
+    .cm-workspace .cm-variable { color: #e2e8f0; }
+    .cm-workspace .cm-variable-2 { color: #e2e8f0; }
+    .cm-workspace .CodeMirror-matchingbracket { color: #22d3ee !important; font-weight: bold; }
+    html.light .cm-workspace.CodeMirror { background: #f8fafc; color: #1e293b; }
+    html.light .cm-workspace .CodeMirror-gutters { background: #f1f5f9; border-right-color: #e2e8f0; }
+    html.light .cm-workspace .CodeMirror-linenumber { color: #94a3b8; }
+  </style>
   <style>
     html.light{--bg-page:#f8fafc;--bg-card:#ffffff;--bg-nav:#f1f5f9;--bg-elevated:#ffffff;--bg-input:#f1f5f9;--text-primary:#1e293b;--text-secondary:#475569;--text-muted:#64748b;--text-dim:#94a3b8;--border:#e2e8f0;--border-light:#f1f5f9}
     html.light body{background-color:var(--bg-page);color:var(--text-primary)}
@@ -47,6 +110,15 @@
     .toast-exit{animation:toastOut 0.3s ease-in forwards}
     @keyframes toastIn{from{opacity:0;transform:translateY(1rem)}to{opacity:1;transform:translateY(0)}}
     @keyframes toastOut{from{opacity:1;transform:translateY(0)}to{opacity:0;transform:translateY(1rem)}}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+    .animate-pulse{animation:pulse 1.5s ease-in-out infinite}
+    .terminal-wrapper .xterm{height:100%;padding:4px}
+    .terminal-wrapper .xterm-viewport{background:#0f172a !important}
+    .terminal-wrapper .xterm-screen{background:#0f172a}
+    .xterm .xterm-viewport::-webkit-scrollbar{width:8px}
+    .xterm .xterm-viewport::-webkit-scrollbar-track{background:transparent}
+    .xterm .xterm-viewport::-webkit-scrollbar-thumb{background:#334155;border-radius:4px}
+    .xterm .xterm-viewport::-webkit-scrollbar-thumb:hover{background:#475569}
   </style>
   <script src="/xterm.js"></script>
   <link rel="stylesheet" href="/xterm.css">
@@ -142,6 +214,18 @@
     if (container._termInit) return;
     container._termInit = true;
 
+    var statusDot = document.getElementById('term-status-dot');
+    var statusText = document.getElementById('term-status-text');
+    var dimEl = document.getElementById('term-dimensions');
+    var fontSizeEl = document.getElementById('term-font-size');
+    var wrapper = container.closest('#terminal-wrapper');
+
+    function setStatus(color, text) {
+      if (statusDot) { statusDot.className = 'w-2 h-2 rounded-full ' + color; }
+      if (statusText) statusText.textContent = text;
+    }
+    setStatus('bg-slate-600', 'Disconnected');
+
     var fitAddon = new FitAddon.FitAddon();
     var webLinksAddon = new WebLinksAddon.WebLinksAddon();
 
@@ -184,32 +268,51 @@
     term.loadAddon(webLinksAddon);
     term.open(container);
 
-    var cols = 80;
-    var rows = 24;
+    function updateDims() {
+      if (dimEl) dimEl.textContent = (term.cols || 80) + 'x' + (term.rows || 24);
+    }
 
     function doFit() {
       try { fitAddon.fit(); } catch(e) {}
-      cols = term.cols || 80;
-      rows = term.rows || 24;
+      updateDims();
     }
 
     var protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     var ws = null;
     var connected = false;
+    var cols = 80, rows = 24;
 
     function connectWs() {
-      if (ws) return;
+      var oldWs = ws;
+      ws = null;
+      if (oldWs) { try { oldWs.onclose = null; oldWs.close(); } catch(e) {} }
       doFit();
-      ws = new WebSocket(protocol + '//' + location.host + '/ws/terminal/' + agentName + '?cols=' + cols + '&rows=' + rows);
-      ws.onopen = function() { connected = true; term.focus(); };
-      ws.onmessage = function(evt) { term.write(evt.data); };
-      ws.onclose = function() { connected = false; term.write('\r\n\x1b[31m[Connection closed]\x1b[0m\r\n'); };
-      ws.onerror = function() { term.write('\r\n\x1b[31m[Connection error]\x1b[0m\r\n'); };
+      cols = term.cols || 80;
+      rows = term.rows || 24;
+      setStatus('bg-amber-500 animate-pulse', 'Connecting...');
+      var sock = new WebSocket(protocol + '//' + location.host + '/ws/terminal/' + agentName + '?cols=' + cols + '&rows=' + rows);
+      sock.onopen = function() {
+        ws = sock; connected = true;
+        setStatus('bg-emerald-400', 'Connected');
+        term.focus();
+      };
+      sock.onmessage = function(evt) { term.write(evt.data); };
+      sock.onclose = function() {
+        connected = false;
+        if (ws === sock) ws = null;
+        setStatus('bg-red-400', 'Disconnected');
+        term.write('\r\n\x1b[31m[Connection closed]\x1b[0m\r\n');
+      };
+      sock.onerror = function() {
+        setStatus('bg-red-400', 'Error');
+        term.write('\r\n\x1b[31m[Connection error]\x1b[0m\r\n');
+      };
     }
 
-    term.onData(function(data) { if (connected) ws.send(data); });
+    term.onData(function(data) { if (connected && ws) ws.send(data); });
     term.onResize(function(size) {
-      if (connected) ws.send(JSON.stringify({ type: 'resize', cols: size.cols, rows: size.rows }));
+      if (connected && ws) ws.send(JSON.stringify({ type: 'resize', cols: size.cols, rows: size.rows }));
+      updateDims();
     });
 
     var resizeTimer;
@@ -220,6 +323,7 @@
         if (ws && connected) {
           ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
         }
+        updateDims();
       }, 100);
     };
     window.addEventListener('resize', onResize);
@@ -240,6 +344,31 @@
       visObs.disconnect();
       clearTimeout(resizeTimer);
     };
+
+    // Font size controls
+    var fontSize = 14;
+    function setFontSize(size) {
+      fontSize = Math.max(10, Math.min(24, size));
+      term.options.fontSize = fontSize;
+      if (fontSizeEl) fontSizeEl.textContent = fontSize;
+      setTimeout(doFit, 50);
+    }
+    var fontInc = document.getElementById('term-font-inc');
+    var fontDec = document.getElementById('term-font-dec');
+    if (fontInc) fontInc.addEventListener('click', function() { setFontSize(fontSize + 1); });
+    if (fontDec) fontDec.addEventListener('click', function() { setFontSize(fontSize - 1); });
+
+    // Clear
+    var clearBtn = document.getElementById('term-clear');
+    if (clearBtn) clearBtn.addEventListener('click', function() { term.clear(); });
+
+    // Reconnect
+    var reconnectBtn = document.getElementById('term-reconnect');
+    if (reconnectBtn) reconnectBtn.addEventListener('click', function() {
+      if (ws) { try { ws.close(); } catch(e) {} ws = null; }
+      connected = false;
+      connectWs();
+    });
   };
 
 
@@ -309,5 +438,11 @@
     });
   })();
   </script>
+  <script src="/codemirror/codemirror.min.js"></script>
+  <script src="/codemirror/javascript.min.js"></script>
+  <script src="/codemirror/matchbrackets.min.js"></script>
+  <script src="/codemirror/closebrackets.min.js"></script>
+  <script src="/codemirror/yaml.min.js"></script>
+  <script src="/codemirror/js-yaml.min.js"></script>
 </body>
 </html>

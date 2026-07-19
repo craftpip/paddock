@@ -8,38 +8,7 @@
   <aside class="w-56 flex-shrink-0 border-r border-slate-800 overflow-y-auto py-6 px-4" id="agent-sidebar">
     <a href="/agents" class="text-xs text-slate-500 hover:text-slate-300 transition-colors block mb-4">&larr; Back to fleet</a>
 
-    <div class="flex items-center gap-3 mb-4">
-      <div class="w-10 h-10 rounded-lg bg-slate-800 flex items-center justify-center text-lg font-bold text-cyan-400 border border-slate-700 flex-shrink-0">
-        <%= agent.display_name.charAt(0) %>
-      </div>
-      <div class="min-w-0">
-        <h1 class="text-base font-bold text-white truncate"><%= agent.display_name %></h1>
-        <span class="px-2 py-0.5 rounded-full text-xs font-medium inline-block mt-0.5
-          <%= agent.status === 'running' ? 'bg-emerald-900/50 text-emerald-400 border border-emerald-800' :
-              agent.status === 'exited' ? 'bg-red-900/50 text-red-400 border border-red-800' :
-              'bg-slate-800 text-slate-400 border border-slate-700' %>">
-          <%= agent.status %>
-        </span>
-      </div>
-    </div>
-
-    <div class="flex gap-2 mb-6">
-      <% if (agent.status === 'running') { %>
-        <form method="POST" action="/agents/<%= agent.name %>/stop" class="flex-1">
-          <input type="hidden" name="_csrf" value="<%= csrfToken %>">
-          <button type="submit" class="w-full px-2 py-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-xs font-medium transition-colors">Stop</button>
-        </form>
-        <form method="POST" action="/agents/<%= agent.name %>/restart" class="flex-1">
-          <input type="hidden" name="_csrf" value="<%= csrfToken %>">
-          <button type="submit" class="w-full px-2 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-xs font-medium transition-colors">Restart</button>
-        </form>
-      <% } else { %>
-        <form method="POST" action="/agents/<%= agent.name %>/start" class="flex-1">
-          <input type="hidden" name="_csrf" value="<%= csrfToken %>">
-          <button type="submit" class="w-full px-2 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-medium transition-colors">Start</button>
-        </form>
-      <% } %>
-    </div>
+    <%- include('partials/sidebar_status', { agent, csrfToken }) %>
 
     <div class="space-y-0.5">
       <button class="sidebar-btn w-full text-left px-3 py-2 text-sm font-medium rounded-lg border-l-2 border-cyan-400 text-cyan-400 bg-slate-800/50 whitespace-nowrap" data-tab="overview">Overview</button>
@@ -48,6 +17,8 @@
       <button class="sidebar-btn w-full text-left px-3 py-2 text-sm font-medium rounded-lg border-l-2 border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 whitespace-nowrap" data-tab="logs">Logs</button>
       <button class="sidebar-btn w-full text-left px-3 py-2 text-sm font-medium rounded-lg border-l-2 border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 whitespace-nowrap" data-tab="sessions">Sessions</button>
       <button class="sidebar-btn w-full text-left px-3 py-2 text-sm font-medium rounded-lg border-l-2 border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 whitespace-nowrap" data-tab="config">Config</button>
+      <button class="sidebar-btn w-full text-left px-3 py-2 text-sm font-medium rounded-lg border-l-2 border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 whitespace-nowrap" data-tab="models">Models</button>
+      <button class="sidebar-btn w-full text-left px-3 py-2 text-sm font-medium rounded-lg border-l-2 border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 whitespace-nowrap" data-tab="messaging">Messaging</button>
       <button class="sidebar-btn w-full text-left px-3 py-2 text-sm font-medium rounded-lg border-l-2 border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 whitespace-nowrap" data-tab="backups">Backups</button>
       <button class="sidebar-btn w-full text-left px-3 py-2 text-sm font-medium rounded-lg border-l-2 border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 whitespace-nowrap" data-tab="activity">Activity</button>
     </div>
@@ -118,7 +89,7 @@
   </div>
 
   <div id="tab-workspace" class="tab-panel hidden">
-    <div hx-get="/agents/<%= agent.name %>/workspace" hx-trigger="load" hx-swap="innerHTML">
+    <div hx-get="/agents/<%= agent.name %>/workspace<% if (locals.workspacePath) { %>?path=<%= encodeURIComponent(workspacePath) %><% } %>" hx-trigger="load" hx-swap="innerHTML">
       <div class="space-y-3">
         <div class="skeleton h-10 w-full"></div>
         <div class="skeleton h-8 w-3/4"></div>
@@ -152,6 +123,18 @@
 
   <div id="tab-config" class="tab-panel hidden">
     <div hx-get="/agents/<%= agent.name %>/config" hx-trigger="load" hx-swap="innerHTML">
+      <div class="skeleton h-64 w-full"></div>
+    </div>
+  </div>
+
+  <div id="tab-models" class="tab-panel hidden">
+    <div hx-get="/agents/<%= agent.name %>/models" hx-trigger="load" hx-swap="innerHTML">
+      <div class="skeleton h-64 w-full"></div>
+    </div>
+  </div>
+
+  <div id="tab-messaging" class="tab-panel hidden">
+    <div hx-get="/agents/<%= agent.name %>/messaging" hx-trigger="load" hx-swap="innerHTML">
       <div class="skeleton h-64 w-full"></div>
     </div>
   </div>
@@ -191,6 +174,8 @@ function VMFswitchTab(tab) {
   var panel = document.getElementById('tab-' + tab);
   if (panel) panel.classList.remove('hidden');
   history.replaceState(null, '', '#' + tab);
+  var cmEl = panel ? panel.querySelector('.CodeMirror') : null;
+  if (cmEl && cmEl.CodeMirror) cmEl.CodeMirror.refresh();
 }
 
 document.querySelectorAll('.sidebar-btn').forEach(function(btn) {
@@ -198,6 +183,7 @@ document.querySelectorAll('.sidebar-btn').forEach(function(btn) {
 });
 
 var initialTab = location.hash.replace('#', '') || 'overview';
+<% if (workspacePath) { %>if (!location.hash) initialTab = 'workspace';<% } %>
 if (!document.getElementById('tab-' + initialTab)) initialTab = 'overview';
 VMFswitchTab(initialTab);
 
@@ -205,4 +191,6 @@ window.addEventListener('hashchange', function() {
   var t = location.hash.replace('#', '') || 'overview';
   if (document.getElementById('tab-' + t)) VMFswitchTab(t);
 });
+
+document.querySelectorAll('#sidebar-status-block ~ .flex.gap-2.mb-6').forEach(function(el) { el.remove(); });
 </script>

@@ -45,11 +45,11 @@ function deleteApiKey(name) {
   save(data);
 }
 
-function addBotToken(name, token) {
+function addBotToken(name, token, platform) {
   const data = load();
   if (data.bot_tokens && data.bot_tokens[name]) throw new Error(`Bot token '${name}' already exists`);
   if (!data.bot_tokens) data.bot_tokens = {};
-  data.bot_tokens[name] = token;
+  data.bot_tokens[name] = { token, platform: platform || 'telegram' };
   save(data);
 }
 
@@ -59,11 +59,11 @@ function deleteBotToken(name) {
   save(data);
 }
 
-function addUserId(name, uid) {
+function addUserId(name, uid, platform) {
   const data = load();
   if (data.user_ids && data.user_ids[name]) throw new Error(`User ID '${name}' already exists`);
   if (!data.user_ids) data.user_ids = {};
-  data.user_ids[name] = uid;
+  data.user_ids[name] = { uid, platform: platform || 'telegram' };
   save(data);
 }
 
@@ -89,7 +89,7 @@ function importFromBotPrefixes() {
       for (const [name, token] of Object.entries(bpData.bots)) {
         if (!data.bot_tokens || !data.bot_tokens[name]) {
           if (!data.bot_tokens) data.bot_tokens = {};
-          data.bot_tokens[name] = token;
+          data.bot_tokens[name] = { token, platform: 'telegram' };
           changed = true;
         }
       }
@@ -98,7 +98,7 @@ function importFromBotPrefixes() {
       for (const [name, uid] of Object.entries(bpData.users)) {
         if (!data.user_ids || !data.user_ids[name]) {
           if (!data.user_ids) data.user_ids = {};
-          data.user_ids[name] = uid;
+          data.user_ids[name] = { uid, platform: 'telegram' };
           changed = true;
         }
       }

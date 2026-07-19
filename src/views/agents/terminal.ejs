@@ -1,1 +1,23 @@
-<div class="border border-slate-800 rounded-xl overflow-hidden bg-[#0f172a]" id="terminal-container" style="height: 72vh; min-height: 520px;" data-agent-name="<%= agent.name %>"></div>
+<div class="terminal-wrapper flex flex-col border border-slate-800 rounded-xl overflow-hidden bg-[#0f172a]" id="terminal-wrapper">
+  <div class="terminal-header flex items-center justify-between px-4 py-2 border-b border-slate-800 bg-slate-900/80 select-none">
+    <div class="flex items-center gap-3">
+      <div class="flex items-center gap-2">
+        <span class="w-2 h-2 rounded-full bg-slate-600" id="term-status-dot"></span>
+        <span class="text-xs text-slate-400 font-medium" id="term-status-text">Disconnected</span>
+      </div>
+      <span class="w-px h-4 bg-slate-700"></span>
+      <span class="text-xs text-slate-300 font-mono"><%= agent.display_name %></span>
+      <span class="w-px h-4 bg-slate-700"></span>
+      <span class="text-xs text-slate-500 font-mono" id="term-dimensions">80x24</span>
+    </div>
+    <div class="flex items-center gap-1.5">
+      <button class="term-btn px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors" id="term-font-dec" title="Decrease font size">A-</button>
+      <span class="text-xs text-slate-600 w-6 text-center" id="term-font-size">14</span>
+      <button class="term-btn px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors" id="term-font-inc" title="Increase font size">A+</button>
+      <span class="w-px h-4 bg-slate-700"></span>
+      <button class="term-btn px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors" id="term-clear" title="Clear terminal">Clear</button>
+      <button class="term-btn px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors" id="term-reconnect" title="Reconnect">Reconnect</button>
+    </div>
+  </div>
+  <div class="flex-1 relative" id="terminal-container" style="height: 70vh; min-height: 480px;" data-agent-name="<%= agent.name %>"></div>
+</div>

@@ -265,8 +265,10 @@ app.post('/vm/create', async (req, res) => {
   const savedApikey = req.body.saved_api_key || '';
 
   const defaultConfig = !!(botToken || savedBot || userId || savedUser || apiKeyValue || savedApikey);
-  const token = botToken || creds.botTokens()[savedBot] || '';
-  const uid = userId || creds.userIDs()[savedUser] || '';
+  const btVal = creds.botTokens()[savedBot];
+  const token = botToken || (typeof btVal === 'string' ? btVal : (btVal || {}).token) || '';
+  const uiVal = creds.userIDs()[savedUser];
+  const uid = userId || (typeof uiVal === 'string' ? uiVal : (uiVal || {}).uid) || '';
 
   if (defaultConfig && !token && !uid && !apiKeyValue && !savedApikey) {
     return res.status(400).render('partials/error', { msg: 'Provide a bot token, user ID, or API key' });
@@ -475,8 +477,14 @@ app.post('/onboard/:name/run', async (req, res) => {
   let apiKeyVal = req.body.api_key_value || '';
   const apiKeyName = req.body.api_key_name || '';
 
-  if (botTokenName && !botToken) botToken = creds.botTokens()[botTokenName] || '';
-  if (userIdName && !userId) userId = creds.userIDs()[userIdName] || '';
+  if (botTokenName && !botToken) {
+    const bt = creds.botTokens()[botTokenName];
+    botToken = typeof bt === 'string' ? bt : (bt || {}).token || '';
+  }
+  if (userIdName && !userId) {
+    const ui = creds.userIDs()[userIdName];
+    userId = typeof ui === 'string' ? ui : (ui || {}).uid || '';
+  }
   if (apiKeyName && !apiKeyVal) {
     const ak = creds.apiKeys()[apiKeyName];
     if (ak) { apiKeyProv = ak.provider; apiKeyVal = ak.key; }
@@ -559,8 +567,8 @@ app.post('/credentials/bot-tokens', (req, res) => {
     return res.status(400).render('partials/error', { msg: 'Name and token are required' });
   }
   try {
-    creds.addBotToken(name, token);
-    res.render('partials/bot_token_row', { name, token, mask_key: creds.maskKey });
+    creds.addBotToken(name, token, 'telegram');
+    res.render('partials/bot_token_row', { name, token, platform: 'telegram', mask_key: creds.maskKey });
   } catch (e) {
     res.status(400).render('partials/error', { msg: e.message });
   }
@@ -578,8 +586,8 @@ app.post('/credentials/user-ids', (req, res) => {
     return res.status(400).render('partials/error', { msg: 'Name and user ID are required' });
   }
   try {
-    creds.addUserId(name, uid);
-    res.render('partials/user_id_row', { name, uid });
+    creds.addUserId(name, uid, 'telegram');
+    res.render('partials/user_id_row', { name, uid, platform: 'telegram' });
   } catch (e) {
     res.status(400).render('partials/error', { msg: e.message });
   }
@@ -594,6 +602,76 @@ app.post('/credentials/import', (req, res) => {
   const changed = creds.importFromBotPrefixes();
   if (!changed) return res.status(204).end();
   res.send('<div class="text-green-400 text-sm">Imported credentials from bot-prefixes.json</div>');
+});
+
+app.get('/api/user-ids', (req, res) => {
+  res.json(creds.userIDs());
+});
+
+app.get('/api/api-keys', (req, res) => {
+  const keys = creds.apiKeys();
+  const masked = {};
+  for (const [name, val] of Object.entries(keys)) {
+    masked[name] = { provider: val.provider, key: creds.maskKey(val.key) };
+  }
+  res.json(masked);
+});
+
+app.post('/api/user-ids', (req, res) => {
+  const { name, uid } = req.body;
+  if (!uid) return res.status(400).json({ error: 'uid required' });
+  const label = (name || '').trim() || 'unnamed';
+  let finalName = label;
+  const existing = creds.userIDs();
+  const storedVal = existing[finalName];
+  const existingUid = storedVal ? (typeof storedVal === 'string' ? storedVal : storedVal.uid) : null;
+  if (!existing[finalName] || existingUid === uid) {
+    try { creds.addUserId(finalName, uid); } catch (e) { /* already exists with same uid, ok */ }
+  } else {
+    let i = 1;
+    while (existing[finalName + '-' + i]) i++;
+    finalName = finalName + '-' + i;
+    try { creds.addUserId(finalName, uid); } catch (e) { /* ignore */ }
+  }
+  res.json({ ok: true, name: finalName, uid });
+});
+
+app.post('/api/providers/add', async (req, res) => {
+  const { agent, provider, api_key, cred_name, name } = req.body;
+  if (!agent || !provider) return res.status(400).json({ error: 'agent and provider required' });
+  try {
+    let keyValue = api_key;
+    let credLabel = (name || cred_name || '').trim() || 'unnamed';
+    if (!keyValue && cred_name) {
+      const allKeys = creds.apiKeys();
+      if (allKeys[cred_name]) {
+        keyValue = allKeys[cred_name].key;
+        credLabel = cred_name;
+      } else {
+        return res.status(400).json({ error: 'Credential not found: ' + cred_name });
+      }
+    }
+    if (!keyValue) return res.status(400).json({ error: 'API key or credential name required' });
+    const { execFile: ef } = require('child_process');
+    await new Promise((resolve, reject) => {
+      ef('docker', ['exec', '-i', agent, 'openclaw', 'models', 'auth', 'paste-api-key', '--provider', provider],
+        { timeout: 30000 }, (err, stdout, stderr) => {
+          if (err) reject(err); else resolve(stdout);
+        });
+    }).catch(() => {});
+    const existing = creds.apiKeys();
+    if (!existing[credLabel] || existing[credLabel].key === keyValue) {
+      try { creds.addApiKey(credLabel, provider, keyValue); } catch (e) { /* exists same key */ }
+    } else {
+      let i = 1;
+      while (existing[credLabel + '-' + i]) i++;
+      credLabel = credLabel + '-' + i;
+      try { creds.addApiKey(credLabel, provider, keyValue); } catch (e) { /* ignore */ }
+    }
+    return res.json({ ok: true, name: credLabel });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ─── Routes: Terminal ───────────────────────────────────────
@@ -643,21 +721,15 @@ wss.on('connection', async (ws, req) => {
   const rows = Math.max(12, Math.min(120, parseInt(url.searchParams.get('rows') || '32', 10) || 32));
   const containers = await dockerPsList(true);
 
-  if (parts[0] !== 'ws' || parts[1] !== 'terminal' || !safeVmName(vmName) || !containers[vmName]) {
+  if (parts[0] !== 'ws' || parts[1] !== 'terminal' || !safeVmName(vmName) || containers[vmName] !== 'running') {
     ws.close();
     return;
   }
 
   const docker = spawn('docker', [
-    'exec',
-    '-e',
-    'TERM=xterm-256color',
-    '-i',
-    vmName,
-    'script',
-    '-qfec',
-    `stty cols ${cols} rows ${rows}; exec bash -i`,
-    '/dev/null',
+    'exec', '-e', 'TERM=xterm-256color', '-i', vmName,
+    'sh', '-c',
+    `if command -v script >/dev/null 2>&1; then exec script -qfec 'stty cols ${cols} rows ${rows}; export COLUMNS=${cols} LINES=${rows}; exec bash -i' /dev/null; else exec env COLUMNS=${cols} LINES=${rows} bash -i; fi`
   ]);
   let closed = false;
 
@@ -695,7 +767,7 @@ wss.on('connection', async (ws, req) => {
         return;
       }
     } catch {}
-    docker.stdin.write(msg);
+    docker.stdin.write(msg.replace(/\r/g, '\n'));
   });
 
   ws.on('close', cleanup);

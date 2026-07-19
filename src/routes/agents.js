@@ -1,7 +1,7 @@
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
-const { execFile } = require('child_process');
+const { execFile, exec } = require('child_process');
 const multer = require('multer');
 const registry = require('../services/agent-registry');
 const workspace = require('../services/workspace');
@@ -74,7 +74,7 @@ router.get('/create', (req, res) => {
 });
 
 router.post('/create', csrfCheck, async (req, res) => {
-  const { agent_name, agent_type, clone_source, password } = req.body;
+  const { agent_name, agent_type, clone_source } = req.body;
   const name = agent_name ? `vm-${agent_name.replace(/^vm-/, '')}` : '';
   if (!name || !registry.VM_NAME_RE.test(name)) {
     return res.status(400).render('partials/error', { message: 'Invalid agent name', code: 400 });
@@ -91,14 +91,12 @@ router.post('/create', csrfCheck, async (req, res) => {
   if (clone_source) args.push('--clone', clone_source);
   else args.push('--fresh');
   if (agent_type) args.push('--agent', agent_type);
-  if (password) args.push('--password', password);
 
   try {
     await vm.createVm(name, {
       agent: agent_type || 'openclaw',
       mode: clone_source ? 'clone' : 'fresh',
       cloneSource: clone_source,
-      password,
     });
     audit(name, 'lifecycle', 'create', 'ok', `Agent created (type=${agent_type || 'openclaw'})`);
     req.session.flash = { type: 'success', message: `Agent ${name} created successfully.` };
@@ -119,61 +117,88 @@ router.get('/:agentId', validateAgent, (req, res) => {
   const flash = req.session.flash || null;
   delete req.session.flash;
   res.locals.fullHeight = true;
-  res.render('agents/detail', { agent, activity, backups, config, flash });
+  res.render('agents/detail', { agent, activity, backups, config, flash, workspacePath: req.query.workspacePath || null });
 });
 
 // ─── Runtime Actions ────────────────────────────────────────────────────────
 
-function renderAgentCard(agent, req, res) {
-  res.render('agents/partials/card', { agent, csrfToken: req.session.csrfToken, layout: false });
+function renderAgentPartial(agent, req, res, extra) {
+  const hxTarget = req.headers['hx-target'];
+  const partial = hxTarget === 'sidebar-status-block' ? 'agents/partials/sidebar_status' : 'agents/partials/card';
+  res.render(partial, { agent, csrfToken: req.session.csrfToken, layout: false, ...extra });
+}
+
+router.get('/:agentId/card', validateAgent, (req, res) => {
+  const expect = req.query.expect;
+  const agent = req.agent;
+  if (expect && agent.status !== expect) {
+    return renderAgentPartial(agent, req, res, { poll: expect });
+  }
+  renderAgentPartial(agent, req, res);
+});
+
+router.get('/:agentId/sidebar-status', validateAgent, (req, res) => {
+  const expect = req.query.expect;
+  const agent = req.agent;
+  if (expect && agent.status !== expect) {
+    return res.render('agents/partials/sidebar_status', { agent, csrfToken: req.session.csrfToken, layout: false, poll: expect });
+  }
+  res.render('agents/partials/sidebar_status', { agent, csrfToken: req.session.csrfToken, layout: false });
+});
+
+function lifecycleCmdBg(action, name, runtimeRef, auditFn) {
+  const run = action === 'start'
+    ? runCmd('docker', ['start', runtimeRef]).catch(() => runCmd('docker', [...COMPOSE_PREFIX, 'up', '-d', runtimeRef]))
+    : runCmd('docker', [action, runtimeRef]);
+  run.then(() => {
+    registry.dockerPsList(true);
+    auditFn(null);
+  }).catch((err) => {
+    registry.dockerPsList(true);
+    auditFn(err);
+  });
 }
 
 router.post('/:agentId/start', validateAgent, csrfCheck, async (req, res) => {
   const isHx = !!req.headers['hx-request'];
-  try {
-    await runCmd('docker', [...COMPOSE_PREFIX, 'up', '-d', req.agent.runtime_ref]);
-    audit(req.agent.name, 'lifecycle', 'start', 'ok', 'Agent started');
-    if (isHx) return renderAgentCard(registry.getAgent(req.agent.name), req, res);
-    req.session.flash = { type: 'success', message: 'Agent started.' };
-    res.redirect(`/agents/${req.agent.name}`);
-  } catch (err) {
-    audit(req.agent.name, 'lifecycle', 'start', 'error', err.message);
-    if (isHx) return renderAgentCard(registry.getAgent(req.agent.name), req, res);
-    req.session.flash = { type: 'error', message: `Failed to start: ${err.message}` };
-    res.redirect(`/agents/${req.agent.name}`);
+  const agentName = req.agent.name;
+  const runtimeRef = req.agent.runtime_ref;
+  lifecycleCmdBg('start', agentName, runtimeRef, (err) => {
+    audit(agentName, 'lifecycle', 'start', err ? 'error' : 'ok', err ? err.message : 'Agent started');
+  });
+  if (isHx) {
+    return renderAgentPartial(registry.getAgent(req.agent.name), req, res, { poll: 'running' });
   }
+  req.session.flash = { type: 'success', message: 'Agent started.' };
+  res.redirect(`/agents/${req.agent.name}`);
 });
 
 router.post('/:agentId/stop', validateAgent, csrfCheck, async (req, res) => {
   const isHx = !!req.headers['hx-request'];
-  try {
-    await runCmd('docker', [...COMPOSE_PREFIX, 'stop', req.agent.runtime_ref]);
-    audit(req.agent.name, 'lifecycle', 'stop', 'ok', 'Agent stopped');
-    if (isHx) return renderAgentCard(registry.getAgent(req.agent.name), req, res);
-    req.session.flash = { type: 'success', message: 'Agent stopped.' };
-    res.redirect(`/agents/${req.agent.name}`);
-  } catch (err) {
-    audit(req.agent.name, 'lifecycle', 'stop', 'error', err.message);
-    if (isHx) return renderAgentCard(registry.getAgent(req.agent.name), req, res);
-    req.session.flash = { type: 'error', message: `Failed to stop: ${err.message}` };
-    res.redirect(`/agents/${req.agent.name}`);
+  const agentName = req.agent.name;
+  const runtimeRef = req.agent.runtime_ref;
+  lifecycleCmdBg('stop', agentName, runtimeRef, (err) => {
+    audit(agentName, 'lifecycle', 'stop', err ? 'error' : 'ok', err ? err.message : 'Agent stopped');
+  });
+  if (isHx) {
+    return renderAgentPartial(registry.getAgent(req.agent.name), req, res, { poll: 'exited' });
   }
+  req.session.flash = { type: 'success', message: 'Agent stopped.' };
+  res.redirect(`/agents/${req.agent.name}`);
 });
 
 router.post('/:agentId/restart', validateAgent, csrfCheck, async (req, res) => {
   const isHx = !!req.headers['hx-request'];
-  try {
-    await runCmd('docker', [...COMPOSE_PREFIX, 'restart', req.agent.runtime_ref]);
-    audit(req.agent.name, 'lifecycle', 'restart', 'ok', 'Agent restarted');
-    if (isHx) return renderAgentCard(registry.getAgent(req.agent.name), req, res);
-    req.session.flash = { type: 'success', message: 'Agent restarted.' };
-    res.redirect(`/agents/${req.agent.name}`);
-  } catch (err) {
-    audit(req.agent.name, 'lifecycle', 'restart', 'error', err.message);
-    if (isHx) return renderAgentCard(registry.getAgent(req.agent.name), req, res);
-    req.session.flash = { type: 'error', message: `Failed to restart: ${err.message}` };
-    res.redirect(`/agents/${req.agent.name}`);
+  const agentName = req.agent.name;
+  const runtimeRef = req.agent.runtime_ref;
+  lifecycleCmdBg('restart', agentName, runtimeRef, (err) => {
+    audit(agentName, 'lifecycle', 'restart', err ? 'error' : 'ok', err ? err.message : 'Agent restarted');
+  });
+  if (isHx) {
+    return renderAgentPartial(registry.getAgent(req.agent.name), req, res, { poll: 'running' });
   }
+  req.session.flash = { type: 'success', message: 'Agent restarted.' };
+  res.redirect(`/agents/${req.agent.name}`);
 });
 
 // ─── Workspace Browser ──────────────────────────────────────────────────────
@@ -233,7 +258,7 @@ router.get('/:agentId/workspace/download', validateAgent, (req, res) => {
   }
 });
 
-router.post('/:agentId/workspace/upload', validateAgent, csrfCheck, upload.single('file'), (req, res) => {
+router.post('/:agentId/workspace/upload', validateAgent, upload.single('file'), csrfCheck, (req, res) => {
   const agent = req.agent;
   const targetDir = req.body.path || '/';
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
@@ -247,7 +272,7 @@ router.post('/:agentId/workspace/upload', validateAgent, csrfCheck, upload.singl
     fs.writeFileSync(destPath, req.file.buffer);
     audit(agent.name, 'workspace', 'upload', 'ok', `Uploaded ${safeName} (${req.file.size} bytes) to ${targetDir}`);
     req.session.flash = { type: 'success', message: `Uploaded ${safeName}` };
-    res.redirect(`/agents/${agent.name}#workspace`);
+    res.redirect(`/agents/${agent.name}?workspacePath=${encodeURIComponent(targetDir)}`);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -260,10 +285,11 @@ router.post('/:agentId/workspace/folder', validateAgent, csrfCheck, (req, res) =
     workspace.createFolder(agent.name, relativePath, folderName);
     audit(agent.name, 'workspace', 'create_folder', 'ok', `Created folder ${folderName}`);
     req.session.flash = { type: 'success', message: `Folder "${folderName}" created.` };
-    res.redirect(`/agents/${agent.name}#workspace`);
+    const parentDir = relativePath || '/';
+    res.redirect(`/agents/${agent.name}?workspacePath=${encodeURIComponent(parentDir)}`);
   } catch (err) {
     req.session.flash = { type: 'error', message: err.message };
-    res.redirect(`/agents/${agent.name}#workspace`);
+    res.redirect(`/agents/${agent.name}?workspacePath=${encodeURIComponent(relativePath || '/')}`);
   }
 });
 
@@ -274,10 +300,11 @@ router.post('/:agentId/workspace/rename', validateAgent, csrfCheck, (req, res) =
     workspace.renameEntry(agent.name, relativePath, new_name);
     audit(agent.name, 'workspace', 'rename', 'ok', `Renamed to ${new_name}`);
     req.session.flash = { type: 'success', message: `Renamed to "${new_name}".` };
-    res.redirect(`/agents/${agent.name}#workspace`);
+    const parentDir = path.dirname(relativePath) || '/';
+    res.redirect(`/agents/${agent.name}?workspacePath=${encodeURIComponent(parentDir)}`);
   } catch (err) {
     req.session.flash = { type: 'error', message: err.message };
-    res.redirect(`/agents/${agent.name}#workspace`);
+    res.redirect(`/agents/${agent.name}?workspacePath=${encodeURIComponent(path.dirname(relativePath || '/'))}`);
   }
 });
 
@@ -288,10 +315,11 @@ router.post('/:agentId/workspace/delete', validateAgent, csrfCheck, (req, res) =
     workspace.deleteEntry(agent.name, relativePath);
     audit(agent.name, 'workspace', 'delete', 'ok', `Deleted ${relativePath}`);
     req.session.flash = { type: 'success', message: `Deleted "${path.basename(relativePath)}".` };
-    res.redirect(`/agents/${agent.name}#workspace`);
+    const parentDir = path.dirname(relativePath) || '/';
+    res.redirect(`/agents/${agent.name}?workspacePath=${encodeURIComponent(parentDir)}`);
   } catch (err) {
     req.session.flash = { type: 'error', message: err.message };
-    res.redirect(`/agents/${agent.name}#workspace`);
+    res.redirect(`/agents/${agent.name}?workspacePath=${encodeURIComponent(path.dirname(relativePath || '/'))}`);
   }
 });
 
@@ -302,10 +330,11 @@ router.post('/:agentId/workspace/move', validateAgent, csrfCheck, (req, res) => 
     workspace.moveEntry(agent.name, fromPath, to_dir);
     audit(agent.name, 'workspace', 'move', 'ok', `Moved ${fromPath} to ${to_dir}`);
     req.session.flash = { type: 'success', message: 'File moved.' };
-    res.redirect(`/agents/${agent.name}#workspace`);
+    const parentDir = path.dirname(fromPath) || '/';
+    res.redirect(`/agents/${agent.name}?workspacePath=${encodeURIComponent(parentDir)}`);
   } catch (err) {
     req.session.flash = { type: 'error', message: err.message };
-    res.redirect(`/agents/${agent.name}#workspace`);
+    res.redirect(`/agents/${agent.name}?workspacePath=${encodeURIComponent(path.dirname(fromPath || '/'))}`);
   }
 });
 
@@ -327,7 +356,7 @@ router.post('/:agentId/workspace/create-file', validateAgent, csrfCheck, (req, r
   const { path: relativePath, name: fileName } = req.body;
   if (!fileName) {
     req.session.flash = { type: 'error', message: 'File name required.' };
-    return res.redirect(`/agents/${agent.name}#workspace`);
+    return res.redirect(`/agents/${agent.name}?workspacePath=${encodeURIComponent(relativePath || '/')}`);
   }
   try {
     const dir = relativePath || '/';
@@ -335,10 +364,10 @@ router.post('/:agentId/workspace/create-file', validateAgent, csrfCheck, (req, r
     workspace.writeFile(agent.name, filePath, '');
     audit(agent.name, 'workspace', 'create_file', 'ok', `Created file ${fileName}`);
     req.session.flash = { type: 'success', message: `File "${fileName}" created.` };
-    res.redirect(`/agents/${agent.name}#workspace`);
+    res.redirect(`/agents/${agent.name}?workspacePath=${encodeURIComponent(dir)}`);
   } catch (err) {
     req.session.flash = { type: 'error', message: err.message };
-    res.redirect(`/agents/${agent.name}#workspace`);
+    res.redirect(`/agents/${agent.name}?workspacePath=${encodeURIComponent(dir)}`);
   }
 });
 
@@ -364,11 +393,83 @@ router.get('/:agentId/logs', validateAgent, async (req, res) => {
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
+function readRawAgentConfig(agent) {
+  const configPath = path.join(agent.config_root, 'openclaw.json');
+  if (!fs.existsSync(configPath)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function preserveSecrets(oldConfig, newConfig) {
+  if (!oldConfig || !newConfig) return newConfig;
+  const result = JSON.parse(JSON.stringify(newConfig));
+  // Preserve redacted api_keys
+  if (oldConfig.api_keys && result.api_keys === '[REDACTED]') {
+    result.api_keys = oldConfig.api_keys;
+  }
+  // Preserve redacted telegram botToken
+  if (oldConfig.channels?.telegram?.botToken && result.channels?.telegram?.botToken === '[REDACTED]') {
+    result.channels.telegram.botToken = oldConfig.channels.telegram.botToken;
+  }
+  // Preserve redacted plugin keys
+  if (oldConfig.plugins && result.plugins) {
+    for (const key of Object.keys(result.plugins)) {
+      if (result.plugins[key]?.key === '[REDACTED]' && oldConfig.plugins[key]?.key) {
+        result.plugins[key].key = oldConfig.plugins[key].key;
+      }
+    }
+  }
+  return result;
+}
+
 router.get('/:agentId/config', validateAgent, (req, res) => {
   const agent = req.agent;
   const config = readAgentConfig(agent);
   if (req.query.raw === '1') return res.json(config);
-  res.render('agents/config', { agent, config });
+  const configRaw = readRawAgentConfig(agent);
+  const configRawStr = configRaw ? JSON.stringify(configRaw, null, 2) : '';
+  res.render('agents/config', { agent, config, configRaw: configRawStr });
+});
+
+router.get('/:agentId/messaging', validateAgent, (req, res) => {
+  const agent = req.agent;
+  const config = readAgentConfig(agent);
+  const configRaw = readRawAgentConfig(agent);
+  const configRawStr = configRaw ? JSON.stringify(configRaw, null, 2) : '';
+  res.render('agents/messaging', { agent, config, configRaw: configRawStr });
+});
+
+router.get('/:agentId/models', validateAgent, (req, res) => {
+  const agent = req.agent;
+  const config = readAgentConfig(agent);
+  const configRaw = readRawAgentConfig(agent);
+  const configRawStr = configRaw ? JSON.stringify(configRaw, null, 2) : '';
+  res.render('agents/models', { agent, config, configRaw: configRawStr });
+});
+
+router.post('/:agentId/config', validateAgent, csrfCheck, (req, res) => {
+  const agent = req.agent;
+  const { config: configStr } = req.body;
+  if (!configStr) return res.status(400).json({ error: 'config required' });
+  let newConfig;
+  try {
+    newConfig = JSON.parse(configStr);
+  } catch (e) {
+    return res.status(400).json({ error: 'Invalid JSON: ' + e.message });
+  }
+  const configPath = path.join(agent.config_root, 'openclaw.json');
+  const oldConfig = readRawAgentConfig(agent);
+  const merged = preserveSecrets(oldConfig, newConfig);
+  try {
+    fs.writeFileSync(configPath, JSON.stringify(merged, null, 2) + '\n');
+    audit(agent.name, 'config', 'update', 'ok', 'Updated openclaw.json');
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ─── Activity ───────────────────────────────────────────────────────────────
@@ -455,7 +556,7 @@ function readAgentConfig(agent) {
     const raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));
     const redacted = JSON.parse(JSON.stringify(raw));
     if (redacted.api_keys) redacted.api_keys = '[REDACTED]';
-    if (redacted.telegram?.bot_token) redacted.telegram.bot_token = '[REDACTED]';
+    if (redacted.channels?.telegram?.botToken) redacted.channels.telegram.botToken = '[REDACTED]';
     if (redacted.plugins) {
       for (const key of Object.keys(redacted.plugins)) {
         if (redacted.plugins[key]?.key) redacted.plugins[key].key = '[REDACTED]';
@@ -480,8 +581,8 @@ function getBackups(vmName) {
 
 function dockerLogs(vmName, tail = 100) {
   return new Promise((resolve) => {
-    execFile('docker', ['logs', '--tail', String(tail), vmName], { timeout: 10000 }, (err, stdout, stderr) => {
-      resolve((stdout || '') + (stderr || ''));
+    exec(`docker logs --tail ${tail} ${vmName} 2>&1`, { timeout: 10000 }, (err, stdout) => {
+      resolve(stdout || '');
     });
   });
 }

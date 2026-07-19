@@ -1,4 +1,13 @@
-<div class="card border border-slate-800 rounded-xl p-5 hover:border-slate-600 transition-all agent-card group" data-name="<%= agent.name %>" data-display="<%= agent.display_name.toLowerCase() %>">
+<% const isPolling = typeof poll !== 'undefined' && poll; %>
+<div class="card border border-slate-800 rounded-xl p-5 hover:border-slate-600 transition-all agent-card group"
+     data-name="<%= agent.name %>"
+     data-display="<%= agent.display_name.toLowerCase() %>"
+     <% if (isPolling) { %>
+     hx-get="/agents/<%= agent.name %>/card?expect=<%= poll %>"
+     hx-trigger="every 2s"
+      hx-swap="outerHTML"
+      hx-target="this"
+      <% } %>>
   <div class="flex items-start justify-between mb-3">
     <div class="flex items-center gap-3 flex-1 min-w-0">
       <div class="w-10 h-10 rounded-lg bg-slate-800 flex items-center justify-center text-lg font-bold text-cyan-400 flex-shrink-0">
@@ -9,12 +18,19 @@
         <p class="text-xs text-slate-500 truncate"><%= agent.name %></p>
       </div>
     </div>
+    <% if (isPolling) { %>
+      <span class="px-2 py-0.5 rounded-full text-xs font-medium flex-shrink-0 ml-3 bg-cyan-900/50 text-cyan-400 border border-cyan-800 flex items-center gap-1.5">
+        <span class="w-2 h-2 rounded-full bg-cyan-400 animate-pulse"></span>
+        <%= poll === 'running' ? 'starting' : 'stopping' %>
+      </span>
+    <% } else { %>
     <span class="px-2 py-0.5 rounded-full text-xs font-medium flex-shrink-0 ml-3
       <%= agent.status === 'running' ? 'bg-emerald-900/50 text-emerald-400 border border-emerald-800' :
           agent.status === 'exited' ? 'bg-red-900/50 text-red-400 border border-red-800' :
           'bg-slate-800 text-slate-400 border border-slate-700' %>">
       <%= agent.status %>
     </span>
+    <% } %>
   </div>
   <div class="text-xs text-slate-500 space-y-1 mb-4">
     <div class="flex justify-between">
@@ -32,7 +48,11 @@
   <div class="flex items-center justify-between pt-3 border-t border-slate-800">
     <a href="/agents/<%= agent.name %>" class="text-xs font-medium text-slate-400 hover:text-cyan-400 transition-colors">Details &rarr;</a>
     <div class="flex items-center gap-1">
-      <% if (agent.status === 'running') { %>
+      <% if (isPolling) { %>
+        <span class="p-2 text-slate-600">
+          <svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+        </span>
+      <% } else if (agent.status === 'running') { %>
         <button hx-post="/agents/<%= agent.name %>/stop"
                 hx-target="closest .agent-card"
                 hx-swap="outerHTML"
@@ -64,4 +84,5 @@
       <% } %>
     </div>
   </div>
+<% if (isPolling) { %><script>(function(){var s=document.currentScript,p=s.parentNode;setTimeout(function(){p.removeAttribute('hx-get');p.removeAttribute('hx-trigger');},30000)})()</script><% } %>
 </div>

@@ -1,0 +1,539 @@
+<% if (config) { %>
+<textarea id="models-config-data" class="hidden"><%= configRaw %></textarea>
+<div class="space-y-4">
+  <!-- Primary Model -->
+  <div class="border border-slate-800 rounded-xl overflow-hidden">
+    <div class="flex items-center justify-between px-4 py-2 border-b border-slate-800 bg-slate-800/30">
+      <div class="flex items-center gap-2">
+        <svg class="w-4 h-4 text-violet-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+        <span class="text-sm text-slate-300 font-medium">Models</span>
+      </div>
+      <div class="flex items-center gap-2">
+        <span id="models-status" class="text-xs text-slate-500"></span>
+        <button id="models-save" onclick="saveModelsConfig()" disabled class="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded text-sm transition-colors disabled:opacity-40 disabled:cursor-not-allowed">Save</button>
+      </div>
+    </div>
+    <div class="p-4 space-y-4">
+      <div>
+        <label class="block text-xs font-medium text-slate-400 mb-1">Primary Model</label>
+        <input type="text" id="models-primary"
+          class="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white text-sm font-mono focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+          placeholder="ollama-cloud/gemma4:31b">
+        <p class="text-xs text-slate-500 mt-1">Format: <span class="font-mono text-slate-400">provider/model</span> (e.g. <span class="font-mono text-slate-400">openai/gpt-5.5</span>)</p>
+      </div>
+      <div>
+        <label class="block text-xs font-medium text-slate-400 mb-1">Fallback Model (optional)</label>
+        <input type="text" id="models-fallback"
+          class="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white text-sm font-mono focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+          placeholder="openai/gpt-5.5">
+      </div>
+    </div>
+  </div>
+
+  <!-- Providers -->
+  <div id="models-providers-container" class="space-y-4"></div>
+
+  <!-- Add Provider -->
+  <div class="border border-slate-800 rounded-xl overflow-hidden">
+    <div class="px-4 py-2 border-b border-slate-800 bg-slate-800/30">
+      <span class="text-sm text-slate-300 font-medium">Add Provider</span>
+    </div>
+    <div class="p-4 space-y-4">
+      <!-- Auth Type -->
+      <div>
+        <label class="block text-xs font-medium text-slate-400 mb-1">Authentication Type</label>
+        <select id="provider-auth-type"
+          class="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white text-sm focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500">
+          <option value="api-key">API Key — paste key non-interactively</option>
+          <option value="oauth">OAuth / Device Code — requires terminal</option>
+        </select>
+      </div>
+
+      <!-- Provider (API Key) -->
+      <div id="provider-api-section">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1">Provider</label>
+            <select id="provider-api-name"
+              class="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white text-sm focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500">
+              <option value="openrouter">OpenRouter</option>
+              <option value="ollama-cloud">Ollama Cloud</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="google">Google</option>
+              <option value="mistral">Mistral</option>
+              <option value="xai">xAI</option>
+              <option value="together">Together</option>
+              <option value="huggingface">HuggingFace</option>
+              <option value="voyage">Voyage</option>
+              <option value="cohere">Cohere</option>
+              <option value="nvidia">NVIDIA</option>
+              <option value="novita">Novita</option>
+              <option value="lmstudio">LM Studio</option>
+              <option value="litellm">LiteLLM</option>
+              <option value="vllm">vLLM</option>
+              <option value="sglang">SGLang</option>
+              <option value="custom">Custom provider...</option>
+            </select>
+          </div>
+          <div id="provider-api-custom-wrap" class="hidden">
+            <label class="block text-xs font-medium text-slate-400 mb-1">Custom Provider ID</label>
+            <input type="text" id="provider-api-custom"
+              class="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white text-sm font-mono focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+              placeholder="my-provider">
+          </div>
+        </div>
+        <div class="mt-4">
+          <label class="block text-xs font-medium text-slate-400 mb-1">API Key</label>
+          <div class="flex items-center gap-2">
+            <select id="provider-api-cred-select"
+              class="flex-1 px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white text-sm focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500">
+              <option value="__custom__">Enter custom key...</option>
+            </select>
+            <button type="button" id="provider-api-cred-refresh" onclick="loadSavedKeys()" class="px-2 py-2 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg transition-colors" title="Refresh credentials">
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+            </button>
+          </div>
+        </div>
+        <div id="provider-api-custom-key-wrap" class="mt-4 hidden">
+          <label class="block text-xs font-medium text-slate-400 mb-1">API Key Value</label>
+          <input type="password" id="provider-api-key"
+            class="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white text-sm font-mono focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+            placeholder="sk-...">
+        </div>
+        <div id="provider-api-cred-name-wrap" class="mt-4 hidden">
+          <label class="block text-xs font-medium text-slate-400 mb-1">Save as (credentials)</label>
+          <input type="text" id="provider-api-cred-name"
+            class="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white text-sm focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+            placeholder="unnamed">
+          <p class="text-xs text-slate-500 mt-1">Name for this key in the credential store. Defaults to "unnamed".</p>
+        </div>
+        <div class="mt-4 flex items-center gap-3">
+          <button id="provider-api-add-btn" onclick="addApiKeyProvider()" class="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-sm font-medium transition-colors">Add Provider</button>
+          <span id="provider-api-status" class="text-xs text-slate-500"></span>
+        </div>
+        <div id="provider-api-picker" class="hidden mt-4 border-t border-slate-700 pt-4">
+          <label class="block text-xs font-medium text-slate-400 mb-2">Select a model to use</label>
+          <div id="provider-api-picker-list" class="space-y-2"></div>
+        </div>
+      </div>
+
+      <!-- Provider (OAuth) -->
+      <div id="provider-oauth-section" class="hidden">
+        <div>
+          <label class="block text-xs font-medium text-slate-400 mb-1">Provider</label>
+          <select id="provider-oauth-name"
+            class="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white text-sm focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500">
+            <option value="openai">OpenAI</option>
+            <option value="github-copilot">GitHub Copilot</option>
+          </select>
+        </div>
+        <p class="text-xs text-slate-500 mt-3">This will open an interactive terminal inside the container. Follow the prompts to authenticate.</p>
+        <div class="mt-3 flex items-center gap-3">
+          <button onclick="startOAuthTerminal()" class="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-sm font-medium transition-colors">Open Terminal</button>
+          <span id="provider-oauth-status" class="text-xs text-slate-500"></span>
+        </div>
+        <div id="provider-oauth-terminal-wrap" class="mt-4 hidden">
+          <div id="provider-oauth-terminal" data-agent-name="<%= agent.name %>"
+            class="border border-slate-700 rounded-lg bg-[#0f172a] overflow-hidden"
+            style="height: 400px;"></div>
+          <div class="mt-3">
+            <button onclick="refreshOAuthModels()" class="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white text-xs rounded transition-colors">Refresh Available Models</button>
+            <span id="provider-oauth-refresh-status" class="text-xs text-slate-500 ml-2"></span>
+          </div>
+        </div>
+        <div id="provider-oauth-picker" class="hidden mt-4 border-t border-slate-700 pt-4">
+          <label class="block text-xs font-medium text-slate-400 mb-2">Select a model to use</label>
+          <div id="provider-oauth-picker-list" class="space-y-2"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  var primaryEl = document.getElementById('models-primary');
+  var fallbackEl = document.getElementById('models-fallback');
+  var saveBtn = document.getElementById('models-save');
+  var status = document.getElementById('models-status');
+  var container = document.getElementById('models-providers-container');
+  var originalSnapshot = null;
+  var authTypeEl = document.getElementById('provider-auth-type');
+  var apiSection = document.getElementById('provider-api-section');
+  var oauthSection = document.getElementById('provider-oauth-section');
+  var apiProviderEl = document.getElementById('provider-api-name');
+  var apiCustomWrap = document.getElementById('provider-api-custom-wrap');
+  var oauthWs = null;
+
+  function getConfig() {
+    var el = document.getElementById('models-config-data');
+    if (!el) return null;
+    try { return JSON.parse(el.value); } catch (e) { return null; }
+  }
+
+  function setConfig(obj) {
+    var el = document.getElementById('models-config-data');
+    if (el) el.value = JSON.stringify(obj, null, 2);
+  }
+
+  function snapshot() {
+    return document.getElementById('models-config-data').value;
+  }
+
+  function loadFields() {
+    var cfg = getConfig();
+    if (!cfg) return;
+    var model = (cfg.agents && cfg.agents.defaults && cfg.agents.defaults.model) || {};
+    primaryEl.value = model.primary || '';
+    fallbackEl.value = model.fallback || '';
+    renderProviders();
+  }
+
+  function loadSavedKeys() {
+    var select = document.getElementById('provider-api-cred-select');
+    if (!select) return;
+    var currentVal = select.value;
+    select.innerHTML = '<option value="__custom__">Enter custom key...</option>';
+    fetch('/api/api-keys')
+      .then(function(r) { return r.json(); })
+      .then(function(keys) {
+        for (var name in keys) {
+          (function(name, info) {
+            var opt = document.createElement('option');
+            opt.value = name;
+            opt.textContent = name + ' (' + info.provider + ' ' + info.key + ')';
+            select.appendChild(opt);
+          })(name, keys[name]);
+        }
+        if (currentVal && currentVal !== '__custom__' && select.querySelector('option[value="' + currentVal + '"]')) {
+          select.value = currentVal;
+        } else {
+          select.value = '__custom__';
+        }
+        toggleCustomInput();
+      })
+      .catch(function() {});
+  }
+
+  function toggleCustomInput() {
+    var select = document.getElementById('provider-api-cred-select');
+    var customKeyWrap = document.getElementById('provider-api-custom-key-wrap');
+    var credNameWrap = document.getElementById('provider-api-cred-name-wrap');
+    var isCustom = select.value === '__custom__';
+    customKeyWrap.classList.toggle('hidden', !isCustom);
+    credNameWrap.classList.toggle('hidden', !isCustom);
+    if (!isCustom) {
+      document.getElementById('provider-api-key').value = '';
+      document.getElementById('provider-api-cred-name').value = select.value;
+    } else {
+      document.getElementById('provider-api-cred-name').value = '';
+    }
+  }
+
+  function renderProviders() {
+    var cfg = getConfig();
+    var providers = (cfg && cfg.models && cfg.models.providers) || {};
+    container.innerHTML = '';
+    for (var name in providers) {
+      var p = providers[name];
+      var card = document.createElement('div');
+      card.className = 'border border-slate-800 rounded-xl overflow-hidden';
+      var models = p.models || [];
+      var modelRows = models.map(function(m) {
+        var inputTypes = (m.input || []).join(', ');
+        return '<tr class="border-b border-slate-800/50">'
+          + '<td class="py-2 pr-4 font-mono text-xs text-white">' + m.id + '</td>'
+          + '<td class="py-2 pr-4 text-xs text-slate-400">' + (m.name || m.id) + '</td>'
+          + '<td class="py-2 pr-4 text-xs text-slate-500">' + inputTypes + '</td>'
+          + '<td class="py-2 text-xs text-slate-500">' + (m.contextWindow || '—') + '</td>'
+          + '</tr>';
+      }).join('');
+
+      card.innerHTML = ''
+        + '<div class="flex items-center px-4 py-2 border-b border-slate-800 bg-slate-800/30">'
+        + '  <span class="text-sm text-slate-300 font-medium">' + name + '</span>'
+        + '  <span class="text-xs text-slate-500 ml-2">' + models.length + ' model' + (models.length !== 1 ? 's' : '') + '</span>'
+        + '</div>'
+        + (models.length
+          ? '<div class="overflow-x-auto"><table class="w-full text-xs"><thead><tr class="text-slate-500 border-b border-slate-700">'
+            + '<th class="text-left py-2 pr-4 font-medium">ID</th>'
+            + '<th class="text-left py-2 pr-4 font-medium">Name</th>'
+            + '<th class="text-left py-2 pr-4 font-medium">Input</th>'
+            + '<th class="text-left py-2 font-medium">Context</th>'
+            + '</tr></thead><tbody>' + modelRows + '</tbody></table></div>'
+          : '<div class="p-4 text-xs text-slate-500">No models configured</div>');
+      container.appendChild(card);
+    }
+    if (!Object.keys(providers).length) {
+      container.innerHTML = '<div class="border border-slate-800 rounded-xl p-4 text-xs text-slate-500">No providers configured yet. Add one below.</div>';
+    }
+  }
+
+  function showModelPicker(pickerId, listId, providerName) {
+    var pickerWrap = document.getElementById(pickerId);
+    var pickerList = document.getElementById(listId);
+    if (!pickerWrap || !pickerList) return;
+    fetch('/agents/<%= agent.name %>/config')
+      .then(function(r) { return r.json(); })
+      .then(function(result) {
+        if (!result.config) return;
+        var el = document.getElementById('models-config-data');
+        if (el) el.value = JSON.stringify(result.config, null, 2);
+        renderProviders();
+        var providers = (result.config.models && result.config.models.providers) || {};
+        var provider = providers[providerName];
+        var models = (provider && provider.models) || [];
+        pickerList.innerHTML = '';
+        if (!models.length) {
+          pickerList.innerHTML = '<p class="text-xs text-slate-500">No models found for ' + providerName + ' yet. Restart the agent and try again.</p>';
+          pickerWrap.classList.remove('hidden');
+          return;
+        }
+        models.forEach(function(m) {
+          var row = document.createElement('div');
+          row.className = 'flex items-center justify-between bg-slate-950 border border-slate-800 rounded-lg px-3 py-2';
+          row.innerHTML = '<div class="flex-1 min-w-0">'
+            + '<span class="font-mono text-xs text-white">' + m.id + '</span>'
+            + '<span class="text-xs text-slate-500 ml-2">' + (m.name || m.id) + '</span>'
+            + '</div>'
+            + '<div class="flex items-center gap-2 ml-3">'
+            + '<button class="set-primary px-2 py-1 bg-emerald-600 hover:bg-emerald-500 text-white text-xs rounded transition-colors">Set Primary</button>'
+            + '<button class="set-fallback px-2 py-1 bg-slate-700 hover:bg-slate-600 text-white text-xs rounded transition-colors">Set Fallback</button>'
+            + '</div>';
+          row.querySelector('.set-primary').addEventListener('click', function() {
+            primaryEl.value = providerName + '/' + m.id;
+            onFieldChange();
+            pickerWrap.classList.add('hidden');
+            VMF.toast('Primary set to ' + providerName + '/' + m.id, 'success');
+          });
+          row.querySelector('.set-fallback').addEventListener('click', function() {
+            fallbackEl.value = providerName + '/' + m.id;
+            onFieldChange();
+            pickerWrap.classList.add('hidden');
+            VMF.toast('Fallback set to ' + providerName + '/' + m.id, 'success');
+          });
+          pickerList.appendChild(row);
+        });
+        pickerWrap.classList.remove('hidden');
+      })
+      .catch(function() {});
+  }
+
+  // ── Auth type toggle ───────────────────────────────────────────────────
+  authTypeEl.addEventListener('change', function() {
+    apiSection.classList.toggle('hidden', authTypeEl.value !== 'api-key');
+    oauthSection.classList.toggle('hidden', authTypeEl.value !== 'oauth');
+    if (authTypeEl.value !== 'oauth' && oauthWs) {
+      try { oauthWs.close(); } catch(e) {}
+      oauthWs = null;
+      document.getElementById('provider-oauth-terminal-wrap').classList.add('hidden');
+      document.getElementById('provider-oauth-status').textContent = '';
+    }
+  });
+
+  apiProviderEl.addEventListener('change', function() {
+    apiCustomWrap.classList.toggle('hidden', apiProviderEl.value !== 'custom');
+  });
+
+  document.getElementById('provider-api-cred-select').addEventListener('change', toggleCustomInput);
+
+  // ── Add API key provider ───────────────────────────────────────────────
+  window.addApiKeyProvider = function() {
+    var provider = apiProviderEl.value === 'custom'
+      ? document.getElementById('provider-api-custom').value.trim()
+      : apiProviderEl.value;
+    var apiKey = document.getElementById('provider-api-key').value.trim();
+    var credSelect = document.getElementById('provider-api-cred-select');
+    var selectedSavedKey = credSelect.value !== '__custom__' ? credSelect.value : null;
+    var credName = document.getElementById('provider-api-cred-name').value.trim() || 'unnamed';
+    var btn = document.getElementById('provider-api-add-btn');
+    var st = document.getElementById('provider-api-status');
+
+    if (!provider) { VMF.toast('Select a provider', 'error'); return; }
+    if (!apiKey && !selectedSavedKey) { VMF.toast('Enter an API key or select a saved one', 'error'); return; }
+
+    btn.textContent = 'Adding...';
+    btn.disabled = true;
+    st.textContent = 'Running paste-api-key...';
+    st.className = 'text-xs text-amber-400';
+
+    var body = { agent: '<%= agent.name %>', provider: provider, name: credName };
+    if (selectedSavedKey && !apiKey) {
+      body.cred_name = selectedSavedKey;
+    } else {
+      body.api_key = apiKey;
+    }
+
+    fetch('/api/providers/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(result) {
+      if (result.error) {
+        VMF.toast('Error: ' + result.error, 'error');
+        st.textContent = 'Failed';
+        st.className = 'text-xs text-red-400';
+      } else {
+        st.textContent = 'Added as ' + (result.name || credName);
+        st.className = 'text-xs text-emerald-400';
+        VMF.toast('Provider ' + provider + ' added.', 'success');
+        document.getElementById('provider-api-key').value = '';
+        document.getElementById('provider-api-cred-name').value = '';
+        credSelect.value = '__custom__';
+        toggleCustomInput();
+        showModelPicker('provider-api-picker', 'provider-api-picker-list', provider);
+      }
+      btn.textContent = 'Add Provider';
+      btn.disabled = false;
+    })
+    .catch(function(err) {
+      VMF.toast('Failed: ' + err.message, 'error');
+      btn.textContent = 'Add Provider';
+      btn.disabled = false;
+      st.textContent = '';
+    });
+  };
+
+  // ── OAuth terminal ─────────────────────────────────────────────────────
+  window.refreshOAuthModels = function() {
+    var provider = document.getElementById('provider-oauth-name').value;
+    var st = document.getElementById('provider-oauth-refresh-status');
+    st.textContent = 'Refreshing...';
+    st.className = 'text-xs text-amber-400 ml-2';
+    showModelPicker('provider-oauth-picker', 'provider-oauth-picker-list', provider);
+    setTimeout(function() { st.textContent = ''; }, 2000);
+  };
+
+  window.startOAuthTerminal = function() {
+    var provider = document.getElementById('provider-oauth-name').value;
+    var wrap = document.getElementById('provider-oauth-terminal-wrap');
+    var termEl = document.getElementById('provider-oauth-terminal');
+    var st = document.getElementById('provider-oauth-status');
+
+    if (!window.Terminal || !window.FitAddon) {
+      st.textContent = 'xterm.js not loaded. Reload the page.';
+      st.className = 'text-xs text-red-400';
+      return;
+    }
+
+    if (oauthWs) { try { oauthWs.close(); } catch(e){} oauthWs = null; }
+    termEl.innerHTML = '';
+    wrap.classList.remove('hidden');
+    st.textContent = 'Connecting...';
+    st.className = 'text-xs text-amber-400';
+
+    var term = new window.Terminal({ theme: { background: '#0f172a', foreground: '#e2e8f0' }, fontSize: 13, fontFamily: 'monospace', cursorBlink: true, scrollback: 5000 });
+    var fitAddon = new window.FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(termEl);
+
+    setTimeout(function() {
+      fitAddon.fit();
+      var protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      var cols = term.cols;
+      var rows = term.rows;
+      var wsUrl = protocol + '//' + location.host + '/ws/terminal/<%= agent.name %>?cols=' + cols + '&rows=' + rows;
+      var ws = new WebSocket(wsUrl);
+      oauthWs = ws;
+
+      ws.onerror = function(e) {
+        st.textContent = 'WebSocket error';
+        st.className = 'text-xs text-red-400';
+      };
+
+      ws.onopen = function() {
+        st.textContent = 'Connected. Starting auth...';
+        st.className = 'text-xs text-amber-400';
+        setTimeout(function() {
+          ws.send('openclaw models auth login --provider ' + provider + ' --force --device-code\n');
+          st.textContent = 'Follow prompts in the terminal below';
+          st.className = 'text-xs text-emerald-400';
+        }, 3000);
+      };
+      ws.onmessage = function(evt) { term.write(evt.data); };
+      ws.onclose = function() {
+        st.textContent = 'Terminal disconnected';
+        st.className = 'text-xs text-slate-500';
+      };
+
+      term.onData(function(data) { if (ws.readyState === WebSocket.OPEN) ws.send(data); });
+      term.onResize(function(size) {
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'resize', cols: size.cols, rows: size.rows }));
+      });
+    }, 200);
+  };
+
+  // ── Model field change handlers ────────────────────────────────────────
+  function onFieldChange() {
+    var cfg = getConfig();
+    if (!cfg) return;
+    if (!cfg.agents) cfg.agents = {};
+    if (!cfg.agents.defaults) cfg.agents.defaults = {};
+    if (!cfg.agents.defaults.model) cfg.agents.defaults.model = {};
+    cfg.agents.defaults.model.primary = primaryEl.value;
+    if (fallbackEl.value) cfg.agents.defaults.model.fallback = fallbackEl.value;
+    else delete cfg.agents.defaults.model.fallback;
+    setConfig(cfg);
+    markDirty();
+  }
+
+  primaryEl.addEventListener('input', onFieldChange);
+  fallbackEl.addEventListener('input', onFieldChange);
+
+  // ── Dirty tracking ─────────────────────────────────────────────────────
+  function markDirty() {
+    var dirty = snapshot() !== originalSnapshot;
+    saveBtn.disabled = !dirty;
+    status.textContent = dirty ? 'Unsaved changes' : '';
+    status.className = 'text-xs ' + (dirty ? 'text-amber-400' : 'text-slate-500');
+  }
+
+  // ── Save ───────────────────────────────────────────────────────────────
+  window.saveModelsConfig = function() {
+    var configStr = document.getElementById('models-config-data').value;
+    try { JSON.parse(configStr); } catch (e) {
+      VMF.toast('Invalid JSON: ' + e.message, 'error');
+      return;
+    }
+    saveBtn.textContent = 'Saving...';
+    saveBtn.disabled = true;
+    fetch('/agents/<%= agent.name %>/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ config: configStr, _csrf: '<%= csrfToken %>' })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(result) {
+      if (result.error) {
+        VMF.toast('Error: ' + result.error, 'error');
+        saveBtn.textContent = 'Save';
+        saveBtn.disabled = false;
+        return;
+      }
+      originalSnapshot = snapshot();
+      saveBtn.disabled = true;
+      status.textContent = 'Saved';
+      status.className = 'text-xs text-emerald-400';
+      saveBtn.textContent = 'Save';
+      VMF.toast('Config saved. Restart the agent to apply.', 'success');
+    })
+    .catch(function(err) {
+      VMF.toast('Failed to save: ' + err.message, 'error');
+      saveBtn.textContent = 'Save';
+      saveBtn.disabled = false;
+    });
+  };
+
+  // ── Init ───────────────────────────────────────────────────────────────
+  setTimeout(function() {
+    loadFields();
+    loadSavedKeys();
+    originalSnapshot = snapshot();
+  }, 0);
+})();
+</script>
+<% } else { %>
+<p class="text-slate-500 text-sm">No configuration found for this agent.</p>
+<% } %>
