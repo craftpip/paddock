@@ -96,7 +96,7 @@ function loadEnv() {
 let dockerCache = { ts: 0, data: {} };
 
 function runCmd(cmd, args, options = {}) {
-  const { timeout = 120, check = false, input } = options;
+  const { timeout = 30000, check = false, input } = options;
   return new Promise((resolve, reject) => {
     const child = execFile(cmd, args || [], { timeout, input }, (err, stdout, stderr) => {
       if (err) {
@@ -682,7 +682,30 @@ app.post('/api/config/backup/:agent', (req, res) => {
   }
 });
 
-app.post('/api/config/restore/:agent', (req, res) => {
+async function populateProviderModels(agent, provider, config) {
+  try {
+    const r = await runCmd('docker', ['exec', agent, 'openclaw', 'models', 'list', '--all', '--json']);
+    const catalog = JSON.parse(r.stdout);
+    if (catalog.models && Array.isArray(catalog.models)) {
+      const prefix = provider + '/';
+      const providerModels = catalog.models.filter(m => m.key && m.key.startsWith(prefix));
+      config.models = config.models || {};
+      config.models.providers = config.models.providers || {};
+      config.models.providers[provider] = {
+        models: providerModels.map(m => ({
+          id: m.key.startsWith(prefix) ? m.key.slice(prefix.length) : m.key,
+          name: m.name || m.key.replace(prefix, ''),
+          input: m.input === 'text+image' ? ['text', 'image'] : ['text'],
+          contextWindow: m.contextWindow
+        }))
+      };
+    }
+  } catch (e) {
+    console.error('Failed to populate models for', provider, ':', e.message);
+  }
+}
+
+app.post('/api/config/restore/:agent', async (req, res) => {
   const agent = req.params.agent;
   const meta = readMeta(agent);
   const agentType = meta.AGENT || 'openclaw';
@@ -703,8 +726,9 @@ app.post('/api/config/restore/:agent', (req, res) => {
     if (newAuthConfig.meta) merged.meta = newAuthConfig.meta;
     merged.models = merged.models || {};
     merged.models.providers = merged.models.providers || {};
-    if (req.body.provider && !merged.models.providers[req.body.provider]) {
+    if (req.body.provider) {
       merged.models.providers[req.body.provider] = { models: [] };
+      await populateProviderModels(agent, req.body.provider, merged);
     }
     fs.writeFileSync(configPath, JSON.stringify(merged, null, 2) + '\n');
     res.json({ ok: true });
@@ -750,7 +774,9 @@ app.post('/api/providers/add', async (req, res) => {
       child.on('close', code => code === 0 ? resolve(buf) : reject(new Error(buf || 'exit ' + code)));
       child.stdin.write(keyValue + '\n');
       child.stdin.end();
-    }).catch(() => {});
+    }).catch((err) => {
+      console.error('paste-api-key failed for', provider, ':', err.message);
+    });
 
     // Restore saved config and merge in auth profile from paste-api-key
     let newAuthConfig = {};
@@ -762,7 +788,8 @@ app.post('/api/providers/add', async (req, res) => {
     if (newAuthConfig.meta) merged.meta = newAuthConfig.meta;
     merged.models = merged.models || {};
     merged.models.providers = merged.models.providers || {};
-    if (!merged.models.providers[provider]) merged.models.providers[provider] = { models: [] };
+    merged.models.providers[provider] = { models: [] };
+    await populateProviderModels(agent, provider, merged);
     try { fs.writeFileSync(configPath, JSON.stringify(merged, null, 2) + '\n'); } catch (e) { console.error('Failed to write config:', e.message); }
 
     const existing = creds.apiKeys();

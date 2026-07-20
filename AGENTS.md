@@ -567,3 +567,27 @@ Terminal appeared small/constrained because xterm.js FitAddon calls `fit()` befo
 - The WebSocket handler compared `containers[vmName] !== 'running'` — comparing an **object** to a string, which always returns `true`.
 - This caused every WebSocket connection to be **immediately rejected** with `ws.close()`.
 - The fix: `(containers[vmName]?.State || '').toLowerCase() !== 'running'`.
+
+## Models/Providers Page — Models Tab (2026-07-19)
+
+### `getCatalogProviders` `r.stdout` Bug
+
+**Root cause:** `getCatalogProviders()` in `src/routes/agents.js:447` used `r.stdout` but `runCmd()` returns a plain string (from `execFile`), not an object with a `.stdout` property. `JSON.parse(undefined)` threw silently, caught by the empty `catch {}`, returning `[]`.
+
+**Fix:** Changed `r.stdout` to `r` at line 447.
+
+**Symptoms:** The "Add Provider" grid was always empty (no unconfigured providers shown). All other model tab functionality (primary, fallback, remove provider) worked fine since they read from the agent config, not the model catalog.
+
+### Action Buttons Verified (★ Primary, ⤵ FB, × Remove)
+- ★ Primary — sets `agents.defaults.model.primary` via HTMX POST, model row shows ★ indicator, button gets cyan highlight.
+- ⤵ FB — sets `agents.defaults.model.fallback` via HTMX POST (empty value clears it), model row shows ⤵ indicator, button gets amber highlight.
+- × Remove — deletes auth profiles + `models.providers` entry + clears primary/fallback matching that provider. Uses `hx-confirm` for confirmation.
+- All three tested on vm-test3 with correct DOM updates and CSRF handling.
+
+
+## Architecture Documentation
+
+- docs/architecture.md — **Source of truth** for business logic, system architecture, page descriptions, routes, data model, security model, and all behavioral contracts.
+- task_create_docs.md — Tracks progress of doc-writing tasks.
+- Rule: If code and docs/architecture.md disagree, fix the code.
+- AGENTS.md remains the place for operational learnings, bug fixes, commands, and agent-session context.

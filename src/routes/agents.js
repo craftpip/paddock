@@ -1,7 +1,7 @@
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
-const { execFile, exec } = require('child_process');
+const { execFile, exec, spawn } = require('child_process');
 const multer = require('multer');
 const registry = require('../services/agent-registry');
 const workspace = require('../services/workspace');
@@ -15,6 +15,8 @@ const COMPOSE_PREFIX = ['compose', '-p', 'vm-friends', '--project-directory', WO
 const BACKUPS_DIR = path.join(WORKSPACE, 'backups');
 
 const router = express.Router();
+
+const oauthProcesses = new Map();
 
 const ALLOWED_UPLOAD_TYPES = new Set([
   'text/plain', 'text/html', 'text/css', 'text/javascript', 'text/xml',
@@ -442,12 +444,201 @@ router.get('/:agentId/messaging', validateAgent, (req, res) => {
   res.render('agents/messaging', { agent, config, configRaw: configRawStr });
 });
 
-router.get('/:agentId/models', validateAgent, (req, res) => {
-  const agent = req.agent;
+async function getCatalogProviders(agentName, configuredProvidersList) {
+  const oauthProviders = ['openai', 'google', 'github-copilot'];
+  const result = [];
+  try {
+    const r = await runCmd('docker', ['exec', agentName, 'openclaw', 'models', 'list', '--all', '--json']);
+    const catalog = JSON.parse(r);
+    if (catalog.models && Array.isArray(catalog.models)) {
+      const seen = new Map();
+      for (const m of catalog.models) {
+        const p = m.key.split('/')[0];
+        seen.set(p, (seen.get(p) || 0) + 1);
+      }
+      for (const [id, count] of seen.entries()) {
+        if (!configuredProvidersList.includes(id)) {
+          result.push({ id, modelCount: count, type: oauthProviders.includes(id) ? 'oauth' : 'api_key' });
+        }
+      }
+    }
+  } catch (e) {}
+  for (const id of oauthProviders) {
+    if (!configuredProvidersList.includes(id) && !result.find(r => r.id === id)) {
+      result.push({ id, modelCount: 0, type: 'oauth' });
+    }
+  }
+  return result;
+}
+
+async function renderModels(agent, req, res) {
   const config = readAgentConfig(agent);
   const configRaw = readRawAgentConfig(agent);
   const configRawStr = configRaw ? JSON.stringify(configRaw, null, 2) : '';
-  res.render('agents/models', { agent, config, configRaw: configRawStr });
+  const configuredProviders = (config && config.models && config.models.providers) ? Object.keys(config.models.providers) : [];
+  const catalogProviders = await getCatalogProviders(agent.name, configuredProviders);
+  res.render('agents/models', { agent, config, configRaw: configRawStr, catalogProviders, configuredProviders });
+}
+
+router.get('/:agentId/models', validateAgent, async (req, res) => {
+  await renderModels(req.agent, req, res);
+});
+
+router.post('/:agentId/models/set-primary', validateAgent, csrfCheck, async (req, res) => {
+  const agent = req.agent;
+  const { model } = req.body;
+  if (!model) return res.status(400).send('model required');
+  const configPath = path.join(agent.config_root, 'openclaw.json');
+  try {
+    const raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    if (!raw.agents) raw.agents = {};
+    if (!raw.agents.defaults) raw.agents.defaults = {};
+    if (!raw.agents.defaults.model) raw.agents.defaults.model = {};
+    raw.agents.defaults.model.primary = model;
+    fs.writeFileSync(configPath, JSON.stringify(raw, null, 2) + '\n');
+    audit(agent.name, 'config', 'set-primary', 'ok', 'Primary model: ' + model);
+  } catch (e) {
+    audit(agent.name, 'config', 'set-primary', 'error', e.message);
+  }
+  await renderModels(agent, req, res);
+});
+
+router.post('/:agentId/models/set-fallback', validateAgent, csrfCheck, async (req, res) => {
+  const agent = req.agent;
+  const { model } = req.body;
+  const configPath = path.join(agent.config_root, 'openclaw.json');
+  try {
+    const raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    if (!raw.agents) raw.agents = {};
+    if (!raw.agents.defaults) raw.agents.defaults = {};
+    if (!raw.agents.defaults.model) raw.agents.defaults.model = {};
+    if (model) {
+      raw.agents.defaults.model.fallback = model;
+    } else {
+      delete raw.agents.defaults.model.fallback;
+    }
+    fs.writeFileSync(configPath, JSON.stringify(raw, null, 2) + '\n');
+    audit(agent.name, 'config', 'set-fallback', 'ok', model ? 'Fallback: ' + model : 'Fallback cleared');
+  } catch (e) {
+    audit(agent.name, 'config', 'set-fallback', 'error', e.message);
+  }
+  await renderModels(agent, req, res);
+});
+
+router.post('/:agentId/models/remove-provider', validateAgent, csrfCheck, async (req, res) => {
+  const agent = req.agent;
+  const { provider } = req.body;
+  if (!provider) return res.status(400).send('provider required');
+  const configPath = path.join(agent.config_root, 'openclaw.json');
+  try {
+    const raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    const prefix = provider + '/';
+    const model = raw.agents && raw.agents.defaults && raw.agents.defaults.model;
+    if (model && model.primary && model.primary.startsWith(prefix)) delete model.primary;
+    if (model && model.fallback && model.fallback.startsWith(prefix)) delete model.fallback;
+    if (raw.auth && raw.auth.profiles) {
+      for (const key of Object.keys(raw.auth.profiles)) {
+        if (raw.auth.profiles[key].provider === provider) delete raw.auth.profiles[key];
+      }
+    }
+    if (raw.models && raw.models.providers && raw.models.providers[provider]) {
+      delete raw.models.providers[provider];
+    }
+    fs.writeFileSync(configPath, JSON.stringify(raw, null, 2) + '\n');
+    audit(agent.name, 'config', 'remove-provider', 'ok', 'Removed provider: ' + provider);
+  } catch (e) {
+    audit(agent.name, 'config', 'remove-provider', 'error', e.message);
+  }
+  await renderModels(agent, req, res);
+});
+
+// ─── OAuth Login Flow ─────────────────────────────────────────────────────
+
+router.post('/:agentId/models/oauth-login', validateAgent, csrfCheck, async (req, res) => {
+  const agent = req.agent;
+  const { provider } = req.body;
+  if (!provider) return res.status(400).json({ error: 'provider required' });
+
+  const key = agent.name + ':' + provider;
+  if (oauthProcesses.has(key)) {
+    try { oauthProcesses.get(key).kill(); } catch (e) {}
+    oauthProcesses.delete(key);
+  }
+
+  const child = spawn('docker', ['exec', agent.name, 'script', '-q', '-c', `openclaw models auth login --provider ${provider} --device-code`, '/dev/null'], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+    timeout: 120000
+  });
+
+  let output = '';
+  let url = '';
+  let code = '';
+
+  child.stdout.on('data', (chunk) => {
+    output += chunk.toString();
+    if (!url || !code) {
+      const urlMatch = output.match(/URL:\s*(\S+)/);
+      const codeMatch = output.match(/Code:\s*(\S+)/);
+      if (urlMatch) url = urlMatch[1];
+      if (codeMatch) code = codeMatch[1];
+    }
+  });
+
+  child.stderr.on('data', (chunk) => {
+    output += chunk.toString();
+  });
+
+  // Wait up to 10s for URL+code to appear, then return
+  await new Promise((resolve) => {
+    const check = setInterval(() => {
+      if (url && code) {
+        clearInterval(check);
+        resolve();
+      }
+    }, 200);
+    setTimeout(() => { clearInterval(check); resolve(); }, 10000);
+  });
+
+  if (!url) {
+    child.kill();
+    return res.json({ error: 'Failed to get OAuth URL. Server response: ' + output.slice(-200) });
+  }
+
+  oauthProcesses.set(key, child);
+  child.on('exit', () => { oauthProcesses.delete(key); });
+
+  res.json({ url, code, status: 'waiting' });
+});
+
+router.get('/:agentId/models/oauth-status', validateAgent, (req, res) => {
+  const agent = req.agent;
+  const { provider } = req.query;
+  const key = agent.name + ':' + provider;
+  const child = oauthProcesses.get(key);
+
+  if (child) {
+    try {
+      const alive = child.exitCode === null;
+      if (alive) return res.json({ status: 'waiting' });
+    } catch (e) {}
+  }
+
+  // Process gone — check if auth succeeded
+  const config = readAgentConfig(agent);
+  const configured = (config && config.models && config.models.providers) ? Object.keys(config.models.providers) : [];
+  const done = configured.includes(provider);
+  return res.json({ status: done ? 'complete' : 'expired' });
+});
+
+router.post('/:agentId/models/oauth-cancel', validateAgent, csrfCheck, (req, res) => {
+  const agent = req.agent;
+  const { provider } = req.body;
+  const key = agent.name + ':' + provider;
+  if (oauthProcesses.has(key)) {
+    try { oauthProcesses.get(key).kill(); } catch (e) {}
+    oauthProcesses.delete(key);
+  }
+  res.json({ ok: true });
 });
 
 router.post('/:agentId/config', validateAgent, csrfCheck, (req, res) => {
