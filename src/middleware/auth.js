@@ -7,7 +7,7 @@ function setupSession(app) {
   const session = require('express-session');
   app.use(session({
     secret: SESSION_SECRET,
-    resave: true,
+    resave: false,
     saveUninitialized: false,
     name: 'vmf.sid',
     cookie: {

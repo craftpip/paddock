@@ -66,8 +66,9 @@
   </style>
   <style>
     .skeleton{background:linear-gradient(90deg,#1e293b 25%,#334155 50%,#1e293b 75%);background-size:200% 100%;animation:shimmer 1.5s infinite;border-radius:0.5rem}
-    .agent-card.htmx-request{opacity:0.5;pointer-events:none;position:relative}
-    .agent-card.htmx-request::after{content:'';position:absolute;inset:0;background:rgba(0,0,0,.2);border-radius:inherit}
+    .agent-card.htmx-request,#models-panel.htmx-request{opacity:0.6;pointer-events:none;position:relative}
+    .agent-card.htmx-request::after,#models-panel.htmx-request::after{content:'';position:absolute;inset:0;background:rgba(0,0,0,.15);border-radius:inherit}
+    #models-panel.htmx-settling{transition:none}
     @keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
 
     .toast-enter{animation:toastIn 0.3s ease-out}

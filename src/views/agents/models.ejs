@@ -1,5 +1,5 @@
 <% if (config) { %>
-<div id="models-panel">
+<div id="models-panel" hx-sync="closest hx-get|hx-post queue">
   <% var providers = (config.models && config.models.providers) || {}; %>
   <% var primary = (config.agents && config.agents.defaults && config.agents.defaults.model && config.agents.defaults.model.primary) || ''; %>
   <% var fallback = (config.agents && config.agents.defaults && config.agents.defaults.model && config.agents.defaults.model.fallback) || ''; %>

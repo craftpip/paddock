@@ -231,5 +231,8 @@ API Key providers get inline key input. OAuth providers redirect to terminal tab
 - [~] Provider grid shows catalog providers — verified unconfigured providers display correctly (15 providers listed)
 - [~] Custom provider section present — not tested (requires API key)
 
-### Minor Issues
-- Rapid consecutive HTMX POST requests can trip CSRF race (same token used for two parallel replacements). Low risk in practice since users click one button at a time.
+### HTMX Swap Race Fix (2026-07-21)
+- Added `hx-sync="closest hx-get|hx-post queue"` to `#models-panel` — serializes concurrent HTMX requests so parallel clicks queue instead of racing
+- Added `#models-panel.htmx-request` CSS — dims panel + blocks pointer events during in-flight request
+- Added `#models-panel.htmx-settling{transition:none}` — prevents flash animation on swap
+- Changed `resave: true` → `resave: false` in session config — prevents concurrent session overwrites

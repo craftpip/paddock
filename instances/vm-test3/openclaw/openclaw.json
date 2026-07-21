@@ -5,5 +5,12 @@
         "models": []
       }
     }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "nonexistent/test"
+      }
+    }
   }
 }
