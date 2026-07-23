@@ -9,7 +9,6 @@ const vm = require('../services/vm-manager');
 const backup = require('../services/backup-manager');
 const { getDb } = require('../services/db');
 const { csrfCheck } = require('../middleware/auth');
-
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const PREFIX = process.env.CONTAINER_PREFIX || 'vm';
 const BACKUPS_DIR = path.join(WORKSPACE, 'backups');
@@ -17,6 +16,19 @@ const BACKUPS_DIR = path.join(WORKSPACE, 'backups');
 const router = express.Router();
 
 const oauthProcesses = new Map();
+const createProgress = new Map();
+
+function setProgress(name, step, pct) {
+  createProgress.set(name, { step, pct, time: Date.now() });
+}
+
+function getProgress(name) {
+  return createProgress.get(name) || null;
+}
+
+function clearProgress(name) {
+  createProgress.delete(name);
+}
 
 const ALLOWED_UPLOAD_TYPES = new Set([
   'text/plain', 'text/html', 'text/css', 'text/javascript', 'text/xml',
@@ -71,13 +83,14 @@ router.get('/', (req, res) => {
 // ─── Create Agent ───────────────────────────────────────────────────────────
 
 router.get('/create', (req, res) => {
-  const existing = registry.discoverAgents().map(a => a.name);
-  res.render('agents/create', { existing });
+  const agents = registry.discoverAgents();
+  res.render('agents/create', { agents, prefix: PREFIX });
 });
 
 router.post('/create', csrfCheck, async (req, res) => {
   const { agent_name, agent_type, clone_source } = req.body;
-  const name = agent_name ? `${PREFIX}-${agent_name.replace(new RegExp('^' + PREFIX + '-'), '')}` : '';
+  const agentType = agent_type || 'openclaw';
+  const name = agent_name ? `${PREFIX}-${agentType}-${agent_name.replace(new RegExp('^' + PREFIX + '-' + agentType + '-'), '')}` : '';
   if (!name || !registry.VM_NAME_RE.test(name)) {
     return res.status(400).render('partials/error', { message: 'Invalid agent name', code: 400 });
   }
@@ -86,27 +99,49 @@ router.post('/create', csrfCheck, async (req, res) => {
     return res.status(409).render('partials/error', { message: 'Agent already exists', code: 409 });
   }
 
-  const args = [name];
   if (clone_source && !registry.VM_NAME_RE.test(clone_source)) {
     return res.status(400).render('partials/error', { message: 'Invalid clone source', code: 400 });
   }
-  if (clone_source) args.push('--clone', clone_source);
-  else args.push('--fresh');
-  if (agent_type) args.push('--agent', agent_type);
 
-  try {
-    await vm.createVm(name, {
-      agent: agent_type || 'openclaw',
-      mode: clone_source ? 'clone' : 'fresh',
-      cloneSource: clone_source,
-    });
-    audit(name, 'lifecycle', 'create', 'ok', `Agent created (type=${agent_type || 'openclaw'})`);
-    req.session.flash = { type: 'success', message: `Agent ${name} created successfully.` };
-    res.redirect(`/agents/${name}`);
-  } catch (err) {
-    audit(name, 'lifecycle', 'create', 'error', err.message);
-    res.status(500).render('partials/error', { message: `Failed to create agent: ${err.message}`, code: 500 });
-  }
+  const isFresh = !clone_source;
+
+  setProgress(name, 'Starting…', 0);
+  res.render('agents/create_progress', { agentName: name, csrfToken: req.session.csrfToken, layout: false });
+
+  // Run creation in background
+  setImmediate(async () => {
+    try {
+      setProgress(name, 'Creating container…', 10);
+      await vm.createVm(name, {
+        agent: agent_type || 'openclaw',
+        mode: clone_source ? 'clone' : 'fresh',
+        cloneSource: clone_source,
+      });
+
+      if (isFresh && (agentType === 'openclaw' || agentType === 'picoclaw')) {
+        setProgress(name, 'Waiting for container…', 50);
+        try {
+          await waitForContainerReady(name);
+        } catch (postErr) {
+          console.error(`Container readiness check failed for ${name}:`, postErr.message);
+        }
+      }
+
+      audit(name, 'lifecycle', 'create', 'ok', `Agent created (type=${agent_type || 'openclaw'})`);
+      setProgress(name, 'Done', 100);
+      setTimeout(() => clearProgress(name), 60000);
+    } catch (err) {
+      console.error(`Create failed for ${name}:`, err.message);
+      audit(name, 'lifecycle', 'create', 'error', err.message);
+      setProgress(name, `Failed: ${err.message}`, -1);
+    }
+  });
+});
+
+router.get('/create-status/:name', (req, res) => {
+  const status = getProgress(req.params.name);
+  if (!status) return res.json({ done: true });
+  res.json({ step: status.step, pct: status.pct, done: status.pct >= 100, failed: status.pct < 0 });
 });
 
 // ─── Agent Detail ───────────────────────────────────────────────────────────
@@ -738,6 +773,26 @@ router.get('/:agentId/sessions', validateAgent, (req, res) => {
   res.render('agents/sessions', { agent: req.agent, sessions });
 });
 
+// ─── Settings ────────────────────────────────────────────────────────────────
+
+router.get('/:agentId/settings', validateAgent, (req, res) => {
+  res.render('agents/settings', { agent: req.agent, csrfToken: req.session.csrfToken });
+});
+
+router.post('/:agentId/delete', validateAgent, csrfCheck, async (req, res) => {
+  const name = req.agent.name;
+  try {
+    await vm.removeVm(name);
+    audit(name, 'lifecycle', 'delete', 'ok', 'Agent deleted');
+    req.session.flash = { type: 'success', message: `Agent "${name}" deleted.` };
+    req.session.save(() => res.redirect('/agents'));
+  } catch (err) {
+    audit(name, 'lifecycle', 'delete', 'error', err.message);
+    req.session.flash = { type: 'error', message: `Delete failed: ${err.message}` };
+    req.session.save(() => res.redirect(`/agents/${name}#settings`));
+  }
+});
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function readAgentConfig(agent) {
@@ -785,6 +840,18 @@ function runCmd(cmd, args, timeout = 30000) {
       else resolve(stdout.toString());
     });
   });
+}
+
+async function waitForContainerReady(name, timeout = 60000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    try {
+      await runCmd('docker', ['exec', name, 'openclaw', '--version'], 5000);
+      return;
+    } catch {}
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  throw new Error('Container did not become ready within ' + timeout + 'ms');
 }
 
 module.exports = router;

@@ -20,6 +20,7 @@
       <button class="sidebar-btn w-full text-left px-3 py-2 text-sm font-medium rounded-lg border-l-2 border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 whitespace-nowrap" data-tab="models">Models</button>
       <button class="sidebar-btn w-full text-left px-3 py-2 text-sm font-medium rounded-lg border-l-2 border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 whitespace-nowrap" data-tab="messaging">Messaging</button>
       <button class="sidebar-btn w-full text-left px-3 py-2 text-sm font-medium rounded-lg border-l-2 border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 whitespace-nowrap" data-tab="backups">Backups</button>
+      <button class="sidebar-btn w-full text-left px-3 py-2 text-sm font-medium rounded-lg border-l-2 border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 whitespace-nowrap" data-tab="settings">Settings</button>
       <button class="sidebar-btn w-full text-left px-3 py-2 text-sm font-medium rounded-lg border-l-2 border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 whitespace-nowrap" data-tab="activity">Activity</button>
     </div>
   </aside>
@@ -142,6 +143,16 @@
   <div id="tab-backups" class="tab-panel hidden">
     <div hx-get="/agents/<%= agent.name %>/backups" hx-trigger="load" hx-swap="innerHTML">
       <div class="space-y-3">
+        <div class="skeleton h-12 w-full"></div>
+        <div class="skeleton h-12 w-full"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="tab-settings" class="tab-panel hidden">
+    <div hx-get="/agents/<%= agent.name %>/settings" hx-trigger="load" hx-swap="innerHTML">
+      <div class="space-y-3">
+        <div class="skeleton h-12 w-full"></div>
         <div class="skeleton h-12 w-full"></div>
         <div class="skeleton h-12 w-full"></div>
       </div>

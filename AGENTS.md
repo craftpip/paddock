@@ -591,3 +591,20 @@ Terminal appeared small/constrained because xterm.js FitAddon calls `fit()` befo
 - task_create_docs.md — Tracks progress of doc-writing tasks.
 - Rule: If code and docs/architecture.md disagree, fix the code.
 - AGENTS.md remains the place for operational learnings, bug fixes, commands, and agent-session context.
+
+## User Preferences
+
+- Planning/ideas files go in `/workspace/plans/` as separate `.md` files. When the user says they want to plan something or save an idea, write a new `.md` file in that folder.
+
+## OpenClaw Docs — Always Use Online Docs
+
+- OpenClaw docs at https://docs.openclaw.ai change frequently (CLI flags, config structure, behavior).
+- Never rely on cached or built-in knowledge about OpenClaw commands, flags, or configuration.
+- Always look up the current online docs before using any OpenClaw CLI command.
+- This applies to: `openclaw setup`, `onboard`, `agents`, `config`, `models`, `cron`, `gateway`, `backup`, and all other subcommands.
+- Bookmark: https://docs.openclaw.ai as the primary reference.
+
+## Do Not Do
+
+- **Never touch containers outside our project.** Containers not defined in this project's `docker-compose.yml` (e.g. `vm-jake2`, `vm-test`, `vm-ozden`, `vm-ramsey`, `vm-test3`, `vm-test2`, `vm-webui`) are not ours. Do not start, stop, exec, inspect, or interact with them in any way. Our project only owns containers it creates.
+- **Never create random containers for testing.** Spin up test containers only through the project's own tools (`add-vm.sh`, docker-compose services, or the web UI). Running `docker run` with external images (e.g. `ghcr.io/openclaw/openclaw:latest`) is outside our scope.

@@ -1,0 +1,40 @@
+<div class="max-w-lg mx-auto mt-12 text-center" id="create-progress-root">
+  <div class="flex items-center justify-center gap-3 mb-4">
+    <svg class="animate-spin h-6 w-6 text-cyan-400" viewBox="0 0 24 24">
+      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"/>
+      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+    </svg>
+    <span id="progress-step" class="text-lg text-slate-200 font-medium">Starting…</span>
+  </div>
+
+  <div class="w-full bg-slate-800 rounded-full h-2 mb-6">
+    <div id="progress-bar" class="bg-cyan-500 h-2 rounded-full transition-all duration-500" style="width: 0%"></div>
+  </div>
+
+  <p class="text-xs text-slate-500">Creating agent <code class="text-cyan-400"><%= agentName %></code></p>
+
+  <p id="progress-error" class="text-sm text-red-400 mt-4 hidden"></p>
+</div>
+
+<script>
+(function() {
+  var name = '<%= agentName %>';
+  var poll = setInterval(function() {
+    fetch('/agents/create-status/' + name + '?_=' + Date.now())
+      .then(function(r) { return r.json(); })
+      .then(function(s) {
+        document.getElementById('progress-step').textContent = s.step || 'Done';
+        document.getElementById('progress-bar').style.width = Math.max(0, s.pct || 0) + '%';
+        if (s.failed) {
+          clearInterval(poll);
+          document.getElementById('progress-error').textContent = s.step;
+          document.getElementById('progress-error').classList.remove('hidden');
+        }
+        if (s.done) {
+          clearInterval(poll);
+          setTimeout(function() { window.location.href = '/agents/' + name; }, 1000);
+        }
+      });
+  }, 1500);
+})();
+</script>

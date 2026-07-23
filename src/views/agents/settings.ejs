@@ -1,0 +1,29 @@
+<div class="max-w-md space-y-6">
+  <div class="border border-slate-800 rounded-xl p-4">
+    <h3 class="text-sm font-medium text-slate-300 mb-3">Container Info</h3>
+    <div class="space-y-2 text-sm">
+      <div class="flex justify-between">
+        <span class="text-slate-500">Name</span>
+        <span class="text-slate-200 font-mono"><%= agent.name %></span>
+      </div>
+      <div class="flex justify-between">
+        <span class="text-slate-500">Runtime</span>
+        <span class="text-slate-200"><%= agent.runtime_type %></span>
+      </div>
+      <div class="flex justify-between">
+        <span class="text-slate-500">Status</span>
+        <span class="<%= agent.status === 'running' ? 'text-emerald-400' : 'text-slate-400' %>"><%= agent.status %></span>
+      </div>
+      <div class="flex justify-between">
+        <span class="text-slate-500">Image</span>
+        <span class="text-slate-200 font-mono text-xs"><%= agent.image || '-' %></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="border border-red-900/50 rounded-xl p-4">
+    <h3 class="text-sm font-medium text-red-400 mb-1">Danger Zone</h3>
+    <p class="text-xs text-slate-500 mb-4">Permanently delete this agent, its container, and all files. This action cannot be undone.</p>
+    <button onclick="VMF.confirm({title:'Delete Agent',message:'Are you sure you want to delete <strong><%= agent.name %></strong>? All container data and instance files will be permanently removed.',danger:true,confirmText:'Delete Forever'},function(){VMF.post('/agents/<%= agent.name %>/delete',{_csrf:'<%= csrfToken %>'})})" class="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg text-sm font-medium transition-colors">Delete Container</button>
+  </div>
+</div>

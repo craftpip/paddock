@@ -91,49 +91,10 @@ function existingServices() {
   return names;
 }
 
-function applyDefaultConfig(configPath, agent, botToken, allowFrom) {
-  let data = {};
-  if (fs.existsSync(configPath)) {
-    try { data = JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch {}
-  }
-  if (typeof data !== 'object' || Array.isArray(data)) data = {};
-
-  const baseUrl = (process.env.DEFAULT_MODEL_BASE_URL || 'http://10.69.1.131:11434/v1').replace(/\/v1$/, '');
-  const model = process.env.DEFAULT_MODEL_NAME || 'gpt-oss:20b-73728';
-  const ctx = parseInt(process.env.DEFAULT_CONTEXT_LENGTH || '96000', 10);
-
-  const channel = { enabled: true, allowFrom: [allowFrom] };
-  const ollamaCfg = { baseUrl, apiKey: 'ollama', api: 'ollama', models: [{ id: model, name: model, reasoning: false, input: ['text'], contextWindow: ctx, maxTokens: ctx * 10, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] };
-
-  if (agent === 'openclaw') {
-    channel.botToken = botToken;
-    channel.dmPolicy = 'allowlist';
-    data.channels = { telegram: channel };
-    data.agents = { defaults: { model: { primary: `ollama/${model}` } } };
-    data.models = { providers: { ollama: ollamaCfg } };
-  } else {
-    channel.token = botToken;
-    data.channels = { telegram: channel };
-    const agentCfg = { model, provider: 'openai', contextLength: ctx };
-    const provCfg = { apiBase: baseUrl, apiKey: 'ollama' };
-    if (agent === 'picoclaw') {
-      data.model_list = [{ model_name: model, model: `ollama/${model}`, api_base: baseUrl }];
-      agentCfg.model_name = model;
-      data.model = model;
-      data.model_context_length = ctx;
-    }
-    data.agents = { defaults: agentCfg };
-    data.providers = { openai: provCfg };
-  }
-
-  fs.writeFileSync(configPath, JSON.stringify(data, null, 2) + '\n');
-}
-
 async function createVm(name, options = {}) {
   const {
     agent = 'openclaw', mode = 'fresh', cloneSource = '',
     sshEnabled = false, port = '', password = '',
-    botToken = '', allowFrom = '532156945', defaultConfig = false,
   } = options;
 
   if (existingServices().has(name)) {
@@ -206,27 +167,16 @@ async function createVm(name, options = {}) {
   const composePath = instanceComposePath(name);
   await runCmd('docker', ['compose', '-f', composePath, 'up', '-d'], { timeout: 180000 });
 
-  if (defaultConfig) {
-    if (agent === 'hermes') return name;
-    if (!botToken) throw new Error('Bot token required for default config');
-
-    try {
-      await runCmd('docker', ['exec', name, 'sh', '-lc',
-        'openclaw onboard --non-interactive --accept-risk --mode local --flow manual --auth-choice skip --skip-channels --skip-skills --skip-search --skip-ui --skip-health --no-install-daemon >/tmp/onboard.log 2>&1 || true'
-      ], { timeout: 30000 });
-    } catch {}
-
-    const configPath = path.join(workspaceDir, 'openclaw.json');
-    for (let i = 0; i < 60; i++) {
-      if (fs.existsSync(configPath)) break;
-      await new Promise(r => setTimeout(r, 1000));
+  if (agent === 'openclaw' || agent === 'picoclaw') {
+    for (let i = 0; i < 15; i++) {
+      try {
+        await runCmd('docker', ['exec', name, 'openclaw', 'setup'], { timeout: 30000 });
+        break;
+      } catch {
+        await new Promise(r => setTimeout(r, 1000));
+      }
     }
-
-    if (fs.existsSync(configPath)) {
-      applyDefaultConfig(configPath, agent, botToken, allowFrom);
-      try { fs.chmodSync(configPath, 0o600); } catch {}
-      try { await runCmd('docker', ['restart', name]); } catch {}
-    }
+    await runCmd('docker', ['restart', name], { timeout: 30000 });
   }
 
   return name;
