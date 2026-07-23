@@ -1,15 +1,15 @@
 services:
-  ${CONTAINER_PREFIX}-webui:
+  webui:
     build:
       context: ./src
     image: paddock-webui:latest
-    container_name: ${CONTAINER_PREFIX}-webui
+    container_name: paddock-webui
     restart: unless-stopped
     ports:
-      - "5050:5050"
+      - "5051:5050"
     volumes:
-      - /mnt/ddrive/www/vm-friends:/workspace:rw
-      - /mnt/ddrive/www/vm-friends/src:/app:rw
+      - /mnt/ddrive/www/vm-friends-dev:/workspace:rw
+      - /mnt/ddrive/www/vm-friends-dev/src:/app:rw
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
       TZ: Asia/Kolkata

@@ -20,6 +20,3 @@ RUN mkdir -p /app/data /app/views/partials
 EXPOSE 5050
 
 CMD ["node", "app.js"]
-
-# Dev: override CMD with:
-# docker compose run --service-ports vm-webui sh -c "npm run dev:watch"
