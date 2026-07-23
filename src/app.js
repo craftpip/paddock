@@ -20,7 +20,9 @@ const BACKUPS_DIR = path.join(WORKSPACE, 'backups');
 const INSTANCES_DIR = path.join(WORKSPACE, 'instances');
 const SCRIPTS_DIR = path.join(WORKSPACE, 'scripts');
 const ENV_FILE = path.join(WORKSPACE, '.env');
-const VM_NAME_RE = /^vm-[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
+const PREFIX = process.env.CONTAINER_PREFIX || 'vm';
+const VM_NAME_RE = new RegExp('^' + PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-[a-zA-Z0-9][a-zA-Z0-9_-]*$');
+const PREFIX_DASH = PREFIX + '-';
 
 function safeVmName(name) {
   if (!name || !VM_NAME_RE.test(name)) return null;
@@ -157,7 +159,7 @@ async function getAllVms() {
   if (!fs.existsSync(INSTANCES_DIR)) return vms;
   const dirs = fs.readdirSync(INSTANCES_DIR).sort();
   for (const d of dirs) {
-    if (!d.startsWith('vm-')) continue;
+    if (!d.startsWith(PREFIX_DASH)) continue;
     const stat = fs.statSync(path.join(INSTANCES_DIR, d));
     if (!stat.isDirectory()) continue;
     const meta = readMeta(d);
@@ -278,7 +280,7 @@ app.get('/vm/create', (req, res) => {
 app.post('/vm/create', async (req, res) => {
   let name = (req.body.name || '').trim();
   if (!name) return res.status(400).render('partials/error', { msg: 'VM name is required' });
-  if (!name.startsWith('vm-')) name = 'vm-' + name;
+  if (!name.startsWith(PREFIX_DASH)) name = PREFIX_DASH + name;
   const agent = req.body.agent || 'openclaw';
   const mode = req.body.mode || 'fresh';
   const cloneSource = req.body.clone_source || '';

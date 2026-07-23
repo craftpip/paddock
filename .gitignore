@@ -1,27 +1,32 @@
-instances/*/openclaw/npm/
 **/node_modules/
 **/.tmp/
 **/codex-home/
-bot-prefixes.json
 **/*-backup/
 *.dll
 *.so
 *.node
 *.wasm
+
+# Runtime data
 src/data/app.db
 src/data/app.db-wal
 src/data/app.db-shm
+src/data/bot-prefixes.json
+src/opencode.json
 
-# Instance runtime data
-instances/*/openclaw/state/
-instances/*/openclaw/agents/*/agent/
-instances/*/openclaw/agents/*/sessions/
-instances/*/openclaw/devices/
-instances/*/openclaw/identity/
-instances/*/openclaw/workspace-attestations/
+# Instance build artifacts
+instances/*/openclaw/npm/
+
+# Instance runtime data (any agent type)
+instances/*/state/
+instances/*/agents/*/agent/
+instances/*/agents/*/sessions/
+instances/*/devices/
+instances/*/identity/
+instances/*/workspace-attestations/
 
 # Backups
 backups/
 
-# OpenCode config
-opencode.json
+# Docker build contexts
+src/vm-builds/*/scripts/

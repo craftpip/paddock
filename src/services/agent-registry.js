@@ -4,7 +4,8 @@ const { getDb } = require('./db');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const INSTANCES_DIR = path.join(WORKSPACE, 'instances');
-const VM_NAME_RE = /^vm-[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
+const PREFIX = process.env.CONTAINER_PREFIX || 'vm';
+const VM_NAME_RE = new RegExp('^' + PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-[a-zA-Z0-9][a-zA-Z0-9_-]*$');
 
 let _dockerCache = { data: null, ts: 0 };
 const DOCKER_CACHE_TTL = 3000;
@@ -111,7 +112,7 @@ function buildAgent(vmName, dockerState) {
   const configRoot = agentDir;
   const status = dockerState[vmName] || 'missing';
 
-  let displayName = vmName.replace(/^vm-/, '');
+  let displayName = vmName.replace(new RegExp('^' + PREFIX + '-'), '');
   displayName = displayName.charAt(0).toUpperCase() + displayName.slice(1);
 
   let defaultModel = null;
@@ -236,6 +237,6 @@ module.exports = {
   getConfigRoot,
   buildAgent,
   syncAgentToDb,
-  INSTANCES_DIR,
+  INSTANCES_DIR, PREFIX,
   VM_NAME_RE,
 };

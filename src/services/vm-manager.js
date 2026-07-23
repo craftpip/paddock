@@ -3,10 +3,27 @@ const path = require('path');
 const { execFile } = require('child_process');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
-const COMPOSE_BASE = ['compose', '-p', 'vm-friends', '--project-directory', WORKSPACE];
 const INSTANCES_DIR = path.join(WORKSPACE, 'instances');
-const COMPOSE_FILE = path.join(WORKSPACE, 'docker-compose.yml');
-const OVERRIDE_FILE = path.join(WORKSPACE, 'docker-compose.override.yml');
+const PREFIX = process.env.CONTAINER_PREFIX || 'vm';
+const PREFIX_RE = new RegExp('^' + PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-');
+
+const AGENT_IMAGES = {
+  openclaw: 'paddock-vm-openclaw:latest',
+  picoclaw: 'paddock-vm-picoclaw:latest',
+  nanobot: 'paddock-vm-nanobot:latest',
+  hermes: 'paddock-vm-hermes:latest',
+};
+
+const AGENT_BUILD_REL = {
+  openclaw: '../../src/vm-builds/openclaw',
+  picoclaw: '../../src/vm-builds/picoclaw',
+  nanobot: '../../src/vm-builds/nanobot',
+  hermes: '../../src/vm-builds/hermes',
+};
+
+function containerDataDir(agent) {
+  return agent === 'hermes' ? '/opt/data' : `/root/.${agent}`;
+}
 
 function runCmd(cmd, args, options = {}) {
   const { timeout = 120000 } = options;
@@ -16,24 +33,6 @@ function runCmd(cmd, args, options = {}) {
       else resolve({ stdout: stdout || '', stderr: stderr || '' });
     });
   });
-}
-
-const AGENT_IMAGES = {
-  openclaw: 'vm-friends-vm-openclaw:latest',
-  picoclaw: 'vm-friends-vm-picoclaw:latest',
-  nanobot: 'vm-friends-vm-nanobot:latest',
-  hermes: 'vm-friends-vm-hermes:latest',
-};
-
-const AGENT_BUILD = {
-  openclaw: './vm_openclaw',
-  picoclaw: './vm_picoclaw',
-  nanobot: './vm_nanobot',
-  hermes: './vm_hermes',
-};
-
-function containerDataDir(agent) {
-  return agent === 'hermes' ? '/opt/data' : `/root/.${agent}`;
 }
 
 function readMeta(vmDir) {
@@ -51,49 +50,45 @@ function readMeta(vmDir) {
   return meta;
 }
 
-function generateOverrideYaml() {
-  let yaml = 'services:\n';
-  if (!fs.existsSync(INSTANCES_DIR)) return yaml;
-  const dirs = fs.readdirSync(INSTANCES_DIR).filter(d => d.startsWith('vm-')).sort();
-  for (const name of dirs) {
-    const vmDir = path.join(INSTANCES_DIR, name);
-    const metaFile = path.join(vmDir, 'meta.env');
-    if (!fs.existsSync(metaFile)) continue;
-    const meta = readMeta(vmDir);
-    const agent = meta.AGENT || 'openclaw';
-    const image = AGENT_IMAGES[agent] || AGENT_IMAGES.openclaw;
-    const build = AGENT_BUILD[agent] || AGENT_BUILD.openclaw;
-    yaml += `  ${name}:\n`;
-    yaml += `    build:\n`;
-    yaml += `      context: ${build}\n`;
-    yaml += `    image: ${image}\n`;
-    yaml += `    container_name: ${name}\n`;
-    yaml += `    restart: unless-stopped\n`;
-    if (meta.PORT) yaml += `    ports:\n      - "${meta.PORT}:22"\n`;
-    yaml += `    volumes:\n      - ./instances/${name}/${agent}:${containerDataDir(agent)}\n`;
-    yaml += `    environment:\n      TZ: Asia/Kolkata\n      ROOT_PASSWORD: ${meta.ROOT_PASSWORD || ''}\n`;
-  }
-  return yaml === 'services:\n' ? '' : yaml;
+function instanceComposePath(name) {
+  return path.join(INSTANCES_DIR, name, 'docker-compose.yml');
 }
 
-function writeOverride() {
-  const yaml = generateOverrideYaml();
-  if (yaml) {
-    fs.writeFileSync(OVERRIDE_FILE, yaml);
-  } else if (fs.existsSync(OVERRIDE_FILE)) {
-    fs.unlinkSync(OVERRIDE_FILE);
-  }
+function generateInstanceCompose(name, agent, password, port) {
+  const image = AGENT_IMAGES[agent] || AGENT_IMAGES.openclaw;
+  const build = AGENT_BUILD_REL[agent] || AGENT_BUILD_REL.openclaw;
+  const dataDir = containerDataDir(agent);
+
+  let yaml = 'services:\n';
+  yaml += `  ${name}:\n`;
+  yaml += `    build:\n`;
+  yaml += `      context: ${build}\n`;
+  yaml += `    image: ${image}\n`;
+  yaml += `    container_name: ${name}\n`;
+  yaml += `    restart: unless-stopped\n`;
+  if (port) yaml += `    ports:\n      - "${port}:22"\n`;
+  yaml += `    volumes:\n      - ./${agent}:${dataDir}\n`;
+  yaml += `    environment:\n      TZ: Asia/Kolkata\n      ROOT_PASSWORD: ${password || ''}\n`;
+  return yaml;
+}
+
+function writeInstanceCompose(name, agent, password, port) {
+  const yaml = generateInstanceCompose(name, agent, password, port);
+  const composePath = instanceComposePath(name);
+  fs.mkdirSync(path.dirname(composePath), { recursive: true });
+  fs.writeFileSync(composePath, yaml);
 }
 
 function existingServices() {
-  const svcs = new Set();
-  if (fs.existsSync(COMPOSE_FILE)) {
-    for (const line of fs.readFileSync(COMPOSE_FILE, 'utf8').split('\n')) {
-      const m = line.match(/^  ([a-zA-Z0-9_.-]+):$/);
-      if (m) svcs.add(m[1]);
+  const names = new Set();
+  if (!fs.existsSync(INSTANCES_DIR)) return names;
+  for (const entry of fs.readdirSync(INSTANCES_DIR, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      const composeFile = path.join(INSTANCES_DIR, entry.name, 'docker-compose.yml');
+      if (fs.existsSync(composeFile)) names.add(entry.name);
     }
   }
-  return svcs;
+  return names;
 }
 
 function applyDefaultConfig(configPath, agent, botToken, allowFrom) {
@@ -142,22 +137,29 @@ async function createVm(name, options = {}) {
   } = options;
 
   if (existingServices().has(name)) {
-    throw new Error(`Agent '${name}' already exists in compose files`);
+    throw new Error(`Agent '${name}' already exists`);
   }
-  if (fs.existsSync(path.join(INSTANCES_DIR, name, 'meta.env'))) {
+  const instDir = path.join(INSTANCES_DIR, name);
+  if (fs.existsSync(path.join(instDir, 'meta.env'))) {
     throw new Error(`Agent '${name}' already exists`);
   }
 
-  const pw = password || name.replace(/^vm-/, '');
+  const pw = password || name.replace(PREFIX_RE, '');
   let finalPort = '';
   if (sshEnabled) {
     if (port) {
       finalPort = port;
     } else {
       const used = new Set();
-      if (fs.existsSync(OVERRIDE_FILE)) {
-        for (const m of fs.readFileSync(OVERRIDE_FILE, 'utf8').matchAll(/"(\d+):22"/g)) {
-          used.add(parseInt(m[1]));
+      if (fs.existsSync(INSTANCES_DIR)) {
+        for (const entry of fs.readdirSync(INSTANCES_DIR, { withFileTypes: true })) {
+          if (!entry.isDirectory()) continue;
+          const composeFile = path.join(INSTANCES_DIR, entry.name, 'docker-compose.yml');
+          if (fs.existsSync(composeFile)) {
+            for (const m of fs.readFileSync(composeFile, 'utf8').matchAll(/"(\d+):22"/g)) {
+              used.add(parseInt(m[1]));
+            }
+          }
         }
       }
       let p = 43817;
@@ -166,12 +168,15 @@ async function createVm(name, options = {}) {
     }
   }
 
-  const instDir = path.join(INSTANCES_DIR, name);
   const workspaceDir = path.join(instDir, agent);
   fs.mkdirSync(workspaceDir, { recursive: true });
 
   if (mode === 'clone') {
-    const sources = fs.readdirSync(INSTANCES_DIR).filter(d => d.startsWith('vm-')).sort().reverse();
+    const sources = fs.readdirSync(INSTANCES_DIR, { withFileTypes: true })
+      .filter(e => e.isDirectory())
+      .map(e => e.name)
+      .filter(n => n.startsWith(PREFIX + '-'))
+      .sort().reverse();
     const src = cloneSource || sources[0] || '';
     if (!src) throw new Error('No source VM available to clone');
     const srcMeta = readMeta(path.join(INSTANCES_DIR, src));
@@ -196,8 +201,10 @@ async function createVm(name, options = {}) {
   if (finalPort) metaTxt += `PORT=${finalPort}\n`;
   fs.writeFileSync(path.join(instDir, 'meta.env'), metaTxt);
 
-  writeOverride();
-  await runCmd('docker', [...COMPOSE_BASE, 'up', '-d', name], { timeout: 180000 });
+  writeInstanceCompose(name, agent, pw, finalPort);
+
+  const composePath = instanceComposePath(name);
+  await runCmd('docker', ['compose', '-f', composePath, 'up', '-d'], { timeout: 180000 });
 
   if (defaultConfig) {
     if (agent === 'hermes') return name;
@@ -229,7 +236,6 @@ async function removeVm(name) {
   try { await runCmd('docker', ['rm', '-f', name], { timeout: 30000 }); } catch {}
   const instDir = path.join(INSTANCES_DIR, name);
   if (fs.existsSync(instDir)) fs.rmSync(instDir, { recursive: true, force: true });
-  writeOverride();
 }
 
 async function resetVm(name) {
@@ -243,8 +249,32 @@ async function resetVm(name) {
   const agentDir = path.join(instDir, agent);
   if (fs.existsSync(agentDir)) fs.rmSync(agentDir, { recursive: true, force: true });
   fs.mkdirSync(agentDir, { recursive: true });
-  writeOverride();
-  await runCmd('docker', [...COMPOSE_BASE, 'up', '-d', name], { timeout: 120000 });
+
+  const pw = meta.ROOT_PASSWORD || name.replace(PREFIX_RE, '');
+  const port = meta.PORT || '';
+  writeInstanceCompose(name, agent, pw, port);
+
+  const composePath = instanceComposePath(name);
+  await runCmd('docker', ['compose', '-f', composePath, 'up', '-d'], { timeout: 120000 });
 }
 
-module.exports = { createVm, removeVm, resetVm, generateOverrideYaml, writeOverride, readMeta };
+function getComposePath(name) {
+  return instanceComposePath(name);
+}
+
+async function startAgent(name) {
+  const composePath = getComposePath(name);
+  try {
+    await runCmd('docker', ['start', name], { timeout: 30000 });
+  } catch {
+    await runCmd('docker', ['compose', '-f', composePath, 'up', '-d'], { timeout: 180000 });
+  }
+}
+
+module.exports = {
+  createVm, removeVm, resetVm, readMeta,
+  generateInstanceCompose, writeInstanceCompose,
+  instanceComposePath, getComposePath,
+  existingServices, startAgent,
+  INSTANCES_DIR, PREFIX, PREFIX_RE,
+};

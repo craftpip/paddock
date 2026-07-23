@@ -11,7 +11,7 @@ const { getDb } = require('../services/db');
 const { csrfCheck } = require('../middleware/auth');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
-const COMPOSE_PREFIX = ['compose', '-p', 'vm-friends', '--project-directory', WORKSPACE];
+const PREFIX = process.env.CONTAINER_PREFIX || 'vm';
 const BACKUPS_DIR = path.join(WORKSPACE, 'backups');
 
 const router = express.Router();
@@ -77,7 +77,7 @@ router.get('/create', (req, res) => {
 
 router.post('/create', csrfCheck, async (req, res) => {
   const { agent_name, agent_type, clone_source } = req.body;
-  const name = agent_name ? `vm-${agent_name.replace(/^vm-/, '')}` : '';
+  const name = agent_name ? `${PREFIX}-${agent_name.replace(new RegExp('^' + PREFIX + '-'), '')}` : '';
   if (!name || !registry.VM_NAME_RE.test(name)) {
     return res.status(400).render('partials/error', { message: 'Invalid agent name', code: 400 });
   }
@@ -150,7 +150,7 @@ router.get('/:agentId/sidebar-status', validateAgent, (req, res) => {
 
 function lifecycleCmdBg(action, name, runtimeRef, auditFn) {
   const run = action === 'start'
-    ? runCmd('docker', ['start', runtimeRef]).catch(() => runCmd('docker', [...COMPOSE_PREFIX, 'up', '-d', runtimeRef]))
+    ? vm.startAgent(name)
     : runCmd('docker', [action, runtimeRef]);
   run.then(() => {
     registry.dockerPsList(true);
