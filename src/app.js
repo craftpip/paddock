@@ -755,6 +755,56 @@ app.post('/api/agents/:name/exec', async (req, res) => {
   }
 });
 
+// SSE streaming exec — output arrives as it comes
+app.get('/api/agents/:name/exec-stream', async (req, res) => {
+  const name = req.params.name;
+  const cmd = req.query.cmd;
+  if (!name) return res.status(400).json({ error: 'Name is required' });
+  if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
+  if (!cmd) return res.status(400).json({ error: 'cmd query param is required' });
+
+  const containers = await dockerPsList();
+  if ((containers[name]?.State || '').toLowerCase() !== 'running')
+    return res.status(400).json({ error: 'Container is not running' });
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+
+  const docker = spawn('docker', ['exec', '-i', name, 'sh', '-lc', cmd]);
+  let closed = false;
+
+  const send = (type, text) => {
+    if (!closed) res.write(`data: ${JSON.stringify({ type, text })}\n\n`);
+  };
+
+  docker.stdout.on('data', (data) => send('stdout', data.toString()));
+  docker.stderr.on('data', (data) => send('stderr', data.toString()));
+
+  docker.on('close', (code) => {
+    if (closed) return;
+    closed = true;
+    send('close', code);
+    res.end();
+  });
+
+  docker.on('error', (err) => {
+    if (closed) return;
+    closed = true;
+    send('error', err.message);
+    res.end();
+  });
+
+  req.on('close', () => {
+    if (closed) return;
+    closed = true;
+    docker.kill();
+  });
+});
+
 // ─── SPA Catch-all — serve index.html for client-side routing ─
 
 // Redirect /new/* to /* (legacy compat)

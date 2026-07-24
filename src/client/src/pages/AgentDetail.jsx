@@ -167,14 +167,6 @@ const HEALTH_GROUPS = [
     ],
   },
   {
-    title: 'Gateway',
-    commands: [
-      { cmd: 'openclaw gateway status', label: 'Gateway Status', desc: 'Daemon status' },
-      { cmd: 'openclaw gateway restart', label: 'Gateway Restart', desc: 'Restart the gateway daemon', confirm: true },
-      { cmd: 'openclaw gateway stop', label: 'Gateway Stop', desc: 'Stop the gateway daemon', confirm: true, danger: true },
-    ],
-  },
-  {
     title: 'Other',
     commands: [
       { cmd: 'openclaw backup create', label: 'Backup', desc: 'Create a new backup', confirm: true },
@@ -201,18 +193,24 @@ function HealthTab({ agent }) {
     setRunningCmd(cmd)
     setConsoleLines((p) => [...p, { ts, cmd, type: 'cmd' }])
 
-    try {
-      const d = await api(`/api/agents/${agent.name}/exec`, { method: 'POST', body: { command: cmd, timeout: 60000 } })
-      if (d.error) {
-        setConsoleLines((p) => [...p, { ts, text: d.error, type: 'err' }])
-      } else {
-        if (d.stdout) setConsoleLines((p) => [...p, { ts, text: d.stdout, type: 'out' }])
-        if (d.stderr) setConsoleLines((p) => [...p, { ts, text: d.stderr, type: 'err' }])
-      }
-    } catch (e) {
-      setConsoleLines((p) => [...p, { ts, text: e.error || e.message, type: 'err' }])
+    const es = new EventSource(`/api/agents/${agent.name}/exec-stream?cmd=${encodeURIComponent(cmd)}`)
+    es.onmessage = (e) => {
+      try {
+        const d = JSON.parse(e.data)
+        if (d.type === 'stdout') {
+          setConsoleLines((p) => [...p, { text: d.text, type: 'out' }])
+        } else if (d.type === 'stderr') {
+          setConsoleLines((p) => [...p, { text: d.text, type: 'err' }])
+        } else if (d.type === 'close' || d.type === 'error') {
+          es.close()
+          setRunningCmd('')
+        }
+      } catch {}
     }
-    setRunningCmd('')
+    es.onerror = () => {
+      es.close()
+      setRunningCmd('')
+    }
   }
 
   function clearConsole() {
@@ -220,23 +218,23 @@ function HealthTab({ agent }) {
   }
 
   return (
-    <div className="flex flex-col gap-4 h-full">
+    <div className="flex flex-col gap-3 h-full">
       {/* Toolbox */}
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-3 gap-x-4 gap-y-2">
         {HEALTH_GROUPS.map((group) => (
-          <div key={group.title} className="border border-slate-800 rounded-xl p-3">
-            <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2.5">{group.title}</h3>
-            <div className="flex flex-wrap gap-1.5">
+          <div key={group.title}>
+            <h3 className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">{group.title}</h3>
+            <div className="flex flex-wrap gap-1">
               {group.commands.map((c) => (
                 <button
                   key={c.label}
                   onClick={() => run(c.cmd, c)}
                   disabled={!!runningCmd}
-                  className={`px-2 py-1 rounded-lg text-xs font-medium transition-colors whitespace-nowrap
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors whitespace-nowrap
                     ${c.danger
                       ? 'bg-red-900/30 text-red-400 border border-red-800/50 hover:bg-red-800/50 hover:text-red-300'
-                      : 'bg-slate-800 text-slate-300 border border-slate-700 hover:bg-slate-700 hover:text-slate-200'}
-                    ${runningCmd ? 'opacity-50 cursor-not-allowed' : ''}`}
+                      : 'bg-slate-800/70 text-slate-400 border border-slate-700/60 hover:bg-slate-700 hover:text-slate-200'}
+                    ${runningCmd ? 'opacity-40 cursor-not-allowed' : ''}`}
                   title={c.desc}
                 >
                   {c.label}
@@ -248,14 +246,14 @@ function HealthTab({ agent }) {
       </div>
 
       {/* Console */}
-      <div className="flex-1 min-h-0 flex flex-col border border-slate-800 rounded-xl overflow-hidden">
-        <div className="flex items-center justify-between px-4 py-2 border-b border-slate-800 bg-slate-900/50">
-          <span className="text-xs text-slate-500 font-medium">
+      <div className="flex-1 min-h-0 flex flex-col border border-slate-800 rounded-lg overflow-hidden">
+        <div className="flex items-center justify-between px-3 py-1.5 border-b border-slate-800 bg-slate-900/50">
+          <span className="text-[10px] text-slate-500 font-medium">
             Console {runningCmd && <span className="text-cyan-400 ml-2">⏳ {runningCmd}</span>}
           </span>
-          <button onClick={clearConsole} className="text-xs text-slate-500 hover:text-slate-300 transition-colors">Clear</button>
+          <button onClick={clearConsole} className="text-[10px] text-slate-500 hover:text-slate-300 transition-colors">Clear</button>
         </div>
-        <div ref={consoleRef} className="flex-1 overflow-y-auto p-3 bg-slate-950 font-mono text-[11px] leading-relaxed">
+        <div ref={consoleRef} className="flex-1 overflow-y-auto p-2 bg-slate-950 font-mono text-[10px] leading-relaxed">
           {consoleLines.length === 0 && (
             <p className="text-slate-600">Click a button above to run a command. Output appears here.</p>
           )}
