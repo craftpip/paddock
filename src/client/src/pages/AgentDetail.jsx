@@ -13,6 +13,7 @@ const TABS = [
   { id: 'models', label: 'Models' },
   { id: 'messaging', label: 'Messaging' },
   { id: 'backups', label: 'Backups' },
+  { id: 'health', label: 'Health' },
   { id: 'activity', label: 'Activity' },
 ]
 
@@ -123,9 +124,157 @@ export default function AgentDetail() {
     return (
       <div className="flex items-center justify-center h-64 text-slate-500">
         <p>Agent not found or loading...</p>
-      </div>
-    )
+    </div>
+  )
+}
+
+// ─── Health ──────────────────────────────────────────────────
+
+const HEALTH_GROUPS = [
+  {
+    title: 'Diagnostics',
+    commands: [
+      { cmd: 'openclaw health', label: 'Health', desc: 'Cached health snapshot', flags: ['--json', '--verbose'] },
+      { cmd: 'openclaw status', label: 'Status', desc: 'Quick channels + sessions', flags: ['--all', '--usage'] },
+      { cmd: 'openclaw logs --tail 50', label: 'Logs', desc: 'Recent gateway logs (50 lines)' },
+    ],
+  },
+  {
+    title: 'Doctor',
+    commands: [
+      { cmd: 'openclaw doctor', label: 'Doctor', desc: 'Diagnose issues' },
+      { cmd: 'openclaw doctor --fix', label: 'Doctor & Fix', desc: 'Auto-repair issues', confirm: true },
+      { cmd: 'openclaw doctor --lint', label: 'Doctor Lint', desc: 'Read-only CI-style checks' },
+      { cmd: 'openclaw doctor --deep', label: 'Doctor Deep', desc: 'Scan system for extra gateways' },
+      { cmd: 'openclaw doctor --state-sqlite compact', label: 'SQLite Compact', desc: 'Compact SQLite state (stop gateway first)', confirm: true, danger: true },
+    ],
+  },
+  {
+    title: 'Security',
+    commands: [
+      { cmd: 'openclaw security audit', label: 'Security Audit', desc: 'Cold security audit' },
+      { cmd: 'openclaw security audit --deep', label: 'Security Audit (deep)', desc: 'Live probes' },
+      { cmd: 'openclaw security audit --fix', label: 'Security Audit & Fix', desc: 'Auto-fix issues', confirm: true },
+    ],
+  },
+  {
+    title: 'Memory',
+    commands: [
+      { cmd: 'openclaw memory status', label: 'Memory Status', desc: 'Index health', flags: ['--deep'] },
+      { cmd: 'openclaw memory index', label: 'Reindex', desc: 'Incremental index rebuild' },
+      { cmd: 'openclaw memory index --force', label: 'Force Reindex', desc: 'Full vector index rebuild', confirm: true, danger: true },
+      { cmd: 'openclaw memory promote --apply', label: 'Promote', desc: 'Promote short-term to MEMORY.md', confirm: true },
+    ],
+  },
+  {
+    title: 'Gateway',
+    commands: [
+      { cmd: 'openclaw gateway status', label: 'Gateway Status', desc: 'Daemon status' },
+      { cmd: 'openclaw gateway restart', label: 'Gateway Restart', desc: 'Restart the gateway daemon', confirm: true },
+      { cmd: 'openclaw gateway stop', label: 'Gateway Stop', desc: 'Stop the gateway daemon', confirm: true, danger: true },
+    ],
+  },
+  {
+    title: 'Other',
+    commands: [
+      { cmd: 'openclaw backup create', label: 'Backup', desc: 'Create a new backup', confirm: true },
+      { cmd: 'openclaw update', label: 'Update', desc: 'Check for updates', confirm: true },
+      { cmd: 'openclaw channels status --probe', label: 'Channels Probe', desc: 'Per-channel health probe' },
+    ],
+  },
+]
+
+function HealthTab({ agent }) {
+  const [consoleLines, setConsoleLines] = useState([])
+  const [runningCmd, setRunningCmd] = useState('')
+  const consoleRef = useRef(null)
+
+  useEffect(() => {
+    if (consoleRef.current) consoleRef.current.scrollTop = consoleRef.current.scrollHeight
+  }, [consoleLines])
+
+  async function run(cmd, opts = {}) {
+    if (opts.confirm && !confirm(`Run "${cmd}"?`)) return
+    if (opts.danger && !confirm(`⚠ DANGER: "${cmd}" — Are you sure?`)) return
+
+    const ts = new Date().toLocaleTimeString()
+    setRunningCmd(cmd)
+    setConsoleLines((p) => [...p, { ts, cmd, type: 'cmd' }])
+
+    try {
+      const d = await api(`/api/agents/${agent.name}/exec`, { method: 'POST', body: { command: cmd, timeout: 60000 } })
+      if (d.error) {
+        setConsoleLines((p) => [...p, { ts, text: d.error, type: 'err' }])
+      } else {
+        if (d.stdout) setConsoleLines((p) => [...p, { ts, text: d.stdout, type: 'out' }])
+        if (d.stderr) setConsoleLines((p) => [...p, { ts, text: d.stderr, type: 'err' }])
+      }
+    } catch (e) {
+      setConsoleLines((p) => [...p, { ts, text: e.error || e.message, type: 'err' }])
+    }
+    setRunningCmd('')
   }
+
+  function clearConsole() {
+    setConsoleLines([])
+  }
+
+  return (
+    <div className="flex flex-col gap-4 h-full">
+      {/* Toolbox */}
+      <div className="grid grid-cols-2 gap-3">
+        {HEALTH_GROUPS.map((group) => (
+          <div key={group.title} className="border border-slate-800 rounded-xl p-3">
+            <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2.5">{group.title}</h3>
+            <div className="flex flex-wrap gap-1.5">
+              {group.commands.map((c) => (
+                <button
+                  key={c.label}
+                  onClick={() => run(c.cmd, c)}
+                  disabled={!!runningCmd}
+                  className={`px-2 py-1 rounded-lg text-xs font-medium transition-colors whitespace-nowrap
+                    ${c.danger
+                      ? 'bg-red-900/30 text-red-400 border border-red-800/50 hover:bg-red-800/50 hover:text-red-300'
+                      : 'bg-slate-800 text-slate-300 border border-slate-700 hover:bg-slate-700 hover:text-slate-200'}
+                    ${runningCmd ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  title={c.desc}
+                >
+                  {c.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Console */}
+      <div className="flex-1 min-h-0 flex flex-col border border-slate-800 rounded-xl overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-2 border-b border-slate-800 bg-slate-900/50">
+          <span className="text-xs text-slate-500 font-medium">
+            Console {runningCmd && <span className="text-cyan-400 ml-2">⏳ {runningCmd}</span>}
+          </span>
+          <button onClick={clearConsole} className="text-xs text-slate-500 hover:text-slate-300 transition-colors">Clear</button>
+        </div>
+        <div ref={consoleRef} className="flex-1 overflow-y-auto p-3 bg-slate-950 font-mono text-[11px] leading-relaxed">
+          {consoleLines.length === 0 && (
+            <p className="text-slate-600">Click a button above to run a command. Output appears here.</p>
+          )}
+          {consoleLines.map((line, i) => (
+            <div key={i} className="whitespace-pre-wrap break-all">
+              {line.type === 'cmd' ? (
+                <span><span className="text-slate-500">{line.ts}</span> <span className="text-cyan-400">$ {line.cmd}</span></span>
+              ) : line.type === 'err' ? (
+                <span className="text-red-400">{line.text}</span>
+              ) : (
+                <span className="text-slate-300">{line.text}</span>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
 
   return (
     <div className="flex gap-0 flex-1 min-h-0 h-full" id="agent-layout">
@@ -159,6 +308,7 @@ export default function AgentDetail() {
         {currentTab === 'models' && <ModelsTab agent={agent} />}
         {currentTab === 'messaging' && <MessagingTab agent={agent} />}
         {currentTab === 'backups' && <BackupsTab agent={agent} />}
+        {currentTab === 'health' && <HealthTab agent={agent} />}
         {currentTab === 'activity' && <ActivityTab agent={agent} />}
       </div>
     </div>

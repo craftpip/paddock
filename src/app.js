@@ -734,6 +734,27 @@ app.post('/api/agents/:name/onboard', async (req, res) => {
   }
 });
 
+// ─── API: Exec ──────────────────────────────────────────────
+
+app.post('/api/agents/:name/exec', async (req, res) => {
+  const name = req.params.name;
+  const { command, timeout } = req.body;
+  if (!name) return res.status(400).json({ error: 'Name is required' });
+  if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
+  if (!command) return res.status(400).json({ error: 'Command is required' });
+
+  try {
+    const containers = await dockerPsList();
+    if ((containers[name]?.State || '').toLowerCase() !== 'running')
+      return res.status(400).json({ error: 'Container is not running' });
+
+    const r = await dockerExec(name, command, timeout || 30000);
+    res.json({ stdout: r.stdout, stderr: r.stderr });
+  } catch (e) {
+    res.status(500).json({ error: e.message, stderr: e.stderr || '' });
+  }
+});
+
 // ─── SPA Catch-all — serve index.html for client-side routing ─
 
 // Redirect /new/* to /* (legacy compat)
