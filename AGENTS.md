@@ -1,4 +1,4 @@
-# VM Friends Project — Agent Learnings
+# PAD Friends Project — PAD Learnings
 
 ## How to Use This File
 
@@ -9,17 +9,26 @@ When the user says "remember" or "write this down in AGENTS.md", or whenever you
 - Configuration quirks
 - Any decision the user makes about how things should work
 
-Append new entries under the relevant section or add a new section. Keep it concise but actionable so future agent sessions benefit.
+Append new entries under the relevant section or add a new section. Keep it concise but actionable so future PAD sessions benefit.
 
 ## Project Structure
 
-- **`docker-compose.yml`** defines services (vm-ozden, vm-pranav).
-- **`docker-compose.override.yml`** adds vm-jake, vm-ozden2, vm-reze, vm-test.
-- **`src/`** — Management dashboard container. Runs Node.js/Express on port 5050. **This is the control plane VM** — it manages all other containers via `/var/run/docker.sock`.
+- **`docker-compose.yml`** defines services.
+- **`docker-compose.override.yml`** adds additional services.
+- **`src/`** — Management dashboard container. Runs Node.js/Express on port 5050. **This is the control plane** — it manages all other containers via `/var/run/docker.sock`.
 - **`vm_openclaw/`** Docker image builds from `ghcr.io/openclaw/openclaw:latest`.
-- **`instances/<vm>/openclaw/`** is bind-mounted to `/root/.openclaw` inside each container.
+- **`instances/<pad>/openclaw/`** is bind-mounted to `/root/.openclaw` inside each container.
 - **`scripts/`** — Kept external scripts: `daily-commit.sh`, `record-usage.sh`, `usage-budget*.sh`
-- **`backups/`** — stores timestamped backup archives per agent.
+- **`backups/`** — stores timestamped backup archives per PAD.
+
+### React SPA (root `/` since 2026-07-23)
+
+- **`src/client/`** — React 19 + Vite 6 SPA. Built output goes to `src/public/` (at root).
+- **SPA serves at root** `/` — no more `/new/*` prefix.
+- **Vite config**: `base: '/'`, `outDir: '../public'`.
+- **Express catch-all** at `app.get('*', ...)` serves `public/index.html` for client-side routing (skips `/api/` and `/ws/` paths).
+- Old EJS routes have been **removed**. The old `routes/agents.js` and all EJS views are dead code.
+- API endpoints are all under `/api/*` in `app.js`. WebSocket at `/ws/terminal/*`.
 
 ## OpenClaw Cron System
 
@@ -87,7 +96,7 @@ The `npm/` folder is OpenClaw's internal plugin cache (not project dependencies)
 
 ## Onboard Bot Script
 
-- **Script**: `scripts/onboard-bot.sh` — automates `openclaw onboard` + Telegram + API key setup for a running VM.
+- **Script**: `scripts/onboard-bot.sh` — automates `openclaw onboard` + Telegram + API key setup for a running PAD.
 - **Flow**:
   1. First run: generates skeleton config, adds Telegram channel with allowlist.
   2. Saves/reads credentials from `bot-prefixes.json` (gitignored).
@@ -125,24 +134,24 @@ The `npm/` folder is OpenClaw's internal plugin cache (not project dependencies)
   --redirect-url <url>    Complete OAuth with redirect URL
   ```
 
-### Full workflow for a new VM:
-  1. `sudo bash add-vm.sh vm-xxx`
+### Full workflow for a new PAD:
+  1. `sudo bash add-vm.sh <pad>`
   2. Save credentials (one-time): `--add-bot mybot=123:ABC --add-user alice=987`
-  3. Onboard: `sudo bash scripts/onboard-bot.sh vm-xxx --bot mybot --user alice`
-  4. Set API keys: `sudo bash scripts/onboard-bot.sh vm-xxx --api-key ollama-cloud=<key>`
+  3. Onboard: `sudo bash scripts/onboard-bot.sh <pad> --bot mybot --user alice`
+  4. Set API keys: `sudo bash scripts/onboard-bot.sh <pad> --api-key ollama-cloud=<key>`
 
 ### Legacy (OAuth / Device-code) — kept for debugging:
-- **OAuth process**: Writes `/tmp/oauth-helper-<vm>.py` inside the container. The helper uses a PTY, strips ANSI/control output, waits until the OAuth URL is detected before blocking on the FIFO, and writes raw debug output to `/tmp/onboard-oauth-<vm>.url.repr`.
+- **OAuth process**: Writes `/tmp/oauth-helper-<pad>.py` inside the container. The helper uses a PTY, strips ANSI/control output, waits until the OAuth URL is detected before blocking on the FIFO, and writes raw debug output to `/tmp/onboard-oauth-<pad>.url.repr`.
 - **OAuth failure-path rule**: Keep all OAuth temp paths defined in both `setup_auth_oauth` and `complete_auth_oauth`; with `set -u`, completion error-reporting must not reference setup-local variables such as `c_log` unless redefined locally. Verify failed-auth paths as well as success paths.
 - **Device-code process**: Uses `script -q -c` inside `docker exec` to create a pseudo-TTY for `openclaw models auth login --device-code`, then runs it in background with `nohup` + `disown` so it survives script exit.
-- **Requirements**: VM must already exist (created with `add-vm.sh`) and be running.
+- **Requirements**: Agent must already exist (created with `add-vm.sh`) and be running.
 
 ## Provider API Keys via `--api-key`
 
 - Uses `openclaw models auth paste-api-key --provider <name>` inside the container.
 - For `ollama-cloud`, automatically sets `ollama-cloud/gemma4:31b` as default model when no model is configured.
 - Providers confirmed working: `openrouter`, `ollama-cloud`.
-- To verify: `docker exec <vm> openclaw models auth list --json`
+- To verify: `docker exec <pad> openclaw models auth list --json`
 
 
 ## Critical: `paste-api-key` Destroys Config
@@ -150,7 +159,7 @@ The `npm/` folder is OpenClaw's internal plugin cache (not project dependencies)
 - Running `openclaw models auth paste-api-key` inside a container **overwrites the entire `openclaw.json`** with only auth info, destroying agents config, gateway config, plugins, etc.
 - **Fix**: Always save the config before invoking `paste-api-key` and merge it back after.
 - Also: `paste-api-key` reads the API key from stdin. Using `child_process.execFile` (which doesn't pipe stdin) causes the command to hang until timeout. Use `spawn` and write to `child.stdin` instead.
-- The `meta.env` files in `instances/*/` are **critical** — without them, the agent discovery system returns 0 agents and all detail pages show "Agent not found".
+- The `meta.env` files in `instances/*/` are **critical** — without them, the PAD discovery system returns 0 PADs and all detail pages show "Agent not found".
 
 ## Known Issues & Fixes
 
@@ -168,16 +177,50 @@ The `npm/` folder is OpenClaw's internal plugin cache (not project dependencies)
 sudo find instances/ -name '.git' -type d -exec rm -rf {} + 2>/dev/null
 ```
 
+### PAD Creation: `openclaw setup` hangs or workspace is empty
+
+**Root cause:** The `openclaw setup` command in v2026.6.34 is already non-interactive by default (creates config + workspace + session dirs). But:
+- Using `--baseline` flag fails with "does not recognize option --baseline" (flag was removed in this version)
+- Not using any flags is correct: `openclaw setup`
+
+**Always check the current docs** before using OpenClaw CLI: https://docs.openclaw.ai/cli/setup
+
+**Fix for createVm flow:**
+- Use `openclaw setup` without flags in `docker exec` — it creates workspace files non-interactively
+- Verify with `docker exec <pad> openclaw setup` and check for "Workspace OK" in output
+
+### PAD Creation: Redundant `docker compose up --force-recreate` kills bind mount
+
+**Root cause:** After `createVm()` already starts the container via its instance-specific compose file, the `/api/agents/create` route tried a second `docker compose up --no-deps --force-recreate` using the main `docker-compose.yml` + `docker-compose.override.yml`. New PADs are NOT services in these files, so docker compose fails with "service not found".
+
+**Fix:** Removed the redundant second compose command entirely. The instance-specific compose is the single source of truth for each PAD.
+
+### PAD Creation: `api()` helper doesn't throw on error status
+
+**Root cause:** The `api()` helper in `src/client/src/lib/api.js` only threw on 401. For 400/500 errors, it returned the JSON body without throwing. The create handler used `result.name` which was `undefined` when the API returned an error object, causing a silent navigation to `/agents/undefined`.
+
+**Fix:** Added `if (!res.ok)` check that throws with the error payload on any non-2xx response:
+```js
+if (!res.ok) {
+  const data = await res.json().catch(() => ({}))
+  throw { status: res.status, ...data }
+}
+```
+
+### Container Prefix comes from `.env` `CONTAINER_PREFIX`
+
+**Not hardcoded.** The prefix (`vm`, `vm2`, `pad`, etc.) comes from `CONTAINER_PREFIX` in `.env` and is passed to the container via `docker-compose.yml`. The frontend reads it via `/api/config`. Always use the dynamic prefix, never hardcode `vm-`.
+
 ## Backup & Restore (save_backups.sh)
 
 **Path:** `./manage_backups.sh`
 
-A self-aware script that discovers agents from `instances/vm-*/` and uses `openclaw backup create` inside each running container.
+A self-aware script that discovers PADs from `instances/` and uses `openclaw backup create` inside each running container.
 
 **Commands:**
 
-- `sudo ./manage_backups.sh backup [agent]` — backup all agents or a specific one.
-- `sudo ./manage_backups.sh restore <agent>` — restore from the latest backup in `backups/`.
+- `sudo ./manage_backups.sh backup [pad]` — backup all PADs or a specific one.
+- `sudo ./manage_backups.sh restore <pad>` — restore from the latest backup in `backups/`.
 
 **Backup flow:**
 1. Run `openclaw backup create --output /tmp/{name}_{timestamp}.tar.gz` inside the container.
@@ -185,22 +228,22 @@ A self-aware script that discovers agents from `instances/vm-*/` and uses `openc
 3. Clean up temp file.
 
 **Restore flow:**
-1. Find latest `backups/{agent}_*.tar.gz`.
+1. Find latest `backups/{pad}_*.tar.gz`.
 2. Copy into container, extract to `/root/.openclaw`.
 3. Restart container.
 
 **Bot Clone / Copy flow:**
 To clone an existing bot into a new one:
-1. Clone directly: `sudo bash add-vm.sh <new-vm> --clone <source-vm>` (this handles backup + copy in one step)
-2. Optionally onboard for Telegram with `sudo bash scripts/onboard-bot.sh <new-vm> ...`
+1. Clone directly: `sudo bash add-vm.sh <new-pad> --clone <source-pad>` (this handles backup + copy in one step)
+2. Optionally onboard for Telegram with `sudo bash scripts/onboard-bot.sh <new-pad> ...`
 
 **Alternative (manual) flow:**
-1. Backup source: `sudo ./manage_backups.sh backup <source-vm>`
-2. Create target: `sudo bash add-vm.sh <new-vm> --fresh`
-3. Stop target: `sudo docker compose stop <new-vm>`
-4. Restore into target: `sudo ./manage_backups.sh restore <new-vm>` (after renaming backup to match target name)
-5. Start target: `sudo docker compose up -d <new-vm>`
-6. Optionally onboard for Telegram with `sudo bash scripts/onboard-bot.sh <new-vm> ...`
+1. Backup source: `sudo ./manage_backups.sh backup <source-pad>`
+2. Create target: `sudo bash add-vm.sh <new-pad> --fresh`
+3. Stop target: `sudo docker compose stop <new-pad>`
+4. Restore into target: `sudo ./manage_backups.sh restore <new-pad>` (after renaming backup to match target name)
+5. Start target: `sudo docker compose up -d <new-pad>`
+6. Optionally onboard for Telegram with `sudo bash scripts/onboard-bot.sh <new-pad> ...`
 
 **Do NOT** use manual `tar -xzf` extraction when `manage_backups.sh restore` exists.
 
@@ -210,13 +253,14 @@ To clone an existing bot into a new one:
 
 ## Project Learnings
 
-### Updating OpenClaw to latest (vm-ozden / vm-jake pattern)
+### Updating OpenClaw to latest
 
 **Last updated:** 2026-07-01
 
-**Correct Approach:** First record the current version with `docker exec <vm> openclaw --version`. If the user says they already have a backup, do not create another. Update with `docker compose build --pull <vm> && docker compose up -d --no-deps --force-recreate <vm>`. Then record the new version and image digest. After update, check OpenAI auth; if needed, have the user complete interactive device auth because non-TTY tool sessions cannot run `docker exec -it`.
+**Correct Approach:** First record the current version with `docker exec <pad> openclaw --version`. If the user says they already have a backup, do not create another. Update with `docker compose build --pull <pad> && docker compose up -d --no-deps --force-recreate <pad>`. Then record the new version and image digest. After update, check OpenAI auth; if needed, have the user complete interactive device auth because non-TTY tool sessions cannot run `docker exec -it`.
 
-**Verification:** Check `docker compose ps <vm>`, `docker exec <vm> openclaw --version`, `docker exec <vm> openclaw cron list`, recent `docker logs --since 2m <vm>`, and send a Telegram test. Also verify agent/OpenAI auth with `docker exec <vm> openclaw models status` and `docker exec <vm> openclaw agent --agent dev --message "Reply with OK only"`. If Telegram can send messages but replies fail with `401 Unauthorized`, ask the user to run `docker exec -it <vm> openclaw models auth login --provider openai --force --device-code`, then re-run the checks.
+**Verification:** Check `
+docker compose ps <pad>`, `docker exec <pad> openclaw --version`, `docker exec <pad> openclaw cron list`, recent `docker logs --since 2m <pad>`, and send a Telegram test. Also verify agent/OpenAI auth with `docker exec <pad> openclaw models status` and `docker exec <pad> openclaw agent --agent dev --message "Reply with OK only"`. If Telegram can send messages but replies fail with `401 Unauthorized`, ask the user to run `docker exec -it <pad> openclaw models auth login --provider openai --force --device-code`, then re-run the checks.
 
 **Related terms:** openclaw update, docker compose build --pull, latest, version record, telegram test, no backup, OpenAI auth, 401 Unauthorized, device-code
 
@@ -224,11 +268,11 @@ To clone an existing bot into a new one:
 
 **Last updated:** 2026-07-01
 
-**Problem:** `vm-ozden` and `vm-jake` do not route through gluetun, so host-side reachability problems to `api.telegram.org` affect their Telegram sends directly.
+**Problem:** Agents not routing through gluetun, so host-side reachability problems to `api.telegram.org` affect their Telegram sends directly.
 
 **Correct Approach:** When Telegram send failures happen (`Network request for 'sendMessage' failed!`, `UND_ERR_CONNECT_TIMEOUT`), first test from the host: `curl -sv --connect-timeout 5 https://api.telegram.org`. If the host also times out while normal HTTPS works, it's a host/network or regional restriction issue.
 
-**Verify:** Check `docker logs --since 30m <vm>` for Telegram timeout errors, and confirm host can/cannot reach `api.telegram.org`.
+**Verify:** Check `docker logs --since 30m <pad>` for Telegram timeout errors, and confirm host can/cannot reach `api.telegram.org`.
 
 ### Local Vector Memory (Semantic Search) for OpenClaw Bots
 
@@ -254,7 +298,7 @@ To clone an existing bot into a new one:
      }
    }
    ```
-4. Restart the container: `docker compose restart <vm>`
+4. Restart the container: `docker compose restart <pad>`
 5. Run the index: `openclaw memory index`
 
 **Notes:**
@@ -300,7 +344,7 @@ To clone an existing bot into a new one:
 
 ### Deploy
 ```bash
-docker compose build vm-webui && docker compose up -d --no-deps --force-recreate vm-webui
+docker compose build paddock-webui && docker compose up -d --no-deps --force-recreate paddock-webui
 ```
 
 ### Common EJS Template Mistakes
@@ -319,11 +363,11 @@ docker.stdin.write(data.toString().replace(/\r/g, '\n'));
 
 **Verify:** Send a command ending with `\r` via WebSocket — the shell should execute it immediately.
 
-## Agent Management System (v2 — 2026-07-18)
+## PAD Management System (v2 — 2026-07-18)
 
 ### Architecture
 
-The system has been rewritten from a VM-centric dashboard to an agent-first management platform.
+The system has been rewritten from a VM-centric dashboard to an PAD-first management platform.
 
 **New directory structure:**
 ```
@@ -336,14 +380,14 @@ src/
 ├── routes/
 │   └── agents.js             # All /agents/* routes (CRUD, workspace, runtime)
 ├── services/
-│   ├── agent-registry.js     # Agent discovery from filesystem, SQLite sync
+│   ├── agent-registry.js     # PAD discovery from filesystem, SQLite sync
 │   ├── db.js                 # SQLite metadata store (agents, activity, sessions)
 │   └── workspace.js          # Safe file operations with path traversal protection
 ├── views/
 │   ├── login.ejs             # Session-based login page
 │   ├── agents/
 │   │   ├── dashboard.ejs     # Fleet view with search/filter
-│   │   ├── create.ejs        # Create agent form
+│   │   ├── create.ejs        # Create PAD form
 │   │   ├── detail.ejs        # Tabbed detail (8 tabs)
 │   │   ├── workspace.ejs     # File browser with upload/download/rename/delete
 │   │   ├── terminal.ejs      # xterm.js terminal
@@ -359,10 +403,10 @@ src/
 
 ### Key Design Decisions
 
-- **Agent-first, not VM-first**: All new routes use `/agents/:id` instead of `/vm/:name`
+- **PAD-first, not VM-first**: All new routes use `/agents/:id` instead of `/vm/:name`
 - **Legacy routes preserved**: `/vm/*`, `/backups`, `/credentials` still work
-- **SQLite metadata store**: `src/data/app.db` stores agents, activity events, sessions
-- **Filesystem-derived state**: Agents discovered from `instances/*/meta.env` + Docker state
+- **SQLite metadata store**: `src/data/app.db` stores PADs, activity events, sessions
+- **Filesystem-derived state**: PADs discovered from `instances/*/meta.env` + Docker state
 - **Session-based auth**: Replaces Basic Auth. Uses `express-session` with CSRF tokens
 - **CSRF on all POST routes**: Every form includes `_csrf` hidden field
 - **Path traversal protection**: `workspace.resolveSafePath()` canonicalizes all paths against workspace root
@@ -382,7 +426,7 @@ src/
 ### Testing
 
 ```bash
-docker exec vm-webui node --test test/
+docker exec paddock-webui node --test test/
 ```
 
 ## Development Workflow — Live Editing without Rebuild
@@ -390,7 +434,7 @@ docker exec vm-webui node --test test/
 ### Key Insight
 Bind-mount the entire `src/` directory over `/app` so any file change (JS, EJS, JSON, etc.) is reflected instantly — no image rebuild needed.
 
-### Volumes Setup (`docker-compose.yml` for `vm-webui`)
+### Volumes Setup for the webui service
 ```yaml
 volumes:
   - /home/boniface/www/vm-friends:/workspace:rw
@@ -398,12 +442,12 @@ volumes:
   - /var/run/docker.sock:/var/run/docker.sock:ro
 ```
 
-Two mounts only: project root (for agent discovery, instances, scripts) and `src/` (for live code).
+Two mounts only: project root (for PAD discovery, instances, scripts) and `src/` (for live code).
 
 ### node_modules
 `node_modules` must exist on the host for the bind mount to work (the image's `/app/node_modules` is hidden by the mount). Copy it once:
 ```bash
-docker cp vm-webui:/app/node_modules /workspace/src/node_modules
+docker cp paddock-webui:/app/node_modules /workspace/src/node_modules
 ```
 And **`.gitignore`** must keep `**/node_modules/` (already done).
 
@@ -413,11 +457,11 @@ And **`.gitignore`** must keep `**/node_modules/` (already done).
 
 ### Restart Command (no rebuild needed)
 ```bash
-docker compose up -d --no-deps --force-recreate vm-webui
+docker compose up -d --no-deps --force-recreate paddock-webui
 ```
 
 ### Nav Items (current order)
-Dashboard, +VM, Backups, Creds
+Dashboard, +PAD, Backups, Creds
 - **Usage tab removed** — it was an external OpenAI report, not useful in the panel.
 
 ### Cleanup Completed
@@ -425,15 +469,15 @@ Dashboard, +VM, Backups, Creds
 - Read-only `usage/usage_data.csv` reading code and all `/usage` / `/api/usage` routes removed from `app.js`.
 
 
-## Agent Dashboard — HTMX Action Buttons (2026-07-18)
+## PAD Dashboard — HTMX Action Buttons (2026-07-18)
 
 ### Pattern: Inline Start/Stop/Restart on Dashboard Cards
-- Dashboard now has compact SVG icon buttons (play/stop/restart) per agent card using **HTMX** (, , ).
+- Dashboard now has compact SVG icon buttons (play/stop/restart) per PAD card using **HTMX** (, , ).
 - Actions do a full card swap (no page reload) — the card re-renders with updated status.
 - Loading state:  CSS dims the card during the request.
 - CSRF sent via  — no hidden form fields needed with HTMX.
 
-### Agent Card Partial
+### PAD Card Partial
 - Card markup lives in  and is included by the dashboard.
 - Route handlers check  — if true, render the card partial (no layout); otherwise redirect.
 - The partial is self-contained: receives  and  as locals.
@@ -449,15 +493,15 @@ Dashboard, +VM, Backups, Creds
 - From , include  (not ).
 
 
-## Agent Dashboard — HTMX Action Buttons (2026-07-18)
+## PAD Dashboard — HTMX Action Buttons (2026-07-18)
 
 ### Pattern: Inline Start/Stop/Restart on Dashboard Cards
-- Dashboard now has compact SVG icon buttons (play/stop/restart) per agent card using **HTMX** (`hx-post`, `hx-target`, `hx-swap`).
+- Dashboard now has compact SVG icon buttons (play/stop/restart) per PAD card using **HTMX** (`hx-post`, `hx-target`, `hx-swap`).
 - Actions do a full card swap (no page reload) — the card re-renders with updated status.
 - Loading state: `.agent-card.htmx-request` CSS dims the card during the request.
 - CSRF sent via `hx-headers='{"x-csrf-token": "<%= csrfToken %>"}'` — no hidden form fields needed with HTMX.
 
-### Agent Card Partial
+### PAD Card Partial
 - Card markup lives in `src/views/agents/partials/card.ejs` and is included by the dashboard.
 - Route handlers check `req.headers['hx-request']` — if true, render the card partial (no layout); otherwise redirect.
 - The partial is self-contained: receives `agent` and `csrfToken` as locals.
@@ -504,12 +548,12 @@ All bash/Python scripts that were external to src/ have been absorbed into Node.
 
 ## MCP Browser Testing (2026-07-18)
 
-### Accessing vm-webui from Browser MCP
+### Accessing the WebUI from Browser MCP
 - Browser MCP runs on the host, so it accesses the webui at `http://172.19.0.1:5050` (Docker gateway IP).
 - `localhost:5050` does **NOT** work from browser MCP — it connects to a different network context.
 - OP-friends container shares gluetun's network namespace — cannot be connected to other Docker networks.
-- vm-webui is on `workspace_default` (172.30.0.2) and `browser-search-mcp_default` (172.23.0.3).
-- Quick restart (no rebuild): `docker restart vm-webui`
+- paddock-webui is on `workspace_default` (172.30.0.2) and `browser-search-mcp_default` (172.23.0.3).
+- Quick restart (no rebuild): `docker restart paddock-webui`
 
 ### MCP Config
 - Created `/workspace/opencode.json` with MCP browser config pointing at `http://localhost:3000/mcp`.
@@ -548,11 +592,11 @@ Terminal appeared small/constrained because xterm.js FitAddon calls `fit()` befo
 - "It works on my end" is not acceptable — prove it works by testing it live.
 - The user has given you everything you need. No excuses.
 
-### Test VMs Available
-- `vm-test` — general testing
-- `vm-test2` — general testing
-- `vm-ramsey` — general testing
-- Navigate to `http://10.69.1.164:5050/agents/<vm-name>#<tab>` to test specific pages.
+### Test PADs Available
+- Use test PADs for general testing.
+- `test-agents` — general testing
+  (use actual PAD names, not vm- prefixes)
+
 - Always test tab switching, HTMX loading, and WebSocket connections — these are the most fragile parts.
 
 ### Rule: Never Deliver Broken Things
@@ -582,7 +626,7 @@ Terminal appeared small/constrained because xterm.js FitAddon calls `fit()` befo
 - ★ Primary — sets `agents.defaults.model.primary` via HTMX POST, model row shows ★ indicator, button gets cyan highlight.
 - ⤵ FB — sets `agents.defaults.model.fallback` via HTMX POST (empty value clears it), model row shows ⤵ indicator, button gets amber highlight.
 - × Remove — deletes auth profiles + `models.providers` entry + clears primary/fallback matching that provider. Uses `hx-confirm` for confirmation.
-- All three tested on vm-test3 with correct DOM updates and CSRF handling.
+- All three tested with correct DOM updates and CSRF handling.
 
 
 ## Architecture Documentation
@@ -590,11 +634,15 @@ Terminal appeared small/constrained because xterm.js FitAddon calls `fit()` befo
 - docs/architecture.md — **Source of truth** for business logic, system architecture, page descriptions, routes, data model, security model, and all behavioral contracts.
 - task_create_docs.md — Tracks progress of doc-writing tasks.
 - Rule: If code and docs/architecture.md disagree, fix the code.
-- AGENTS.md remains the place for operational learnings, bug fixes, commands, and agent-session context.
+- AGENTS.md remains the place for operational learnings, bug fixes, commands, and PAD session context.
 
 ## User Preferences
 
 - Planning/ideas files go in `/workspace/plans/` as separate `.md` files. When the user says they want to plan something or save an idea, write a new `.md` file in that folder.
+- Messaging page plan: `/workspace/plans/messaging-auth-panel.md` — terminal + credential panel for messaging setup (Telegram, Signal, GChat). Uses `openclaw channels add/login/remove` commands.
+- Model provider plan: `/workspace/plans/model-provider-panel.md` — terminal + API key panel for model provider setup. Uses `openclaw models auth paste-api-key/login/list` commands.
+- Backups page plan: `/workspace/plans/backups-page.md` — global backup listing; add File Name column to the table.
+- Create agent page plan: `/workspace/plans/create-agent-fix.md` — fix layout-breaking HTMX and simplify the form.
 
 ## OpenClaw Docs — Always Use Online Docs
 
@@ -604,7 +652,61 @@ Terminal appeared small/constrained because xterm.js FitAddon calls `fit()` befo
 - This applies to: `openclaw setup`, `onboard`, `agents`, `config`, `models`, `cron`, `gateway`, `backup`, and all other subcommands.
 - Bookmark: https://docs.openclaw.ai as the primary reference.
 
+## Docker-on-Docker Bind Mount Split-Brain
+
+### Problem
+
+The `paddock-webui` container manages PAD containers via the host's Docker socket. When it generates instance `docker-compose.yml` files with **relative paths** like `./openclaw:/root/.openclaw`, Docker Compose resolves the path relative to the compose file's location inside the webui container (`/workspace/instances/<pad>/`). It then sends the absolute path `/workspace/instances/<pad>/openclaw/` to the **real host's Docker daemon**.
+
+But on the real host, the project lives at `/mnt/ddrive/www/vm-friends-dev/` (or wherever the volumes point). The daemon creates/mounts `/workspace/instances/<pad>/openclaw/` at the HOST ROOT level — a **different directory** from the actual project data. Result: the PAD container writes workspace files to the root-level directory, and the webui container can't see them (it reads from the project-level directory via its own bind mount).
+
+**Architecture:**
+```
+Real Host (project at /mnt/ddrive/www/vm-friends-dev/)
+  └── Dev/Webui container (/workspace → /mnt/ddrive/...)
+        └── docker compose -f /workspace/instances/pad/docker-compose.yml
+              → resolves `./openclaw` to `/workspace/instances/pad/openclaw/`
+              → sends to Docker daemon (on REAL host)
+              → daemon mounts `/workspace/instances/pad/openclaw/` at HOST ROOT
+              → WRONG! Project is at `/mnt/ddrive/.../instances/pad/openclaw/`
+```
+
+### Fix
+
+Use **absolute paths from the real host's perspective** in generated compose files:
+
+1. `src/services/vm-manager.js` reads `HOST_WORKSPACE_ROOT` env var (falls back to `WORKSPACE_ROOT`)
+2. `generateInstanceCompose()` produces: `- ${HOST_WORKSPACE_ROOT}/instances/${name}/${agent}:${dataDir}`
+3. Set `HOST_WORKSPACE_ROOT=/mnt/ddrive/www/vm-friends-dev` in `.env` for the deployment
+4. Pass it to the webui container in `docker-compose.yml`: `HOST_WORKSPACE_ROOT: "${HOST_WORKSPACE_ROOT:-}"`
+
+### Key Files
+
+- `src/services/vm-manager.js` — `generateInstanceCompose()` and `createVm()`
+- `docker-compose.yml` — passes `HOST_WORKSPACE_ROOT` env var
+- `.env` — sets `HOST_WORKSPACE_ROOT` to the real host's project path
+
+### Verification
+
+After creating a new PAD, check that container and host see the same files:
+```bash
+docker inspect <pad> --format '{{range .Mounts}}{{.Source}}{{"\n"}}{{end}}'
+# Source MUST be /mnt/ddrive/... NOT /workspace/...
+docker exec <pad> find /root/.openclaw/ -type f | wc -l
+find /workspace/instances/<pad>/openclaw/ -type f | wc -l
+# Counts must match!
+```
+
+### File Modal in SPA — Escape and Save Indicator
+
+- File viewer modal in the workspace tab (AgentDetail.jsx) originally had no Escape key handler and no "unsaved changes" indicator.
+- Fix: Added `onKeyDown` with `e.key === 'Escape'` on the backdrop div, switched from `defaultValue` to `value` + `onChange` for content tracking, added `fileDirty` / `fileSaved` state with visual indicator.
+- The textarea needed a `setFileModal({ ...fileModal, content: e.target.value })` onChange to keep the state in sync.
+- Close button and backdrop click both call `closeFileModal()` which warns if dirty: `if (fileDirty && !confirm('You have unsaved changes. Discard?')) return`.
+
 ## Do Not Do
 
-- **Never touch containers outside our project.** Containers not defined in this project's `docker-compose.yml` (e.g. `vm-jake2`, `vm-test`, `vm-ozden`, `vm-ramsey`, `vm-test3`, `vm-test2`, `vm-webui`) are not ours. Do not start, stop, exec, inspect, or interact with them in any way. Our project only owns containers it creates.
-- **Never create random containers for testing.** Spin up test containers only through the project's own tools (`add-vm.sh`, docker-compose services, or the web UI). Running `docker run` with external images (e.g. `ghcr.io/openclaw/openclaw:latest`) is outside our scope.
+- **Never touch containers outside our project.** Containers not defined in this project's `docker-compose.yml` are not ours. Do not start, stop, exec, inspect, or interact with them in any way. Our project only owns containers it creates.
+- **Never create random containers for testing.** Spin up test containers only through the project's own tools (add-vm scripts, docker-compose services, or the web UI). Running `docker run` with external images is outside our scope.
+- **Never refer to containers/PADs with a `vm-` prefix.** The naming scheme is not guaranteed. Refer to PADs by their actual name only.
+- **Never use the question tool to ask the user questions during a conversation.** Ask questions directly in text instead. The tool is only for fallback or complex multi-option scenarios when explicitly justified.

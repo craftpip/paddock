@@ -3,6 +3,7 @@ const path = require('path');
 const { execFile } = require('child_process');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
+const HOST_WORKSPACE = process.env.HOST_WORKSPACE_ROOT || WORKSPACE;
 const INSTANCES_DIR = path.join(WORKSPACE, 'instances');
 const PREFIX = process.env.CONTAINER_PREFIX || 'vm';
 const PREFIX_RE = new RegExp('^' + PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-');
@@ -62,12 +63,12 @@ function generateInstanceCompose(name, agent, password, port) {
   let yaml = 'services:\n';
   yaml += `  ${name}:\n`;
   yaml += `    build:\n`;
-  yaml += `      context: ${build}\n`;
+  yaml += `      context: ${path.resolve(HOST_WORKSPACE, 'instances', name, build)}\n`;
   yaml += `    image: ${image}\n`;
   yaml += `    container_name: ${name}\n`;
   yaml += `    restart: unless-stopped\n`;
   if (port) yaml += `    ports:\n      - "${port}:22"\n`;
-  yaml += `    volumes:\n      - ./${agent}:${dataDir}\n`;
+  yaml += `    volumes:\n      - ${HOST_WORKSPACE}/instances/${name}/${agent}:${dataDir}\n`;
   yaml += `    environment:\n      TZ: Asia/Kolkata\n      ROOT_PASSWORD: ${password || ''}\n`;
   return yaml;
 }
@@ -170,7 +171,7 @@ async function createVm(name, options = {}) {
   if (agent === 'openclaw' || agent === 'picoclaw') {
     for (let i = 0; i < 15; i++) {
       try {
-        await runCmd('docker', ['exec', name, 'openclaw', 'setup'], { timeout: 30000 });
+        await runCmd('docker', ['exec', name, 'openclaw', 'setup'], { timeout: 60000 });
         break;
       } catch {
         await new Promise(r => setTimeout(r, 1000));
