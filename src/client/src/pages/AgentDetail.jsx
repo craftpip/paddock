@@ -547,12 +547,13 @@ function TerminalTab({ agent }) {
 function WorkspaceTab({ agent }) {
   const storageKey = `workspace-state-${agent.name}`
   function restoreState() {
-    try { return JSON.parse(sessionStorage.getItem(storageKey)) } catch {}
+    const raw = sessionStorage.getItem(storageKey)
+    if (!raw) return {}
+    try { return JSON.parse(raw) } catch {}
     return {}
   }
   const saved = restoreState()
-  const [path, setPath] = useState(saved.path || '/')
-  const [parentView, setParentView] = useState(saved.parentView || false)
+  const [path, setPath] = useState(saved.path || '/workspace')
   const [listing, setListing] = useState(null)
   const [error, setError] = useState('')
   const [uploading, setUploading] = useState(false)
@@ -563,19 +564,7 @@ function WorkspaceTab({ agent }) {
   const [loading, setLoading] = useState(false)
   const fileInputRef = useRef(null)
 
-  const loadParent = useCallback(() => {
-    setParentView(true)
-    setError('')
-    setLoading(true)
-    api(`/api/agents/${agent.name}/workspace/parent`).then((d) => {
-      if (d.entries) setListing(d)
-      else if (d.error) setError(d.error)
-    }).catch(() => setError('Failed to load parent'))
-    .finally(() => setLoading(false))
-  }, [agent.name])
-
   const load = useCallback((p) => {
-    setParentView(false)
     setError('')
     setLoading(true)
     api(`/api/agents/${agent.name}/workspace?path=${encodeURIComponent(p)}`).then((d) => {
@@ -585,19 +574,16 @@ function WorkspaceTab({ agent }) {
     .finally(() => setLoading(false))
   }, [agent.name])
 
-  useEffect(() => { if (!parentView) load(path) }, [path, load, parentView])
-  useEffect(() => { sessionStorage.setItem(storageKey, JSON.stringify({ path, parentView })) }, [path, parentView, storageKey])
+  useEffect(() => { load(path) }, [path, load])
+  useEffect(() => { sessionStorage.setItem(storageKey, JSON.stringify({ path })) }, [path, storageKey])
 
   const parts = path.split('/').filter(Boolean)
-  const breadcrumbs = parentView
-    ? [{ name: 'openclaw', path: '/' }]
-    : [{ name: 'root', path: '/' }, ...parts.map((p, i) => ({ name: p, path: '/' + parts.slice(0, i + 1).join('/') }))]
+  const breadcrumbs = [{ name: 'openclaw', path: '/' }, ...parts.map((p, i) => ({ name: p, path: '/' + parts.slice(0, i + 1).join('/') }))]
 
-  function goToDir(p) { setPath(p); setParentView(false) }
+  function goToDir(p) { setPath(p) }
   function goUp() {
-    if (parentView) { goToDir('/') }
-    else if (path === '/') { loadParent() }
-    else { goToDir(path.split('/').slice(0, -1).join('/') || '/') }
+    if (path === '/') return
+    setPath(path.split('/').slice(0, -1).join('/') || '/')
   }
 
   async function createFile(e) {
@@ -669,8 +655,7 @@ function WorkspaceTab({ agent }) {
 
   async function openFile(entryPath) {
     try {
-      const base = parentView ? `/api/agents/${agent.name}/workspace/parent/file` : `/api/agents/${agent.name}/workspace/file`
-      const d = await api(base + '?path=' + encodeURIComponent(entryPath))
+      const d = await api(`/api/agents/${agent.name}/workspace/file?path=` + encodeURIComponent(entryPath))
       if (d.error) { setError(d.error); return }
       setFileModal(d)
     } catch (err) { setError('Failed to load file') }
@@ -678,12 +663,26 @@ function WorkspaceTab({ agent }) {
 
   const [fileDirty, setFileDirty] = useState(false)
   const [fileSaved, setFileSaved] = useState(false)
+  const [jsonError, setJsonError] = useState('')
+
+  function getJsonLine(content, error) {
+    const match = error.message.match(/position\s+(\d+)/i)
+    if (!match) return error.message
+    const pos = parseInt(match[1])
+    const lines = content.substring(0, pos).split('\n')
+    return 'Line ' + lines.length + ': ' + error.message
+  }
 
   async function saveFile() {
     if (!fileModal) return
     const textarea = document.getElementById('file-editor')
     if (!textarea) return
     const content = textarea.value
+    const ext = '.' + (fileModal.name || '').split('.').pop()?.toLowerCase()
+    if (ext === '.json') {
+      try { JSON.parse(content); setJsonError('') }
+      catch (e) { setJsonError(getJsonLine(content, e)); return }
+    }
     try {
       await api(`/api/agents/${agent.name}/workspace/save`, { method: 'POST', body: { path: fileModal.path || fileModal.name, content } })
       setFileModal({ ...fileModal, content })
@@ -786,23 +785,29 @@ function WorkspaceTab({ agent }) {
                 </tr>
               </thead>
               <tbody>
-                <tr className={`border-b border-slate-800/50 ${parentView ? 'opacity-40 cursor-not-allowed' : 'hover:bg-slate-800/30 cursor-pointer'}`} onClick={() => !parentView && goUp()}>
-                    <td className="px-4 py-2 text-cyan-400" colSpan={4}>&larr; {parentView ? 'Up to parent' : path === '/' ? 'Up to parent' : 'Up'}</td>
+                {path !== '/' && (
+                  <tr className="border-b border-slate-800/50 hover:bg-slate-800/30 cursor-pointer" onClick={goUp}>
+                    <td className="px-4 py-2 text-cyan-400" colSpan={4}>&larr; Up</td>
                   </tr>
+                )}
                 {listing.entries?.filter((e) => !e.name.startsWith('.')).map((entry) => {
                   const entryPath = path === '/' ? '/' + entry.name : path + '/' + entry.name
                   return (
                     <tr key={entry.name} className="border-b border-slate-800/50 hover:bg-slate-800/30 group">
-                      <td className="px-4 py-2">
+                      <td className="px-4 py-3 cursor-pointer"
+                          onClick={() => {
+                            if (entry.type !== 'directory') openFile(entryPath)
+                            else goToDir(entryPath)
+                          }}>
                         {entry.type === 'directory' ? (
-                          <button onClick={() => { if (parentView && entry.name === 'workspace') goToDir('/'); else goToDir(entryPath) }} className="text-cyan-400 hover:text-cyan-300 transition-colors text-left">
+                          <span className="text-cyan-400">
                             <span className="mr-1.5 text-slate-500">📁</span>{entry.name}
-                            {parentView && entry.name === 'workspace' && <span className="ml-2 inline-block px-1.5 py-0.5 rounded text-[10px] font-medium bg-cyan-900/50 text-cyan-300 border border-cyan-800/50 align-middle">workspace</span>}
-                          </button>
+                            {entry.name === 'workspace' && <span className="ml-2 inline-block px-1.5 py-0.5 rounded text-[10px] font-medium bg-cyan-900/50 text-cyan-300 border border-cyan-800/50 align-middle">workspace</span>}
+                          </span>
                         ) : (
-                          <button onClick={() => openFile(entryPath)} className="text-slate-200 hover:text-cyan-300 transition-colors text-left">
+                          <span className="text-slate-200">
                             <span className="mr-1.5 text-slate-500">📄</span>{entry.name}
-                          </button>
+                          </span>
                         )}
                       </td>
                       <td className="px-4 py-2 text-slate-500 hidden sm:table-cell">{entry.size_hr || entry.size || '-'}</td>
@@ -810,17 +815,13 @@ function WorkspaceTab({ agent }) {
                       <td className="px-4 py-2">
                         <div className="flex items-center gap-1 opacity-50 group-hover:opacity-100 transition-opacity">
                           {entry.type === 'file' && (
-                            <a href={parentView ? `/api/agents/${agent.name}/workspace/parent/download?path=${encodeURIComponent(entryPath)}` : `/api/agents/${agent.name}/workspace/download?path=${encodeURIComponent(entryPath)}`}
+                            <a href={`/api/agents/${agent.name}/workspace/download?path=${encodeURIComponent(entryPath)}`}
                                className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors" title="Download" download>DL</a>
                           )}
-                          {!parentView && (
-                            <>
-                              <button onClick={() => renameEntry(entryPath)}
-                                      className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors" title="Rename">MV</button>
-                              <button onClick={() => deleteEntry(entryPath, entry.name)}
-                                      className="px-2 py-1 text-xs text-red-400 hover:text-red-300 hover:bg-slate-700 rounded transition-colors" title="Delete">RM</button>
-                            </>
-                          )}
+                          <button onClick={() => renameEntry(entryPath)}
+                                  className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors" title="Rename">MV</button>
+                          <button onClick={() => deleteEntry(entryPath, entry.name)}
+                                  className="px-2 py-1 text-xs text-red-400 hover:text-red-300 hover:bg-slate-700 rounded transition-colors" title="Delete">RM</button>
                         </div>
                       </td>
                     </tr>
@@ -850,15 +851,15 @@ function WorkspaceTab({ agent }) {
                 <span className="text-slate-400">📄</span>
                 <span className="text-sm font-medium text-white truncate">{fileModal.name}</span>
                 <span className="text-xs text-slate-500">{fileModal.size} bytes · {ext.replace('.', '').toUpperCase()}</span>
-                {editable && (
-                  <span className={`text-xs ml-2 ${fileSaved ? 'text-emerald-400' : fileDirty ? 'text-amber-400' : 'text-slate-600'}`}>
-                    {fileSaved ? 'Saved' : fileDirty ? 'Unsaved' : ''}
-                  </span>
-                )}
+{editable && (
+                    <span className={`text-xs ml-2 ${jsonError ? 'text-red-400' : fileSaved ? 'text-emerald-400' : fileDirty ? 'text-amber-400' : 'text-slate-600'}`}>
+                      {jsonError || (fileSaved ? 'Saved' : fileDirty ? 'Unsaved' : '')}
+                    </span>
+                  )}
               </div>
               <div className="flex items-center gap-2">
-                {editable && !parentView && <button onClick={saveFile} className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded text-sm transition-colors">Save</button>}
-                <a href={parentView ? `/api/agents/${agent.name}/workspace/parent/download?path=${encodeURIComponent(fileModal.path || fileModal.name)}` : `/api/agents/${agent.name}/workspace/download?path=${encodeURIComponent(fileModal.path || fileModal.name)}`}
+                {editable && <button onClick={saveFile} className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded text-sm transition-colors">Save</button>}
+                <a href={`/api/agents/${agent.name}/workspace/download?path=${encodeURIComponent(fileModal.path || fileModal.name)}`}
                    className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded text-sm transition-colors" download>Download</a>
                 <button onClick={closeFileModal} className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded text-sm transition-colors">Close</button>
               </div>
@@ -866,7 +867,7 @@ function WorkspaceTab({ agent }) {
             <div className="flex-1 overflow-hidden p-4">
               {editable ? (
                 <textarea id="file-editor" value={fileModal.content}
-                          onChange={(e) => { setFileModal({ ...fileModal, content: e.target.value }); setFileDirty(true); setFileSaved(false) }}
+                          onChange={(e) => { setFileModal({ ...fileModal, content: e.target.value }); setFileDirty(true); setFileSaved(false); setJsonError('') }}
                           className="w-full h-full bg-slate-900 text-slate-200 font-mono text-sm p-4 rounded-lg border border-slate-700 focus:border-cyan-500 focus:outline-none resize-none"
                           style={{ minHeight: '100%' }} />
               ) : (
@@ -1091,7 +1092,7 @@ function McpTab({ agent }) {
 
       {servers.length === 0 && !showAdd ? (
         <div className="text-center py-12">
-          <svg className="w-10 h-10 mx-auto mb-3 text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5"><path strokeLinecap="round" strokeLinejoin="round" d="M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0 01-6.364-6.364l1.757-1.757m9.86-2.813a4.5 4.5 0 00-1.242-7.244l-4.5-4.5a4.5 4.5 0 00-6.364 6.364L4.25 8.5" /></svg>
+          <svg className="w-10 h-10 mx-auto mb-3 text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5"><path strokeLinecap="round" strokeLinejoin="round" d="M5 12h14M12 5l7 7-7 7" /></svg>
           <p className="text-slate-500 text-sm mb-3">No MCP servers configured.</p>
           <button onClick={() => setShowAdd(true)} className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-xs font-medium transition-colors">+ Add Server</button>
         </div>

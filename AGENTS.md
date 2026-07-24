@@ -567,10 +567,10 @@ All bash/Python scripts that were external to src/ have been absorbed into Node.
 ## MCP Browser Testing (2026-07-18)
 
 ### Accessing the WebUI from Browser MCP
-- Browser MCP runs on the host, so it accesses the webui at `http://172.19.0.1:5050` (Docker gateway IP).
+- Browser MCP runs on the host, so it accesses the webui at `http://10.69.1.164:5051` (local network IP, production SPA build).
+- Vite dev server (HMR) runs on port 5173+ inside the container — use `http://10.69.1.164:5176` (or whichever port Vite picks) for live dev.
 - `localhost:5050` does **NOT** work from browser MCP — it connects to a different network context.
-- OP-friends container shares gluetun's network namespace — cannot be connected to other Docker networks.
-- paddock-webui is on `workspace_default` (172.30.0.2) and `browser-search-mcp_default` (172.23.0.3).
+- `172.19.0.1` (Docker gateway IP) does **NOT** work from browser MCP — use `10.69.1.164` instead.
 - Quick restart (no rebuild): `docker restart paddock-webui`
 
 ### MCP Config

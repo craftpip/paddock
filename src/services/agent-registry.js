@@ -138,7 +138,7 @@ function buildAgent(vmName, dockerState) {
     runtime_type: 'docker',
     runtime_ref: vmName,
     status,
-    workspace_root: fs.existsSync(workspaceRoot) ? workspaceRoot : agentDir,
+    workspace_root: agentDir,
     config_root: configRoot,
     default_model: defaultModel,
     default_provider: defaultProvider,
