@@ -209,6 +209,79 @@ function getMimeType(filename) {
   return map[ext] || 'text/plain';
 }
 
+function listParentDir(agentId) {
+  const agent = getAgent(agentId);
+  if (!agent) throw new Error('Agent not found');
+  const parentDir = path.resolve(agent.workspace_root, '..');
+
+  if (!fs.existsSync(parentDir)) {
+    return { path: '/', entries: [] };
+  }
+
+  const stat = fs.statSync(parentDir);
+  if (!stat.isDirectory()) {
+    throw new Error('Not a directory');
+  }
+
+  const raw = fs.readdirSync(parentDir, { withFileTypes: true });
+  const entries = raw
+    .filter(e => !e.name.startsWith('.'))
+    .map(e => {
+      const entryPath = path.join(parentDir, e.name);
+      let entryStat;
+      try {
+        entryStat = fs.statSync(entryPath);
+      } catch {
+        entryStat = null;
+      }
+      return {
+        name: e.name,
+        type: e.isDirectory() ? 'directory' : 'file',
+        size: entryStat ? entryStat.size : 0,
+        modified: entryStat ? entryStat.mtime.toISOString() : null,
+      };
+    })
+    .sort((a, b) => {
+      if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+
+  return {
+    path: '/',
+    entries,
+  };
+}
+
+function resolveParentSafePath(agentId, relativePath) {
+  const agent = getAgent(agentId);
+  if (!agent) throw new Error('Agent not found');
+  const parentDir = path.resolve(agent.workspace_root, '..');
+  if (!relativePath || relativePath === '/') return parentDir;
+  const cleaned = path.normalize(relativePath).replace(/^\/+/, '');
+  const resolved = path.resolve(parentDir, cleaned);
+  if (!resolved.startsWith(parentDir + path.sep) && resolved !== parentDir) {
+    throw new Error('Path traversal rejected');
+  }
+  return resolved;
+}
+
+function readParentFile(agentId, relativePath) {
+  const absPath = resolveParentSafePath(agentId, relativePath);
+  if (!fs.existsSync(absPath)) throw new Error('File not found');
+  const stat = fs.statSync(absPath);
+  if (stat.isDirectory()) throw new Error('Cannot read directory');
+  return {
+    content: fs.readFileSync(absPath, 'utf8'),
+    size: stat.size,
+    modified: stat.mtime.toISOString(),
+    name: path.basename(absPath),
+  };
+}
+
+function downloadParentFile(agentId, relativePath) {
+  return resolveParentSafePath(agentId, relativePath);
+}
+
 module.exports = {
   listDir,
   readFile,
@@ -222,5 +295,8 @@ module.exports = {
   isPreviewable,
   getMimeType,
   resolveSafePath,
+  listParentDir,
+  readParentFile,
+  downloadParentFile,
   MAX_UPLOAD_SIZE,
 };

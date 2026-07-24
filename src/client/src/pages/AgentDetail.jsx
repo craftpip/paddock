@@ -10,6 +10,8 @@ const TABS = [
   { id: 'logs', label: 'Logs' },
   { id: 'sessions', label: 'Sessions' },
   { id: 'config', label: 'Config' },
+  { id: 'mcp', label: 'MCP' },
+  { id: 'skills', label: 'Skills' },
   { id: 'models', label: 'Models' },
   { id: 'messaging', label: 'Messaging' },
   { id: 'backups', label: 'Backups' },
@@ -220,20 +222,31 @@ function HealthTab({ agent }) {
   return (
     <div className="flex flex-col gap-3 h-full">
       {/* Toolbox */}
-      <div className="grid grid-cols-3 gap-x-4 gap-y-2">
-        {HEALTH_GROUPS.map((group) => (
-          <div key={group.title}>
-            <h3 className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">{group.title}</h3>
-            <div className="flex flex-wrap gap-1">
+      <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1">
+        {HEALTH_GROUPS.map((group) => {
+          const dotColor = group.title === 'Diagnostics' ? 'bg-cyan-500' : group.title === 'Doctor' ? 'bg-amber-500' : group.title === 'Security' ? 'bg-rose-500' : group.title === 'Memory' ? 'bg-violet-500' : 'bg-slate-600'
+          const colors = {
+            Diagnostics: 'border-cyan-800/30 text-cyan-300 bg-cyan-950/20 hover:bg-cyan-900/30 hover:text-cyan-200',
+            Doctor: 'border-amber-800/30 text-amber-300 bg-amber-950/20 hover:bg-amber-900/30 hover:text-amber-200',
+            Security: 'border-rose-800/30 text-rose-300 bg-rose-950/20 hover:bg-rose-900/30 hover:text-rose-200',
+            Memory: 'border-violet-800/30 text-violet-300 bg-violet-950/20 hover:bg-violet-900/30 hover:text-violet-200',
+            Other: 'border-slate-700/50 text-slate-400 bg-slate-800/50 hover:bg-slate-700 hover:text-slate-200',
+          }
+          const accent = colors[group.title] || colors.Other
+          return (
+          <div key={group.title} className="flex items-baseline gap-1.5">
+            <div className="flex items-center gap-1 shrink-0">
+              <div className={`w-1 h-2.5 rounded-full ${dotColor}`} />
+              <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">{group.title}:</span>
+            </div>
+            <div className="flex flex-nowrap gap-1">
               {group.commands.map((c) => (
                 <button
                   key={c.label}
                   onClick={() => run(c.cmd, c)}
                   disabled={!!runningCmd}
-                  className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors whitespace-nowrap
-                    ${c.danger
-                      ? 'bg-red-900/30 text-red-400 border border-red-800/50 hover:bg-red-800/50 hover:text-red-300'
-                      : 'bg-slate-800/70 text-slate-400 border border-slate-700/60 hover:bg-slate-700 hover:text-slate-200'}
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors whitespace-nowrap border shrink-0
+                    ${c.danger ? 'bg-red-900/30 text-red-400 border-red-800/50 hover:bg-red-800/50 hover:text-red-300' : accent}
                     ${runningCmd ? 'opacity-40 cursor-not-allowed' : ''}`}
                   title={c.desc}
                 >
@@ -242,7 +255,8 @@ function HealthTab({ agent }) {
               ))}
             </div>
           </div>
-        ))}
+          )
+        })}
       </div>
 
       {/* Console */}
@@ -288,7 +302,7 @@ function HealthTab({ agent }) {
                 e.preventDefault()
                 navigate(`/agents/${agent.name}#${tab.id}`, { replace: true })
               }}
-              className={`w-full text-left px-3 py-2 text-sm font-medium rounded-lg border-l-2 whitespace-nowrap block ${currentTab === tab.id ? 'border-cyan-400 text-cyan-400 bg-slate-800/50' : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}
+              className={`w-full text-left px-3 py-2 text-sm font-medium border-l-2 whitespace-nowrap block ${currentTab === tab.id ? 'rounded-none border-cyan-400 text-cyan-400 bg-slate-800/50' : 'rounded-lg border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}
             >
               {tab.label}
             </a>
@@ -303,6 +317,8 @@ function HealthTab({ agent }) {
         {currentTab === 'logs' && <LogsTab agent={agent} />}
         {currentTab === 'sessions' && <SessionsTab agent={agent} />}
         {currentTab === 'config' && <ConfigTab agent={agent} />}
+        {currentTab === 'mcp' && <McpTab agent={agent} />}
+        {currentTab === 'skills' && <SkillsTab agent={agent} />}
         {currentTab === 'models' && <ModelsTab agent={agent} />}
         {currentTab === 'messaging' && <MessagingTab agent={agent} />}
         {currentTab === 'backups' && <BackupsTab agent={agent} />}
@@ -529,7 +545,14 @@ function TerminalTab({ agent }) {
 // ─── Workspace ───────────────────────────────────────────────
 
 function WorkspaceTab({ agent }) {
-  const [path, setPath] = useState('/')
+  const storageKey = `workspace-state-${agent.name}`
+  function restoreState() {
+    try { return JSON.parse(sessionStorage.getItem(storageKey)) } catch {}
+    return {}
+  }
+  const saved = restoreState()
+  const [path, setPath] = useState(saved.path || '/')
+  const [parentView, setParentView] = useState(saved.parentView || false)
   const [listing, setListing] = useState(null)
   const [error, setError] = useState('')
   const [uploading, setUploading] = useState(false)
@@ -537,22 +560,45 @@ function WorkspaceTab({ agent }) {
   const [fileModal, setFileModal] = useState(null)
   const [newFileName, setNewFileName] = useState('')
   const [newFolderName, setNewFolderName] = useState('')
+  const [loading, setLoading] = useState(false)
   const fileInputRef = useRef(null)
 
-  const load = useCallback((p) => {
+  const loadParent = useCallback(() => {
+    setParentView(true)
     setError('')
+    setLoading(true)
+    api(`/api/agents/${agent.name}/workspace/parent`).then((d) => {
+      if (d.entries) setListing(d)
+      else if (d.error) setError(d.error)
+    }).catch(() => setError('Failed to load parent'))
+    .finally(() => setLoading(false))
+  }, [agent.name])
+
+  const load = useCallback((p) => {
+    setParentView(false)
+    setError('')
+    setLoading(true)
     api(`/api/agents/${agent.name}/workspace?path=${encodeURIComponent(p)}`).then((d) => {
       if (d.entries) setListing(d)
       else if (d.error) setError(d.error)
     }).catch(() => setError('Failed to load workspace'))
+    .finally(() => setLoading(false))
   }, [agent.name])
 
-  useEffect(() => { load(path) }, [path, load])
+  useEffect(() => { if (!parentView) load(path) }, [path, load, parentView])
+  useEffect(() => { sessionStorage.setItem(storageKey, JSON.stringify({ path, parentView })) }, [path, parentView, storageKey])
 
   const parts = path.split('/').filter(Boolean)
-  const breadcrumbs = [{ name: 'root', path: '/' }, ...parts.map((p, i) => ({ name: p, path: '/' + parts.slice(0, i + 1).join('/') }))]
+  const breadcrumbs = parentView
+    ? [{ name: 'openclaw', path: '/' }]
+    : [{ name: 'root', path: '/' }, ...parts.map((p, i) => ({ name: p, path: '/' + parts.slice(0, i + 1).join('/') }))]
 
-  function goToDir(p) { setPath(p) }
+  function goToDir(p) { setPath(p); setParentView(false) }
+  function goUp() {
+    if (parentView) { goToDir('/') }
+    else if (path === '/') { loadParent() }
+    else { goToDir(path.split('/').slice(0, -1).join('/') || '/') }
+  }
 
   async function createFile(e) {
     e.preventDefault()
@@ -623,7 +669,8 @@ function WorkspaceTab({ agent }) {
 
   async function openFile(entryPath) {
     try {
-      const d = await api(`/api/agents/${agent.name}/workspace/file?path=${encodeURIComponent(entryPath)}`)
+      const base = parentView ? `/api/agents/${agent.name}/workspace/parent/file` : `/api/agents/${agent.name}/workspace/file`
+      const d = await api(base + '?path=' + encodeURIComponent(entryPath))
       if (d.error) { setError(d.error); return }
       setFileModal(d)
     } catch (err) { setError('Failed to load file') }
@@ -655,6 +702,13 @@ function WorkspaceTab({ agent }) {
 
   const ext = fileModal ? '.' + (fileModal.name || '').split('.').pop()?.toLowerCase() : ''
   const editable = ['.txt', '.md', '.json', '.js', '.ts', '.jsx', '.tsx', '.py', '.rb', '.go', '.rs', '.java', '.c', '.cpp', '.css', '.html', '.xml', '.yaml', '.yml', '.toml', '.ini', '.conf', '.sh', '.bash', '.env', '.log', '.csv', '.sql', '.ejs', '.vue', '.svelte', '.gitignore'].includes(ext)
+
+  useEffect(() => {
+    if (!fileModal) return
+    function onKey(e) { if (e.key === 'Escape') closeFileModal() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [fileModal])
 
   return (
     <div>
@@ -708,8 +762,18 @@ function WorkspaceTab({ agent }) {
 
       {error && <p className="text-red-400 text-sm mb-4">{error}</p>}
 
+      {/* Loading Spinner */}
+      {loading && (
+        <div className="flex items-center justify-center py-16">
+          <div className="flex items-center gap-3 text-slate-400">
+            <span className="w-5 h-5 border-2 border-slate-600 border-t-cyan-400 rounded-full animate-spin" />
+            <span className="text-sm">Loading...</span>
+          </div>
+        </div>
+      )}
+
       {/* File Table */}
-      {listing && (
+      {listing && !loading && (
         <div className="border border-slate-800 rounded-xl overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -722,19 +786,18 @@ function WorkspaceTab({ agent }) {
                 </tr>
               </thead>
               <tbody>
-                {path !== '/' && (
-                  <tr className="border-b border-slate-800/50 hover:bg-slate-800/30 cursor-pointer" onClick={() => goToDir(path.split('/').slice(0, -1).join('/') || '/')}>
-                    <td className="px-4 py-2 text-cyan-400" colSpan={4}>&larr; Up</td>
+                <tr className={`border-b border-slate-800/50 ${parentView ? 'opacity-40 cursor-not-allowed' : 'hover:bg-slate-800/30 cursor-pointer'}`} onClick={() => !parentView && goUp()}>
+                    <td className="px-4 py-2 text-cyan-400" colSpan={4}>&larr; {parentView ? 'Up to parent' : path === '/' ? 'Up to parent' : 'Up'}</td>
                   </tr>
-                )}
                 {listing.entries?.filter((e) => !e.name.startsWith('.')).map((entry) => {
                   const entryPath = path === '/' ? '/' + entry.name : path + '/' + entry.name
                   return (
                     <tr key={entry.name} className="border-b border-slate-800/50 hover:bg-slate-800/30 group">
                       <td className="px-4 py-2">
                         {entry.type === 'directory' ? (
-                          <button onClick={() => goToDir(entryPath)} className="text-cyan-400 hover:text-cyan-300 transition-colors text-left">
+                          <button onClick={() => { if (parentView && entry.name === 'workspace') goToDir('/'); else goToDir(entryPath) }} className="text-cyan-400 hover:text-cyan-300 transition-colors text-left">
                             <span className="mr-1.5 text-slate-500">📁</span>{entry.name}
+                            {parentView && entry.name === 'workspace' && <span className="ml-2 inline-block px-1.5 py-0.5 rounded text-[10px] font-medium bg-cyan-900/50 text-cyan-300 border border-cyan-800/50 align-middle">workspace</span>}
                           </button>
                         ) : (
                           <button onClick={() => openFile(entryPath)} className="text-slate-200 hover:text-cyan-300 transition-colors text-left">
@@ -747,13 +810,17 @@ function WorkspaceTab({ agent }) {
                       <td className="px-4 py-2">
                         <div className="flex items-center gap-1 opacity-50 group-hover:opacity-100 transition-opacity">
                           {entry.type === 'file' && (
-                            <a href={`/api/agents/${agent.name}/workspace/download?path=${encodeURIComponent(entryPath)}`}
+                            <a href={parentView ? `/api/agents/${agent.name}/workspace/parent/download?path=${encodeURIComponent(entryPath)}` : `/api/agents/${agent.name}/workspace/download?path=${encodeURIComponent(entryPath)}`}
                                className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors" title="Download" download>DL</a>
                           )}
-                          <button onClick={() => renameEntry(entryPath)}
-                                  className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors" title="Rename">MV</button>
-                          <button onClick={() => deleteEntry(entryPath, entry.name)}
-                                  className="px-2 py-1 text-xs text-red-400 hover:text-red-300 hover:bg-slate-700 rounded transition-colors" title="Delete">RM</button>
+                          {!parentView && (
+                            <>
+                              <button onClick={() => renameEntry(entryPath)}
+                                      className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors" title="Rename">MV</button>
+                              <button onClick={() => deleteEntry(entryPath, entry.name)}
+                                      className="px-2 py-1 text-xs text-red-400 hover:text-red-300 hover:bg-slate-700 rounded transition-colors" title="Delete">RM</button>
+                            </>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -776,8 +843,7 @@ function WorkspaceTab({ agent }) {
       {/* File Viewer/Editor Modal */}
       {fileModal && (
         <div className="fixed inset-0 z-[60] bg-black/60 flex items-center justify-center"
-             onClick={(e) => { if (e.target === e.currentTarget) closeFileModal() }}
-             onKeyDown={(e) => { if (e.key === 'Escape') closeFileModal() }}>
+             onClick={(e) => { if (e.target === e.currentTarget) closeFileModal() }}>
           <div className="bg-slate-800 border border-slate-700 rounded-xl shadow-2xl flex flex-col" style={{ width: '80vw', maxWidth: '900px', height: '80vh' }}>
             <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700">
               <div className="flex items-center gap-3 min-w-0">
@@ -791,13 +857,13 @@ function WorkspaceTab({ agent }) {
                 )}
               </div>
               <div className="flex items-center gap-2">
-                {editable && <button onClick={saveFile} className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded text-sm transition-colors">Save</button>}
-                <a href={`/api/agents/${agent.name}/workspace/download?path=${encodeURIComponent(fileModal.path || fileModal.name)}`}
+                {editable && !parentView && <button onClick={saveFile} className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded text-sm transition-colors">Save</button>}
+                <a href={parentView ? `/api/agents/${agent.name}/workspace/parent/download?path=${encodeURIComponent(fileModal.path || fileModal.name)}` : `/api/agents/${agent.name}/workspace/download?path=${encodeURIComponent(fileModal.path || fileModal.name)}`}
                    className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded text-sm transition-colors" download>Download</a>
                 <button onClick={closeFileModal} className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded text-sm transition-colors">Close</button>
               </div>
             </div>
-            <div className="flex-1 overflow-auto p-4">
+            <div className="flex-1 overflow-hidden p-4">
               {editable ? (
                 <textarea id="file-editor" value={fileModal.content}
                           onChange={(e) => { setFileModal({ ...fileModal, content: e.target.value }); setFileDirty(true); setFileSaved(false) }}
@@ -933,6 +999,253 @@ function ActivityTab({ agent }) {
           </tbody>
         </table>
       </div>
+    </div>
+  )
+}
+
+// ─── MCP ─────────────────────────────────────────────────────
+
+function McpTab({ agent }) {
+  const [servers, setServers] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [msg, setMsg] = useState('')
+  const [showAdd, setShowAdd] = useState(false)
+  const [addForm, setAddForm] = useState({ name: '', transport: 'stdio', command: '', args: '', url: '', cwd: '' })
+  const [probeResult, setProbeResult] = useState(null)
+  const [probing, setProbing] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [removing, setRemoving] = useState('')
+  const [testUrlStatus, setTestUrlStatus] = useState(null)
+
+  function load() {
+    setLoading(true)
+    api(`/api/agents/${agent.name}/mcp`).then((d) => {
+      setServers(d.servers || [])
+    }).catch(() => setMsg('Failed to load'))
+      .finally(() => setLoading(false))
+  }
+  useEffect(load, [agent.name])
+
+  function testUrl() {
+    if (!addForm.url) return
+    setTestUrlStatus('testing')
+    api(`/api/agents/${agent.name}/mcp/test-url`, { method: 'POST', body: { url: addForm.url } })
+      .then((r) => setTestUrlStatus(r.ok ? 'ok' : 'fail'))
+      .catch(() => setTestUrlStatus('fail'))
+  }
+
+  async function addServer(e) {
+    e.preventDefault()
+    if (!addForm.name || submitting) return
+    setSubmitting(true)
+    const body = { name: addForm.name, transport: addForm.transport }
+    if (addForm.transport === 'stdio') {
+      body.command = addForm.command
+      body.args = addForm.args ? addForm.args.split(',').map(s => s.trim()).filter(Boolean) : []
+      if (addForm.cwd) body.cwd = addForm.cwd
+    } else {
+      body.url = addForm.url
+    }
+    try {
+      await api(`/api/agents/${agent.name}/mcp/add`, { method: 'POST', body })
+      setMsg(`"${addForm.name}" added.`)
+      setAddForm({ name: '', transport: 'stdio', command: '', args: '', url: '', cwd: '' })
+      setShowAdd(false)
+      setSubmitting(false)
+      load()
+    } catch (e) { setSubmitting(false); setMsg('Failed: ' + (e.error || e.message)) }
+  }
+
+  async function removeServer(name) {
+    if (!confirm(`Remove "${name}"?`)) return
+    setRemoving(name)
+    try {
+      await api(`/api/agents/${agent.name}/mcp/remove`, { method: 'POST', body: { name } })
+      setMsg(`"${name}" removed.`)
+      load()
+    } catch (e) { setMsg('Failed: ' + (e.error || e.message)) }
+    setRemoving('')
+  }
+
+  async function toggleServer(name, enabled) {
+    try {
+      await api(`/api/agents/${agent.name}/mcp/toggle`, { method: 'POST', body: { name, enabled } })
+      setServers((prev) => prev.map((s) => s.name === name ? { ...s, enabled } : s))
+    } catch (e) { setMsg('Failed: ' + (e.error || e.message)) }
+  }
+
+  async function probeServer(name) {
+    setProbing(name)
+    try {
+      const result = await api(`/api/agents/${agent.name}/mcp/probe`, { method: 'POST', body: { name } })
+      setProbeResult({ name, ...result })
+    } catch (e) { setMsg('Probe failed: ' + (e.error || e.message)) }
+    setProbing('')
+  }
+
+  if (loading) return <div className="flex items-center gap-2 text-slate-500 text-sm"><span className="w-4 h-4 border-2 border-slate-600 border-t-cyan-400 rounded-full animate-spin" /> Loading MCP servers...</div>
+
+  return (
+    <div>
+      {msg && <div className="mb-4 text-xs text-cyan-400">{msg}</div>}
+
+      {servers.length === 0 && !showAdd ? (
+        <div className="text-center py-12">
+          <svg className="w-10 h-10 mx-auto mb-3 text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5"><path strokeLinecap="round" strokeLinejoin="round" d="M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0 01-6.364-6.364l1.757-1.757m9.86-2.813a4.5 4.5 0 00-1.242-7.244l-4.5-4.5a4.5 4.5 0 00-6.364 6.364L4.25 8.5" /></svg>
+          <p className="text-slate-500 text-sm mb-3">No MCP servers configured.</p>
+          <button onClick={() => setShowAdd(true)} className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-xs font-medium transition-colors">+ Add Server</button>
+        </div>
+      ) : (
+        <>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-sm font-medium text-slate-300">{servers.length} server{servers.length !== 1 ? 's' : ''}</h3>
+            <button onClick={() => setShowAdd(!showAdd)} className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-xs font-medium transition-colors">{showAdd ? 'Cancel' : '+ Add Server'}</button>
+          </div>
+
+          {showAdd && (
+            <form onSubmit={addServer} className="border border-slate-700 rounded-xl p-4 mb-4 bg-slate-900/50">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+                <div>
+                  <label className="block text-xs text-slate-500 mb-1">Name</label>
+                  <input type="text" value={addForm.name} onChange={(e) => setAddForm({ ...addForm, name: e.target.value })}
+                         className="w-full px-2 py-1.5 bg-slate-950 border border-slate-700 rounded text-sm text-white focus:border-cyan-500 focus:outline-none" placeholder="my-server" required />
+                </div>
+                <div>
+                  <label className="block text-xs text-slate-500 mb-1">Transport</label>
+                  <select value={addForm.transport} onChange={(e) => setAddForm({ ...addForm, transport: e.target.value })}
+                          className="w-full px-2 py-1.5 bg-slate-950 border border-slate-700 rounded text-sm text-white focus:border-cyan-500 focus:outline-none">
+                    <option value="stdio">stdio</option>
+                    <option value="streamable-http">streamable-http</option>
+                  </select>
+                </div>
+              </div>
+              {addForm.transport === 'stdio' ? (
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
+                  <div>
+                    <label className="block text-xs text-slate-500 mb-1">Command</label>
+                    <input type="text" value={addForm.command} onChange={(e) => setAddForm({ ...addForm, command: e.target.value })}
+                           className="w-full px-2 py-1.5 bg-slate-950 border border-slate-700 rounded text-sm text-white focus:border-cyan-500 focus:outline-none" placeholder="npx" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-500 mb-1">Args (comma-separated)</label>
+                    <input type="text" value={addForm.args} onChange={(e) => setAddForm({ ...addForm, args: e.target.value })}
+                           className="w-full px-2 py-1.5 bg-slate-950 border border-slate-700 rounded text-sm text-white focus:border-cyan-500 focus:outline-none" placeholder="-y, @modelcontextprotocol/server-filesystem" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-500 mb-1">CWD (optional)</label>
+                    <input type="text" value={addForm.cwd} onChange={(e) => setAddForm({ ...addForm, cwd: e.target.value })}
+                           className="w-full px-2 py-1.5 bg-slate-950 border border-slate-700 rounded text-sm text-white focus:border-cyan-500 focus:outline-none" placeholder="/data" />
+                  </div>
+                </div>
+              ) : (
+                <div className="mb-3">
+                  <label className="block text-xs text-slate-500 mb-1">URL</label>
+                  <div className="flex items-center gap-2">
+                    <input type="text" value={addForm.url} onChange={(e) => { setAddForm({ ...addForm, url: e.target.value }); setTestUrlStatus(null) }}
+                           className="flex-1 px-2 py-1.5 bg-slate-950 border border-slate-700 rounded text-sm text-white focus:border-cyan-500 focus:outline-none" placeholder="http://localhost:3001" required />
+                    <button type="button" onClick={testUrl} disabled={testUrlStatus === 'testing' || !addForm.url}
+                            className="px-3 py-1.5 border border-slate-600 hover:border-cyan-500 disabled:border-slate-700 text-xs text-slate-300 hover:text-white disabled:text-slate-600 rounded-lg transition-colors whitespace-nowrap">
+                      {testUrlStatus === 'testing' ? '...' : 'Test URL'}
+                    </button>
+                    {testUrlStatus === 'ok' && <span className="text-xs text-emerald-400 flex-shrink-0">OK</span>}
+                    {testUrlStatus === 'fail' && <span className="text-xs text-red-400 flex-shrink-0">Fail</span>}
+                  </div>
+                </div>
+              )}
+              <div className="flex justify-end">
+                <button type="submit" disabled={submitting}
+                        className="px-4 py-1.5 bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-700 text-white rounded-lg text-xs font-medium transition-colors">{submitting ? 'Adding...' : 'Add Server'}</button>
+              </div>
+            </form>
+          )}
+
+          <div className="space-y-3">
+            {servers.map((s) => (
+              <div key={s.name} className="border border-slate-800 rounded-xl p-4">
+                <div className="flex items-start justify-between gap-3 mb-2">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="text-sm font-medium text-white">{s.name}</span>
+                      <span className={`w-2 h-2 rounded-full flex-shrink-0 ${s.ok === true ? 'bg-emerald-400' : s.ok === false ? 'bg-red-400' : 'bg-cyan-400'}`} />
+                      <span className="text-xs text-slate-500">{s.ok === true ? 'ok' : s.ok === false ? 'error' : 'configured'}</span>
+                    </div>
+                    <div className="flex items-center gap-2 text-xs text-slate-500">
+                      <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">{s.transport}</span>
+                      {s.command && <span className="font-mono text-slate-400 truncate max-w-xs">{s.command}</span>}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    <label className="relative inline-flex items-center cursor-pointer">
+                      <input type="checkbox" checked={s.enabled} onChange={(e) => toggleServer(s.name, e.target.checked)} className="sr-only peer" />
+                      <div className="w-9 h-5 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-cyan-600" />
+                    </label>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5 mt-2">
+                  <button onClick={() => probeServer(s.name)} disabled={probing === s.name}
+                          className="px-2 py-1 text-xs text-cyan-400 hover:text-white hover:bg-slate-700 rounded transition-colors disabled:opacity-40">
+                    {probing === s.name ? 'Testing...' : 'Test'}
+                  </button>
+                  <button onClick={() => removeServer(s.name)} disabled={removing === s.name}
+                          className="px-2 py-1 text-xs text-red-400 hover:text-red-300 disabled:text-slate-600 disabled:cursor-not-allowed hover:bg-slate-700 rounded transition-colors">{removing === s.name ? 'Removing...' : 'Remove'}</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {probeResult && (
+        <div className="fixed inset-0 z-[60] bg-black/60 flex items-center justify-center"
+             onClick={(e) => { if (e.target === e.currentTarget) setProbeResult(null) }}
+             onKeyDown={(e) => { if (e.key === 'Escape') setProbeResult(null) }}>
+          <div className="bg-slate-800 border border-slate-700 rounded-xl shadow-2xl w-full max-w-lg mx-4">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700">
+              <div className="flex items-center gap-2">
+                <h3 className="text-sm font-medium text-white">{probeResult.name}</h3>
+                <span className={`w-2 h-2 rounded-full ${probeResult.ok ? 'bg-emerald-400' : 'bg-red-400'}`} />
+              </div>
+              <button onClick={() => setProbeResult(null)} className="text-slate-400 hover:text-white text-lg">&times;</button>
+            </div>
+            <div className="p-4 max-h-96 overflow-y-auto">
+              {probeResult.error ? (
+                <p className="text-red-400 text-sm">{probeResult.error}</p>
+              ) : (
+                <>
+                  {probeResult.diagnostics?.length > 0 && (
+                    <div className="mb-3">
+                      <p className="text-xs text-slate-500 mb-1">Issues</p>
+                      {probeResult.diagnostics.map((d, i) => <p key={i} className="text-xs text-amber-400">{d}</p>)}
+                    </div>
+                  )}
+                  {probeResult.tools?.length > 0 && (
+                    <div>
+                      <p className="text-xs text-slate-500 mb-1">{probeResult.tools.length} tools</p>
+                      <div className="flex flex-wrap gap-1">
+                        {probeResult.tools.map((t) => (
+                          <span key={t} className="px-1.5 py-0.5 text-[10px] font-mono bg-slate-900 text-slate-400 rounded">{t.replace(/^[^_]+__/, '')}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {probeResult.servers && Object.entries(probeResult.servers).map(([name, info]) => (
+                    <div key={name} className="mb-3">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-sm font-medium text-white">{name}</span>
+                        <span className="text-xs text-slate-500">{info.tools} tools</span>
+                      </div>
+                      <p className="text-xs text-slate-500 font-mono">{info.launch}</p>
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
+            <div className="flex justify-end px-4 py-3 border-t border-slate-700">
+              <button onClick={() => setProbeResult(null)} className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-xs font-medium transition-colors">Close</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -1189,5 +1502,199 @@ function MessagingTab({ agent }) {
         <button onClick={save} className="mt-2 px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-xs font-medium transition-colors">Save</button>
       </div>
     </div>
+  )
+}
+
+function sourceLabel(source) {
+  if (source === 'openclaw-bundled' || source === 'openclaw-extra') return { label: 'Bundled', color: 'bg-slate-600' }
+  if (source === 'clawhub') return { label: 'Global', color: 'bg-cyan-700' }
+  return { label: source || 'User', color: 'bg-emerald-700' }
+}
+
+function SkillsTab({ agent }) {
+  const [skills, setSkills] = useState([])
+  const [check, setCheck] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [msg, setMsg] = useState('')
+  const [infoModal, setInfoModal] = useState(null)
+  const [showInstall, setShowInstall] = useState(false)
+
+  function load() {
+    setLoading(true)
+    api(`/api/agents/${agent.name}/skills`).then((d) => {
+      setSkills(d.skills || [])
+      setCheck(d.check || null)
+    }).catch(() => setMsg('Failed to load skills'))
+      .finally(() => setLoading(false))
+  }
+  useEffect(load, [agent.name])
+
+  async function removeSkill(slug) {
+    if (!confirm(`Remove skill "${slug}"?`)) return
+    try {
+      await api(`/api/agents/${agent.name}/skills/remove`, { method: 'POST', body: { slug } })
+      setMsg(`"${slug}" removed.`)
+      load()
+    } catch (e) { setMsg('Failed: ' + (e.error || e.message)) }
+  }
+
+  async function updateSkill(slug) {
+    try {
+      await api(`/api/agents/${agent.name}/skills/update`, { method: 'POST', body: { slug } })
+      setMsg(`"${slug}" updated.`)
+      load()
+    } catch (e) { setMsg('Failed: ' + (e.error || e.message)) }
+  }
+
+  async function verifySkill(slug) {
+    try {
+      const r = await api(`/api/agents/${agent.name}/skills/verify`, { method: 'POST', body: { slug } })
+      setMsg(`Verify: ${r.verified ? 'Verified' : 'Not verified'} (${r.publisher || 'unknown'})`)
+    } catch (e) { setMsg('Failed: ' + (e.error || e.message)) }
+  }
+
+  function showInfo(slug) {
+    api(`/api/agents/${agent.name}/skills/info?name=${encodeURIComponent(slug)}`)
+      .then((d) => setInfoModal(d))
+      .catch(() => setMsg('Failed to load skill info'))
+  }
+
+  if (loading) return <div className="flex items-center gap-2 text-slate-500 text-sm"><span className="w-4 h-4 border-2 border-slate-600 border-t-cyan-400 rounded-full animate-spin" /> Loading skills...</div>
+
+  const userSkills = skills.filter((s) => s.source !== 'openclaw-bundled' && s.source !== 'openclaw-extra')
+  const bundledSkills = skills.filter((s) => s.source === 'openclaw-bundled' || s.source === 'openclaw-extra')
+
+  return (
+    <div>
+      {msg && <div className="mb-4 text-xs text-cyan-400">{msg}</div>}
+      {check && !check.ok && <div className="mb-4 text-xs text-amber-400">Skills check: {check.warnings?.join(', ') || 'issues found'}</div>}
+
+      {userSkills.length > 0 && (
+        <>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-medium text-slate-300">User Skills ({userSkills.length})</h3>
+          </div>
+          <div className="space-y-2 mb-6">
+            {userSkills.map((s) => (
+              <SkillCard key={s.name} skill={s} agent={agent} onInfo={showInfo} onUpdate={updateSkill} onRemove={removeSkill} onVerify={verifySkill} />
+            ))}
+          </div>
+        </>
+      )}
+
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-medium text-slate-300">Bundled Skills ({bundledSkills.length})</h3>
+        <button onClick={() => setShowInstall(!showInstall)} className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-xs font-medium transition-colors">{showInstall ? 'Cancel' : '+ Install'}</button>
+      </div>
+
+      {showInstall && (
+        <InstallForm agent={agent} onDone={() => { setShowInstall(false); load() }} />
+      )}
+
+      <div className="space-y-2">
+        {bundledSkills.map((s) => (
+          <SkillCard key={s.name} skill={s} agent={agent} onInfo={showInfo} onUpdate={updateSkill} onRemove={null} onVerify={verifySkill} />
+        ))}
+      </div>
+
+      {infoModal && (
+        <div className="fixed inset-0 z-[60] bg-black/60 flex items-center justify-center"
+             onClick={(e) => { if (e.target === e.currentTarget) setInfoModal(null) }}>
+          <div className="bg-slate-800 border border-slate-700 rounded-xl shadow-2xl w-full max-w-lg mx-4">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700">
+              <h3 className="text-sm font-medium text-white">{infoModal.name}</h3>
+              <button onClick={() => setInfoModal(null)} className="text-slate-400 hover:text-white text-lg">&times;</button>
+            </div>
+            <div className="p-4 max-h-96 overflow-y-auto text-xs text-slate-300 space-y-3">
+              <p className="text-slate-500">{infoModal.description}</p>
+              {infoModal.source && <p><span className="text-slate-500">Source:</span> {infoModal.source}</p>}
+              {infoModal.eligible !== undefined && <p><span className="text-slate-500">Eligible:</span> {infoModal.eligible ? 'Yes' : 'No'}</p>}
+              {infoModal.missing?.bins?.length > 0 && <p><span className="text-slate-500">Missing bins:</span> {infoModal.missing.bins.join(', ')}</p>}
+              {infoModal.requirements?.bins?.length > 0 && <p><span className="text-slate-500">Requires:</span> {infoModal.requirements.bins.join(', ')}</p>}
+              {infoModal.filePath && <pre className="text-[10px] text-slate-600 mt-2">{infoModal.filePath}</pre>}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SkillCard({ skill, onInfo, onUpdate, onRemove, onVerify }) {
+  const sl = sourceLabel(skill.source)
+  return (
+    <div className="border border-slate-800 rounded-xl p-3">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 mb-0.5">
+            <span className="text-sm font-medium text-white">{skill.name}</span>
+            {skill.version && <span className="text-[10px] text-slate-500 font-mono">{skill.version}</span>}
+            <span className={`px-1.5 py-0.5 rounded text-[10px] text-white ${sl.color}`}>{sl.label}</span>
+            {skill.eligible !== undefined && (
+              <span className={`w-2 h-2 rounded-full flex-shrink-0 ${skill.eligible ? 'bg-emerald-400' : 'bg-slate-600'}`} />
+            )}
+          </div>
+          <p className="text-xs text-slate-500 truncate">{skill.description}</p>
+        </div>
+        <div className="flex items-center gap-1 flex-shrink-0">
+          <button onClick={() => onInfo(skill.name)} className="px-2 py-1 text-[10px] text-cyan-400 hover:bg-slate-700 rounded transition-colors">Info</button>
+          {skill.source === 'clawhub' && <button onClick={() => onVerify(skill.name)} className="px-2 py-1 text-[10px] text-amber-400 hover:bg-slate-700 rounded transition-colors">Verify</button>}
+          {skill.bundled !== true && <button onClick={() => onUpdate(skill.name)} className="px-2 py-1 text-[10px] text-emerald-400 hover:bg-slate-700 rounded transition-colors">Update</button>}
+          {onRemove && skill.bundled !== true && <button onClick={() => onRemove(skill.name)} className="px-2 py-1 text-[10px] text-red-400 hover:bg-slate-700 rounded transition-colors">&times;</button>}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function InstallForm({ agent, onDone }) {
+  const [ref, setRef] = useState('')
+  const [source, setSource] = useState('clawhub')
+  const [as, setAs] = useState('')
+  const [force, setForce] = useState(false)
+  const [installing, setInstalling] = useState(false)
+  const [err, setErr] = useState('')
+
+  async function install(e) {
+    e.preventDefault()
+    if (!ref) return
+    setInstalling(true)
+    setErr('')
+    try {
+      await api(`/api/agents/${agent.name}/skills/install`, { method: 'POST', body: { ref, source, as, force } })
+      onDone()
+    } catch (e) { setErr(e.error || e.message) }
+    setInstalling(false)
+  }
+
+  return (
+    <form onSubmit={install} className="border border-slate-700 rounded-xl p-4 mb-4 bg-slate-900/50 space-y-3">
+      <div className="flex gap-4">
+        {['clawhub', 'git', 'local'].map((s) => (
+          <label key={s} className="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer">
+            <input type="radio" name="skill-source" checked={source === s} onChange={() => setSource(s)} className="accent-cyan-500" />
+            {s === 'clawhub' ? 'ClawHub' : s === 'git' ? 'Git' : 'Local'}
+          </label>
+        ))}
+      </div>
+      <div>
+        <input type="text" value={ref} onChange={(e) => setRef(e.target.value)}
+               className="w-full px-2 py-1.5 bg-slate-950 border border-slate-700 rounded text-sm text-white focus:border-cyan-500 focus:outline-none"
+               placeholder={source === 'clawhub' ? '@owner/slug' : source === 'git' ? 'owner/repo@ref' : './path/to/skill'} />
+      </div>
+      <div className="flex items-center gap-4">
+        <input type="text" value={as} onChange={(e) => setAs(e.target.value)} placeholder="Custom name (--as)"
+               className="flex-1 px-2 py-1.5 bg-slate-950 border border-slate-700 rounded text-sm text-white focus:border-cyan-500 focus:outline-none" />
+        <label className="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer whitespace-nowrap">
+          <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} className="accent-cyan-500" />
+          Force
+        </label>
+      </div>
+      {err && <p className="text-xs text-red-400">{err}</p>}
+      <div className="flex justify-end">
+        <button type="submit" disabled={installing}
+                className="px-4 py-1.5 bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-700 text-white rounded-lg text-xs font-medium transition-colors">{installing ? 'Installing...' : 'Install'}</button>
+      </div>
+    </form>
   )
 }

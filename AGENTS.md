@@ -460,6 +460,24 @@ And **`.gitignore`** must keep `**/node_modules/` (already done).
 docker compose up -d --no-deps --force-recreate paddock-webui
 ```
 
+### Vite Dev Server (HMR for React SPA)
+
+For React frontend development with hot reload, run Vite dev server inside the container:
+
+```bash
+docker exec -d paddock-webui sh -c 'cd /app/client && npm run dev'
+```
+
+- Vite runs on **port 5173** (already mapped in `docker-compose.yml`).
+- **Access the app at `http://10.69.1.164:5173` during development** (NOT port 5051).
+- Port 5051 also works — it serves the **built** SPA from `public/` via Express, but requires `cd client && npm run build` to see changes.
+- In dev, use 5173 for instant HMR. In prod/demo, use 5051.
+- Vite's config proxies `/api` and `/ws` to Express on port 5050.
+- Express backend changes still use the bind mount (no rebuild needed).
+- To stop: `docker exec paddock-webui sh -c "kill \$(lsof -ti:5173)"`
+
+**Default workflow for me:** When doing frontend development, I must start the Vite dev server first (if not already running) and test on port 5173. No rebuild needed. Only use port 5051 for production/demo verification.
+
 ### Nav Items (current order)
 Dashboard, +PAD, Backups, Creds
 - **Usage tab removed** — it was an external OpenAI report, not useful in the panel.

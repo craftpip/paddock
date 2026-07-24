@@ -38,6 +38,7 @@ const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use(cookieParser());
+
 app.use(express.static('public'));
 
 setupSession(app);
@@ -326,6 +327,46 @@ app.get('/api/agents/:name/workspace', (req, res) => {
   }
 });
 
+app.get('/api/agents/:name/workspace/parent', (req, res) => {
+  const agent = registry.getAgent(req.params.name);
+  if (!agent) return res.status(404).json({ error: 'Agent not found' });
+  try {
+    const listing = require('./services/workspace').listParentDir(agent.name);
+    res.json(listing);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/api/agents/:name/workspace/parent/file', (req, res) => {
+  const agent = registry.getAgent(req.params.name);
+  if (!agent) return res.status(404).json({ error: 'Agent not found' });
+  if (!req.query.path) return res.status(400).json({ error: 'path required' });
+  try {
+    const file = require('./services/workspace').readParentFile(agent.name, req.query.path);
+    res.json(file);
+  } catch (err) {
+    res.status(404).json({ error: err.message });
+  }
+});
+
+app.get('/api/agents/:name/workspace/parent/download', (req, res) => {
+  const agent = registry.getAgent(req.params.name);
+  if (!agent) return res.status(404).json({ error: 'Agent not found' });
+  const relativePath = req.query.path;
+  if (!relativePath) return res.status(400).send('path required');
+  try {
+    const absPath = require('./services/workspace').downloadParentFile(agent.name, relativePath);
+    if (!fs.existsSync(absPath)) return res.status(404).send('Not found');
+    const stat = fs.statSync(absPath);
+    if (stat.isDirectory()) return res.status(400).send('Cannot download directory');
+    if (stat.size > 50 * 1024 * 1024) return res.status(413).send('File too large');
+    res.download(absPath);
+  } catch (err) {
+    res.status(400).send(err.message);
+  }
+});
+
 app.get('/api/agents/:name/workspace/file', (req, res) => {
   const agent = registry.getAgent(req.params.name);
   if (!agent) return res.status(404).json({ error: 'Agent not found' });
@@ -506,6 +547,249 @@ app.post('/api/agents/:name/config', (req, res) => {
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
+});
+
+// ─── API: MCP Servers ────────────────────────────────────────
+
+app.get('/api/agents/:name/mcp', async (req, res) => {
+  const name = req.params.name;
+  if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
+  const agent = registry.getAgent(name);
+  if (!agent) return res.status(404).json({ error: 'Agent not found' });
+
+  try {
+    const { stdout, code } = await dockerExec(name, 'cat /root/.openclaw/openclaw.json', 5000);
+    if (code !== 0) return res.json({ servers: [] });
+    const raw = JSON.parse(stdout);
+    const mcpServers = (raw.mcp && raw.mcp.servers) || {};
+    const entries = Object.entries(mcpServers).map(([name, cfg]) => ({
+      name, cfg,
+      transport: cfg.transport || (cfg.url ? 'streamable-http' : 'stdio'),
+      command: cfg.url || [cfg.command, ...(cfg.args || [])].filter(Boolean).join(' '),
+      enabled: cfg.enabled !== false,
+    }));
+
+    // Quick curl reachability check for HTTP servers
+    const httpServers = entries.filter((e) => e.cfg.url);
+    const statusMap = {};
+    if (httpServers.length > 0) {
+      const results = await Promise.all(
+        httpServers.map((s) =>
+          dockerExec(name, `curl -sI --connect-timeout 5 ${s.cfg.url}`, 10000)
+            .then((r) => ({ name: s.name, ok: r.code === 0 }))
+            .catch(() => ({ name: s.name, ok: false }))
+        )
+      );
+      for (const r of results) statusMap[r.name] = r.ok;
+    }
+
+    const servers = entries.map(({ name, transport, command, enabled }) => ({
+      name, transport, command, enabled,
+      ok: name in statusMap ? statusMap[name] : null,
+    }));
+    res.json({ servers });
+  } catch (e) {
+    res.json({ servers: [], error: e.message });
+  }
+});
+
+app.post('/api/agents/:name/mcp/add', async (req, res) => {
+  const name = req.params.name;
+  if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
+  const agent = registry.getAgent(name);
+  if (!agent) return res.status(404).json({ error: 'Agent not found' });
+  const { name: serverName, command, args, url, transport, cwd, env, auth, timeout } = req.body;
+  if (!serverName) return res.status(400).json({ error: 'name required' });
+
+  const sq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+  let cmdStr = `openclaw mcp add --no-probe ${sq(serverName)}`;
+  if (transport === 'streamable-http' || url) {
+    cmdStr += ` --url ${sq(url || '')}`;
+    if (transport) cmdStr += ` --transport ${sq(transport)}`;
+  } else {
+    if (command) cmdStr += ` --command ${sq(command)}`;
+    if (args && Array.isArray(args)) {
+      for (const a of args) cmdStr += ` --arg ${sq(a)}`;
+    }
+  }
+  if (cwd) cmdStr += ` --cwd ${sq(cwd)}`;
+  if (env && typeof env === 'object') {
+    for (const [k, v] of Object.entries(env)) cmdStr += ` --env ${sq(`${k}=${v}`)}`;
+  }
+  if (auth === 'oauth') cmdStr += ` --auth oauth`;
+  if (timeout) cmdStr += ` --timeout ${sq(String(timeout))}`;
+  try {
+    const { code, stderr } = await dockerExec(name, cmdStr, 30000);
+    if (code !== 0) {
+      return res.status(500).json({ error: stderr || 'Server add command failed' });
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/agents/:name/mcp/remove', async (req, res) => {
+  const name = req.params.name;
+  if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
+  const { name: serverName } = req.body;
+  if (!serverName) return res.status(400).json({ error: 'name required' });
+  const sq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+  try {
+    const { code, stderr } = await dockerExec(name, `openclaw mcp unset ${sq(serverName)}`);
+    if (code !== 0) {
+      return res.status(500).json({ error: stderr || 'Remove command failed' });
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/agents/:name/mcp/toggle', async (req, res) => {
+  const name = req.params.name;
+  if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
+  const agent = registry.getAgent(name);
+  if (!agent) return res.status(404).json({ error: 'Agent not found' });
+  const { name: serverName, enabled } = req.body;
+  if (!serverName || typeof enabled !== 'boolean') return res.status(400).json({ error: 'name and enabled required' });
+  try {
+    const flag = enabled ? '--enable' : '--disable';
+    await dockerExec(name, `openclaw mcp configure ${serverName} ${flag}`);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Lightweight URL reachability check for MCP add form
+app.post('/api/agents/:name/mcp/test-url', async (req, res) => {
+  const { url } = req.body;
+  if (!url) return res.status(400).json({ error: 'url required' });
+  try {
+    const response = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(5000) });
+    res.json({ ok: true, status: response.status });
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/api/agents/:name/mcp/probe', async (req, res) => {
+  const name = req.params.name;
+  if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
+  const { name: serverName } = req.body;
+  let cmd = 'openclaw mcp probe --json';
+  if (serverName) cmd = `openclaw mcp probe ${serverName} --json`;
+  try {
+    const { stdout, code } = await dockerExec(name, cmd, 30000);
+    if (code !== 0) return res.status(500).json({ error: 'Probe failed' });
+    const data = JSON.parse(stdout);
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── API: Skills ──────────────────────────────────────────
+
+const skillsCache = { ts: 0, data: {} };
+
+app.get('/api/agents/:name/skills', async (req, res) => {
+  const name = req.params.name;
+  if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
+  const agent = registry.getAgent(name);
+  if (!agent) return res.status(404).json({ error: 'Agent not found' });
+
+  const now = Date.now();
+  const cached = skillsCache.data[name];
+  if (cached && now - skillsCache.ts < 30000) return res.json(cached);
+
+  try {
+    const [listR, checkR] = await Promise.all([
+      dockerExec(name, 'openclaw skills list --json', 30000),
+      dockerExec(name, 'openclaw skills check --json', 30000),
+    ]);
+    const skills = listR.code === 0 ? JSON.parse(listR.stdout).skills || [] : [];
+    const check = checkR.code === 0 ? JSON.parse(checkR.stdout) : { ok: false };
+    skillsCache.data[name] = { skills, check };
+    skillsCache.ts = now;
+    res.json({ skills, check });
+  } catch (e) {
+    res.json(cached || { skills: [], check: { ok: false }, error: e.message });
+  }
+});
+
+app.get('/api/agents/:name/skills/info', async (req, res) => {
+  const name = req.params.name;
+  if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
+  const slug = req.query.name;
+  if (!slug) return res.status(400).json({ error: 'name query param required' });
+  const sq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+  try {
+    const { stdout, code } = await dockerExec(name, `openclaw skills info ${sq(slug)} --json`, 15000);
+    if (code !== 0) return res.status(500).json({ error: 'Skill not found' });
+    res.json(JSON.parse(stdout));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/agents/:name/skills/install', async (req, res) => {
+  const name = req.params.name;
+  if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
+  const { ref, source, as, force } = req.body;
+  if (!ref) return res.status(400).json({ error: 'ref required' });
+  const sq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+  let cmd = `openclaw skills install ${sq(ref)}`;
+  if (source === 'git') cmd = `openclaw skills install git:${sq(ref)}`;
+  else if (source === 'local') cmd = `openclaw skills install ${sq(ref)}`;
+  if (as) cmd += ` --as ${sq(as)}`;
+  if (force) cmd += ' --force';
+  try {
+    const { code, stderr } = await dockerExec(name, cmd, 30000);
+    if (code !== 0) return res.status(500).json({ error: stderr || 'Install failed' });
+    skillsCache.data[name] = null;
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/agents/:name/skills/remove', async (req, res) => {
+  const name = req.params.name;
+  if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
+  const { slug } = req.body;
+  if (!slug) return res.status(400).json({ error: 'slug required' });
+  const sq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+  try {
+    const { code, stderr } = await dockerExec(name, `rm -rf /root/.openclaw/workspace/skills/${sq(slug)}`, 10000);
+    if (code !== 0) return res.status(500).json({ error: stderr || 'Remove failed' });
+    skillsCache.data[name] = null;
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/agents/:name/skills/update', async (req, res) => {
+  const name = req.params.name;
+  if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
+  const { slug } = req.body;
+  const sq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+  const cmd = slug ? `openclaw skills update ${sq(slug)}` : 'openclaw skills update --all';
+  try {
+    const { code, stderr } = await dockerExec(name, cmd, 30000);
+    if (code !== 0) return res.status(500).json({ error: stderr || 'Update failed' });
+    skillsCache.data[name] = null;
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/agents/:name/skills/verify', async (req, res) => {
+  const name = req.params.name;
+  if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
+  const { slug } = req.body;
+  if (!slug) return res.status(400).json({ error: 'slug required' });
+  const sq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+  try {
+    const { stdout, code } = await dockerExec(name, `openclaw skills verify ${sq(slug)} --json`, 30000);
+    if (code !== 0) return res.status(500).json({ error: 'Verify failed' });
+    res.json(JSON.parse(stdout));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/agents/:name/activity', (req, res) => {
@@ -815,6 +1099,7 @@ app.use((req, res, next) => {
   next();
 });
 
+// SPA catch-all — serve index.html for client-side routing
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api/') || req.path.startsWith('/ws/')) return next();
   const indexPath = path.join(__dirname, 'public', 'index.html');
@@ -833,11 +1118,9 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: err.message || 'Internal server error' });
 });
 
-// ─── WebSocket Terminal ─────────────────────────────────────
+// ─── Boot ───────────────────────────────────────────────────
 
-const server = app.listen(5050, () => {
-  console.log('VM WebUI listening on port 5050');
-});
+const server = app.listen(5050, () => console.log('VM WebUI listening on port 5050'));
 
 const wss = new WebSocketServer({ server });
 
@@ -870,20 +1153,11 @@ wss.on('connection', async (ws, req) => {
   docker.stdout.on('data', (data) => {
     if (ws.readyState === ws.OPEN) ws.send(data.toString());
   });
-
   docker.stderr.on('data', (data) => {
     if (ws.readyState === ws.OPEN) ws.send(data.toString());
   });
-
-  docker.on('close', () => {
-    if (ws.readyState === ws.OPEN) ws.close();
-    cleanup();
-  });
-
-  docker.on('error', () => {
-    if (ws.readyState === ws.OPEN) ws.send('Connection failed');
-    cleanup();
-  });
+  docker.on('close', () => { if (ws.readyState === ws.OPEN) ws.close(); cleanup(); });
+  docker.on('error', () => { if (ws.readyState === ws.OPEN) ws.send('Connection failed'); cleanup(); });
 
   ws.on('message', (data) => {
     if (docker.stdin.destroyed) return;
@@ -902,9 +1176,5 @@ wss.on('connection', async (ws, req) => {
   ws.on('error', cleanup);
 });
 
-// ─── Init ───────────────────────────────────────────────────
-
-// Initialize app metadata database
 try { getDb(); console.log('App metadata database initialized'); } catch (e) { console.error('DB init error:', e.message); }
-
 creds.importFromBotPrefixes();
