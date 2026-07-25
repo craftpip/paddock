@@ -1439,11 +1439,13 @@ function ModelsTab({ agent }) {
                   return (
                     <tr key={m.id} className="border-b border-slate-800/50">
                       <td className="px-2 py-1 text-slate-300">{m.name || m.id}</td>
-                      <td className="px-2 py-1 text-right flex gap-1 justify-end">
+                      <td className="px-2 py-1 text-right">
+                        <div className="flex flex-col gap-1 items-end">
                         <button onClick={() => setPrimary(fullId)}
                                 className={`px-2 py-0.5 rounded text-xs ${isPrimary ? 'bg-cyan-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-white'}`}>★</button>
                         <button onClick={() => setFallback(isFallback ? '' : fullId)}
                                 className={`px-2 py-0.5 rounded text-xs ${isFallback ? 'bg-amber-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-white'}`}>⤵</button>
+                        </div>
                       </td>
                     </tr>
                   )
@@ -1459,49 +1461,214 @@ function ModelsTab({ agent }) {
 
 // ─── Messaging ───────────────────────────────────────────────
 
+const CHANNEL_ICONS = {
+  telegram: '✈', signal: '💬', whatsapp: '📱', discord: '🎮',
+  gchat: '📧', matrix: '🔗', slack: '💼', nostr: '🌐',
+  imessage: '🍎', tlon: '🐦',
+}
+
 function MessagingTab({ agent }) {
-  const [config, setConfig] = useState(null)
-  const [raw, setRaw] = useState('')
-  const [msg, setMsg] = useState('')
+  const [channelType, setChannelType] = useState('')
+  const [available, setAvailable] = useState([])
+  const [activeProvider, setActiveProvider] = useState(null)
+  const [consoleLines, setConsoleLines] = useState([])
+  const [runningCmd, setRunningCmd] = useState('')
+  const wsRef = useRef(null)
+  const consoleRef = useRef(null)
+  const [creds, setCreds] = useState({ bot_tokens: {}, user_ids: {} })
 
   useEffect(() => {
-    api(`/api/agents/${agent.name}/config`).then((d) => {
-      if (d.configRaw) { setRaw(d.configRaw); try { setConfig(JSON.parse(d.configRaw)) } catch {} }
+    if (consoleRef.current) consoleRef.current.scrollTop = consoleRef.current.scrollHeight
+  }, [consoleLines])
+
+  function loadChannels() {
+    api(`/api/agents/${agent.name}/channels-list`).then((d) => {
+      const entries = Object.entries(d.chat || {}).map(([id, v]) => ({ id, name: v.name || id }))
+      setAvailable(entries)
     }).catch(() => {})
-  }, [agent.name])
+  }
 
-  const channels = config?.channels
+  function loadCreds() {
+    api('/api/credentials').then((d) => {
+      if (d) setCreds({ bot_tokens: d.bot_tokens || {}, user_ids: d.user_ids || {} })
+    }).catch(() => {})
+  }
 
-  async function save() {
-    try {
-      const parsed = JSON.parse(raw)
-      await api(`/api/agents/${agent.name}/config`, { method: 'POST', body: { config: raw } })
-      setConfig(parsed)
-      setMsg('Configuration saved.')
-    } catch (err) {
-      setMsg('Invalid JSON: ' + err.message)
+  useEffect(() => { loadChannels(); loadCreds() }, [agent.name])
+
+  function connectAndRun(cmd) {
+    if (wsRef.current) { wsRef.current.close(); wsRef.current = null }
+    setConsoleLines([])
+    setRunningCmd('')
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const socket = new WebSocket(`${protocol}//${window.location.host}/ws/messaging/${agent.name}`)
+    wsRef.current = socket
+
+    socket.onopen = () => {
+      socket.send(JSON.stringify({ type: 'run', cmd }))
+      const ts = new Date().toLocaleTimeString()
+      setConsoleLines([{ ts, cmd, type: 'cmd' }])
+      setRunningCmd(cmd)
     }
+
+    socket.onmessage = (evt) => {
+      try {
+        const d = JSON.parse(evt.data)
+        if (d.type === 'stdout') {
+          setConsoleLines((p) => [...p, { text: d.text, type: 'out' }])
+        } else if (d.type === 'stderr') {
+          setConsoleLines((p) => [...p, { text: d.text, type: 'err' }])
+        } else if (d.type === 'close' || d.type === 'error') {
+          setRunningCmd('')
+        }
+      } catch {}
+    }
+
+    socket.onclose = () => { setRunningCmd(''); wsRef.current = null }
+    socket.onerror = () => { setRunningCmd(''); wsRef.current = null }
+  }
+
+  function pasteCredential(value) {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && runningCmd) {
+      wsRef.current.send(JSON.stringify({ type: 'credential-paste', value }))
+    }
+  }
+
+  function closePanel() {
+    if (wsRef.current) { wsRef.current.close(); wsRef.current = null }
+    setActiveProvider(null)
+    setConsoleLines([])
+    setRunningCmd('')
+    setChannelType('')
+    loadChannels()
+    loadCreds()
   }
 
   return (
     <div>
-      {msg && <div className="mb-4 text-xs text-cyan-400">{msg}</div>}
-      {channels?.telegram ? (
-        <div className="border border-slate-800 rounded-xl p-4 mb-4">
-          <h3 className="text-sm font-medium text-white mb-3">Telegram</h3>
-          <div className="space-y-2 text-sm">
-            <div className="flex justify-between"><span className="text-slate-500">Bot Token</span><span className="text-slate-300">{channels.telegram.botToken?.slice(0, 8)}...{channels.telegram.botToken?.slice(-4)}</span></div>
-            <div className="flex justify-between"><span className="text-slate-500">DM Policy</span><span className="text-slate-300">{channels.telegram.dmPolicy || 'allowlist'}</span></div>
-            <div className="flex justify-between"><span className="text-slate-500">Allowlist</span><span className="text-slate-300">{channels.telegram.allowFrom?.join(', ') || 'none'}</span></div>
+      {/* ── Create Channel ── */}
+      {!activeProvider && (
+        <div className="border border-slate-800 rounded-xl overflow-hidden mb-4">
+          <div className="px-4 py-3 border-b border-slate-800">
+            <h3 className="text-sm font-medium text-slate-300">Create Channel</h3>
+          </div>
+          <div className="p-4 flex items-end gap-3">
+            <div className="flex-1">
+              <label className="block text-[10px] text-slate-500 mb-1">Channel Type</label>
+              <select
+                value={channelType}
+                onChange={(e) => setChannelType(e.target.value)}
+                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-cyan-600"
+              >
+                <option value="">Select a channel...</option>
+                {available.map((ch) => (
+                  <option key={ch.id} value={ch.id}>{CHANNEL_ICONS[ch.id] || '📡'} {ch.name}</option>
+                ))}
+              </select>
+            </div>
+            <button
+              onClick={() => {
+                if (!channelType) return
+                setActiveProvider(channelType)
+                connectAndRun(`openclaw channels add --channel ${channelType}`)
+              }}
+              disabled={!channelType || !!runningCmd}
+              className="px-4 py-1.5 text-sm font-medium text-cyan-400 border border-cyan-800 hover:bg-cyan-900/30 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Setup
+            </button>
           </div>
         </div>
-      ) : <p className="text-slate-500 text-sm mb-4">No Telegram channel configured.</p>}
-      <div className="border border-slate-800 rounded-xl p-4">
-        <h3 className="text-sm font-medium text-white mb-3">Raw Config</h3>
-        <textarea value={raw} onChange={(e) => setRaw(e.target.value)}
-                  className="w-full h-64 bg-slate-950 border border-slate-800 rounded-xl p-4 text-xs font-mono text-slate-200 focus:outline-none focus:border-cyan-500 resize-none" spellCheck={false} />
-        <button onClick={save} className="mt-2 px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-xs font-medium transition-colors">Save</button>
-      </div>
+      )}
+
+      {/* ── Expandable Panel ── */}
+      {activeProvider && (
+        <div className="border border-slate-700 rounded-xl overflow-hidden">
+          {/* Header */}
+          <div className="flex items-center justify-between px-4 py-2 border-b border-slate-700 bg-slate-900/50">
+            <div className="flex items-center gap-2">
+              <span className="text-cyan-400 text-sm">{CHANNEL_ICONS[activeProvider] || '📡'}</span>
+              <span className="text-sm font-medium text-white">{activeProvider}</span>
+              {runningCmd && <span className="text-[10px] text-cyan-400 ml-2">Running: {runningCmd}</span>}
+              {!runningCmd && consoleLines.length > 0 && <span className="text-[10px] text-slate-500 ml-2">Done</span>}
+            </div>
+            <button onClick={closePanel} className="text-slate-500 hover:text-white text-lg leading-none px-1 transition-colors" title="Close">&times;</button>
+          </div>
+
+          {/* Body: Console + Creds */}
+          <div className="flex">
+            {/* Console (3/4) */}
+            <div className="w-3/4 border-r border-slate-700" style={{ height: '400px' }}>
+              <div className="flex flex-col h-full">
+                <div ref={consoleRef} className="flex-1 overflow-y-auto p-2 bg-slate-950 font-mono text-[10px] leading-relaxed">
+                  {consoleLines.length === 0 && (
+                    <p className="text-slate-600">Select a channel above and click Setup to begin.</p>
+                  )}
+                  {consoleLines.map((line, i) => (
+                    <div key={i} className="whitespace-pre-wrap break-all">
+                      {line.type === 'cmd' ? (
+                        <span><span className="text-slate-500">{line.ts}</span> <span className="text-cyan-400">$ {line.cmd}</span></span>
+                      ) : line.type === 'err' ? (
+                        <span className="text-red-400">{line.text}</span>
+                      ) : (
+                        <span className="text-slate-300">{line.text}</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Credentials (1/4) */}
+            <div className="w-1/4 flex flex-col" style={{ height: '400px' }}>
+              <div className="px-3 py-1.5 border-b border-slate-700 bg-slate-900/30">
+                <span className="text-[10px] text-slate-500 font-medium">Credentials</span>
+              </div>
+              <div className="flex-1 overflow-y-auto p-3">
+                {Object.keys(creds.bot_tokens).length === 0 && Object.keys(creds.user_ids).length === 0 ? (
+                  <p className="text-slate-600 text-[10px]">No credentials saved. Add them in the Credentials page.</p>
+                ) : (
+                  <div className="space-y-3">
+                    {Object.keys(creds.bot_tokens).length > 0 && (
+                      <div>
+                        <p className="text-[10px] text-slate-500 font-medium mb-1">Bot Tokens</p>
+                        {Object.entries(creds.bot_tokens).map(([name, data]) => (
+                          <button
+                            key={name}
+                            onClick={() => pasteCredential(typeof data === 'string' ? data : data.token)}
+                            disabled={!runningCmd}
+                            className="block w-full text-left px-2 py-1 text-[10px] text-slate-300 hover:text-white hover:bg-slate-800 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed truncate"
+                            title={typeof data === 'string' ? data.slice(0, 8) + '...' : data.token?.slice(0, 8) + '...'}
+                          >
+                            {name}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {Object.keys(creds.user_ids).length > 0 && (
+                      <div>
+                        <p className="text-[10px] text-slate-500 font-medium mb-1">User IDs</p>
+                        {Object.entries(creds.user_ids).map(([name, data]) => (
+                          <button
+                            key={name}
+                            onClick={() => pasteCredential(typeof data === 'string' ? data : data.uid)}
+                            disabled={!runningCmd}
+                            className="block w-full text-left px-2 py-1 text-[10px] text-slate-300 hover:text-white hover:bg-slate-800 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed truncate"
+                            title={typeof data === 'string' ? data : data.uid}
+                          >
+                            {name}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
