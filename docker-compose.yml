@@ -9,11 +9,12 @@ services:
       - "5051:5050"
       - "5173:5173"
     volumes:
-      - /mnt/ddrive/www/vm-friends-dev:/workspace:rw
-      - /mnt/ddrive/www/vm-friends-dev/src:/app:rw
+      - /mnt/ddrive/www/paddock:/workspace:rw
+      - /mnt/ddrive/www/paddock/src:/app:rw
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
       TZ: Asia/Kolkata
       CONTAINER_PREFIX: "${CONTAINER_PREFIX:-vm}"
       HOST_WORKSPACE_ROOT: "${HOST_WORKSPACE_ROOT:-}"
       AUTH_PASSWORD: "${WEBUI_PASSWORD:-}"
+      AUTO_LOGIN: "${AUTO_LOGIN:-false}"

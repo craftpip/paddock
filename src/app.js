@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 const cookieParser = require('cookie-parser');
 const { execFile, execSync, spawn } = require('child_process');
@@ -11,7 +12,7 @@ const registry = require('./services/agent-registry');
 const vm = require('./services/vm-manager');
 const backup = require('./services/backup-manager');
 const { getDb } = require('./services/db');
-const { setupSession, requireAuth, csrfToken, AUTH_PASSWORD } = require('./middleware/auth');
+const { setupSession, requireAuth, requireAdmin, csrfToken, hashPassword, verifyPassword, checkNeedsSetup } = require('./middleware/auth');
 const { rateLimit } = require('./middleware/rateLimit');
 
 const WORKSPACE = '/workspace';
@@ -19,6 +20,7 @@ const BACKUPS_DIR = path.join(WORKSPACE, 'backups');
 const INSTANCES_DIR = path.join(WORKSPACE, 'instances');
 const SCRIPTS_DIR = path.join(WORKSPACE, 'scripts');
 const ENV_FILE = path.join(WORKSPACE, '.env');
+const AUTO_LOGIN = process.env.AUTO_LOGIN === 'true';
 const PREFIX = process.env.CONTAINER_PREFIX || 'vm';
 const VM_NAME_RE = new RegExp('^' + PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-[a-zA-Z0-9][a-zA-Z0-9_-]*$');
 const PREFIX_DASH = PREFIX + '-';
@@ -45,12 +47,19 @@ setupSession(app);
 app.use(csrfToken);
 app.use(rateLimit);
 
-// ─── Auth (session-based) ────────────────────────────────────
+// ─── Auth: public paths, then enforce on everything else ───
+
+app.use(checkNeedsSetup);
 
 app.use((req, res, next) => {
-  if (!AUTH_PASSWORD) return next();
-  if (req.path.startsWith('/api/') || req.path.startsWith('/ws/')) return next();
-  requireAuth(req, res, next);
+  if (AUTO_LOGIN) return next();
+  // Public paths — no auth needed
+  const publicPaths = ['/api/setup', '/api/login', '/api/session', '/login', '/setup'];
+  if (publicPaths.includes(req.path)) return next();
+  if (req.path.startsWith('/api/') || req.path.startsWith('/ws/')) {
+    return requireAuth(req, res, next);
+  }
+  return requireAuth(req, res, next);
 });
 
 let envCache = null;
@@ -154,10 +163,16 @@ async function getAllVms() {
   return vms;
 }
 
-function getBackups(vmName) {
+function getBackups(vmName, userId, role) {
   if (!fs.existsSync(BACKUPS_DIR)) return [];
-  const all = fs.readdirSync(BACKUPS_DIR).filter(f => f.endsWith('.tar.gz'));
-  const files = vmName ? all.filter(f => f.startsWith(vmName + '_')) : all;
+  let all = fs.readdirSync(BACKUPS_DIR).filter(f => f.endsWith('.tar.gz'));
+  let files = vmName ? all.filter(f => f.startsWith(vmName + '_')) : all;
+
+  if (role !== 'admin' && userId && !vmName) {
+    const db = getDb();
+    const myAgents = db.prepare('SELECT name FROM agents WHERE owner_id = ?').all(userId).map(r => r.name);
+    files = files.filter(f => myAgents.some(name => f.startsWith(name + '_')));
+  }
   files.sort().reverse();
   const meta = backup.loadMeta();
   return files.map(f => {
@@ -237,33 +252,246 @@ async function dockerLogs(vmName, tail = 100) {
   return r.stdout + r.stderr;
 }
 
+function parseCookies(cookieHeader) {
+  const cookies = {};
+  if (!cookieHeader) return cookies;
+  for (const part of cookieHeader.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx > 0) {
+      cookies[part.slice(0, idx).trim()] = part.slice(idx + 1).trim();
+    }
+  }
+  return cookies;
+}
+
+function requireAgentAccess(req, res, next) {
+  if (req.session.role === 'admin') return next();
+  const name = req.params.name;
+  if (!name) return next();
+  try {
+    const db = getDb();
+    const row = db.prepare('SELECT owner_id FROM agents WHERE name = ?').get(name);
+    if (!row || row.owner_id !== req.session.userId) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    next();
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+}
+
+app.param('name', (req, res, next, name) => {
+  if (req.path.startsWith('/api/users')) return next();
+  if (req.path === '/api/agents/create') return next();
+  if (req.session.role === 'admin') return next();
+  const db = getDb();
+  const row = db.prepare('SELECT owner_id FROM agents WHERE name = ?').get(name);
+  if (!row || row.owner_id !== req.session.userId) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+  next();
+});
+
 // ─── Routes: Auth API ───────────────────────────────────────
 
-app.get('/api/session', (req, res) => {
+app.get('/api/session', async (req, res) => {
+  if (AUTO_LOGIN && (!req.session || !req.session.userId)) {
+    try {
+      const db = getDb();
+      let admin = db.prepare("SELECT * FROM users WHERE role = 'admin' ORDER BY created_at ASC LIMIT 1").get();
+      if (!admin) {
+        const id = 'admin_' + Date.now();
+        const passwordHash = hashPassword('admin');
+        db.prepare('INSERT INTO users (id, username, display_name, role, password_hash) VALUES (?, ?, ?, ?, ?)').run(id, 'admin', 'Admin', 'admin', passwordHash);
+        admin = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+      }
+      req.session.userId = admin.id;
+      req.session.username = admin.username;
+      req.session.role = admin.role;
+      req.session.loginTime = Date.now();
+    } catch (e) {
+      console.error('Auto-login error:', e.message);
+    }
+  }
   res.json({
-    authenticated: AUTH_PASSWORD ? !!req.session?.authenticated : true,
+    authenticated: !!req.session?.userId,
+    userId: req.session?.userId || null,
+    username: req.session?.username || null,
+    role: req.session?.role || null,
     csrfToken: req.session?.csrfToken || '',
   });
 });
 
+app.get('/api/setup', (req, res) => {
+  try {
+    const db = getDb();
+    const count = db.prepare('SELECT COUNT(*) as count FROM users').get().count;
+    res.json({ needsSetup: count === 0 });
+  } catch {
+    res.json({ needsSetup: true });
+  }
+});
+
+app.post('/api/setup', (req, res) => {
+  try {
+    const db = getDb();
+    const count = db.prepare('SELECT COUNT(*) as count FROM users').get().count;
+    if (count > 0) return res.status(400).json({ error: 'Admin already exists' });
+  } catch { return res.status(500).json({ error: 'DB error' }); }
+
+  const { username, password } = req.body;
+  if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
+  if (password.length < 4) return res.status(400).json({ error: 'Password must be at least 4 characters' });
+
+  try {
+    const db = getDb();
+    const id = 'admin_' + Date.now();
+    const passwordHash = hashPassword(password);
+    db.prepare('INSERT INTO users (id, username, display_name, role, password_hash) VALUES (?, ?, ?, ?, ?)').run(id, username.trim(), 'Admin', 'admin', passwordHash);
+    res.json({ ok: true });
+  } catch (e) {
+    if (e.message.includes('UNIQUE')) return res.status(409).json({ error: 'Username already taken' });
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/api/login', (req, res) => {
-  const { password } = req.body;
-  if (!AUTH_PASSWORD) {
-    req.session.authenticated = true;
-    return res.json({ ok: true });
+  const { username, password } = req.body;
+  if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
+
+  try {
+    const db = getDb();
+    const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username.trim());
+    if (!user) return res.status(401).json({ error: 'Invalid username or password' });
+    if (!verifyPassword(password, user.password_hash)) return res.status(401).json({ error: 'Invalid username or password' });
+
+    req.session.userId = user.id;
+    req.session.username = user.username;
+    req.session.role = user.role;
+    req.session.loginTime = Date.now();
+    res.json({ ok: true, username: user.username, role: user.role });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
-  if (!password || password !== AUTH_PASSWORD) {
-    return res.status(401).json({ error: 'Invalid password' });
-  }
-  req.session.authenticated = true;
-  req.session.loginTime = Date.now();
-  res.json({ ok: true });
 });
 
 app.post('/api/logout', (req, res) => {
   req.session.destroy(() => {
     res.json({ ok: true });
   });
+});
+
+// ─── Routes: User Management (admin only) ───────────────────
+
+app.get('/api/users', requireAdmin, (req, res) => {
+  try {
+    const db = getDb();
+    const users = db.prepare(`
+      SELECT u.id, u.username, u.display_name, u.email, u.role, u.created_at,
+        (SELECT COUNT(*) FROM agents a WHERE a.owner_id = u.id) as agent_count
+      FROM users u ORDER BY u.created_at ASC
+    `).all();
+    res.json({ users });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/users', requireAdmin, (req, res) => {
+  const { username, password, role } = req.body;
+  if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
+  if (password.length < 4) return res.status(400).json({ error: 'Password must be at least 4 characters' });
+
+  try {
+    const db = getDb();
+    const id = 'user_' + Date.now() + '_' + crypto.randomBytes(4).toString('hex');
+    const passwordHash = hashPassword(password);
+    db.prepare('INSERT INTO users (id, username, display_name, role, password_hash) VALUES (?, ?, ?, ?, ?)')
+      .run(id, username.trim(), username.trim(), role === 'admin' ? 'admin' : 'user', passwordHash);
+    res.json({ ok: true, id });
+  } catch (e) {
+    if (e.message.includes('UNIQUE')) return res.status(409).json({ error: 'Username already taken' });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/users/:id/reset-password', requireAdmin, (req, res) => {
+  const { password } = req.body;
+  if (!password || password.length < 4) return res.status(400).json({ error: 'Password must be at least 4 characters' });
+
+  try {
+    const db = getDb();
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const passwordHash = hashPassword(password);
+    db.prepare('UPDATE users SET password_hash = ?, updated_at = datetime(\'now\') WHERE id = ?').run(passwordHash, req.params.id);
+    db.prepare('DELETE FROM user_sessions WHERE sid IN (SELECT sid FROM user_sessions WHERE json_extract(data, \'$.userId\') = ?)').run(req.params.id);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/api/users/:id', requireAdmin, (req, res) => {
+  try {
+    const db = getDb();
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (user.role === 'admin') {
+      const adminCount = db.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'admin'").get().count;
+      if (adminCount <= 1) return res.status(400).json({ error: 'Cannot delete the only admin' });
+    }
+    db.prepare("UPDATE agents SET owner_id = NULL WHERE owner_id = ?").run(req.params.id);
+    db.prepare('DELETE FROM user_sessions WHERE sid IN (SELECT sid FROM user_sessions WHERE json_extract(data, \'$.userId\') = ?)').run(req.params.id);
+    db.prepare('DELETE FROM users WHERE id = ?').run(req.params.id);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── Routes: Profile ────────────────────────────────────────
+
+app.get('/api/profile', (req, res) => {
+  try {
+    const db = getDb();
+    const user = db.prepare('SELECT id, username, display_name, email, role, created_at FROM users WHERE id = ?').get(req.session.userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    res.json({ user });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch('/api/profile', (req, res) => {
+  const { email } = req.body;
+  try {
+    const db = getDb();
+    db.prepare('UPDATE users SET email = ?, updated_at = datetime(\'now\') WHERE id = ?').run(email || null, req.session.userId);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/profile/change-password', (req, res) => {
+  const { current_password, new_password } = req.body;
+  if (!current_password || !new_password) return res.status(400).json({ error: 'Current and new password required' });
+  if (new_password.length < 4) return res.status(400).json({ error: 'New password must be at least 4 characters' });
+
+  try {
+    const db = getDb();
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.session.userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!verifyPassword(current_password, user.password_hash)) return res.status(401).json({ error: 'Current password is incorrect' });
+
+    const passwordHash = hashPassword(new_password);
+    db.prepare('UPDATE users SET password_hash = ?, updated_at = datetime(\'now\') WHERE id = ?').run(passwordHash, req.session.userId);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ─── Routes: API ────────────────────────────────────────────
@@ -273,9 +501,26 @@ app.get('/api/vms', async (req, res) => {
 });
 
 app.get('/api/agents', (req, res) => {
-  const agents = registry.discoverAgents();
-  const stats = registry.getAgentStats();
-  res.json({ agents, stats });
+  const ownerId = req.session.role === 'admin' ? null : req.session.userId;
+  const agents = registry.discoverAgents(ownerId);
+  const stats = registry.getAgentStats(ownerId);
+  const orphans = req.session.role === 'admin' ? registry.getOrphanCount() : 0;
+  res.json({ agents, stats, orphans });
+});
+
+app.post('/api/agents/:name/assign', (req, res) => {
+  if (req.session.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  const { owner_id } = req.body;
+  if (!owner_id) return res.status(400).json({ error: 'owner_id required' });
+  try {
+    const db = getDb();
+    const user = db.prepare('SELECT id FROM users WHERE id = ?').get(owner_id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    db.prepare('UPDATE agents SET owner_id = ? WHERE name = ?').run(owner_id, req.params.name);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.post('/api/agents/:name/start', async (req, res) => {
@@ -299,12 +544,24 @@ app.post('/api/agents/:name/restart', async (req, res) => {
   res.json({ ok: true, status: agent ? agent.status : 'running' });
 });
 
+app.post('/api/agents/:name/delete', async (req, res) => {
+  if (!safeVmName(req.params.name)) return res.status(400).json({ error: 'Invalid name' });
+  try {
+    await vm.removeVm(req.params.name);
+    registry.removeAgentFromDb(req.params.name);
+    registry.dockerPsList(true);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/config', (req, res) => {
   res.json({ containerPrefix: PREFIX });
 });
 
 app.get('/api/backups', (req, res) => {
-  res.json(getBackups());
+  res.json(getBackups(null, req.session.userId, req.session.role));
 });
 
 // ─── Agent API ──────────────────────────────────────────────
@@ -331,7 +588,7 @@ app.get('/api/agents/:name/workspace/parent', (req, res) => {
   const agent = registry.getAgent(req.params.name);
   if (!agent) return res.status(404).json({ error: 'Agent not found' });
   try {
-    const listing = require('./services/workspace').listParentDir(agent.name);
+    const listing = require('./services/workspace').listParentDir(agent.name, req.query.subpath || '');
     res.json(listing);
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -386,6 +643,19 @@ app.post('/api/agents/:name/workspace/save', (req, res) => {
   if (!filePath) return res.status(400).json({ error: 'path required' });
   try {
     const result = require('./services/workspace').writeFile(agent.name, filePath, content || '');
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/agents/:name/workspace/parent/save', (req, res) => {
+  const agent = registry.getAgent(req.params.name);
+  if (!agent) return res.status(404).json({ error: 'Agent not found' });
+  const { path: filePath, content } = req.body;
+  if (!filePath) return res.status(400).json({ error: 'path required' });
+  try {
+    const result = require('./services/workspace').writeParentFile(agent.name, filePath, content || '');
     res.json({ ok: true, ...result });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -818,9 +1088,20 @@ app.post('/api/agents/:name/backups/create', async (req, res) => {
   }
 });
 
+app.get('/api/agents/:name/backups/download', (req, res) => {
+  const file = req.query.file;
+  if (!file) return res.status(400).json({ error: 'file required' });
+  const safeName = path.basename(file);
+  const filePath = path.join(BACKUPS_DIR, safeName);
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'file not found' });
+  res.download(filePath, safeName);
+});
+
 app.post('/api/agents/:name/backups/restore', async (req, res) => {
   try {
-    await backup.restoreAgent(req.params.name);
+    const { file } = req.body;
+    if (!file) return res.status(400).json({ error: 'file required' });
+    await backup.restoreAgent(req.params.name, file);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -913,19 +1194,27 @@ function enrichUsedBy(credsFn, usedByKey) {
   return out;
 }
 
+function filterCredsByOwner(creds, userId, role) {
+  if (role === 'admin') return creds;
+  const filtered = {};
+  for (const [name, val] of Object.entries(creds)) {
+    if (!val.owner || val.owner === userId) filtered[name] = val;
+  }
+  return filtered;
+}
+
 app.get('/api/credentials', (req, res) => {
-  res.json({
-    api_keys: enrichUsedBy(creds.apiKeys, 'apiKeys'),
-    bot_tokens: enrichUsedBy(creds.botTokens, 'botTokens'),
-    user_ids: enrichUsedBy(creds.userIDs, 'userIds'),
-  });
+  const apiKeys = filterCredsByOwner(enrichUsedBy(creds.apiKeys, 'apiKeys'), req.session.userId, req.session.role);
+  const botTokens = filterCredsByOwner(enrichUsedBy(creds.botTokens, 'botTokens'), req.session.userId, req.session.role);
+  const userIds = filterCredsByOwner(enrichUsedBy(creds.userIDs, 'userIds'), req.session.userId, req.session.role);
+  res.json({ api_keys: apiKeys, bot_tokens: botTokens, user_ids: userIds });
 });
 
 app.post('/api/credentials/api-key', (req, res) => {
   const { name, provider, key } = req.body;
   if (!name || !provider || !key) return res.status(400).json({ error: 'Name, provider, and key are required' });
   try {
-    creds.addApiKey(name.trim(), provider.trim(), key.trim());
+    creds.addApiKey(name.trim(), provider.trim(), key.trim(), req.session.userId);
     res.json({ ok: true });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -936,7 +1225,7 @@ app.post('/api/credentials/bot-token', (req, res) => {
   const { name, token } = req.body;
   if (!name || !token) return res.status(400).json({ error: 'Name and token are required' });
   try {
-    creds.addBotToken(name.trim(), token.trim(), 'telegram');
+    creds.addBotToken(name.trim(), token.trim(), 'telegram', req.session.userId);
     res.json({ ok: true });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -947,7 +1236,7 @@ app.post('/api/credentials/user-id', (req, res) => {
   const { name, uid } = req.body;
   if (!name || !uid) return res.status(400).json({ error: 'Name and user ID are required' });
   try {
-    creds.addUserId(name.trim(), uid.trim(), 'telegram');
+    creds.addUserId(name.trim(), uid.trim(), 'telegram', req.session.userId);
     res.json({ ok: true });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -971,7 +1260,7 @@ app.post('/api/credentials/delete', (req, res) => {
 // ─── API: Create Agent ──────────────────────────────────────
 
 app.post('/api/agents/create', async (req, res) => {
-  const { name, agent, backup_file } = req.body;
+  const { name, agent, backup_file, assign_to } = req.body;
   if (!name) return res.status(400).json({ error: 'Name is required' });
   if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
 
@@ -981,6 +1270,19 @@ app.post('/api/agents/create', async (req, res) => {
       mode: 'fresh',
     });
     registry.dockerPsList(true);
+
+    // Set owner_id in DB
+    try {
+      const db = getDb();
+      let ownerId = req.session.userId;
+      if (assign_to && req.session.role === 'admin') {
+        const user = db.prepare('SELECT id FROM users WHERE id = ?').get(assign_to);
+        if (user) ownerId = assign_to;
+      }
+      if (ownerId) {
+        db.prepare('UPDATE agents SET owner_id = ? WHERE name = ?').run(ownerId, name);
+      }
+    } catch {}
 
     // Optionally restore from backup
     if (backup_file) {
@@ -1013,6 +1315,61 @@ app.post('/api/agents/:name/onboard', async (req, res) => {
       await runCmd('docker', ['exec', '-i', name, 'openclaw', 'models', 'auth', 'paste-api-key', '--provider', api_key_provider], { input: api_key_value, timeout: 30000 });
     }
     res.json({ ok: true, message: 'Onboard complete' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── API: Channels ──────────────────────────────────────────
+
+app.get('/api/agents/:name/channels-status', async (req, res) => {
+  const name = req.params.name;
+  const agent = registry.getAgent(name);
+  if (!agent) return res.status(404).json({ error: 'Agent not found' });
+  try {
+    const { stdout, code } = await dockerExec(name, 'openclaw channels status --json', 15000);
+    if (code !== 0) return res.json({ channels: {} });
+    try { res.json(JSON.parse(stdout)); } catch { res.json({ channels: {} }); }
+  } catch (e) {
+    res.json({ channels: {}, error: e.message });
+  }
+});
+
+const channelsCache = { ts: 0, data: {} };
+const CHANNELS_CACHE_TTL = 600000; // 10 minutes
+
+app.get('/api/agents/:name/channels-list', async (req, res) => {
+  const name = req.params.name;
+  const agent = registry.getAgent(name);
+  if (!agent) return res.status(404).json({ error: 'Agent not found' });
+
+  const now = Date.now();
+  const force = req.query.refresh === 'true';
+  const cached = channelsCache.data[name];
+  if (!force && cached && now - channelsCache.ts < CHANNELS_CACHE_TTL) return res.json(cached);
+
+  try {
+    const { stdout, code } = await dockerExec(name, 'openclaw channels list --all --json', 15000);
+    if (code !== 0) return res.json(cached || { channels: [] });
+    const data = JSON.parse(stdout);
+    channelsCache.data[name] = data;
+    channelsCache.ts = now;
+    res.json(data);
+  } catch (e) {
+    res.json(cached || { channels: [], error: e.message });
+  }
+});
+
+app.post('/api/agents/:name/channels/remove', async (req, res) => {
+  const name = req.params.name;
+  if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid name' });
+  const { channel } = req.body;
+  if (!channel) return res.status(400).json({ error: 'channel required' });
+  const sq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+  try {
+    const { code, stderr } = await dockerExec(name, `openclaw channels remove --channel ${sq(channel)} --delete`, 30000);
+    if (code !== 0) return res.status(500).json({ error: stderr || 'Remove failed' });
+    res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -1127,15 +1484,78 @@ const wss = new WebSocketServer({ server });
 wss.on('connection', async (ws, req) => {
   const url = new URL(req.url, 'http://localhost');
   const parts = url.pathname.split('/').filter(Boolean);
-  const vmName = parts[2] || '';
-  const cols = Math.max(40, Math.min(400, parseInt(url.searchParams.get('cols') || '120', 10) || 120));
-  const rows = Math.max(12, Math.min(120, parseInt(url.searchParams.get('rows') || '32', 10) || 32));
-  const containers = await dockerPsList(true);
 
-  if (parts[0] !== 'ws' || parts[1] !== 'terminal' || !safeVmName(vmName) || (containers[vmName]?.State || '').toLowerCase() !== 'running') {
+  if (parts[0] !== 'ws' || !['terminal', 'messaging'].includes(parts[1]) || !safeVmName(parts[2] || '')) {
     ws.close();
     return;
   }
+
+  const wsType = parts[1];
+  const vmName = parts[2];
+  const containers = await dockerPsList(true);
+
+  if ((containers[vmName]?.State || '').toLowerCase() !== 'running') {
+    ws.close();
+    return;
+  }
+
+  // ─── Auth check (shared) ───
+  if (!AUTO_LOGIN) {
+    try {
+      const cookies = parseCookies(req.headers.cookie || '');
+      const sid = cookies['vmf.sid'];
+      if (sid) {
+        const db = getDb();
+        const row = db.prepare(`SELECT data FROM user_sessions WHERE sid = ?`).get(sid);
+        if (row) {
+          const session = JSON.parse(row.data);
+          if (session.role !== 'admin' && session.userId) {
+            const agentRow = db.prepare('SELECT owner_id FROM agents WHERE name = ?').get(vmName);
+            if (!agentRow || agentRow.owner_id !== session.userId) {
+              ws.close(4003, 'Access denied');
+              return;
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.error('WS auth error:', e.message);
+    }
+  }
+
+  // ─── Messaging WebSocket (interactive command runner) ───
+  if (wsType === 'messaging') {
+    let docker = null;
+    let closed = false;
+    const cleanup = () => { if (closed) return; closed = true; if (docker) docker.kill(); };
+
+    ws.on('message', (data) => {
+      try {
+        const parsed = JSON.parse(data.toString());
+
+        if (parsed.type === 'run' && parsed.cmd && !docker) {
+          docker = spawn('docker', [
+            'exec', '-e', 'TERM=xterm-256color', '-i', vmName,
+            'sh', '-c',
+            `script -qfec 'export COLUMNS=120 LINES=40; ${parsed.cmd}' /dev/null`
+          ]);
+          docker.stdout.on('data', (d) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'stdout', text: d.toString() })); });
+          docker.stderr.on('data', (d) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'stderr', text: d.toString() })); });
+          docker.on('close', (code) => { if (!closed) { closed = true; if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'close', code })); } });
+          docker.on('error', (e) => { if (!closed) { closed = true; if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'error', message: e.message })); } });
+        } else if (parsed.type === 'credential-paste' && docker && !docker.stdin.destroyed) {
+          docker.stdin.write(parsed.value + '\n');
+        }
+      } catch {}
+    });
+    ws.on('close', cleanup);
+    ws.on('error', cleanup);
+    return;
+  }
+
+  // ─── Terminal WebSocket (full interactive shell) ───
+  const cols = Math.max(40, Math.min(400, parseInt(url.searchParams.get('cols') || '120', 10) || 120));
+  const rows = Math.max(12, Math.min(120, parseInt(url.searchParams.get('rows') || '32', 10) || 32));
 
   const docker = spawn('docker', [
     'exec', '-e', 'TERM=xterm-256color', '-i', vmName,
