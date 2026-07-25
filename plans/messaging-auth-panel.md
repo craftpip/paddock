@@ -26,10 +26,16 @@ Backend cache for channel list, loading skeletons, error states, end-to-end test
 - `closePanel()` resets channel selection and reloads channels/creds
 - Removed `loadStatus()`, `status` state, `TabSkeleton` guard, `removeChannel()`, `useConfirm` dependency
 
+### Done in this commit
+- Backend: 10-min TTL cache on `channels-list` endpoint with `?refresh=true` force bypass
+- Frontend: Rewrote `MessagingTab` — channel dropdown + Setup button + terminal/creds panel
+- Credential paste via WebSocket (`credential-paste` message type)
+- SPA rebuilt
+
 ### Still TODO
 - [ ] Test the page loads fast and form works end-to-end
-- [ ] Backend cache for channel list (see Cache section below)
 - [ ] Verify credential paste works with interactive CLI prompts
+- [ ] `closePanel()` should force-refresh channels (`?refresh=true`) after setup
 
 ---
 
