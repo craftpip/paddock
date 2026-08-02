@@ -4,9 +4,12 @@ import { api } from '../../lib/api'
 /**
  * Commands — the "home" mode of an agent page.
  *
- * Groups of one-click OpenClaw CLI commands that run in the docked terminal
- * below (tracked), plus compact live panels for Messaging, Models, MCP, Skills
- * and Backups. The `run`/`runningCmd`/`termRef` plumbing lives in AgentDetail.
+ * The whole pane is ONE continuous wrapped flow of pill buttons (float-left):
+ * every group's commands sit inline in a single line that wraps, no cards, no
+ * rows. Group labels are small chips inline before their buttons. Data
+ * (servers, skills, backups, creds) shows as compact chips in the same flow.
+ * Commands run in the docked terminal below. The `run`/`runningCmd`/`termRef`
+ * plumbing lives in AgentDetail.
  */
 
 const COLORS = {
@@ -97,48 +100,60 @@ function Pill({ label, onClick, desc, color, disabled, active, danger }) {
   )
 }
 
-function GroupCard({ title, color, children, className = '' }) {
+/** Small inline group label chip, sits in the flow before its buttons. */
+function GroupLabel({ color, title }) {
   const c = COLORS[color] || COLORS.slate
   return (
-    <div className={`border border-slate-800 rounded-xl p-4 ${className}`}>
-      <div className="flex items-center gap-2 mb-3">
-        <div className={`w-1.5 h-4 rounded-full ${c.dot}`} />
-        <h3 className="text-xs font-semibold text-slate-300 uppercase tracking-wider">{title}</h3>
-      </div>
-      {children}
-    </div>
+    <span className="inline-flex items-center gap-1.5 shrink-0 ml-1 first:ml-0">
+      <span className={`w-1.5 h-3 rounded-full ${c.dot}`} />
+      <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">{title}</span>
+    </span>
   )
 }
 
-function SimpleGroupRow({ group, query, runningCmd, run }) {
+/** Neutral chip for data items (servers, skills, backups) in the flow. */
+function DataChip({ children, className = '' }) {
+  return (
+    <span className={`inline-flex items-center gap-1.5 px-2 py-1 rounded text-[11px] border border-slate-700/60 bg-slate-800/40 text-slate-300 shrink-0 ${className}`}>
+      {children}
+    </span>
+  )
+}
+
+/** Small destructive inline action button used inside data chips. */
+function MiniBtn({ label, onClick, color = 'text-slate-400 hover:text-slate-200', disabled }) {
+  return (
+    <button onClick={onClick} disabled={disabled}
+            className={`px-1 rounded text-[10px] ${color} hover:bg-slate-700/60 transition-colors disabled:opacity-40`}>
+      {label}
+    </button>
+  )
+}
+
+function FlowGroup({ group, query, runningCmd, run }) {
   const c = COLORS[group.color] || COLORS.slate
   const visible = group.commands.filter((x) => matches(query, x.label, x.cmd, x.desc))
   if (query && visible.length === 0) return null
   return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 py-1.5 border-b border-slate-800/50 last:border-b-0">
-      <div className="flex items-center gap-1.5 w-[110px] shrink-0">
-        <div className={`w-1.5 h-3 rounded-full ${c.dot}`} />
-        <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">{group.title}</span>
-      </div>
-      <div className="flex flex-wrap gap-1.5">
-        {visible.map((x) => (
-          <Pill
-            key={x.label}
-            label={x.label}
-            desc={x.desc}
-            color={c.pill}
-            danger={x.danger}
-            disabled={!!runningCmd}
-            active={runningCmd === x.cmd}
-            onClick={() => run(x.cmd, x)}
-          />
-        ))}
-      </div>
-    </div>
+    <>
+      <GroupLabel color={group.color} title={group.title} />
+      {visible.map((x) => (
+        <Pill
+          key={x.label}
+          label={x.label}
+          desc={x.desc}
+          color={c.pill}
+          danger={x.danger}
+          disabled={!!runningCmd}
+          active={runningCmd === x.cmd}
+          onClick={() => run(x.cmd, x)}
+        />
+      ))}
+    </>
   )
 }
 
-// ─── Messaging card ──────────────────────────────────────────────
+// ─── Messaging ───────────────────────────────────────────────────
 
 const CHANNEL_ICONS = {
   telegram: '✈', signal: '💬', whatsapp: '📱', discord: '🎮',
@@ -146,7 +161,7 @@ const CHANNEL_ICONS = {
   imessage: '🍎', tlon: '🐦',
 }
 
-function MessagingCard({ agent, query, runningCmd, run, termRef }) {
+function MessagingFlow({ agent, query, runningCmd, run, termRef }) {
   const [channels, setChannels] = useState([])
   const [selected, setSelected] = useState('')
   const [creds, setCreds] = useState({ bot_tokens: {}, user_ids: {} })
@@ -177,63 +192,42 @@ function MessagingCard({ agent, query, runningCmd, run, termRef }) {
     ] : []),
   ]
   const visible = pills.filter((x) => matches(query, x.label, x.cmd))
-  if (query && visible.length === 0) return null
-
-  const tokenCount = Object.keys(creds.bot_tokens).length + Object.keys(creds.user_ids).length
+  const tokenEntries = [
+    ...Object.entries(creds.bot_tokens).map(([name, data]) => ({ key: 'b' + name, name, value: typeof data === 'string' ? data : data.token, hint: 'Paste bot token' })),
+    ...Object.entries(creds.user_ids).map(([name, data]) => ({ key: 'u' + name, name, value: typeof data === 'string' ? data : data.uid, hint: 'Paste user ID' })),
+  ]
+  if (query && visible.length === 0 && tokenEntries.length === 0) return null
 
   return (
-    <GroupCard title="Messaging" color="cyan">
-      <div className="flex flex-wrap items-center gap-1.5">
-        {channels.length > 0 && (
-          <select value={selected} onChange={(e) => setSelected(e.target.value)}
-                  className="px-1.5 py-1 rounded text-[11px] bg-slate-950 border border-slate-700 text-white focus:border-cyan-500 focus:outline-none">
-            {channels.map((ch) => <option key={ch.id} value={ch.id}>{CHANNEL_ICONS[ch.id] || '📡'} {ch.name}</option>)}
-          </select>
-        )}
-        {visible.map((x) => (
-          <Pill key={x.label} label={x.label} desc={x.desc} color={COLORS.cyan.pill} danger={x.danger}
-                disabled={!!runningCmd} active={runningCmd === x.cmd} onClick={() => run(x.cmd, x)} />
-        ))}
-      </div>
-
-      {/* Saved credentials — click to paste into whatever is running in the terminal */}
-      <div className="mt-3 pt-3 border-t border-slate-800/70">
-        <p className="text-[10px] font-medium text-slate-500 uppercase tracking-wider mb-1.5">
-          Saved credentials {tokenCount > 0 ? `(${tokenCount})` : ''} — click to paste
-        </p>
-        {tokenCount === 0 ? (
-          <p className="text-[11px] text-slate-600">None saved. Add them in the Credentials page.</p>
-        ) : (
-          <div className="flex flex-wrap gap-1.5">
-            {Object.entries(creds.bot_tokens).map(([name, data]) => (
-              <button key={'b' + name}
-                      onClick={() => termRef.current?.pasteSecret(typeof data === 'string' ? data : data.token)}
-                      title="Paste bot token into terminal"
-                      className="px-2 py-1 rounded text-[11px] font-mono border border-emerald-800/30 text-emerald-300 bg-emerald-950/20 hover:bg-emerald-900/30 hover:text-emerald-200 transition-colors whitespace-nowrap">
-                {name}
-              </button>
-            ))}
-            {Object.entries(creds.user_ids).map(([name, data]) => (
-              <button key={'u' + name}
-                      onClick={() => termRef.current?.pasteSecret(typeof data === 'string' ? data : data.uid)}
-                      title="Paste user ID into terminal"
-                      className="px-2 py-1 rounded text-[11px] font-mono border border-blue-800/30 text-blue-300 bg-blue-950/20 hover:bg-blue-900/30 hover:text-blue-200 transition-colors whitespace-nowrap">
-                {name}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-    </GroupCard>
+    <>
+      <GroupLabel color="cyan" title="Messaging" />
+      {channels.length > 0 && (
+        <select value={selected} onChange={(e) => setSelected(e.target.value)}
+                className="px-1.5 py-1 rounded text-[11px] bg-slate-950 border border-slate-700 text-white focus:border-cyan-500 focus:outline-none">
+          {channels.map((ch) => <option key={ch.id} value={ch.id}>{CHANNEL_ICONS[ch.id] || '📡'} {ch.name}</option>)}
+        </select>
+      )}
+      {visible.map((x) => (
+        <Pill key={x.label} label={x.label} desc={x.desc} color={COLORS.cyan.pill} danger={x.danger}
+              disabled={!!runningCmd} active={runningCmd === x.cmd} onClick={() => run(x.cmd, x)} />
+      ))}
+      {tokenEntries.map((t) => (
+        <button key={t.key}
+                onClick={() => termRef.current?.pasteSecret(t.value)}
+                title={t.hint}
+                className="px-2 py-1 rounded text-[11px] font-mono border border-emerald-800/30 text-emerald-300 bg-emerald-950/20 hover:bg-emerald-900/30 hover:text-emerald-200 transition-colors whitespace-nowrap">
+          {t.name}
+        </button>
+      ))}
+    </>
   )
 }
 
-// ─── Models card ─────────────────────────────────────────────────
+// ─── Models ──────────────────────────────────────────────────────
 
-function ModelsCard({ agent, query, runningCmd, run }) {
+function ModelsFlow({ agent, query, runningCmd, run }) {
   const [config, setConfig] = useState(null)
   const [provider, setProvider] = useState('')
-  const [msg, setMsg] = useState('')
 
   function load() {
     api(`/api/agents/${agent.name}/config`).then((d) => {
@@ -274,46 +268,35 @@ function ModelsCard({ agent, query, runningCmd, run }) {
   if (query && visible.length === 0 && !primary && !fallback) return null
 
   return (
-    <GroupCard title="Models" color="blue">
-      <div className="flex flex-wrap items-center gap-1.5 mb-3">
-        {providers.length > 0 ? (
-          <select value={provider} onChange={(e) => setProvider(e.target.value)}
-                  className="px-1.5 py-1 rounded text-[11px] bg-slate-950 border border-slate-700 text-white focus:border-cyan-500 focus:outline-none">
-            {providers.map((p) => <option key={p} value={p}>{p}</option>)}
-          </select>
-        ) : (
-          <input type="text" value={provider} onChange={(e) => setProvider(e.target.value)} placeholder="provider (e.g. openai)"
-                 className="px-1.5 py-1 rounded text-[11px] bg-slate-950 border border-slate-700 text-white w-36 focus:border-cyan-500 focus:outline-none placeholder-slate-600" />
-        )}
-        {!provider && <span className="text-[10px] text-slate-600">no provider configured</span>}
-        {visible.map((x) => (
-          <Pill key={x.label} label={x.label} desc={x.desc} color={COLORS.blue.pill}
-                disabled={!!runningCmd} active={runningCmd === (typeof x.cmd === 'function' ? x.cmd(provider) : x.cmd)}
-                onClick={() => (x.click ? x.click() : run(x.cmd(provider)))}
-          />
-        ))}
-      </div>
-      {(primary || fallback) && (
-        <div className="flex flex-wrap items-center gap-2 text-[11px]">
-          {primary && (
-            <span className="px-2 py-1 rounded border border-cyan-800/40 text-cyan-300 bg-cyan-950/20 font-mono">
-              ★ {primary}
-            </span>
-          )}
-          {fallback && (
-            <span className="px-2 py-1 rounded border border-amber-800/40 text-amber-300 bg-amber-950/20 font-mono">
-              ⤵ {fallback}
-            </span>
-          )}
-        </div>
+    <>
+      <GroupLabel color="blue" title="Models" />
+      {providers.length > 0 ? (
+        <select value={provider} onChange={(e) => setProvider(e.target.value)}
+                className="px-1.5 py-1 rounded text-[11px] bg-slate-950 border border-slate-700 text-white focus:border-cyan-500 focus:outline-none">
+          {providers.map((p) => <option key={p} value={p}>{p}</option>)}
+        </select>
+      ) : (
+        <input type="text" value={provider} onChange={(e) => setProvider(e.target.value)} placeholder="provider (e.g. openai)"
+               className="px-1.5 py-1 rounded text-[11px] bg-slate-950 border border-slate-700 text-white w-36 focus:border-cyan-500 focus:outline-none placeholder-slate-600" />
       )}
-    </GroupCard>
+      {visible.map((x) => (
+        <Pill key={x.label} label={x.label} desc={x.desc} color={COLORS.blue.pill}
+              disabled={!!runningCmd} active={runningCmd === (typeof x.cmd === 'function' ? x.cmd(provider) : x.cmd)}
+              onClick={() => (x.click ? x.click() : run(x.cmd(provider)))} />
+      ))}
+      {primary && (
+        <DataChip className="border-cyan-800/40 text-cyan-300 bg-cyan-950/20 font-mono">★ {primary}</DataChip>
+      )}
+      {fallback && (
+        <DataChip className="border-amber-800/40 text-amber-300 bg-amber-950/20 font-mono">⤵ {fallback}</DataChip>
+      )}
+    </>
   )
 }
 
-// ─── MCP card ────────────────────────────────────────────────────
+// ─── MCP ─────────────────────────────────────────────────────────
 
-function McpCard({ agent, query, runningCmd, run }) {
+function McpFlow({ agent, query, runningCmd, run }) {
   const [servers, setServers] = useState([])
   const [removing, setRemoving] = useState('')
   const [msg, setMsg] = useState('')
@@ -332,7 +315,8 @@ function McpCard({ agent, query, runningCmd, run }) {
     { cmd: 'openclaw mcp tools', label: 'Tools', desc: 'List available tools' },
   ]
   const visible = pills.filter((x) => matches(query, x.label, x.cmd))
-  if (query && visible.length === 0 && servers.length === 0) return null
+  const shown = servers.filter((s) => matches(query, s.name))
+  if (query && visible.length === 0 && shown.length === 0) return null
 
   async function removeServer(name) {
     if (!confirm(`Remove "${name}"?`)) return
@@ -346,35 +330,27 @@ function McpCard({ agent, query, runningCmd, run }) {
   }
 
   return (
-    <GroupCard title="MCP" color="emerald">
-      {msg && <div className="mb-2 text-[11px] text-cyan-400">{msg}</div>}
-      <div className="flex flex-wrap gap-1.5 mb-3">
-        {visible.map((x) => (
-          <Pill key={x.label} label={x.label} desc={x.desc} color={COLORS.emerald.pill}
-                disabled={!!runningCmd} active={runningCmd === x.cmd} onClick={() => run(x.cmd)} />
-        ))}
-      </div>
-      {servers.length > 0 && (
-        <div className="flex flex-col gap-1.5">
-          {servers.map((s) => (
-            <div key={s.name} className="flex items-center gap-2 text-[11px]">
-              <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${s.ok === true ? 'bg-emerald-400' : s.ok === false ? 'bg-red-400' : 'bg-cyan-400'}`} />
-              <span className="text-slate-200 font-medium">{s.name}</span>
-              <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 text-[10px]">{s.transport}</span>
-              <span className="text-slate-500 truncate font-mono flex-1 min-w-0">{s.command || s.url || ''}</span>
-              <button onClick={() => removeServer(s.name)} disabled={removing === s.name}
-                      className="px-1.5 py-0.5 rounded text-[10px] text-red-400 hover:text-red-300 hover:bg-slate-800 transition-colors disabled:opacity-40">
-                {removing === s.name ? '...' : 'Remove'}
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-    </GroupCard>
+    <>
+      {msg && <span className="text-[11px] text-cyan-400">{msg}</span>}
+      <GroupLabel color="emerald" title="MCP" />
+      {visible.map((x) => (
+        <Pill key={x.label} label={x.label} desc={x.desc} color={COLORS.emerald.pill}
+              disabled={!!runningCmd} active={runningCmd === x.cmd} onClick={() => run(x.cmd)} />
+      ))}
+      {shown.map((s) => (
+        <DataChip key={s.name} title={s.command || s.url || ''}>
+          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${s.ok === true ? 'bg-emerald-400' : s.ok === false ? 'bg-red-400' : 'bg-cyan-400'}`} />
+          <span className="font-medium text-slate-200">{s.name}</span>
+          {s.transport && <span className="text-[10px] text-slate-500">{s.transport}</span>}
+          <MiniBtn label={removing === s.name ? '…' : '×'} color="text-red-400 hover:text-red-300" disabled={removing === s.name}
+                   onClick={() => removeServer(s.name)} />
+        </DataChip>
+      ))}
+    </>
   )
 }
 
-// ─── Skills card ─────────────────────────────────────────────────
+// ─── Skills ──────────────────────────────────────────────────────
 
 function sourceLabel(source) {
   if (source === 'openclaw-bundled' || source === 'openclaw-extra') return { label: 'Bundled', color: 'bg-slate-600' }
@@ -382,7 +358,7 @@ function sourceLabel(source) {
   return { label: source || 'User', color: 'bg-emerald-700' }
 }
 
-function SkillsCard({ agent, query, runningCmd, run }) {
+function SkillsFlow({ agent, query, runningCmd, run }) {
   const [skills, setSkills] = useState([])
   const [msg, setMsg] = useState('')
   const [showInstall, setShowInstall] = useState(false)
@@ -404,7 +380,8 @@ function SkillsCard({ agent, query, runningCmd, run }) {
     { label: 'Install', desc: 'Open the install box', click: () => setShowInstall(!showInstall) },
   ]
   const visible = pills.filter((x) => matches(query, x.label, x.cmd))
-  if (query && visible.length === 0 && skills.length === 0) return null
+  const shown = skills.filter((s) => matches(query, s.name))
+  if (query && visible.length === 0 && shown.length === 0) return null
 
   async function doInstall(e) {
     e.preventDefault()
@@ -442,58 +419,52 @@ function SkillsCard({ agent, query, runningCmd, run }) {
   }
 
   return (
-    <GroupCard title="Skills" color="violet">
-      {msg && <div className="mb-2 text-[11px] text-cyan-400">{msg}</div>}
-      <div className="flex flex-wrap gap-1.5 mb-3">
-        {visible.map((x) => (
-          <Pill key={x.label} label={x.label} desc={x.desc} color={COLORS.violet.pill}
-                disabled={!!runningCmd} active={runningCmd === x.cmd}
-                onClick={() => (x.click ? x.click() : run(x.cmd, x))} />
-        ))}
-      </div>
+    <>
+      {msg && <span className="text-[11px] text-cyan-400">{msg}</span>}
+      <GroupLabel color="violet" title="Skills" />
+      {visible.map((x) => (
+        <Pill key={x.label} label={x.label} desc={x.desc} color={COLORS.violet.pill}
+              disabled={!!runningCmd} active={runningCmd === x.cmd}
+              onClick={() => (x.click ? x.click() : run(x.cmd, x))} />
+      ))}
       {showInstall && (
-        <form onSubmit={doInstall} className="flex items-center gap-2 mb-3">
+        <form onSubmit={doInstall} className="inline-flex items-center gap-2">
           <input type="text" value={installRef} onChange={(e) => setInstallRef(e.target.value)}
                  placeholder="@owner/slug or owner/repo@ref"
-                 className="flex-1 px-2 py-1 rounded text-[11px] bg-slate-950 border border-slate-700 text-white focus:border-cyan-500 focus:outline-none placeholder-slate-600" />
+                 className="w-56 px-2 py-1 rounded text-[11px] bg-slate-950 border border-slate-700 text-white focus:border-cyan-500 focus:outline-none placeholder-slate-600" />
           <button type="submit" disabled={installing}
                   className="px-2.5 py-1 rounded text-[11px] bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-700 text-white transition-colors">
-            {installing ? '...' : 'Install'}
+            {installing ? '…' : 'Install'}
           </button>
         </form>
       )}
-      {skills.length > 0 && (
-        <div className="flex flex-col gap-1.5">
-          {skills.slice(0, 12).map((s) => {
-            const sl = sourceLabel(s.source)
-            return (
-              <div key={s.name} className="flex items-center gap-2 text-[11px]">
-                <span className="text-slate-200 font-medium">{s.name}</span>
-                {s.version && <span className="text-[10px] text-slate-500 font-mono">{s.version}</span>}
-                <span className={`px-1.5 py-0.5 rounded text-[10px] text-white ${sl.color}`}>{sl.label}</span>
-                <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${s.eligible ? 'bg-emerald-400' : 'bg-slate-600'}`} />
-                <span className="text-slate-500 truncate flex-1 min-w-0">{s.description}</span>
-                {s.source === 'clawhub' && (
-                  <button onClick={() => verifySkill(s.name)} className="px-1.5 py-0.5 rounded text-[10px] text-amber-400 hover:bg-slate-800 transition-colors">Verify</button>
-                )}
-                {s.bundled !== true && (
-                  <>
-                    <button onClick={() => updateSkill(s.name)} className="px-1.5 py-0.5 rounded text-[10px] text-emerald-400 hover:bg-slate-800 transition-colors">Update</button>
-                    <button onClick={() => removeSkill(s.name)} className="px-1.5 py-0.5 rounded text-[10px] text-red-400 hover:bg-slate-800 transition-colors">×</button>
-                  </>
-                )}
-              </div>
-            )
-          })}
-        </div>
-      )}
-    </GroupCard>
+      {shown.slice(0, 12).map((s) => {
+        const sl = sourceLabel(s.source)
+        return (
+          <DataChip key={s.name} title={s.description}>
+            <span className="font-medium text-slate-200">{s.name}</span>
+            {s.version && <span className="text-[10px] text-slate-500 font-mono">{s.version}</span>}
+            <span className={`px-1 rounded text-[10px] text-white ${sl.color}`}>{sl.label}</span>
+            <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${s.eligible ? 'bg-emerald-400' : 'bg-slate-600'}`} />
+            {s.source === 'clawhub' && (
+              <MiniBtn label="Verify" color="text-amber-400 hover:text-amber-300" onClick={() => verifySkill(s.name)} />
+            )}
+            {s.bundled !== true && (
+              <>
+                <MiniBtn label="Update" color="text-emerald-400 hover:text-emerald-300" onClick={() => updateSkill(s.name)} />
+                <MiniBtn label="×" color="text-red-400 hover:text-red-300" onClick={() => removeSkill(s.name)} />
+              </>
+            )}
+          </DataChip>
+        )
+      })}
+    </>
   )
 }
 
-// ─── Backups card ────────────────────────────────────────────────
+// ─── Backups ─────────────────────────────────────────────────────
 
-function BackupsCard({ agent, query, runningCmd, run }) {
+function BackupsFlow({ agent, query, runningCmd, run }) {
   const [backups, setBackups] = useState([])
   const [msg, setMsg] = useState('')
 
@@ -508,7 +479,8 @@ function BackupsCard({ agent, query, runningCmd, run }) {
     { cmd: 'openclaw backup create --only-config', label: 'Config only', desc: 'Just openclaw.json', confirm: true },
   ]
   const visible = pills.filter((x) => matches(query, x.label, x.cmd))
-  if (query && visible.length === 0 && backups.length === 0) return null
+  const shown = backups.filter((b) => matches(query, b.name))
+  if (query && visible.length === 0 && shown.length === 0) return null
 
   async function deleteBak(file) {
     if (!confirm('Delete backup?')) return
@@ -517,26 +489,21 @@ function BackupsCard({ agent, query, runningCmd, run }) {
   }
 
   return (
-    <GroupCard title="Backups" color="amber">
-      {msg && <div className="mb-2 text-[11px] text-cyan-400">{msg}</div>}
-      <div className="flex flex-wrap gap-1.5 mb-3">
-        {visible.map((x) => (
-          <Pill key={x.label} label={x.label} desc={x.desc} color={COLORS.amber.pill}
-                disabled={!!runningCmd} active={runningCmd === x.cmd} onClick={() => run(x.cmd, x)} />
-        ))}
-      </div>
-      {backups.length > 0 && (
-        <div className="flex flex-col gap-1">
-          {backups.slice(0, 10).map((b) => (
-            <div key={b.name} className="flex items-center gap-2 text-[11px]">
-              <span className="text-slate-300 font-mono truncate flex-1 min-w-0">{b.name}</span>
-              {b.size_hr && <span className="text-slate-500">{b.size_hr}</span>}
-              <button onClick={() => deleteBak(b.name)} className="px-1.5 py-0.5 rounded text-[10px] text-red-400 hover:bg-slate-800 transition-colors">Delete</button>
-            </div>
-          ))}
-        </div>
-      )}
-    </GroupCard>
+    <>
+      {msg && <span className="text-[11px] text-cyan-400">{msg}</span>}
+      <GroupLabel color="amber" title="Backups" />
+      {visible.map((x) => (
+        <Pill key={x.label} label={x.label} desc={x.desc} color={COLORS.amber.pill}
+              disabled={!!runningCmd} active={runningCmd === x.cmd} onClick={() => run(x.cmd, x)} />
+      ))}
+      {shown.slice(0, 10).map((b) => (
+        <DataChip key={b.name}>
+          <span className="font-mono text-slate-300">{b.name}</span>
+          {b.size_hr && <span className="text-[10px] text-slate-500">{b.size_hr}</span>}
+          <MiniBtn label="×" color="text-red-400 hover:text-red-300" onClick={() => deleteBak(b.name)} />
+        </DataChip>
+      ))}
+    </>
   )
 }
 
@@ -560,20 +527,16 @@ export default function CommandsPane({ agent, termRef, run, runningCmd }) {
         )}
       </div>
 
-      {/* Merged command groups */}
-      <div className="border border-slate-800 rounded-xl p-4">
+      {/* Everything flows in one wrapped line, float-left, no cards */}
+      <div className="flex flex-wrap items-center gap-1.5">
         {SIMPLE_GROUPS.map((g) => (
-          <SimpleGroupRow key={g.title} group={g} query={query} runningCmd={runningCmd} run={run} />
+          <FlowGroup key={g.title} group={g} query={query} runningCmd={runningCmd} run={run} />
         ))}
-      </div>
-
-      {/* Data cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-        <MessagingCard agent={agent} query={query} runningCmd={runningCmd} run={run} termRef={termRef} />
-        <ModelsCard agent={agent} query={query} runningCmd={runningCmd} run={run} />
-        <McpCard agent={agent} query={query} runningCmd={runningCmd} run={run} />
-        <SkillsCard agent={agent} query={query} runningCmd={runningCmd} run={run} />
-        <BackupsCard agent={agent} query={query} runningCmd={runningCmd} run={run} />
+        <MessagingFlow agent={agent} query={query} runningCmd={runningCmd} run={run} termRef={termRef} />
+        <ModelsFlow agent={agent} query={query} runningCmd={runningCmd} run={run} />
+        <McpFlow agent={agent} query={query} runningCmd={runningCmd} run={run} />
+        <SkillsFlow agent={agent} query={query} runningCmd={runningCmd} run={run} />
+        <BackupsFlow agent={agent} query={query} runningCmd={runningCmd} run={run} />
       </div>
     </div>
   )
