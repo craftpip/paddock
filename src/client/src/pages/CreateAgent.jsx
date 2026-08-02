@@ -91,7 +91,7 @@ export default function CreateAgent() {
       setRunningCmd('')
       setPhase('done')
       if (isClone) {
-        setTimeout(() => navigate('/agents'), 1800)
+        setTimeout(() => navigate('/agents/' + job), 1800)
       }
     })
 
@@ -241,9 +241,9 @@ export default function CreateAgent() {
           />
 
           {phase === 'done' && !isClone && (
-            <button onClick={() => navigate('/agents')}
+            <button onClick={() => navigate('/agents/' + jobName)}
                     className="w-full bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-semibold py-3.5 rounded-xl transition-all duration-200 shadow-lg shadow-emerald-900/30">
-              Go to Agents
+              Go to Commands
             </button>
           )}
         </div>

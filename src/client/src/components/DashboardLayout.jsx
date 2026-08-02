@@ -27,7 +27,7 @@ export default function DashboardLayout({ children, fullHeight, fullWidth }) {
         <div className="max-w-full mx-auto px-4 sm:px-6">
           <div className="flex items-center justify-between h-14">
             <Link to="/agents" className="flex items-center gap-2.5 text-base font-bold tracking-tight text-cyan-400 hover:text-cyan-300 transition-colors">
-              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>
+              <img src="/paddock-logo.svg" alt="Paddock" className="w-6 h-6" />
               Paddock
             </Link>
             <div className="flex items-center gap-0.5">

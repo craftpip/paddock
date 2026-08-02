@@ -1074,6 +1074,26 @@ app.get('/api/agents/:name/activity', (req, res) => {
   res.json({ activity });
 });
 
+app.post('/api/agents/:name/command-log', (req, res) => {
+  const { cmd, status, ts } = req.body || {};
+  if (!cmd || typeof cmd !== 'string' || !cmd.trim()) {
+    return res.status(400).json({ error: 'cmd required' });
+  }
+  try {
+    registry.recordActivity(
+      req.params.name,
+      'command',
+      'run',
+      status === 'error' ? 'error' : 'ok',
+      cmd.trim(),
+      ts || null
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/agents/:name/sessions', (req, res) => {
   const db = getDb();
   const sessions = db.prepare('SELECT * FROM sessions WHERE agent_id = ? ORDER BY started_at DESC LIMIT 50').all(req.params.name);
@@ -1465,56 +1485,6 @@ app.post('/api/agents/:name/exec', async (req, res) => {
   }
 });
 
-// SSE streaming exec — output arrives as it comes
-app.get('/api/agents/:name/exec-stream', async (req, res) => {
-  const name = req.params.name;
-  const cmd = req.query.cmd;
-  if (!name) return res.status(400).json({ error: 'Name is required' });
-  if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
-  if (!cmd) return res.status(400).json({ error: 'cmd query param is required' });
-
-  const containers = await dockerPsList();
-  if ((containers[name]?.State || '').toLowerCase() !== 'running')
-    return res.status(400).json({ error: 'Container is not running' });
-
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive',
-    'X-Accel-Buffering': 'no',
-  });
-
-  const docker = spawn('docker', ['exec', '-i', name, 'sh', '-lc', cmd]);
-  let closed = false;
-
-  const send = (type, text) => {
-    if (!closed) res.write(`data: ${JSON.stringify({ type, text })}\n\n`);
-  };
-
-  docker.stdout.on('data', (data) => send('stdout', data.toString()));
-  docker.stderr.on('data', (data) => send('stderr', data.toString()));
-
-  docker.on('close', (code) => {
-    if (closed) return;
-    closed = true;
-    send('close', code);
-    res.end();
-  });
-
-  docker.on('error', (err) => {
-    if (closed) return;
-    closed = true;
-    send('error', err.message);
-    res.end();
-  });
-
-  req.on('close', () => {
-    if (closed) return;
-    closed = true;
-    docker.kill();
-  });
-});
-
 // ─── SPA Catch-all — serve index.html for client-side routing ─
 
 // Redirect /new/* to /* (legacy compat)
@@ -1555,25 +1525,13 @@ wss.on('connection', async (ws, req) => {
   const url = new URL(req.url, 'http://localhost');
   const parts = url.pathname.split('/').filter(Boolean);
 
-  if (parts[0] !== 'ws' || !['terminal', 'messaging'].includes(parts[1]) || !safeVmName(parts[2] || '')) {
+  if (parts[0] !== 'ws' || parts[1] !== 'terminal' || !safeVmName(parts[2] || '')) {
     ws.close();
     return;
   }
 
   const wsType = parts[1];
   const vmName = parts[2];
-
-  // ─── Messaging: buffer incoming messages until async setup completes ───
-  // The client sends the `run` command immediately on open. The connection
-  // handler below awaits dockerPsList() + DB auth checks, so a message listener
-  // attached after those would miss the `run` message. Buffer now, flush later.
-  let msgDocker = null;
-  let msgClosed = false;
-  const msgBuffer = [];
-  const msgBufferListener = (data) => { msgBuffer.push(data); };
-  if (wsType === 'messaging') {
-    ws.on('message', msgBufferListener);
-  }
 
   const containers = await dockerPsList(true);
 
@@ -1604,39 +1562,6 @@ wss.on('connection', async (ws, req) => {
     } catch (e) {
       console.error('WS auth error:', e.message);
     }
-  }
-
-  // ─── Messaging WebSocket (interactive command runner) ───
-  if (wsType === 'messaging') {
-    const handleMsg = (data) => {
-      try {
-        console.log('[messaging] got msg:', data.toString().slice(0, 150));
-        const parsed = JSON.parse(data.toString());
-
-        if (parsed.type === 'run' && parsed.cmd && !msgDocker) {
-          console.log('[messaging] spawning for', vmName, parsed.cmd);
-          msgDocker = spawn('docker', [
-            'exec', '-e', 'TERM=xterm-256color', '-i', vmName,
-            'sh', '-c',
-            `script -qfec 'export COLUMNS=120 LINES=40; ${parsed.cmd}' /dev/null`
-          ]);
-          msgDocker.stdout.on('data', (d) => { console.log('[messaging] stdout', String(d).slice(0,200)); if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'stdout', text: d.toString() })); });
-          msgDocker.stderr.on('data', (d) => { console.log('[messaging] stderr', String(d).slice(0,200)); if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'stderr', text: d.toString() })); });
-          msgDocker.on('close', (code) => { console.log('[messaging] close', code); if (!msgClosed) { msgClosed = true; if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'close', code })); } });
-          msgDocker.on('error', (e) => { console.log('[messaging] error', e.message); if (!msgClosed) { msgClosed = true; if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'error', message: e.message })); } });
-        } else if (parsed.type === 'credential-paste' && msgDocker && !msgDocker.stdin.destroyed) {
-          msgDocker.stdin.write(parsed.value + '\n');
-        }
-      } catch {}
-    };
-    ws.on('message', handleMsg);
-    ws.removeListener('message', msgBufferListener);
-    const cleanup = () => { if (msgClosed) return; msgClosed = true; if (msgDocker) msgDocker.kill(); };
-    ws.on('close', cleanup);
-    ws.on('error', cleanup);
-    const pending = msgBuffer.splice(0);
-    for (const data of pending) handleMsg(data);
-    return;
   }
 
   // ─── Terminal WebSocket (full interactive shell via Docker Engine API) ───

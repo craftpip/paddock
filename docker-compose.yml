@@ -12,9 +12,5 @@ services:
       - .:/workspace:rw
       - ./src:/app:rw
       - /var/run/docker.sock:/var/run/docker.sock:ro
-    environment:
-      TZ: Asia/Kolkata
-      CONTAINER_PREFIX: "${CONTAINER_PREFIX:-vm}"
-      HOST_WORKSPACE_ROOT: "${HOST_WORKSPACE_ROOT:-}"
-      AUTH_PASSWORD: "${WEBUI_PASSWORD:-}"
-      AUTO_LOGIN: "${AUTO_LOGIN:-false}"
+    env_file:
+      - .env

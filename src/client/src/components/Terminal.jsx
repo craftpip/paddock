@@ -23,8 +23,8 @@ import { useEffect, useRef, useImperativeHandle, forwardRef, useState, useCallba
  *  | `height`         | string   | `'70vh'` | CSS height of the terminal area.        |
  *  | `minHeight`      | string   | `'480px'`| CSS min-height of the terminal area.    |
  *  | `disabled`       | boolean  | `false`  | Lock the terminal: the user cannot type their own commands. Only `runCommand()`-injected commands run. During an injected command the user can type again; when it finishes, it auto-locks. |
- *  | `onCommandStart` | fn       | (none)   | Fired when an injected command starts running (only in locked mode). |
- *  | `onCommandDone`  | fn       | (none)   | Fired when an injected command finishes (only in locked mode). |
+ *  | `onCommandStart` | fn       | (none)   | Fired when a tracked/locked injected command starts. |
+ *  | `onCommandDone`  | fn       | (none)   | Fired with the command string when a tracked/locked injected command finishes. |
  *
  * ─────────────────────────────────────────────────────────────────────────────
  *  Imperative API (via `ref`)
@@ -33,10 +33,11 @@ import { useEffect, useRef, useImperativeHandle, forwardRef, useState, useCallba
  *
  *  | Method           | Returns  | Description                                 |
  *  |------------------|----------|---------------------------------------------|
- *  | `runCommand(cmd)`| boolean  | Sends `cmd` to the shell (newline appended). In locked mode it also auto-unlocks input until the command completes, then re-locks. Queued until the WS is open. Returns true if sent immediately. |
+ *  | `runCommand(cmd, {track})` | boolean | Sends `cmd` to the shell (newline appended). With `{track:true}` (or when locked) it appends a completion sentinel, fires onCommandStart/onCommandDone, and shows the "Running" indicator without locking input. Queued until the WS is open. |
+ *  | `pasteSecret(v)` | boolean  | Pastes a raw value + newline into the shell stdin WITHOUT echoing it in the scrollback. Callers are expected to wrap secret-reading commands as `stty -echo; <cmd>; stty echo` first. |
  *  | `write(text)`    | boolean  | Raw write to shell stdin. Queued when disconnected. |
  *  | `clear()`        | —        | Clears the visible scrollback.               |
- *  | `reconnect()`    | —        | Tears down and starts a fresh shell session. |
+ *  | `reconnect()`    | —        | Confirms, then tears down and starts a fresh shell session. |
  *  | `focus()`        | —        | Focuses the terminal.                        |
  *  | `isConnected()`  | boolean  | True when the WebSocket is OPEN.             |
  *  | `setLocked(v)`   | —        | Lock/unlock input imperatively (independent of the `disabled` prop). |
@@ -49,6 +50,11 @@ import { useEffect, useRef, useImperativeHandle, forwardRef, useState, useCallba
  *              onCommandStart={() => setBusy(true)}
  *              onCommandDone={() => setBusy(false)} />
  *     <button onClick={() => termRef.current?.runCommand('git pull')}>
+ *
+ *  Tracked-mode example (operator drives, terminal just runs + reports):
+ *     <Terminal ref={termRef} name={agent.name}
+ *              onCommandDone={(cmd) => console.log('done:', cmd)} />
+ *     <button onClick={() => termRef.current?.runCommand('openclaw health', {track:true})}>
  *
  * ─────────────────────────────────────────────────────────────────────────────
  *  Backend contract (see src/app.js — "Terminal WebSocket", and
@@ -64,10 +70,10 @@ import { useEffect, useRef, useImperativeHandle, forwardRef, useState, useCallba
  *    by xterm. No `\r` → `\n` conversion — the PTY line discipline handles CR/LF.
  *
  * ─────────────────────────────────────────────────────────────────────────────
- *  Locked mode: how "command is done" is detected
+ *  Tracked/locked mode: how "command is done" is detected
  * ─────────────────────────────────────────────────────────────────────────────
- *  A PTY has no reliable "command finished" signal, so in locked mode
- *  `runCommand()` appends a unique sentinel to the injected line:
+ *  A PTY has no reliable "command finished" signal, so `runCommand()` with
+ *  `{track:true}` (or in locked mode) appends a unique sentinel to the line:
  *      <cmd>; echo; echo __PAD_DONE_<id>__
  *  - bash parses the whole line first, so the `echo`s run only AFTER `<cmd>`
  *    finishes (and are never fed to an interactive app's stdin).
@@ -77,9 +83,9 @@ import { useEffect, useRef, useImperativeHandle, forwardRef, useState, useCallba
  *    START of a line) via a rolling tail, so a sentinel split across WebSocket
  *    frames is still found. The PTY echoes the injected line too, but there
  *    the sentinel sits mid-line after `echo `, so it can never false-trigger.
- *  - When the sentinel appears, the command is over and the terminal re-locks.
- *  - Multiple injected commands queue: a sentinel set is tracked, and the
- *    terminal only re-locks when the last sentinel resolves.
+ *  - When the sentinel appears, the command is over and onCommandDone fires.
+ *  - Multiple injected commands queue: a sentinel set is tracked, and
+ *    onCommandDone fires only when the last sentinel resolves.
  *
  * ─────────────────────────────────────────────────────────────────────────────
  *  Lifecycle & robustness
@@ -89,9 +95,9 @@ import { useEffect, useRef, useImperativeHandle, forwardRef, useState, useCallba
  *  - `name` change: full teardown + fresh session.
  *  - Unmount: WebSocket closed, xterm disposed, ResizeObserver disconnected,
  *    all refs cleared. No setState after unmount.
- *  - Reconnect: safe to call repeatedly; stale in-flight init is invalidated
- *    by a generation counter, so a reconnect during a slow import can never
- *    double-mount a terminal.
+ *  - Reconnect: confirms first; safe to call repeatedly; stale in-flight init
+ *    is invalidated by a generation counter, so a reconnect during a slow
+ *    import can never double-mount a terminal.
  *  - Resize: after `fit()` and after font-size changes a `{type:'resize'}`
  *    frame is sent so the container PTY matches the pane.
  *  - Commands written while disconnected are queued (capped at 64) and flushed
@@ -103,7 +109,7 @@ import { useEffect, useRef, useImperativeHandle, forwardRef, useState, useCallba
  *    interrupt injected commands). The `scrollback` is 10000 lines.
  */
 const Terminal = forwardRef(function Terminal(
-  { name, title, height = '70vh', minHeight = '480px', disabled = false, onCommandStart, onCommandDone },
+  { name, title, height = '70vh', minHeight = '480px', disabled = false, onCommandStart, onCommandDone, className = '' },
   ref
 ) {
   const containerRef = useRef(null)
@@ -116,9 +122,11 @@ const Terminal = forwardRef(function Terminal(
   const mountedRef = useRef(true) // guards setState after unmount
 
   const disabledRef = useRef(!!disabled) // external lock (the `disabled` prop)
-  const manualLockRef = useRef(false) // imperative lock()/unlock()
+  const manualLockRef = useRef(false) // imperative lock()/unlock()/Lock toggle
   const cmdRunningRef = useRef(false) // an injected command is in flight
   const pendingMarkersRef = useRef(new Set()) // sentinels awaiting their echo
+  const markerCmdRef = useRef(new Map()) // sentinel → command text
+  const lastDoneCmdRef = useRef(null) // cmd of the last resolved sentinel
   const outputTailRef = useRef('') // rolling output tail for sentinel detection
   const markerSeqRef = useRef(0)
 
@@ -127,6 +135,12 @@ const Terminal = forwardRef(function Terminal(
   const [initError, setInitError] = useState('')
   const [cmdRunning, setCmdRunning] = useState(false)
   const [uiLocked, setUiLocked] = useState(false)
+
+  // Command history popover
+  const historyRef = useRef(null)
+  const [showHistory, setShowHistory] = useState(false)
+  const [history, setHistory] = useState([])
+  const [historyLoading, setHistoryLoading] = useState(false)
 
   /** Set state only while the component is mounted. */
   function setStateSafe(setter, value) {
@@ -174,7 +188,7 @@ const Terminal = forwardRef(function Terminal(
     } catch {}
   }
 
-  /** A fresh, unguessable sentinel for a locked-mode injected command. */
+  /** A fresh, unguessable sentinel for an injected command. */
   const nextMarker = useCallback(() => {
     markerSeqRef.current += 1
     return `__PAD_DONE_${Date.now().toString(36)}_${markerSeqRef.current}__`
@@ -254,7 +268,7 @@ const Terminal = forwardRef(function Terminal(
       if (gen !== genRef.current) return
       writeTerm(evt.data)
 
-      // Locked mode: look for pending completion sentinels in the output.
+      // Look for pending completion sentinels in the output.
       const pending = pendingMarkersRef.current
       if (pending.size) {
         outputTailRef.current = (outputTailRef.current + String(evt.data)).slice(-512)
@@ -264,14 +278,20 @@ const Terminal = forwardRef(function Terminal(
           // match and cause a premature "done".
           if (outputTailRef.current.includes('\n' + marker)) {
             pending.delete(marker)
+            if (markerCmdRef.current.has(marker)) {
+              lastDoneCmdRef.current = markerCmdRef.current.get(marker)
+              markerCmdRef.current.delete(marker)
+            }
           }
         }
         if (pending.size === 0) {
+          const doneCmd = lastDoneCmdRef.current
+          lastDoneCmdRef.current = null
           outputTailRef.current = ''
           cmdRunningRef.current = false
           setStateSafe(setCmdRunning, false)
           refreshLockUI()
-          try { onCommandDone?.() } catch {}
+          try { onCommandDone?.(doneCmd) } catch {}
         }
       }
     }
@@ -328,6 +348,15 @@ const Terminal = forwardRef(function Terminal(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [disabled])
 
+  // Persisted Lock toggle: restore the saved manual-lock state per agent.
+  useEffect(() => {
+    try {
+      manualLockRef.current = localStorage.getItem(`pad-term-lock-${name}`) === '1'
+    } catch {}
+    refreshLockUI()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [name])
+
   // Font size changes need a re-fit + backend resize (pane dims are unchanged,
   // so the ResizeObserver alone will not fire).
   useEffect(() => {
@@ -346,29 +375,86 @@ const Terminal = forwardRef(function Terminal(
     if (term) term.options.cursorBlink = !uiLocked
   }, [uiLocked])
 
+  // Close the history popover when clicking outside it.
+  useEffect(() => {
+    if (!showHistory) return
+    function onDocClick(e) {
+      if (historyRef.current && !historyRef.current.contains(e.target)) setShowHistory(false)
+    }
+    document.addEventListener('mousedown', onDocClick)
+    return () => document.removeEventListener('mousedown', onDocClick)
+  }, [showHistory])
+
+  /** Load past commands from the activity log (category 'command'). */
+  const loadHistory = useCallback(async () => {
+    if (!name) return
+    setHistoryLoading(true)
+    try {
+      const res = await fetch(`/api/agents/${encodeURIComponent(name)}/activity?limit=50`)
+      if (!res.ok) return
+      const data = await res.json()
+      const cmds = (data.activity || [])
+        .filter((a) => a.category === 'command')
+        .map((a) => a.details)
+        .filter(Boolean)
+      setHistory(cmds)
+    } catch {}
+    setHistoryLoading(false)
+  }, [name])
+
+  function toggleHistory() {
+    if (!showHistory) loadHistory()
+    setShowHistory(!showHistory)
+  }
+
+  function toggleLock() {
+    const v = !manualLockRef.current
+    manualLockRef.current = v
+    try {
+      localStorage.setItem(`pad-term-lock-${name}`, v ? '1' : '0')
+    } catch {}
+    refreshLockUI()
+  }
+
   function reconnect() {
+    if (!window.confirm('Restart the terminal session? Scrollback will be cleared.')) return
     teardown()
     initTerminal().catch(() => {})
   }
 
+  /** Inject `text` as a tracked command (sentinel + completion callbacks). */
+  const injectTracked = useCallback((text) => {
+    const marker = nextMarker()
+    pendingMarkersRef.current.add(marker)
+    markerCmdRef.current.set(marker, text)
+    cmdRunningRef.current = true
+    setStateSafe(setCmdRunning, true)
+    refreshLockUI()
+    try { onCommandStart?.(text) } catch {}
+    return sendToShell(`${text}; echo; echo ${marker}\n`)
+  }, [sendToShell, nextMarker, onCommandStart, refreshLockUI])
+
   useImperativeHandle(
     ref,
     () => ({
-      runCommand: (cmd) => {
+      runCommand: (cmd, opts) => {
+        const track = opts?.track === true
         const text = String(cmd ?? '').replace(/\r/g, '\n')
         if (!text.trim()) return false
-        if (isInputLocked()) {
-          // Locked mode: append a completion sentinel to the same line (bash
-          // runs it only after the command finishes), auto-unlock input while
-          // the command runs, and re-lock when the sentinel echoes back.
-          const marker = nextMarker()
-          pendingMarkersRef.current.add(marker)
-          cmdRunningRef.current = true
-          setStateSafe(setCmdRunning, true)
-          refreshLockUI()
-          try { onCommandStart?.() } catch {}
-          return sendToShell(`${text}; echo; echo ${marker}\n`)
+        if (track || isInputLocked()) {
+          // Tracked/locked mode: append a completion sentinel to the same line
+          // (bash runs it only after the command finishes). In locked mode input
+          // auto-unlocks while the command runs and re-locks on completion; in
+          // tracked mode input stays whatever it was.
+          return injectTracked(text)
         }
+        return sendToShell(text + '\n')
+      },
+      pasteSecret: (value) => {
+        const text = String(value ?? '').replace(/\r/g, '')
+        if (!text) return false
+        // Raw paste — echo suppression is the caller's job via the
+        // `stty -echo; <cmd>; stty echo` wrapper (see CommandsPane.run).
         return sendToShell(text + '\n')
       },
       write: sendToShell,
@@ -390,11 +476,11 @@ const Terminal = forwardRef(function Terminal(
       },
       isLocked: () => isInputLocked(),
     }),
-    [sendToShell, isInputLocked, nextMarker, onCommandStart, onCommandDone, refreshLockUI]
+    [sendToShell, isInputLocked, nextMarker, injectTracked, onCommandStart, onCommandDone, refreshLockUI]
   )
 
   return (
-    <div className="flex flex-col border border-slate-800 rounded-xl overflow-hidden bg-[#0f172a]">
+    <div className={`relative flex flex-col border border-slate-800 rounded-xl overflow-hidden bg-[#0f172a] ${className}`}>
       <div className="flex items-center justify-between px-4 py-2 border-b border-slate-800 bg-slate-900/80 select-none">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
@@ -419,13 +505,65 @@ const Terminal = forwardRef(function Terminal(
           <span className="w-px h-4 bg-slate-700" />
           <span className="text-xs text-slate-300 font-mono">{title || name}</span>
         </div>
-        <div className="flex items-center gap-1.5">
+        <div ref={historyRef} className="relative flex items-center gap-1.5">
+          <button
+            onClick={toggleHistory}
+            title="Command history"
+            className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors"
+          >
+            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3 3v5h5" />
+              <path d="M3.05 13A9 9 0 1 0 6 5.3L3 8" />
+              <path d="M12 7v5l4 2" />
+            </svg>
+          </button>
+          <button
+            onClick={toggleLock}
+            title={uiLocked ? 'Unlock terminal' : 'Lock terminal (read-only, commands only via buttons)'}
+            className={`px-2 py-1 text-xs rounded transition-colors ${
+              uiLocked
+                ? 'text-amber-300 hover:text-amber-200 hover:bg-slate-700'
+                : 'text-slate-400 hover:text-white hover:bg-slate-700'
+            }`}
+          >
+            {uiLocked ? 'Unlock' : 'Lock'}
+          </button>
+          <span className="w-px h-4 bg-slate-700" />
           <button onClick={() => setFontSize((s) => Math.max(10, s - 1))} className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">A-</button>
           <span className="text-xs text-slate-600 w-6 text-center">{fontSize}</span>
           <button onClick={() => setFontSize((s) => Math.min(24, s + 1))} className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">A+</button>
           <span className="w-px h-4 bg-slate-700" />
           <button onClick={() => termRef.current?.clear()} className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">Clear</button>
           <button onClick={reconnect} className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">Reconnect</button>
+
+          {showHistory && (
+            <div className="absolute bottom-full right-0 mb-2 w-96 max-h-72 overflow-y-auto rounded-lg border border-slate-700 bg-slate-900 shadow-xl z-50">
+              <div className="flex items-center justify-between px-3 py-2 border-b border-slate-800">
+                <span className="text-xs font-medium text-slate-300">Command history</span>
+                <button onClick={() => setShowHistory(false)} className="text-slate-500 hover:text-white text-xs">×</button>
+              </div>
+              <div className="py-1">
+                {historyLoading && <div className="px-3 py-2 text-xs text-slate-500">Loading…</div>}
+                {!historyLoading && history.length === 0 && (
+                  <div className="px-3 py-2 text-xs text-slate-500">No tracked commands yet.</div>
+                )}
+                {!historyLoading &&
+                  history.map((cmd, i) => (
+                    <button
+                      key={i}
+                      onClick={() => {
+                        setShowHistory(false)
+                        injectTracked(cmd)
+                      }}
+                      className="block w-full text-left px-3 py-1.5 text-xs font-mono text-slate-300 hover:bg-slate-800 hover:text-cyan-300 transition-colors truncate"
+                      title={cmd}
+                    >
+                      {cmd}
+                    </button>
+                  ))}
+              </div>
+            </div>
+          )}
         </div>
       </div>
       <div ref={containerRef} className="w-full" style={{ height, minHeight }}>
