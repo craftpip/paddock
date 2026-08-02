@@ -227,62 +227,43 @@ function MessagingFlow({ agent, query, runningCmd, run, termRef }) {
 
 function ModelsFlow({ agent, query, runningCmd, run }) {
   const [config, setConfig] = useState(null)
-  const [provider, setProvider] = useState('')
 
   function load() {
     api(`/api/agents/${agent.name}/config`).then((d) => {
-      if (d.config) { setConfig(d.config); setProvider((p) => p || Object.keys(d.config.models?.providers || {})[0] || '') }
+      if (d.config) setConfig(d.config)
     }).catch(() => {})
   }
   useEffect(load, [agent.name])
 
-  const providers = Object.keys(config?.models?.providers || {})
   const primary = config?.agents?.defaults?.model?.primary || ''
   const fallback = config?.agents?.defaults?.model?.fallback || ''
 
-  function askKey(actionLabel, cmdTemplate) {
-    const value = window.prompt(`${actionLabel} — paste the value:`)
-    if (!value) return
-    run(cmdTemplate(provider), { secret: value })
-  }
-
   const pills = [
-    { label: 'API key', desc: 'Paste an API key for the selected provider', click: () => askKey('API key', (p) => `openclaw models auth paste-api-key --provider ${p}`) },
-    { label: 'Token', desc: 'Paste a token for the selected provider', click: () => askKey('Token', (p) => `openclaw models auth paste-token --provider ${p}`) },
-    { label: 'OAuth', desc: 'Interactive OAuth/device login', cmd: (p) => `openclaw models auth login --provider ${p} --device-code` },
+    { cmd: 'openclaw configure --section model', label: 'Configure', desc: 'Interactive setup — API key, token or OAuth' },
     { label: 'Logout', desc: 'Log out the selected provider profile', click: () => {
       const prof = window.prompt('Profile ID to log out (see Auth list):')
       if (!prof) return
       run(`openclaw models auth logout ${prof} --yes`, { confirm: true })
     } },
-    { label: 'Auth list', desc: 'Configured auth profiles', cmd: () => 'openclaw models auth list' },
-    { label: 'Model list', desc: 'All catalog models', cmd: () => 'openclaw models list --all' },
-    { label: 'Status', desc: 'Auth + model status', cmd: () => 'openclaw models status' },
+    { cmd: 'openclaw models auth list', label: 'Auth list', desc: 'Configured auth profiles' },
+    { cmd: 'openclaw models list', label: 'Logged in', desc: 'Models available with current auth (no --all)' },
+    { cmd: 'openclaw models status', label: 'Status', desc: 'Auth + model status' },
     { label: 'Set default', desc: 'Set primary model by id', click: () => {
       const m = window.prompt('Model id (provider/model), e.g. openai/gpt-5.6-sol:')
       if (!m) return
       run(`openclaw models set ${m}`)
     } },
   ]
-  const visible = pills.filter((x) => matches(query, x.label))
+  const visible = pills.filter((x) => matches(query, x.label, x.cmd))
   if (query && visible.length === 0 && !primary && !fallback) return null
 
   return (
     <>
       <GroupLabel color="blue" title="Models" />
-      {providers.length > 0 ? (
-        <select value={provider} onChange={(e) => setProvider(e.target.value)}
-                className="px-1.5 py-1 rounded text-[11px] bg-slate-950 border border-slate-700 text-white focus:border-cyan-500 focus:outline-none">
-          {providers.map((p) => <option key={p} value={p}>{p}</option>)}
-        </select>
-      ) : (
-        <input type="text" value={provider} onChange={(e) => setProvider(e.target.value)} placeholder="provider (e.g. openai)"
-               className="px-1.5 py-1 rounded text-[11px] bg-slate-950 border border-slate-700 text-white w-36 focus:border-cyan-500 focus:outline-none placeholder-slate-600" />
-      )}
       {visible.map((x) => (
         <Pill key={x.label} label={x.label} desc={x.desc} color={COLORS.blue.pill}
-              disabled={!!runningCmd} active={runningCmd === (typeof x.cmd === 'function' ? x.cmd(provider) : x.cmd)}
-              onClick={() => (x.click ? x.click() : run(x.cmd(provider)))} />
+              disabled={!!runningCmd} active={runningCmd === x.cmd}
+              onClick={() => (x.click ? x.click() : run(x.cmd))} />
       ))}
       {primary && (
         <DataChip className="border-cyan-800/40 text-cyan-300 bg-cyan-950/20 font-mono">★ {primary}</DataChip>
