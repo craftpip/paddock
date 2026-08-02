@@ -1,9 +1,14 @@
 import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../stores/auth'
+import { useKeyboardShortcuts } from '../lib/shortcuts'
 
 export default function DashboardLayout({ children, fullHeight, fullWidth }) {
   const navigate = useNavigate()
   const logout = useAuth((s) => s.logout)
+  const username = useAuth((s) => s.username)
+  const role = useAuth((s) => s.role)
+
+  useKeyboardShortcuts()
 
   async function handleLogout() {
     await logout()
@@ -30,7 +35,15 @@ export default function DashboardLayout({ children, fullHeight, fullWidth }) {
               <Link to="/agents/create" className="px-3 py-1.5 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-slate-800 transition-colors">+ Agent</Link>
               <Link to="/credentials" className="px-3 py-1.5 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-slate-800 transition-colors">Creds</Link>
               <Link to="/backups" className="px-3 py-1.5 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-slate-800 transition-colors">Backups</Link>
+              {role === 'admin' && (
+                <Link to="/users" className="px-3 py-1.5 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-slate-800 transition-colors">Users</Link>
+              )}
               <span className="w-px h-5 bg-slate-700 mx-1.5" />
+              {username && (
+                <Link to="/profile" className="px-3 py-1.5 rounded-lg text-sm text-slate-400 hover:text-white hover:bg-slate-800 transition-colors" title="Profile">
+                  {username}
+                </Link>
+              )}
               <button onClick={handleLogout} className="px-3 py-1.5 rounded-lg text-sm text-slate-500 hover:text-red-400 hover:bg-slate-800 transition-colors" title="Sign out">
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>
               </button>

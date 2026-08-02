@@ -960,6 +960,9 @@ All defined in `src/routes/agents.js`.
 
 ## 13. WebSocket Terminal
 
+> Full, self-contained write-up: **`src/docs/terminal.md`**. This section is
+> the condensed contract.
+
 ### 13.1 Connection
 
 WebSocket endpoint: `ws://<host>/ws/terminal/<vmName>?cols=<n>&rows=<n>`
@@ -976,35 +979,53 @@ if (parts[0] !== 'ws' || parts[1] !== 'terminal' || !safeVmName(vmName) ||
 
 The container must be in `running` state. This checks the `State` property of the Docker JSON object.
 
-### 13.2 Docker Exec
+### 13.2 Docker Exec (real PTY via Docker Engine API)
 
-The terminal spawns: `docker exec -e TERM=xterm-256color -i <vmName> sh -c '...'`
+The terminal uses **dockerode** (`new Docker({ socketPath: '/var/run/docker.sock' })`) to create a
+Docker-managed exec session with `Tty: true`. Docker allocates a **real PTY**, so Enter,
+arrow keys, and raw-mode TUI apps (opencode, fzf, htop, ...) behave exactly like a local terminal:
 
-Note: `-i` (interactive) but **no `-t`** (no PTY). This avoids PTY allocation issues but means `\r` must be converted to `\n` on the server side.
+```javascript
+const dockerExec = await container.exec({
+  AttachStdin: true,
+  AttachStdout: true,
+  AttachStderr: true,
+  Tty: true,
+  Env: ['TERM=xterm-256color'],
+  Cmd: ['bash', '-i'],
+});
+const stream = await dockerExec.start({ hijack: true, stdin: true, stdout: true, stderr: true });
+```
 
-The shell command:
-1. Prefers `script -qfec 'stty cols N rows N; export COLUMNS=N LINES=N; exec bash -i' /dev/null`
-2. Falls back to `env COLUMNS=N LINES=N bash -i`
+No `script` wrapper and **no `\r` → `\n` conversion** — the PTY line discipline handles CR/LF.
+
+**Demux required:** the hijacked stream is multiplexed (8-byte frames
+`[type:1][reserved:3][len:4 BE]`); the handler strips headers with
+`dockerClient.modem.demuxStream(...)` so they never reach the WebSocket
+(otherwise a printable length byte renders as a stray character).
 
 ### 13.3 Message Protocol
 
 **Client → Server:**
-- Raw text: Written to docker stdin. All `\r` characters are converted to `\n` before writing.
-- JSON `{ type: 'resize', cols: N, rows: N }`: Triggers `docker exec <vm> stty cols N rows N`
+- Raw text (keystrokes): written to the hijacked docker stream as-is.
+- JSON `{ type: 'resize', cols: N, rows: N }`: calls `dockerExec.resize({ h: N, w: N })`.
 
 **Server → Client:**
-- Raw text: Docker stdout/stderr sent directly as string data
+- Demuxed stdout/stderr decoded with `StringDecoder('utf8')` (handles multi-byte
+  UTF-8 split across chunks) and sent as a text frame.
 
 ### 13.4 Resize Handling
 
-- Client sends resize messages on `term.onResize` and window resize (debounced 100ms)
-- Server executes `stty cols N rows N` inside the container
-- Dimensions are also sent as URL query params on WebSocket connect
+- Initial PTY size comes from `?cols=&rows=` URL params and is applied immediately after
+  `exec.start()` via `dockerExec.resize({ h: rows, w: cols })`.
+- Live resize: the client sends `{ type: 'resize', cols, rows }` after `fit()` and font-size
+  changes; the server calls the official `POST /exec/:id/resize` API. This resizes the actual
+  running PTY (the old `docker exec stty` approach never worked because it targeted a new process).
 
 ### 13.5 Cleanup
 
-On close/error of either WebSocket or docker process:
-- `docker.kill()` to terminate the shell
+On close/error of either WebSocket or docker stream:
+- `dockerStream.destroy()` — closing the hijacked stream makes the Docker daemon kill the exec process.
 - `ws.close()` if docker dies
 - Cleanup runs at most once (`closed` guard flag)
 
@@ -1017,6 +1038,26 @@ On close/error of either WebSocket or docker process:
 - **Font size**: 10-24 range, saved to variable (not persisted)
 - **Scrollback**: 10,000 lines
 - **Theme**: Professional dark with cyan accents
+
+### 13.7 Locked / Read-only Mode (operator-driven)
+
+The `<Terminal>` component supports being locked from outside (the `disabled`
+prop or the imperative `lock()`/`unlock()`/`setLocked(v)` handle). While
+locked, user keystrokes, paste, and Ctrl+C are dropped — only commands injected
+via `runCommand()` execute. During an injected command the user can type again
+(to answer prompts); when it finishes, the terminal auto-locks.
+
+Since a PTY has no "command finished" signal, `runCommand()` in locked mode
+appends a sentinel to the injected line — `<cmd>; echo; echo __PAD_DONE_<id>__`.
+The client scans the output for `\n__PAD_DONE_<id>__` on a rolling tail; the
+PTY-echoed copy of the injected line can't false-match (the sentinel sits
+mid-line there, after `echo `). `onCommandStart`/`onCommandDone` fire around the
+run, and a Locked/Running badge + stopped cursor blink reflect the state.
+
+Timing gotcha: the `disabled` prop reaches the lock via a React effect, so
+`runCommand()` called in the same tick that `disabled` flips to `true` runs
+unlocked — operator flows should use the synchronous imperative `lock()` +
+`runCommand()`. Full write-up in **`src/docs/terminal.md`**.
 
 ---
 
@@ -1402,7 +1443,7 @@ For backward compatibility, the following routes still work (but redirect to the
 5. **Backups are agent-type-aware** — you cannot restore a PicoClaw backup into an OpenClaw container
 6. **paste-api-key destroys config** — always save and merge
 7. **Files starting with `.` are hidden** in the workspace browser
-8. **`\r` → `\n`** conversion is required for the WebSocket terminal (no PTY allocation)
+8. **Terminals are real PTYs via Docker Engine API** — `Tty: true` allocates a PTY, so no `\r` → `\n` conversion is needed (see section 13 / `src/docs/terminal.md`)
 9. **Config secrets are double-redacted** — once for JSON API, once for the raw config editor (with preservation on save)
 10. **HTMX responses skip layout** — only the partial is returned
 

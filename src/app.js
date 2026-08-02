@@ -2,10 +2,15 @@ const express = require('express');
 const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 const cookieParser = require('cookie-parser');
-const { execFile, execSync, spawn } = require('child_process');
+const { execFile, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const { once } = require('events');
+const { StringDecoder } = require('string_decoder');
+const { Writable } = require('stream');
+const Docker = require('dockerode');
+
+const dockerClient = new Docker({ socketPath: '/var/run/docker.sock' });
 
 const creds = require('./creds');
 const registry = require('./services/agent-registry');
@@ -1482,6 +1487,7 @@ const server = app.listen(5050, () => console.log('VM WebUI listening on port 50
 const wss = new WebSocketServer({ server });
 
 wss.on('connection', async (ws, req) => {
+  console.log('[wss] connection:', req.url);
   const url = new URL(req.url, 'http://localhost');
   const parts = url.pathname.split('/').filter(Boolean);
 
@@ -1492,6 +1498,19 @@ wss.on('connection', async (ws, req) => {
 
   const wsType = parts[1];
   const vmName = parts[2];
+
+  // ─── Messaging: buffer incoming messages until async setup completes ───
+  // The client sends the `run` command immediately on open. The connection
+  // handler below awaits dockerPsList() + DB auth checks, so a message listener
+  // attached after those would miss the `run` message. Buffer now, flush later.
+  let msgDocker = null;
+  let msgClosed = false;
+  const msgBuffer = [];
+  const msgBufferListener = (data) => { msgBuffer.push(data); };
+  if (wsType === 'messaging') {
+    ws.on('message', msgBufferListener);
+  }
+
   const containers = await dockerPsList(true);
 
   if ((containers[vmName]?.State || '').toLowerCase() !== 'running') {
@@ -1525,75 +1544,133 @@ wss.on('connection', async (ws, req) => {
 
   // ─── Messaging WebSocket (interactive command runner) ───
   if (wsType === 'messaging') {
-    let docker = null;
-    let closed = false;
-    const cleanup = () => { if (closed) return; closed = true; if (docker) docker.kill(); };
-
-    ws.on('message', (data) => {
+    const handleMsg = (data) => {
       try {
+        console.log('[messaging] got msg:', data.toString().slice(0, 150));
         const parsed = JSON.parse(data.toString());
 
-        if (parsed.type === 'run' && parsed.cmd && !docker) {
-          docker = spawn('docker', [
+        if (parsed.type === 'run' && parsed.cmd && !msgDocker) {
+          console.log('[messaging] spawning for', vmName, parsed.cmd);
+          msgDocker = spawn('docker', [
             'exec', '-e', 'TERM=xterm-256color', '-i', vmName,
             'sh', '-c',
             `script -qfec 'export COLUMNS=120 LINES=40; ${parsed.cmd}' /dev/null`
           ]);
-          docker.stdout.on('data', (d) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'stdout', text: d.toString() })); });
-          docker.stderr.on('data', (d) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'stderr', text: d.toString() })); });
-          docker.on('close', (code) => { if (!closed) { closed = true; if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'close', code })); } });
-          docker.on('error', (e) => { if (!closed) { closed = true; if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'error', message: e.message })); } });
-        } else if (parsed.type === 'credential-paste' && docker && !docker.stdin.destroyed) {
-          docker.stdin.write(parsed.value + '\n');
+          msgDocker.stdout.on('data', (d) => { console.log('[messaging] stdout', String(d).slice(0,200)); if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'stdout', text: d.toString() })); });
+          msgDocker.stderr.on('data', (d) => { console.log('[messaging] stderr', String(d).slice(0,200)); if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'stderr', text: d.toString() })); });
+          msgDocker.on('close', (code) => { console.log('[messaging] close', code); if (!msgClosed) { msgClosed = true; if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'close', code })); } });
+          msgDocker.on('error', (e) => { console.log('[messaging] error', e.message); if (!msgClosed) { msgClosed = true; if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'error', message: e.message })); } });
+        } else if (parsed.type === 'credential-paste' && msgDocker && !msgDocker.stdin.destroyed) {
+          msgDocker.stdin.write(parsed.value + '\n');
         }
       } catch {}
+    };
+    ws.on('message', handleMsg);
+    ws.removeListener('message', msgBufferListener);
+    const cleanup = () => { if (msgClosed) return; msgClosed = true; if (msgDocker) msgDocker.kill(); };
+    ws.on('close', cleanup);
+    ws.on('error', cleanup);
+    const pending = msgBuffer.splice(0);
+    for (const data of pending) handleMsg(data);
+    return;
+  }
+
+  // ─── Terminal WebSocket (full interactive shell via Docker Engine API) ───
+  // Docker allocates a REAL PTY (`Tty: true`), so Enter, arrow keys, and
+  // raw-mode TUI apps (opencode, fzf, htop, ...) behave exactly like a local
+  // terminal. Resize goes through the official exec resize API instead of a
+  // broken `docker exec stty` on a different process. No `\r` mangling needed:
+  // the PTY line discipline handles CR/LF itself.
+  if (wsType === 'terminal') {
+    const cols = Math.max(40, Math.min(400, parseInt(url.searchParams.get('cols') || '120', 10) || 120));
+    const rows = Math.max(12, Math.min(120, parseInt(url.searchParams.get('rows') || '32', 10) || 32));
+
+    let dockerExec = null;
+    let dockerStream = null;
+    let closed = false;
+
+    const cleanup = () => {
+      if (closed) return;
+      closed = true;
+      // Destroying the hijacked stream makes the Docker daemon kill the exec process.
+      if (dockerStream) { try { dockerStream.destroy(); } catch {} dockerStream = null; }
+      dockerExec = null;
+    };
+
+    try {
+      const container = dockerClient.getContainer(vmName);
+      dockerExec = await container.exec({
+        AttachStdin: true,
+        AttachStdout: true,
+        AttachStderr: true,
+        Tty: true,
+        Env: ['TERM=xterm-256color'],
+        Cmd: ['bash', '-i'],
+      });
+      dockerStream = await dockerExec.start({ hijack: true, stdin: true, stdout: true, stderr: true });
+    } catch (err) {
+      console.error('[wss/terminal] start error:', err.message);
+      if (ws.readyState === ws.OPEN) ws.send(`\r\n\x1b[31m[Terminal error: ${err.message}]\x1b[0m\r\n`);
+      ws.close();
+      return;
+    }
+
+    // Set the initial PTY size (Docker allocates the exec TTY at start).
+    try { await dockerExec.resize({ h: rows, w: cols }); } catch {}
+
+    const decoder = new StringDecoder('utf8');
+
+    // Docker multiplexes stdout+stderr as 8-byte frames:
+    //   [streamType:1][reserved:3][length:4 (BE)]
+    // demuxStream() strips those headers and routes each frame to the matching
+    // writer. (Without this, the header bytes — including a printable length
+    // byte — leak into the WebSocket and show up as stray characters.)
+    const forward = () => new Writable({
+      write(chunk, _enc, cb) {
+        if (ws.readyState === ws.OPEN) ws.send(decoder.write(chunk));
+        cb();
+      },
     });
+    const stdoutW = forward();
+    const stderrW = forward();
+    try {
+      dockerClient.modem.demuxStream(dockerStream, stdoutW, stderrW);
+    } catch (err) {
+      // Fallback for non-multiplexed streams: treat the stream as raw stdout.
+      dockerStream.on('data', (data) => {
+        if (ws.readyState === ws.OPEN) ws.send(decoder.write(data));
+      });
+    }
+
+    dockerStream.on('end', () => {
+      if (ws.readyState === ws.OPEN) { ws.send(decoder.end()); ws.close(); }
+      cleanup();
+    });
+    dockerStream.on('error', (err) => {
+      console.error('[wss/terminal] stream error:', err.message);
+      if (ws.readyState === ws.OPEN) { ws.send(`\r\n\x1b[31m[Terminal error: ${err.message}]\x1b[0m\r\n`); ws.close(); }
+      cleanup();
+    });
+
+    ws.on('message', (data) => {
+      if (closed || !dockerStream || dockerStream.destroyed) return;
+      const msg = data.toString();
+      try {
+        const parsed = JSON.parse(msg);
+        if (parsed.type === 'resize' && parsed.cols && parsed.rows) {
+          const w = Math.max(2, parseInt(parsed.cols, 10) || 0);
+          const h = Math.max(2, parseInt(parsed.rows, 10) || 0);
+          if (w && h && dockerExec) dockerExec.resize({ h, w }).catch(() => {});
+          return;
+        }
+      } catch {}
+      dockerStream.write(data);
+    });
+
     ws.on('close', cleanup);
     ws.on('error', cleanup);
     return;
   }
-
-  // ─── Terminal WebSocket (full interactive shell) ───
-  const cols = Math.max(40, Math.min(400, parseInt(url.searchParams.get('cols') || '120', 10) || 120));
-  const rows = Math.max(12, Math.min(120, parseInt(url.searchParams.get('rows') || '32', 10) || 32));
-
-  const docker = spawn('docker', [
-    'exec', '-e', 'TERM=xterm-256color', '-i', vmName,
-    'sh', '-c',
-    `if command -v script >/dev/null 2>&1; then exec script -qfec 'stty cols ${cols} rows ${rows}; export COLUMNS=${cols} LINES=${rows}; exec bash -i' /dev/null; else exec env COLUMNS=${cols} LINES=${rows} bash -i; fi`
-  ]);
-  let closed = false;
-
-  const cleanup = () => {
-    if (closed) return;
-    closed = true;
-    docker.kill();
-  };
-
-  docker.stdout.on('data', (data) => {
-    if (ws.readyState === ws.OPEN) ws.send(data.toString());
-  });
-  docker.stderr.on('data', (data) => {
-    if (ws.readyState === ws.OPEN) ws.send(data.toString());
-  });
-  docker.on('close', () => { if (ws.readyState === ws.OPEN) ws.close(); cleanup(); });
-  docker.on('error', () => { if (ws.readyState === ws.OPEN) ws.send('Connection failed'); cleanup(); });
-
-  ws.on('message', (data) => {
-    if (docker.stdin.destroyed) return;
-    const msg = data.toString();
-    try {
-      const parsed = JSON.parse(msg);
-      if (parsed.type === 'resize' && parsed.cols && parsed.rows) {
-        try { execSync(`docker exec ${vmName} stty cols ${parsed.cols} rows ${parsed.rows}`, { timeout: 2000 }); } catch {}
-        return;
-      }
-    } catch {}
-    docker.stdin.write(msg.replace(/\r/g, '\n'));
-  });
-
-  ws.on('close', cleanup);
-  ws.on('error', cleanup);
 });
 
 try { getDb(); console.log('App metadata database initialized'); } catch (e) { console.error('DB init error:', e.message); }

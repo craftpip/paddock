@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
+const { runCmdStream } = require('./cmd');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const INSTANCES_DIR = path.join(WORKSPACE, 'instances');
@@ -70,7 +71,7 @@ async function backupAgent(agentName) {
   }
 }
 
-async function restoreAgent(agentName, archiveFile) {
+async function restoreAgent(agentName, archiveFile, onLog = () => {}) {
   const instDir = path.join(INSTANCES_DIR, agentName);
   const meta = readMeta(agentName);
   const agent = meta.AGENT || 'openclaw';
@@ -80,10 +81,14 @@ async function restoreAgent(agentName, archiveFile) {
   if (!fs.existsSync(archivePath)) throw new Error(`Backup file not found: ${archiveFile}`);
 
   try {
-    await runCmd('docker', ['cp', archivePath, `${agentName}:/tmp/${archiveFile}`], { timeout: 30000 });
-    await runCmd('docker', ['exec', agentName, 'tar', '-xzf', `/tmp/${archiveFile}`, '-C', dataDir], { timeout: 120000 });
-    await runCmd('docker', ['exec', agentName, 'rm', `/tmp/${archiveFile}`], { timeout: 10000 });
-    await runCmd('docker', ['restart', agentName], { timeout: 60000 });
+    onLog('system', `Copying ${archiveFile} into ${agentName}…`);
+    await runCmdStream('docker', ['cp', archivePath, `${agentName}:/tmp/${archiveFile}`], { onLog, timeout: 60000 });
+    onLog('system', `Extracting ${archiveFile} to ${dataDir}…`);
+    await runCmdStream('docker', ['exec', agentName, 'tar', '-xzf', `/tmp/${archiveFile}`, '-C', dataDir], { onLog, timeout: 180000 });
+    await runCmdStream('docker', ['exec', agentName, 'rm', `/tmp/${archiveFile}`], { onLog, timeout: 10000 });
+    onLog('system', 'Restarting container…');
+    await runCmdStream('docker', ['restart', agentName], { onLog, timeout: 60000 });
+    onLog('system', `Restore complete: ${archiveFile}`);
     return true;
   } catch (err) {
     throw new Error(`Restore failed for ${agentName}: ${err.message}`);

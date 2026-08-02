@@ -2,6 +2,8 @@ import { useEffect, useState, useRef, useCallback } from 'react'
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom'
 import { useAgents } from '../stores/agents'
 import { api } from '../lib/api'
+import Terminal from '../components/Terminal'
+import Console from '../components/Console'
 
 const TABS = [
   { id: 'overview', label: 'Overview' },
@@ -179,44 +181,12 @@ const HEALTH_GROUPS = [
 ]
 
 function HealthTab({ agent }) {
-  const [consoleLines, setConsoleLines] = useState([])
-  const [runningCmd, setRunningCmd] = useState('')
-  const consoleRef = useRef(null)
+  const termRef = useRef(null)
 
-  useEffect(() => {
-    if (consoleRef.current) consoleRef.current.scrollTop = consoleRef.current.scrollHeight
-  }, [consoleLines])
-
-  async function run(cmd, opts = {}) {
+  function run(cmd, opts = {}) {
     if (opts.confirm && !confirm(`Run "${cmd}"?`)) return
     if (opts.danger && !confirm(`⚠ DANGER: "${cmd}" — Are you sure?`)) return
-
-    const ts = new Date().toLocaleTimeString()
-    setRunningCmd(cmd)
-    setConsoleLines((p) => [...p, { ts, cmd, type: 'cmd' }])
-
-    const es = new EventSource(`/api/agents/${agent.name}/exec-stream?cmd=${encodeURIComponent(cmd)}`)
-    es.onmessage = (e) => {
-      try {
-        const d = JSON.parse(e.data)
-        if (d.type === 'stdout') {
-          setConsoleLines((p) => [...p, { text: d.text, type: 'out' }])
-        } else if (d.type === 'stderr') {
-          setConsoleLines((p) => [...p, { text: d.text, type: 'err' }])
-        } else if (d.type === 'close' || d.type === 'error') {
-          es.close()
-          setRunningCmd('')
-        }
-      } catch {}
-    }
-    es.onerror = () => {
-      es.close()
-      setRunningCmd('')
-    }
-  }
-
-  function clearConsole() {
-    setConsoleLines([])
+    termRef.current?.runCommand(cmd)
   }
 
   return (
@@ -244,10 +214,8 @@ function HealthTab({ agent }) {
                 <button
                   key={c.label}
                   onClick={() => run(c.cmd, c)}
-                  disabled={!!runningCmd}
                   className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors whitespace-nowrap border shrink-0
-                    ${c.danger ? 'bg-red-900/30 text-red-400 border-red-800/50 hover:bg-red-800/50 hover:text-red-300' : accent}
-                    ${runningCmd ? 'opacity-40 cursor-not-allowed' : ''}`}
+                    ${c.danger ? 'bg-red-900/30 text-red-400 border-red-800/50 hover:bg-red-800/50 hover:text-red-300' : accent}`}
                   title={c.desc}
                 >
                   {c.label}
@@ -259,31 +227,8 @@ function HealthTab({ agent }) {
         })}
       </div>
 
-      {/* Console */}
-      <div className="flex-1 min-h-0 flex flex-col border border-slate-800 rounded-lg overflow-hidden">
-        <div className="flex items-center justify-between px-3 py-1.5 border-b border-slate-800 bg-slate-900/50">
-          <span className="text-[10px] text-slate-500 font-medium">
-            Console {runningCmd && <span className="text-cyan-400 ml-2">⏳ {runningCmd}</span>}
-          </span>
-          <button onClick={clearConsole} className="text-[10px] text-slate-500 hover:text-slate-300 transition-colors">Clear</button>
-        </div>
-        <div ref={consoleRef} className="flex-1 overflow-y-auto p-2 bg-slate-950 font-mono text-[10px] leading-relaxed">
-          {consoleLines.length === 0 && (
-            <p className="text-slate-600">Click a button above to run a command. Output appears here.</p>
-          )}
-          {consoleLines.map((line, i) => (
-            <div key={i} className="whitespace-pre-wrap break-all">
-              {line.type === 'cmd' ? (
-                <span><span className="text-slate-500">{line.ts}</span> <span className="text-cyan-400">$ {line.cmd}</span></span>
-              ) : line.type === 'err' ? (
-                <span className="text-red-400">{line.text}</span>
-              ) : (
-                <span className="text-slate-300">{line.text}</span>
-              )}
-            </div>
-          ))}
-        </div>
-      </div>
+      {/* Interactive terminal */}
+      <Terminal ref={termRef} name={agent.name} title={agent.display_name} height="55vh" minHeight="360px" />
     </div>
   )
 }
@@ -410,136 +355,7 @@ function QuickLink({ href, icon, title, desc }) {
 // ─── Terminal ────────────────────────────────────────────────
 
 function TerminalTab({ agent }) {
-  const containerRef = useRef(null)
-  const termRef = useRef(null)
-  const wsRef = useRef(null)
-  const [connected, setConnected] = useState(false)
-  const [fontSize, setFontSize] = useState(14)
-
-  useEffect(() => {
-    if (!containerRef.current) return
-
-    let term, fitAddon, ws
-
-    async function init() {
-      const { Terminal } = await import('@xterm/xterm')
-      const { FitAddon } = await import('@xterm/addon-fit')
-      await import('@xterm/xterm/css/xterm.css')
-
-      fitAddon = new FitAddon()
-      term = new Terminal({
-        cursorBlink: true,
-        fontSize,
-        fontFamily: '"Cascadia Code", "Fira Code", monospace',
-        scrollback: 10000,
-        theme: { background: '#0f172a', foreground: '#e2e8f0', cursor: '#22d3ee', selectionBackground: '#334155' },
-      })
-      term.loadAddon(fitAddon)
-      term.open(containerRef.current)
-      fitAddon.fit()
-      termRef.current = term
-
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-      const host = window.location.host
-      ws = new WebSocket(`${protocol}//${host}/ws/terminal/${agent.name}?cols=${term.cols}&rows=${term.rows}`)
-      wsRef.current = ws
-      setConnected(true)
-
-      term.onData((data) => { if (ws.readyState === WebSocket.OPEN) ws.send(data) })
-
-      ws.onmessage = (evt) => term.write(evt.data)
-      ws.onclose = () => {
-        setConnected(false)
-        term.write('\r\n\x1b[31m[Connection closed]\x1b[0m\r\n')
-      }
-      ws.onerror = () => setConnected(false)
-
-      const ro = new ResizeObserver(() => { try { fitAddon.fit() } catch {} })
-      ro.observe(containerRef.current)
-
-      term.attachCustomKeyEventHandler((e) => {
-        if ((e.ctrlKey || e.metaKey) && e.key === 'c' && term.hasSelection()) return true
-        return true
-      })
-
-      return () => { ro.disconnect() }
-    }
-
-    let cleanup
-    init().then((c) => { cleanup = c })
-
-    return () => {
-      if (ws) { ws.close(); wsRef.current = null }
-      if (term) { term.dispose(); termRef.current = null }
-      if (cleanup) cleanup()
-    }
-  }, [agent.name])
-
-  useEffect(() => {
-    if (termRef.current) termRef.current.options.fontSize = fontSize
-  }, [fontSize])
-
-  function reconnect() {
-    if (wsRef.current) wsRef.current.close()
-    termRef.current?.dispose()
-    termRef.current = null
-
-    async function reconnectAsync() {
-      const { Terminal } = await import('@xterm/xterm')
-      const { FitAddon } = await import('@xterm/addon-fit')
-      await import('@xterm/xterm/css/xterm.css')
-
-      const fitAddon = new FitAddon()
-      const term = new Terminal({
-        cursorBlink: true,
-        fontSize,
-        fontFamily: '"Cascadia Code", "Fira Code", monospace',
-        scrollback: 10000,
-        theme: { background: '#0f172a', foreground: '#e2e8f0', cursor: '#22d3ee', selectionBackground: '#334155' },
-      })
-      term.loadAddon(fitAddon)
-      term.open(containerRef.current)
-      fitAddon.fit()
-      termRef.current = term
-
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-      const ws = new WebSocket(`${protocol}//${host}/ws/terminal/${agent.name}?cols=${term.cols}&rows=${term.rows}`)
-      wsRef.current = ws
-      setConnected(true)
-
-      term.onData((data) => { if (ws.readyState === WebSocket.OPEN) ws.send(data) })
-      ws.onmessage = (evt) => term.write(evt.data)
-      ws.onclose = () => { setConnected(false); term.write('\r\n\x1b[31m[Connection closed]\x1b[0m\r\n') }
-      ws.onerror = () => setConnected(false)
-    }
-    reconnectAsync()
-  }
-
-  function clearTerm() { termRef.current?.clear() }
-
-  return (
-    <div className="flex flex-col border border-slate-800 rounded-xl overflow-hidden bg-[#0f172a]">
-      <div className="flex items-center justify-between px-4 py-2 border-b border-slate-800 bg-slate-900/80 select-none">
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2">
-            <span className={`w-2 h-2 rounded-full ${connected ? 'bg-emerald-400' : 'bg-slate-600'}`} />
-            <span className="text-xs text-slate-400 font-medium">{connected ? 'Connected' : 'Disconnected'}</span>
-          </div>
-          <span className="w-px h-4 bg-slate-700" />
-          <span className="text-xs text-slate-300 font-mono">{agent.display_name}</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <button onClick={() => setFontSize((s) => Math.max(10, s - 1))} className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">A-</button>
-          <span className="text-xs text-slate-600 w-6 text-center">{fontSize}</span>
-          <button onClick={() => setFontSize((s) => Math.min(24, s + 1))} className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">A+</button>
-          <span className="w-px h-4 bg-slate-700" />
-          <button onClick={clearTerm} className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">Clear</button>
-          <button onClick={reconnect} className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">Reconnect</button>
-        </div>
-      </div>
-      <div ref={containerRef} className="w-full" style={{ height: '70vh', minHeight: '480px' }} />
-    </div>
-  )
+  return <Terminal name={agent.name} title={agent.display_name} />
 }
 
 // ─── Workspace ───────────────────────────────────────────────
@@ -1468,21 +1284,15 @@ const CHANNEL_ICONS = {
 }
 
 function MessagingTab({ agent }) {
-  const [channelType, setChannelType] = useState('')
+  const [selected, setSelected] = useState('')
   const [available, setAvailable] = useState([])
-  const [activeProvider, setActiveProvider] = useState(null)
   const [consoleLines, setConsoleLines] = useState([])
   const [runningCmd, setRunningCmd] = useState('')
   const wsRef = useRef(null)
-  const consoleRef = useRef(null)
   const [creds, setCreds] = useState({ bot_tokens: {}, user_ids: {} })
 
-  useEffect(() => {
-    if (consoleRef.current) consoleRef.current.scrollTop = consoleRef.current.scrollHeight
-  }, [consoleLines])
-
-  function loadChannels() {
-    api(`/api/agents/${agent.name}/channels-list`).then((d) => {
+  function loadChannels(force) {
+    api(`/api/agents/${agent.name}/channels-list${force ? '?refresh=true' : ''}`).then((d) => {
       const entries = Object.entries(d.chat || {}).map(([id, v]) => ({ id, name: v.name || id }))
       setAvailable(entries)
     }).catch(() => {})
@@ -1521,6 +1331,8 @@ function MessagingTab({ agent }) {
           setConsoleLines((p) => [...p, { text: d.text, type: 'err' }])
         } else if (d.type === 'close' || d.type === 'error') {
           setRunningCmd('')
+          loadChannels(true)
+          loadCreds()
         }
       } catch {}
     }
@@ -1535,140 +1347,109 @@ function MessagingTab({ agent }) {
     }
   }
 
-  function closePanel() {
-    if (wsRef.current) { wsRef.current.close(); wsRef.current = null }
-    setActiveProvider(null)
-    setConsoleLines([])
-    setRunningCmd('')
-    setChannelType('')
-    loadChannels()
-    loadCreds()
+  function startSetup(id) {
+    setSelected(id)
+    connectAndRun(`openclaw channels add --channel ${id}`)
   }
 
   return (
-    <div>
-      {/* ── Create Channel ── */}
-      {!activeProvider && (
-        <div className="border border-slate-800 rounded-xl overflow-hidden mb-4">
-          <div className="px-4 py-3 border-b border-slate-800">
-            <h3 className="text-sm font-medium text-slate-300">Create Channel</h3>
-          </div>
-          <div className="p-4 flex items-end gap-3">
-            <div className="flex-1">
-              <label className="block text-[10px] text-slate-500 mb-1">Channel Type</label>
-              <select
-                value={channelType}
-                onChange={(e) => setChannelType(e.target.value)}
-                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-cyan-600"
-              >
-                <option value="">Select a channel...</option>
-                {available.map((ch) => (
-                  <option key={ch.id} value={ch.id}>{CHANNEL_ICONS[ch.id] || '📡'} {ch.name}</option>
-                ))}
-              </select>
-            </div>
+    <div className="flex flex-col gap-3">
+      {/* ── Create Channel buttons ── */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <div className="flex items-center gap-1 shrink-0">
+          <div className="w-1 h-2.5 rounded-full bg-cyan-500" />
+          <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Create:</span>
+        </div>
+        <div className="flex flex-wrap gap-1">
+          {available.map((ch) => (
             <button
-              onClick={() => {
-                if (!channelType) return
-                setActiveProvider(channelType)
-                connectAndRun(`openclaw channels add --channel ${channelType}`)
-              }}
-              disabled={!channelType || !!runningCmd}
-              className="px-4 py-1.5 text-sm font-medium text-cyan-400 border border-cyan-800 hover:bg-cyan-900/30 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              key={ch.id}
+              onClick={() => startSetup(ch.id)}
+              disabled={!!runningCmd}
+              title={ch.name}
+              className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors whitespace-nowrap border shrink-0
+                border-cyan-800/30 text-cyan-300 bg-cyan-950/20 hover:bg-cyan-900/30 hover:text-cyan-200
+                ${runningCmd ? 'opacity-40 cursor-not-allowed' : ''}`}
             >
-              Setup
+              {CHANNEL_ICONS[ch.id] || '📡'} Create {ch.name}
             </button>
+          ))}
+        </div>
+      </div>
+
+      {/* ── Terminal + Creds (always visible) ── */}
+      <div className="border border-slate-700 rounded-xl overflow-hidden">
+        {/* Header */}
+        <div className="flex items-center justify-between px-4 py-2 border-b border-slate-700 bg-slate-900/50">
+          <div className="flex items-center gap-2">
+            <span className="text-cyan-400 text-sm">{CHANNEL_ICONS[selected] || '📡'}</span>
+            <span className="text-sm font-medium text-white">{selected || 'Terminal'}</span>
+            {runningCmd && <span className="text-[10px] text-cyan-400 ml-2">Running: {runningCmd}</span>}
+            {!runningCmd && consoleLines.length > 0 && <span className="text-[10px] text-slate-500 ml-2">Done</span>}
           </div>
         </div>
-      )}
 
-      {/* ── Expandable Panel ── */}
-      {activeProvider && (
-        <div className="border border-slate-700 rounded-xl overflow-hidden">
-          {/* Header */}
-          <div className="flex items-center justify-between px-4 py-2 border-b border-slate-700 bg-slate-900/50">
-            <div className="flex items-center gap-2">
-              <span className="text-cyan-400 text-sm">{CHANNEL_ICONS[activeProvider] || '📡'}</span>
-              <span className="text-sm font-medium text-white">{activeProvider}</span>
-              {runningCmd && <span className="text-[10px] text-cyan-400 ml-2">Running: {runningCmd}</span>}
-              {!runningCmd && consoleLines.length > 0 && <span className="text-[10px] text-slate-500 ml-2">Done</span>}
-            </div>
-            <button onClick={closePanel} className="text-slate-500 hover:text-white text-lg leading-none px-1 transition-colors" title="Close">&times;</button>
+        {/* Body: Console + Creds */}
+        <div className="flex">
+          {/* Console (3/4) */}
+          <div className="w-3/4 border-r border-slate-700" style={{ height: '400px' }}>
+            <Console
+              lines={consoleLines}
+              runningCmd={runningCmd}
+              onClear={() => setConsoleLines([])}
+              emptyMessage="Click a Create button above to set up a channel. Output appears here."
+              className="h-full border-0 rounded-none"
+            />
           </div>
 
-          {/* Body: Console + Creds */}
-          <div className="flex">
-            {/* Console (3/4) */}
-            <div className="w-3/4 border-r border-slate-700" style={{ height: '400px' }}>
-              <div className="flex flex-col h-full">
-                <div ref={consoleRef} className="flex-1 overflow-y-auto p-2 bg-slate-950 font-mono text-[10px] leading-relaxed">
-                  {consoleLines.length === 0 && (
-                    <p className="text-slate-600">Select a channel above and click Setup to begin.</p>
-                  )}
-                  {consoleLines.map((line, i) => (
-                    <div key={i} className="whitespace-pre-wrap break-all">
-                      {line.type === 'cmd' ? (
-                        <span><span className="text-slate-500">{line.ts}</span> <span className="text-cyan-400">$ {line.cmd}</span></span>
-                      ) : line.type === 'err' ? (
-                        <span className="text-red-400">{line.text}</span>
-                      ) : (
-                        <span className="text-slate-300">{line.text}</span>
-                      )}
+          {/* Credentials (1/4) */}
+          <div className="w-1/4 flex flex-col" style={{ height: '400px' }}>
+            <div className="px-3 py-1.5 border-b border-slate-700 bg-slate-900/30">
+              <span className="text-[10px] text-slate-500 font-medium">Credentials</span>
+            </div>
+            <div className="flex-1 overflow-y-auto p-3">
+              {Object.keys(creds.bot_tokens).length === 0 && Object.keys(creds.user_ids).length === 0 ? (
+                <p className="text-slate-600 text-[10px]">No credentials saved. Add them in the Credentials page.</p>
+              ) : (
+                <div className="space-y-3">
+                  {Object.keys(creds.bot_tokens).length > 0 && (
+                    <div>
+                      <p className="text-[10px] text-slate-500 font-medium mb-1">Bot Tokens</p>
+                      {Object.entries(creds.bot_tokens).map(([name, data]) => (
+                        <button
+                          key={name}
+                          onClick={() => pasteCredential(typeof data === 'string' ? data : data.token)}
+                          disabled={!runningCmd}
+                          className="block w-full text-left px-2 py-1 text-[10px] text-slate-300 hover:text-white hover:bg-slate-800 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed truncate"
+                          title={typeof data === 'string' ? data.slice(0, 8) + '...' : data.token?.slice(0, 8) + '...'}
+                        >
+                          {name}
+                        </button>
+                      ))}
                     </div>
-                  ))}
+                  )}
+                  {Object.keys(creds.user_ids).length > 0 && (
+                    <div>
+                      <p className="text-[10px] text-slate-500 font-medium mb-1">User IDs</p>
+                      {Object.entries(creds.user_ids).map(([name, data]) => (
+                        <button
+                          key={name}
+                          onClick={() => pasteCredential(typeof data === 'string' ? data : data.uid)}
+                          disabled={!runningCmd}
+                          className="block w-full text-left px-2 py-1 text-[10px] text-slate-300 hover:text-white hover:bg-slate-800 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed truncate"
+                          title={typeof data === 'string' ? data : data.uid}
+                        >
+                          {name}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
-              </div>
-            </div>
-
-            {/* Credentials (1/4) */}
-            <div className="w-1/4 flex flex-col" style={{ height: '400px' }}>
-              <div className="px-3 py-1.5 border-b border-slate-700 bg-slate-900/30">
-                <span className="text-[10px] text-slate-500 font-medium">Credentials</span>
-              </div>
-              <div className="flex-1 overflow-y-auto p-3">
-                {Object.keys(creds.bot_tokens).length === 0 && Object.keys(creds.user_ids).length === 0 ? (
-                  <p className="text-slate-600 text-[10px]">No credentials saved. Add them in the Credentials page.</p>
-                ) : (
-                  <div className="space-y-3">
-                    {Object.keys(creds.bot_tokens).length > 0 && (
-                      <div>
-                        <p className="text-[10px] text-slate-500 font-medium mb-1">Bot Tokens</p>
-                        {Object.entries(creds.bot_tokens).map(([name, data]) => (
-                          <button
-                            key={name}
-                            onClick={() => pasteCredential(typeof data === 'string' ? data : data.token)}
-                            disabled={!runningCmd}
-                            className="block w-full text-left px-2 py-1 text-[10px] text-slate-300 hover:text-white hover:bg-slate-800 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed truncate"
-                            title={typeof data === 'string' ? data.slice(0, 8) + '...' : data.token?.slice(0, 8) + '...'}
-                          >
-                            {name}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                    {Object.keys(creds.user_ids).length > 0 && (
-                      <div>
-                        <p className="text-[10px] text-slate-500 font-medium mb-1">User IDs</p>
-                        {Object.entries(creds.user_ids).map(([name, data]) => (
-                          <button
-                            key={name}
-                            onClick={() => pasteCredential(typeof data === 'string' ? data : data.uid)}
-                            disabled={!runningCmd}
-                            className="block w-full text-left px-2 py-1 text-[10px] text-slate-300 hover:text-white hover:bg-slate-800 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed truncate"
-                            title={typeof data === 'string' ? data : data.uid}
-                          >
-                            {name}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
+              )}
             </div>
           </div>
         </div>
-      )}
+      </div>
     </div>
   )
 }

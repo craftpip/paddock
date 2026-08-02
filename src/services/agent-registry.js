@@ -224,6 +224,16 @@ function getAgentStats() {
   return { total, running, stopped, unknown: total - running - stopped };
 }
 
+function getOrphanCount() {
+  const db = getDb();
+  try {
+    const row = db.prepare("SELECT COUNT(*) as count FROM agents WHERE owner_id IS NULL OR owner_id = ''").get();
+    return row ? row.count : 0;
+  } catch {
+    return 0;
+  }
+}
+
 module.exports = {
   discoverAgents,
   getAgent,
@@ -231,6 +241,7 @@ module.exports = {
   recordActivity,
   getActivity,
   getAgentStats,
+  getOrphanCount,
   dockerPsList,
   readMeta,
   getWorkspaceRoot,

@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
+const { runCmdStream } = require('./cmd');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const HOST_WORKSPACE = process.env.HOST_WORKSPACE_ROOT || WORKSPACE;
@@ -96,6 +97,7 @@ async function createVm(name, options = {}) {
   const {
     agent = 'openclaw', mode = 'fresh', cloneSource = '',
     sshEnabled = false, port = '', password = '',
+    onLog = () => {}, onStep = () => {}, skipSetup = false,
   } = options;
 
   if (existingServices().has(name)) {
@@ -132,6 +134,7 @@ async function createVm(name, options = {}) {
 
   const workspaceDir = path.join(instDir, agent);
   fs.mkdirSync(workspaceDir, { recursive: true });
+  onLog('system', `Created instance directory: ${instDir}`);
 
   if (mode === 'clone') {
     const sources = fs.readdirSync(INSTANCES_DIR, { withFileTypes: true })
@@ -145,6 +148,7 @@ async function createVm(name, options = {}) {
     const srcAgent = srcMeta.AGENT || 'openclaw';
     const srcDir = path.join(INSTANCES_DIR, src, srcAgent);
     if (fs.existsSync(srcDir)) {
+      onLog('system', `Cloning workspace from ${src}…`);
       for (const entry of fs.readdirSync(srcDir)) {
         const srcPath = path.join(srcDir, entry);
         const dstPath = path.join(workspaceDir, entry);
@@ -154,6 +158,7 @@ async function createVm(name, options = {}) {
           fs.copyFileSync(srcPath, dstPath);
         }
       }
+      onLog('system', `Cloned workspace from ${src}`);
     } else {
       throw new Error(`Source workspace for '${src}' not found`);
     }
@@ -166,18 +171,48 @@ async function createVm(name, options = {}) {
   writeInstanceCompose(name, agent, pw, finalPort);
 
   const composePath = instanceComposePath(name);
-  await runCmd('docker', ['compose', '-f', composePath, 'up', '-d'], { timeout: 180000 });
 
-  if (agent === 'openclaw' || agent === 'picoclaw') {
+  onStep('build', 'start');
+  try {
+    await runCmdStream('docker', ['compose', '-f', composePath, 'build'], { onLog, timeout: 900000 });
+  } catch (e) {
+    onStep('build', 'error');
+    throw e;
+  }
+  onStep('build', 'end');
+
+  onStep('up', 'start');
+  try {
+    await runCmdStream('docker', ['compose', '-f', composePath, 'up', '-d'], { onLog, timeout: 300000 });
+  } catch (e) {
+    onStep('up', 'error');
+    throw e;
+  }
+  onStep('up', 'end');
+
+  if ((agent === 'openclaw' || agent === 'picoclaw') && !skipSetup) {
+    onStep('setup', 'start');
+    let ready = false;
     for (let i = 0; i < 15; i++) {
       try {
-        await runCmd('docker', ['exec', name, 'openclaw', 'setup'], { timeout: 60000 });
+        await runCmdStream('docker', ['exec', name, 'openclaw', 'setup'], { onLog, timeout: 60000 });
+        ready = true;
         break;
       } catch {
+        if (i === 14) break;
+        onLog('system', `Container not ready yet (attempt ${i + 1}/15), waiting…`);
         await new Promise(r => setTimeout(r, 1000));
       }
     }
-    await runCmd('docker', ['restart', name], { timeout: 30000 });
+    if (!ready) {
+      onStep('setup', 'error');
+      throw new Error(`Container '${name}' did not become ready for openclaw setup`);
+    }
+    onStep('setup', 'end');
+  }
+
+  if ((agent === 'openclaw' || agent === 'picoclaw') && !skipSetup) {
+    await runCmdStream('docker', ['restart', name], { onLog, timeout: 30000 });
   }
 
   return name;

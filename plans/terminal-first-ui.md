@@ -1,14 +1,51 @@
 # Terminal-First UI
 
+## Status: Updated 2026-08-02 — one persistent terminal per agent
+
 ## Core Concept
 
-The web panel is a **terminal emulator with a GUI command picker**.
+The agent page is a **terminal emulator with a GUI command picker**.
 
-GUI elements (forms, tables, cards) are for **displaying information**. For **entering things, setting things up, configuring** — the terminal flow takes over.
+The terminal is **always on screen**. It is mounted **once per agent** at the page
+level and stays alive the whole time you're on that agent's page. Switching tabs
+swaps the **button toolbar** above the terminal — the shell is never torn down.
+Pages that don't need a shell (workspace, sessions, ...) hide the terminal, but it
+stays mounted underneath, so when you come back to a terminal tab your scrollback
+and your shell session are still exactly where you left them.
 
-Click a button → the CLI command gets typed into the terminal and executed. The user sees every command, every output, every prompt. Interactive flows (OAuth login, API key entry, device-code auth) happen live in the terminal. When the command finishes, the terminal resets, ready for the next action.
+GUI elements (tables, cards, lists) are for **displaying information**. For
+**entering things, setting things up, configuring** — the terminal flow takes over.
 
-The user never types raw commands. The buttons are the interface. The terminal is the engine.
+Click a button → the CLI command gets typed into the terminal and executed. The
+user sees every command, every output, every prompt. Interactive flows (OAuth
+login, API key entry, device-code auth) happen live in the terminal. The user can
+also type straight into the shell — it is a real bash session, not a mock.
+
+Every command run for this agent accumulates in that one terminal. You never juggle
+multiple terminals — **one terminal per agent, it remembers everything.**
+
+## Why This Update
+
+The original version of this plan (below) described a per-page console where each
+tab owned its own terminal session. Practically that meant: switch tab → session
+killed, history gone, connect again. User feedback was clear:
+
+> Show the terminal forever. Tabs change the buttons, keep the terminal. For pages
+> that don't need the terminal, hide it. All commands run in that one terminal and
+> the user can scroll back and see what was previously run for this agent. No more
+> switching between different terminals.
+
+So the architecture changed:
+
+- **Before:** one `<Terminal>` / `<Console>` per tab, unmounted on tab switch,
+  scrollback + shell session lost.
+- **After:** one `<Terminal>` at the `AgentDetail` page level, mounted once,
+  shown/hidden by tab, never unmounted while on the agent page. Tabs become
+  button toolbars that feed commands into that shared instance.
+
+The **Health tab** stays the reference implementation (buttons + terminal), but
+every terminal-driven tab now reuses the *same* mounted terminal instead of
+spawning its own.
 
 ## Scope
 
@@ -16,38 +53,150 @@ The user never types raw commands. The buttons are the interface. The terminal i
 - **Phase 2**: Nanopot
 - **Phase 3**: Hermes PAD
 
+## Layout
+
+```
+┌──────────┬───────────────────────────────────────────────────────┐
+│ Sidebar  │  Tab content (scrollable)                             │
+│          │  ┌─────────────────────────────────────────────────┐  │
+│ Overview │  │  Toolbar: [Group: cmd] [cmd]  [Group: cmd] ... │  │  ← tab-specific buttons
+│ Workspace│  └─────────────────────────────────────────────────┘  │
+│ Terminal │  Status / display widgets (per tab, optional)         │
+│ Health   │  ┌─────────────────────────────────────────────────┐  │
+│ ...      │  │  TERMINAL (docked, always visible on shell tabs)│  │  ← one shared instance
+│          │  │  $ openclaw health --json                       │  │
+│          │  └─────────────────────────────────────────────────┘  │
+└──────────┴───────────────────────────────────────────────────────┘
+```
+
+The right column is a **flex column**: tab content on top (scrolls itself), the
+terminal docked at the bottom on shell tabs. The terminal has a fixed-ish height
+(e.g. `40vh`, min `320px`), so it never competes with the tab content for scroll
+space.
+
 ## Terminal States
 
 | State | What the user sees | Can they type? |
-|-------|-------------------|----------------|
-| **Idle** | Frozen, empty terminal waiting for a button click | No — keystrokes dropped |
-| **Running** | Output streaming live. If CLI prompts for input, terminal unfreezes | Yes — stdin of the running command only, never a bare shell |
-| **Done** | Frozen, showing final output of the completed command(s) | No — keystrokes dropped |
+|-------|--------------------|----------------|
+| **Interactive** (default) | Live bash session. Buttons inject commands, user can type too | Yes — free shell |
+| **Locked** (toggle) | Frozen shell. Buttons still inject commands; input drops until the command finishes | No — buttons only |
+| **Running** | Output streaming live. If the CLI prompts, terminal unfreezes | Yes — stdin of the running command |
 
-## Canonical Implementation: Health Tab
+The lock is a **per-agent toggle** (persisted in `localStorage`) in the terminal
+header. `Interactive` is the default: the point of one persistent terminal is that
+it behaves like a real shell you can just use, while the buttons give you a
+shortcut for every OpenClaw command.
 
-The Health tab is the reference implementation. Every new terminal-first page follows this exact pattern.
+## Tab Classification
 
-### Layout
+| Tab | Type | What changes |
+|-----|------|--------------|
+| Health | **Terminal-driven** | Done — buttons + terminal (reference impl) |
+| Messaging | **Terminal-driven** | Buttons (Create/Login/Remove per channel) + creds panel + terminal |
+| Models | **Terminal-driven** | Buttons (auth login / paste-api-key / set model) + provider list + terminal |
+| MCP | **Terminal-driven** | Buttons (add/remove/probe server) + server list + terminal |
+| Skills | **Terminal-driven** | Buttons (install/update/remove/verify) + skill list + terminal |
+| Backups | **Terminal-driven** | Buttons (create/restore/list) + backup table + terminal |
+| Config | **Hybrid** | Keep the JSON editor (it's a text file), add terminal buttons (validate / reload / set) |
+| Terminal | **Full-height shell** | No toolbar, terminal fills the tab. Same instance, just taller |
+| Overview | GUI-only | No terminal — stat cards, quick links, activity |
+| Workspace | GUI-only | No terminal — file browser |
+| Logs | GUI-only | No terminal — streamed container logs |
+| Sessions | GUI-only | No terminal — table |
+| Activity | GUI-only | No terminal — table |
 
+For **GUI-only** tabs the terminal is hidden but *stays mounted* (see below), so
+the shell session and scrollback survive the detour.
+
+## How the Persistent Terminal Works
+
+**Mount it once at the page level:**
+
+```jsx
+function AgentDetail() {
+  const termRef = useRef(null)
+
+  return (
+    <div className="flex h-full" id="agent-layout">
+      <aside>… tabs …</aside>
+      <div className="flex-1 min-w-0 flex flex-col">
+        <div className="flex-1 min-h-0 overflow-y-auto p-6">
+          {currentTab === 'health'    && <HealthToolbar  agent={agent} termRef={termRef} />}
+          {currentTab === 'messaging' && <MessagingToolbar agent={agent} termRef={termRef} />}
+          … only the toolbar/content renders per tab …
+        </div>
+        {SHELL_TABS.has(currentTab) && (
+          <div className="h-[40vh] min-h-[320px] shrink-0 px-6 pb-6">
+            <Terminal ref={termRef} name={agent.name} title={agent.display_name} height="100%" />
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
 ```
-┌─────────────────────────────────────────────┐
-│  [Group: cmd] [cmd] [cmd]  [Group: cmd] ...│  ← Button bar (top)
-├─────────────────────────────────────────────┤
-│  Console                                    │
-│  $ openclaw health --json                   │
-│  { "status": "ok", ... }                    │  ← Console output (bottom)
-│                                             │
-└─────────────────────────────────────────────┘
-```
 
-**Two sections only:**
-1. **Button bar** (top) — grouped command buttons, always visible
-2. **Console** (bottom) — command output, always visible
+Key rules:
 
-The terminal is always on screen. No collapsing, no hiding. The user always sees the console.
+- The `<Terminal>` sits **outside** the per-tab render. It never unmounts while
+  the agent page is open. Tab switches only change what renders above it.
+- "Hide on GUI-only tabs" is done by **not rendering the wrapper div** — which
+  would unmount the terminal and kill the session. Instead the wrapper stays and
+  is toggled with a `hidden` class (`display: none`). The xterm buffer and the
+  WebSocket bash session survive, and the existing **ResizeObserver** refits the
+  terminal automatically when it becomes visible again.
+  - xterm inside `display: none` reports zero size — that's fine. On reveal the
+    ResizeObserver fires and calls `fit()` + sends a `resize` frame. No extra work.
+- Switching **agents** (`name` prop changes) tears down and starts a fresh session
+  — that behavior already exists in the component.
+- The dock height can grow: the **Terminal tab** passes `height="100%"` inside a
+  `flex-1` wrapper so it becomes the full-height shell.
 
-### Button Bar Pattern
+## Terminal Component Changes Needed
+
+The shared `<Terminal>` component (`src/client/src/components/Terminal.jsx`)
+needs three additions to support this:
+
+1. **Tracked `runCommand`** — today completion is only detected in locked mode
+   (sentinel). Buttons on an *unlocked* terminal need a busy indicator too. Add
+   `runCommand(cmd, { track: true })` which injects the completion sentinel
+   (`stty -echo\r` + `stty echo; <cmd>; echo __PAD_DONE_<id>__\r`) but **does not
+   lock input** the way `disabled` mode does. `onCommandStart` / `onCommandDone`
+   fire so buttons can show a spinner and stay disabled while running.
+
+2. **Secret paste** — pasting a credential into the shared shell with `write()`
+   would echo the secret into the scrollback (and history). Wrap pastes the same
+   way the sentinel does:
+   ```
+   stty -echo\r  <secret>\r  stty echo\r
+   ```
+   A `pasteSecret(value)` imperative method on the terminal. The secret never
+   appears in the visible buffer.
+
+3. **Lock toggle** — a `Lock` / `Unlock` button in the terminal header (persisted
+   per agent), so `disabled` mode is now a user-facing feature instead of a
+   per-tab prop. Buttons keep working in both modes.
+
+## Command History
+
+The user should always be able to see "what was run for this agent". Two layers:
+
+1. **In-session scrollback** (free). The persistent terminal keeps one running
+   buffer (10000 lines). Scrolling up shows every command + output since you
+   opened the agent page. This is the primary experience.
+
+2. **Persistent command log** (survives refresh / agent switch). The backend
+   records every button-issued command in the activity store (same place
+   start/stop/restart events go). A small **history popover** (clock icon in the
+   terminal header) lists past commands with timestamps + exit status; clicking
+   one re-runs it. Optional: also capture the user's own typed commands from the
+   shell's `~/.bash_history`.
+
+- **Clear** wipes the visible scrollback only, never the log.
+- **Reconnect** starts a fresh bash session and is destructive to the current
+  buffer — give it a confirm.
+
+## Button Bar Pattern
 
 Buttons are grouped by category. Each group has a colored dot + label + pill buttons:
 
@@ -77,7 +226,7 @@ const COMMAND_GROUPS = [
 | `cmd` | string | The exact CLI command to run |
 | `label` | string | Button text (short, 1-2 words) |
 | `desc` | string | Tooltip description |
-| `confirm` | boolean | Show confirmation modal before running |
+| `confirm` | boolean | Show confirmation before running |
 | `danger` | boolean | Double-confirm with danger styling |
 | `flags` | string[] | Optional toggleable flags (shown as checkboxes) |
 
@@ -122,206 +271,70 @@ const DOT_COLORS = {
 </button>
 ```
 
-Buttons are disabled while any command is running. Only one command at a time.
+Buttons are disabled while any tracked command is running. Only one tracked
+command at a time (free typing in the shell is unaffected).
 
-### Console Component
+## Shared `run()` helper
+
+One helper per agent page, used by every toolbar:
+
+```jsx
+function run(termRef, cmd, opts = {}) {
+  if (opts.confirm && !confirm(`Run "${cmd}"?`)) return
+  if (opts.danger && !confirm(`⚠ DANGER: "${cmd}" — Are you sure?`)) return
+  termRef.current?.runCommand(cmd, { track: true })
+}
+```
+
+Toolbars receive `termRef` from the page (or via a tiny `TerminalContext` if prop
+drilling gets ugly).
+
+## Console Component
 
 File: `src/client/src/components/Console.jsx`
 
-Reusable across all terminal-first pages. Takes these props:
+Still exists, but its role shrinks. It is the **display-only sibling** for pages
+that just show command output without an interactive shell — after the migration,
+mostly nothing on the agent page uses it. It stays for any future read-only
+"run and show" surfaces (e.g. fleet-wide commands). The interactive shell is
+always the shared `<Terminal>`.
 
-| Prop | Type | Default | Description |
-|------|------|---------|-------------|
-| `lines` | array | `[]` | `[{ type: 'cmd'\|'out'\|'err', text?, cmd?, ts? }]` |
-| `runningCmd` | string | `''` | Currently running command (empty = idle) |
-| `onClear` | function | — | Clear handler |
-| `label` | string | `'Console'` | Header label |
-| `emptyMessage` | string | `'Click a button above...'` | Shown when lines is empty |
-| `autoScroll` | boolean | `true` | Auto-scroll to bottom |
-| `className` | string | `''` | Extra classes on outer container |
-| `headerRight` | element | — | Extra elements in header (right side) |
-| `children` | element | — | Extra elements below header bar (toolbar slot) |
+## Credential Paste Pattern
 
-**Line types in output:**
-
-- `cmd` → Cyan prompt: `$ <command>` with timestamp
-- `out` → Slate text (normal output)
-- `err` → Red text (error output)
-
-### Frontend State Pattern
-
-Every terminal-first tab uses the same state:
-
-```jsx
-function SomeTab({ agent }) {
-  const [consoleLines, setConsoleLines] = useState([])
-  const [runningCmd, setRunningCmd] = useState('')
-
-  async function run(cmd, opts = {}) {
-    // Confirmation
-    if (opts.confirm && !await confirm({ title: 'Run Command', message: `Run "${cmd}"?` })) return
-    if (opts.danger && !await confirm({ title: 'Danger', message: `⚠ Run "${cmd}"?`, danger: true, confirmText: 'Run' })) return
-
-    const ts = new Date().toLocaleTimeString()
-    setRunningCmd(cmd)
-    setConsoleLines((p) => [...p, { ts, cmd, type: 'cmd' }])
-
-    // Open WebSocket to backend
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const socket = new WebSocket(`${protocol}//${window.location.host}/ws/exec/${agent.name}`)
-    socket.onopen = () => socket.send(JSON.stringify({ type: 'run', cmd }))
-
-    socket.onmessage = (evt) => {
-      try {
-        const d = JSON.parse(evt.data)
-        if (d.type === 'stdout') setConsoleLines((p) => [...p, { text: d.text, type: 'out' }])
-        else if (d.type === 'stderr') setConsoleLines((p) => [...p, { text: d.text, type: 'err' }])
-        else if (d.type === 'close' || d.type === 'error') setRunningCmd('')
-      } catch {}
-    }
-
-    socket.onclose = () => setRunningCmd('')
-    socket.onerror = () => setRunningCmd('')
-  }
-
-  return (
-    <div className="flex flex-col gap-3 h-full">
-      {/* Button bar */}
-      <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1">
-        {COMMAND_GROUPS.map((group) => (
-          // ... group rendering (see Health tab)
-        ))}
-      </div>
-
-      {/* Console */}
-      <div className="flex-1 min-h-0">
-        <Console
-          lines={consoleLines}
-          runningCmd={runningCmd}
-          onClear={() => setConsoleLines([])}
-          className="h-full"
-        />
-      </div>
-    </div>
-  )
-}
-```
-
-### Backend: WebSocket Exec Endpoint
-
-**Endpoint:** `ws://host/ws/exec/:name`
-
-**Protocol:**
-
-Client → Server:
-```json
-{ "type": "run", "cmd": "openclaw health --json" }
-{ "type": "stdin", "text": "my-api-key-here\n" }
-{ "type": "resize", "cols": 80, "rows": 24 }
-```
-
-Server → Client:
-```json
-{ "type": "stdout", "text": "..." }
-{ "type": "stderr", "text": "..." }
-{ "type": "close", "text": "0" }
-{ "type": "error", "text": "Container not running" }
-```
-
-**Why WebSocket, not SSE:**
-- Interactive flows need bidirectional communication (stdin for API keys, OAuth tokens)
-- One connection per command session
-- SSE is one-way (server→client only) — can't send credentials back
-
-**Backend implementation:**
-
-```js
-// ws/exec/:name
-wss.on('connection', (ws, req) => {
-  const name = req.url.split('/')[3]
-  let dockerProc = null
-
-  ws.on('message', (raw) => {
-    const msg = JSON.parse(raw)
-
-    if (msg.type === 'run') {
-      // Kill any existing process
-      if (dockerProc) dockerProc.kill()
-      dockerProc = spawn('docker', ['exec', '-i', name, 'sh', '-lc', msg.cmd])
-      dockerProc.stdout.on('data', (d) => ws.send(JSON.stringify({ type: 'stdout', text: d.toString() })))
-      dockerProc.stderr.on('data', (d) => ws.send(JSON.stringify({ type: 'stderr', text: d.toString() })))
-      dockerProc.on('close', (code) => ws.send(JSON.stringify({ type: 'close', text: String(code) })))
-    }
-
-    if (msg.type === 'stdin' && dockerProc) {
-      dockerProc.stdin.write(msg.text)
-    }
-  })
-
-  ws.on('close', () => { if (dockerProc) dockerProc.kill() })
-})
-```
-
-### Credential Paste Pattern
-
-For interactive flows (API key entry, OAuth), the UI can inject credentials into the running command's stdin without the user typing:
+Interactive flows (API key entry, OAuth, bot tokens) happen inside the shared
+shell. The creds side panel (Messaging) or a paste button (Models) calls the
+terminal's new `pasteSecret(value)`:
 
 ```jsx
 function pasteCredential(value) {
-  if (wsRef.current?.readyState === WebSocket.OPEN && runningCmd) {
-    wsRef.current.send(JSON.stringify({ type: 'stdin', text: value + '\n' }))
-  }
+  termRef.current?.pasteSecret(value) // stty -echo \r value \r stty echo \r
 }
 ```
 
-This is used in the Messaging tab's split layout — credentials panel on the right, console on the left. Clicking a saved credential pastes it into the running command.
+The secret is written to the running command's stdin and **not echoed** into the
+terminal buffer or history. This replaces the old `/ws/messaging`
+`credential-paste` message — the PTY already gives us stdin, we just need the
+echo suppression.
 
 ### Split Layout Variant (Messaging)
 
-For pages that need a credentials side panel:
+Pages that need a credentials side panel keep it, now beside the shared terminal:
 
 ```
-┌──────────────────────────┬──────────────┐
-│  Console (3/4)           │ Creds (1/4)  │
-│  $ openclaw channels ... │ [bot1] [bot2]│
-│  Enter bot token: _      │ [user1]      │
-└──────────────────────────┴──────────────┘
+┌──────────────────────────────────────┬──────────────┐
+│  TERMINAL (3/4)                      │ Creds (1/4)  │
+│  $ openclaw channels add --channel ..│ [bot1] [bot2]│
+│  Enter bot token: █                  │ [user1]      │
+└──────────────────────────────────────┴──────────────┘
 ```
 
-- Console takes 3/4 width, creds panel takes 1/4
-- Creds panel shows saved bot tokens / user IDs
-- Clicking a credential calls `pasteCredential()` → sends to WebSocket stdin
-- Panel has a close button that clears state and refreshes data
+- Creds panel shows saved bot tokens / user IDs (from `/api/credentials`).
+- Clicking a credential calls `pasteSecret()` → into the running command.
+- Refresh: after a command completes, the display strip reloads.
 
-## Command Chain Flow
+## Command Definitions
 
-1. User clicks a button → UI sends command via WebSocket.
-2. Backend starts `docker exec -i <container> sh -lc <command>`.
-3. Output streams to the console in real time.
-4. Backend monitors output:
-   - **Prompt detected** (e.g., "Enter your API key:") → user clicks credential button → stdin sent.
-   - **Command completed** (exit code received) → `close` event → console freezes at Done.
-5. User clicks a new button → old WebSocket closes, new command starts in same console.
-6. Console is append-only. History accumulates until user clicks Clear.
-
-## Rules
-
-- One console per page — each page has its own terminal session.
-- Command definitions are hardcoded per-page — not a config file, not scraped.
-- The user cannot free-type. Only the UI sends commands. Keystrokes are grabbed and dropped.
-- Command history is logged — exact CLI command + output/result.
-- After a command finishes, info zone refreshes via manual Refresh button (auto-refresh later).
-- Guided forms are designed per-page — depends on what data the page needs.
-- Terminal prompt style: simple `$` is fine.
-- Multi-command flows run sequentially in the same terminal. Post-setup verification commands can run internally without terminal display.
-- **Console is always visible** — never collapsed, never hidden. The user must always see the terminal.
-- Only one command runs at a time. Buttons are disabled during execution.
-
-## Data
-
-### OpenClaw Commands
-
-#### Messaging
+### Messaging
 
 | Action | Command | Interactive? |
 |--------|---------|:------------:|
@@ -333,7 +346,7 @@ For pages that need a credentials side panel:
 | Status | `openclaw channels status` | No |
 | List all | `openclaw channels list --all` | No |
 
-#### Models
+### Models
 
 | Action | Command | Interactive? |
 |--------|---------|:------------:|
@@ -346,7 +359,7 @@ For pages that need a credentials side panel:
 | List all available | `openclaw models list --all --json` | No |
 | Full status | `openclaw models status --json` | No |
 
-#### PADs
+### PADs
 
 | Action | Command | Interactive? |
 |--------|---------|:------------:|
@@ -357,23 +370,71 @@ For pages that need a credentials side panel:
 | Cron add | `openclaw cron add ...` | Depends |
 | Memory index | `openclaw memory index` | No |
 
-## Implementation Checklist
+## Backend Changes
 
-When building a new terminal-first page:
+- **Keep** `/ws/terminal/:name` (dockerode PTY) — it is the engine. One shell
+  session per agent, held open for as long as the page is open.
+- **Add** command log recording: `POST /api/agents/:name/command-log`
+  `{ cmd, status, ts }` → append to the agent's activity store (reuses the
+  existing activity table / `registry.getActivity`). The history popover reads
+  `GET /api/agents/:name/activity`.
+- **Retire after migration:**
+  - `/ws/messaging/:name` + `credential-paste` → replaced by the shared terminal
+    + `pasteSecret()`.
+  - `/ws/exec/:name` and `/api/agents/:name/exec-stream` → not needed once every
+    shell tab uses the shared terminal.
+- The `command-log` route should record **exit status** too, so the history
+  popover can mark failures. Best-effort: sentinel-tagged commands already know
+  when they finish; wire that signal through to the log.
 
-- [ ] Define `COMMAND_GROUPS` const with page-specific commands
-- [ ] Add tab to `TABS` array in `AgentDetail.jsx`
-- [ ] Create `XxxTab({ agent })` function component
-- [ ] Add state: `consoleLines`, `runningCmd`
-- [ ] Add `run(cmd, opts)` function with confirmation + WebSocket
-- [ ] Render button bar (top) + Console component (bottom)
-- [ ] If interactive: add credential paste panel (split layout)
-- [ ] If page needs data display: add info cards above button bar
-- [ ] Backend: ensure `ws/exec/:name` endpoint exists (shared across pages)
-- [ ] Test: button click → console output → command completes → idle
+## Migration Checklist
+
+Order matters — do the risky/loved pages first, retire old WS endpoints last.
+
+- [x] `Terminal.jsx` extracted as the one shell component (see `terminal-component.md`)
+- [x] Health tab = buttons + terminal (reference implementation)
+- [ ] **Lift** `<Terminal>` to page level, mount once, keep mounted, toggle visibility per tab
+- [ ] Add tracked `runCommand(cmd, { track: true })` to the terminal
+- [ ] Add `pasteSecret()` to the terminal
+- [ ] Add Lock toggle (persisted per agent)
+- [ ] Add history popover + backend `command-log` recording
+- [ ] **Messaging** → toolbar + creds panel + shared terminal (retire `/ws/messaging`)
+- [ ] **Models** → toolbar + provider list + shared terminal
+- [ ] **MCP** → toolbar + server list + shared terminal
+- [ ] **Skills** → toolbar + skill list + shared terminal
+- [ ] **Backups** → toolbar + backup table + shared terminal
+- [ ] **Config** → hybrid: JSON editor + terminal buttons (validate / reload / set)
+- [ ] **Terminal** tab → full-height shell on the same instance
+- [ ] Retire `/ws/exec/:name`, `/api/agents/:name/exec-stream`
+- [ ] Browser-test: tab switching keeps scrollback + session; GUI-only tabs hide terminal; refresh restores history popover
+
+## Rules
+
+- **One terminal per agent.** It mounts once, lives at the page level, and is
+  never unmounted while the agent page is open. Tabs swap the toolbar, not the shell.
+- **Hiding ≠ unmounting.** GUI-only tabs use `display: none` on the wrapper so
+  scrollback and the bash session survive.
+- Command definitions are hardcoded per-tab — not a config file, not scraped.
+- The user can free-type. The buttons are shortcuts, not the only input path.
+- Only one **tracked** command runs at a time. Free typing is unaffected.
+- Command history is logged — exact CLI command + exit status, viewable from the
+  history popover even after the buffer is cleared or the page is reloaded.
+- After a command finishes, display strips refresh (auto-refresh later).
+- **Secrets never hit the buffer or the log** — always paste via `stty -echo`.
+- Terminal prompt style: simple `$` is fine.
+- Multi-command flows run sequentially in the same terminal. Post-setup
+  verification commands can run internally without terminal display.
+- **The terminal is always visible on shell tabs** — never collapsed, never hidden.
 
 ## Open Questions
 
-- **Long-running commands** — background mode? Progress indicator?
-- **Ctrl+C / interrupt** — should the user be able to abort a running command? How to surface it safely?
-- **Command completion detection** — exit code alone, or also detect shell prompts?
+- **Long-running commands** — background mode? Progress indicator? (e.g. `openclaw
+  memory index` can take a while; do we block the tab or let it stream?)
+- **Ctrl+C / interrupt** — should buttons offer a Stop that sends `\x03` to the
+  shell? It's natural in an interactive terminal, but a button would be nicer
+  than reaching for the keyboard.
+- **Command log retention** — cap the log (e.g. last 100 entries per agent)?
+- **bash_history capture** — worth wiring the user's typed commands into the
+  history popover, or is scrollback enough?
+- **Multi-agent superpowers later** — can the same terminal dock concept scale to
+  a fleet view (pick agent → same dock, new session)?

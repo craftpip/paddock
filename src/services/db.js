@@ -30,10 +30,22 @@ function migrate(db) {
       config_root TEXT,
       default_model TEXT,
       default_provider TEXT,
+      owner_id TEXT,
       tags TEXT DEFAULT '[]',
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       last_activity_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      username TEXT NOT NULL UNIQUE,
+      display_name TEXT,
+      email TEXT,
+      role TEXT NOT NULL DEFAULT 'user',
+      password_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
     CREATE TABLE IF NOT EXISTS activity_events (
@@ -69,7 +81,14 @@ function migrate(db) {
     CREATE INDEX IF NOT EXISTS idx_activity_agent ON activity_events(agent_id);
     CREATE INDEX IF NOT EXISTS idx_activity_ts ON activity_events(timestamp);
     CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id);
+    CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
   `);
+
+  // Add owner_id to agents if missing (from older schema)
+  const cols = db.prepare("PRAGMA table_info(agents)").all().map(c => c.name);
+  if (!cols.includes('owner_id')) {
+    db.exec("ALTER TABLE agents ADD COLUMN owner_id TEXT");
+  }
 }
 
 function close() {

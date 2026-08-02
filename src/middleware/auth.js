@@ -28,22 +28,39 @@ function requireAuth(req, res, next) {
   return res.redirect('/login');
 }
 
-function handleLogin(req, res) {
-  const { password } = req.body;
-  if (!password || password !== AUTH_PASSWORD) {
-    return res.status(401).render('login', { error: 'Invalid password' });
-  }
-  req.session.authenticated = true;
-  req.session.loginTime = Date.now();
-  const returnTo = req.session.returnTo || '/';
-  delete req.session.returnTo;
-  res.redirect(returnTo);
+function requireAdmin(req, res, next) {
+  if (req.session && req.session.role === 'admin') return next();
+  return res.status(403).json({ error: 'Admin access required' });
 }
 
-function handleLogout(req, res) {
-  req.session.destroy(() => {
-    res.redirect('/login');
-  });
+function checkNeedsSetup(req, res, next) {
+  const publicPaths = ['/api/setup', '/api/login', '/api/session', '/setup', '/login'];
+  if (publicPaths.includes(req.path)) return next();
+  if (req.path.startsWith('/api/') || req.path.startsWith('/ws/')) return next();
+  try {
+    const { getDb } = require('../services/db');
+    const db = getDb();
+    const row = db.prepare('SELECT COUNT(*) as count FROM users').get();
+    if (row.count === 0) return res.redirect('/setup');
+  } catch {
+    return next();
+  }
+  next();
+}
+
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+  return salt + ':' + hash;
+}
+
+function verifyPassword(password, stored) {
+  if (!stored || !stored.includes(':')) return false;
+  const [salt, hash] = stored.split(':');
+  const hashBuf = Buffer.from(hash, 'hex');
+  const testBuf = crypto.scryptSync(password, salt, 64);
+  if (hashBuf.length !== testBuf.length) return false;
+  return crypto.timingSafeEqual(hashBuf, testBuf);
 }
 
 function csrfToken(req, res, next) {
@@ -66,4 +83,4 @@ function csrfCheck(req, res, next) {
   next();
 }
 
-module.exports = { setupSession, requireAuth, handleLogin, handleLogout, csrfToken, csrfCheck, AUTH_PASSWORD };
+module.exports = { setupSession, requireAuth, requireAdmin, csrfToken, csrfCheck, hashPassword, verifyPassword, checkNeedsSetup, AUTH_PASSWORD };

@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../stores/auth'
 
 export default function Login() {
+  const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const error = useAuth((s) => s.error)
@@ -12,7 +13,7 @@ export default function Login() {
   async function handleSubmit(e) {
     e.preventDefault()
     setSubmitting(true)
-    const ok = await login(password)
+    const ok = await login(username, password)
     setSubmitting(false)
     if (ok) navigate('/agents', { replace: true })
   }
@@ -38,12 +39,23 @@ export default function Login() {
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
+            <label className="block text-sm font-medium text-slate-300 mb-2">Username</label>
+            <input
+              type="text"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              autoFocus
+              required
+              className="w-full px-4 py-3 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+              placeholder="Enter username"
+            />
+          </div>
+          <div>
             <label className="block text-sm font-medium text-slate-300 mb-2">Password</label>
             <input
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              autoFocus
               required
               className="w-full px-4 py-3 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
               placeholder="Enter password"
