@@ -14,7 +14,7 @@ const MODES = [
   { id: 'activity', label: 'Activity' },
 ]
 
-function AgentHeader({ agent, runningCmd }) {
+function AgentHeader({ agent }) {
   const startAgent = useAgents((s) => s.startAgent)
   const stopAgent = useAgents((s) => s.stopAgent)
   const restartAgent = useAgents((s) => s.restartAgent)
@@ -58,12 +58,6 @@ function AgentHeader({ agent, runningCmd }) {
         <span className="text-slate-500">CPU <span className="text-slate-200 font-mono">{agent.status === 'running' ? (cpuPct.toFixed(1) + '%') : '—'}</span></span>
         <span className="text-slate-500">MEM <span className="text-slate-200 font-mono">{agent.status === 'running' && stats ? memUsage : '—'}</span></span>
       </div>
-      {runningCmd && (
-        <span className="flex items-center gap-1.5 text-xs text-cyan-300 font-medium">
-          <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
-          Running
-        </span>
-      )}
       <div className="flex-1" />
       <div className="flex items-center gap-2">
         {agent.status === 'running' ? (
@@ -133,7 +127,7 @@ export default function AgentDetail() {
 
   return (
     <div className="flex flex-col h-full min-h-0" id="agent-layout">
-      <AgentHeader agent={agent} runningCmd={runningCmd} />
+      <AgentHeader agent={agent} />
 
       {/* Mode tabs */}
       <div className="flex items-center gap-1 px-6 py-2 border-b border-slate-800 overflow-x-auto flex-shrink-0">

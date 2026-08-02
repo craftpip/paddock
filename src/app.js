@@ -13,12 +13,13 @@ const Docker = require('dockerode');
 const dockerClient = new Docker({ socketPath: '/var/run/docker.sock' });
 
 const creds = require('./creds');
+const vault = require('./services/vault');
 const registry = require('./services/agent-registry');
 const vm = require('./services/vm-manager');
 const backup = require('./services/backup-manager');
 const jobLog = require('./services/job-log');
 const { getDb } = require('./services/db');
-const { setupSession, requireAuth, requireAdmin, csrfToken, hashPassword, verifyPassword, checkNeedsSetup } = require('./middleware/auth');
+const { setupSession, requireAuth, requireAdmin, csrfToken, csrfCheck, hashPassword, verifyPassword, checkNeedsSetup } = require('./middleware/auth');
 const { rateLimit } = require('./middleware/rateLimit');
 
 const WORKSPACE = '/workspace';
@@ -1283,6 +1284,55 @@ app.post('/api/credentials/delete', (req, res) => {
   }
 });
 
+// ─── API: Vault (encrypted key-value store) ────────────────
+
+app.get('/api/vault', (req, res) => {
+  try {
+    res.json({ items: vault.list() });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/vault', csrfCheck, (req, res) => {
+  const { name, description, value } = req.body;
+  if (!name || !value) return res.status(400).json({ error: 'Name and value are required' });
+  try {
+    const item = vault.create(name.trim(), description, value);
+    res.json({ ok: true, item });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.put('/api/vault/:id', csrfCheck, (req, res) => {
+  const { name, description, value } = req.body;
+  try {
+    const item = vault.update(Number(req.params.id), { name, description, value });
+    res.json({ ok: true, item });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.delete('/api/vault/:id', csrfCheck, (req, res) => {
+  try {
+    vault.remove(Number(req.params.id));
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.get('/api/vault/:id/decrypt', requireAdmin, (req, res) => {
+  try {
+    res.json({ value: vault.getValue(Number(req.params.id)) });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+
 // ─── API: Create Agent ──────────────────────────────────────
 
 app.post('/api/agents/create', async (req, res) => {
@@ -1593,7 +1643,16 @@ wss.on('connection', async (ws, req) => {
         AttachStdout: true,
         AttachStderr: true,
         Tty: true,
-        Env: ['TERM=xterm-256color'],
+        // A colored PS1 highlights `user@host` so the start of each command
+        // is easy to spot in the scrollback. SUDO_USER + SUDO_PS1 are set so
+        // /etc/bash.bashrc does not overwrite our PS1 (its default prompt is
+        // monochrome `\u@\h:\w\$ `).
+        Env: [
+          'TERM=xterm-256color',
+          'PS1=\\[\\e[1;36m\\]\\u@\\h\\[\\e[0m\\]:\\w\\$ ',
+          'SUDO_USER=pad',
+          'SUDO_PS1=1',
+        ],
         Cmd: ['bash', '-i'],
       });
       dockerStream = await dockerExec.start({ hijack: true, stdin: true, stdout: true, stderr: true });

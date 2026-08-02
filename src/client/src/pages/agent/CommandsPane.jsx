@@ -74,7 +74,6 @@ const SIMPLE_GROUPS = [
     commands: [
       { cmd: 'openclaw backup create', label: 'Backup', desc: 'Create a backup archive', confirm: true },
       { cmd: 'openclaw update', label: 'Update', desc: 'Check for updates', confirm: true },
-      { cmd: 'openclaw channels status --probe', label: 'Channels Probe', desc: 'Per-channel health probe' },
       { cmd: 'openclaw mcp doctor', label: 'MCP Doctor', desc: 'Check MCP servers' },
     ],
   },
@@ -156,41 +155,23 @@ function FlowGroup({ group, query, runningCmd, run }) {
 
 // ─── Messaging ───────────────────────────────────────────────────
 
-const CHANNEL_ICONS = {
-  telegram: '✈', signal: '💬', whatsapp: '📱', discord: '🎮',
-  gchat: '📧', matrix: '🔗', slack: '💼', nostr: '🌐',
-  imessage: '🍎', tlon: '🐦',
-}
-
 function MessagingFlow({ agent, query, runningCmd, run, termRef }) {
-  const [channels, setChannels] = useState([])
-  const [selected, setSelected] = useState('')
   const [creds, setCreds] = useState({ bot_tokens: {}, user_ids: {} })
 
-  function loadChannels(force) {
-    api(`/api/agents/${agent.name}/channels-list${force ? '?refresh=true' : ''}`).then((d) => {
-      const entries = Object.entries(d.chat || {}).map(([id, v]) => ({ id, name: v.name || id }))
-      setChannels(entries)
-      if (!selected && entries.length > 0) setSelected(entries[0].id)
-    }).catch(() => {})
-  }
   function loadCreds() {
     api('/api/credentials').then((d) => {
       if (d) setCreds({ bot_tokens: d.bot_tokens || {}, user_ids: d.user_ids || {} })
     }).catch(() => {})
   }
-  useEffect(() => { loadChannels(); loadCreds() }, [agent.name])
+  useEffect(() => { loadCreds() }, [agent.name])
 
   const pills = [
-    { cmd: 'openclaw channels status --probe', label: 'Status', desc: 'Live channel probe' },
-    { cmd: 'openclaw channels list --all', label: 'List all', desc: 'All configured channels' },
-    { cmd: 'openclaw channels logs --lines 100', label: 'Logs', desc: 'Channel runtime logs' },
-    ...(selected ? [
-      { cmd: `openclaw channels add --channel ${selected}`, label: `Add ${selected}`, desc: 'Interactive setup wizard' },
-      { cmd: `openclaw channels login --channel ${selected}`, label: `Login ${selected}`, desc: 'Interactive login' },
-      { cmd: `openclaw channels logout --channel ${selected}`, label: `Logout ${selected}`, desc: 'Logout + stop listener' },
-      { cmd: `openclaw channels remove --channel ${selected} --delete`, label: `Remove ${selected}`, desc: 'Delete account', confirm: true, danger: true },
-    ] : []),
+    { cmd: 'openclaw configure --section channels', label: 'Configure channel', desc: 'Interactive wizard — add, update, login or remove channel accounts' },
+    { cmd: 'openclaw channels list --all', label: 'List channels', desc: 'Configured + available channels' },
+    { cmd: 'openclaw channels status --probe', label: 'Status probe', desc: 'Live transport + audit check per account' },
+    { cmd: 'openclaw channels capabilities', label: 'Capabilities', desc: 'What each channel supports (intents/scopes)' },
+    { cmd: 'openclaw channels logs --lines 100', label: 'Channel logs', desc: 'Recent channel runtime logs' },
+    { cmd: 'openclaw agents bindings', label: 'Routing', desc: 'Which agent owns which channel' },
   ]
   const visible = pills.filter((x) => matches(query, x.label, x.cmd))
   const tokenEntries = [
@@ -202,15 +183,10 @@ function MessagingFlow({ agent, query, runningCmd, run, termRef }) {
   return (
     <>
       <GroupLabel color="cyan" title="Messaging" />
-      {channels.length > 0 && (
-        <select value={selected} onChange={(e) => setSelected(e.target.value)}
-                className="px-1.5 py-1 rounded text-[11px] bg-slate-950 border border-slate-700 text-white focus:border-cyan-500 focus:outline-none">
-          {channels.map((ch) => <option key={ch.id} value={ch.id}>{CHANNEL_ICONS[ch.id] || '📡'} {ch.name}</option>)}
-        </select>
-      )}
       {visible.map((x) => (
         <Pill key={x.label} label={x.label} desc={x.desc} color={COLORS.cyan.pill} danger={x.danger}
-              disabled={!!runningCmd} active={runningCmd === x.cmd} onClick={() => run(x.cmd, x)} />
+              disabled={!!runningCmd} active={runningCmd === x.cmd}
+              onClick={() => (x.click ? x.click() : run(x.cmd, x))} />
       ))}
       {tokenEntries.map((t) => (
         <button key={t.key}
@@ -351,23 +327,11 @@ function McpFlow({ agent, query, runningCmd, run }) {
 
 // ─── Skills ──────────────────────────────────────────────────────
 
-function sourceLabel(source) {
-  if (source === 'openclaw-bundled' || source === 'openclaw-extra') return { label: 'Bundled', color: 'bg-slate-600' }
-  if (source === 'clawhub') return { label: 'Global', color: 'bg-cyan-700' }
-  return { label: source || 'User', color: 'bg-emerald-700' }
-}
-
 function SkillsFlow({ agent, query, runningCmd, run, prompt }) {
-  const [skills, setSkills] = useState([])
   const [msg, setMsg] = useState('')
   const [showInstall, setShowInstall] = useState(false)
   const [installRef, setInstallRef] = useState('')
   const [installing, setInstalling] = useState(false)
-
-  function load() {
-    api(`/api/agents/${agent.name}/skills`).then((d) => setSkills(d.skills || [])).catch(() => {})
-  }
-  useEffect(load, [agent.name])
 
   const pills = [
     { label: 'Search', desc: 'Search the skill catalog', click: async () => {
@@ -387,8 +351,7 @@ function SkillsFlow({ agent, query, runningCmd, run, prompt }) {
     { label: 'Install', desc: 'Open the install box', click: () => setShowInstall(!showInstall) },
   ]
   const visible = pills.filter((x) => matches(query, x.label, x.cmd))
-  const shown = skills.filter((s) => matches(query, s.name))
-  if (query && visible.length === 0 && shown.length === 0) return null
+  if (query && visible.length === 0) return null
 
   async function doInstall(e) {
     e.preventDefault()
@@ -396,33 +359,10 @@ function SkillsFlow({ agent, query, runningCmd, run, prompt }) {
     setInstalling(true)
     try {
       await api(`/api/agents/${agent.name}/skills/install`, { method: 'POST', body: { ref: installRef, source: 'clawhub', as: '', force: false } })
-      setInstallRef(''); setShowInstall(false); load()
+      setInstallRef(''); setShowInstall(false)
+      setMsg(`"${installRef}" installed.`)
     } catch (err) { setMsg('Failed: ' + (err.error || err.message)) }
     setInstalling(false)
-  }
-
-  async function removeSkill(slug) {
-    if (!confirm(`Remove skill "${slug}"?`)) return
-    try {
-      await api(`/api/agents/${agent.name}/skills/remove`, { method: 'POST', body: { slug } })
-      setMsg(`"${slug}" removed.`)
-      load()
-    } catch (e) { setMsg('Failed: ' + (e.error || e.message)) }
-  }
-
-  async function updateSkill(slug) {
-    try {
-      await api(`/api/agents/${agent.name}/skills/update`, { method: 'POST', body: { slug } })
-      setMsg(`"${slug}" updated.`)
-      load()
-    } catch (e) { setMsg('Failed: ' + (e.error || e.message)) }
-  }
-
-  async function verifySkill(slug) {
-    try {
-      const r = await api(`/api/agents/${agent.name}/skills/verify`, { method: 'POST', body: { slug } })
-      setMsg(`Verify ${slug}: ${r.verified ? 'verified' : 'not verified'}`)
-    } catch (e) { setMsg('Failed: ' + (e.error || e.message)) }
   }
 
   return (
@@ -445,71 +385,6 @@ function SkillsFlow({ agent, query, runningCmd, run, prompt }) {
           </button>
         </form>
       )}
-      {shown.slice(0, 12).map((s) => {
-        const sl = sourceLabel(s.source)
-        return (
-          <DataChip key={s.name} title={s.description}>
-            <span className="font-medium text-slate-200">{s.name}</span>
-            {s.version && <span className="text-[10px] text-slate-500 font-mono">{s.version}</span>}
-            <span className={`px-1 rounded text-[10px] text-white ${sl.color}`}>{sl.label}</span>
-            <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${s.eligible ? 'bg-emerald-400' : 'bg-slate-600'}`} />
-            {s.source === 'clawhub' && (
-              <MiniBtn label="Verify" color="text-amber-400 hover:text-amber-300" onClick={() => verifySkill(s.name)} />
-            )}
-            {s.bundled !== true && (
-              <>
-                <MiniBtn label="Update" color="text-emerald-400 hover:text-emerald-300" onClick={() => updateSkill(s.name)} />
-                <MiniBtn label="×" color="text-red-400 hover:text-red-300" onClick={() => removeSkill(s.name)} />
-              </>
-            )}
-          </DataChip>
-        )
-      })}
-    </>
-  )
-}
-
-// ─── Backups ─────────────────────────────────────────────────────
-
-function BackupsFlow({ agent, query, runningCmd, run }) {
-  const [backups, setBackups] = useState([])
-  const [msg, setMsg] = useState('')
-
-  function load() {
-    api(`/api/agents/${agent.name}/backups`).then((d) => setBackups(d.backups || [])).catch(() => {})
-  }
-  useEffect(load, [agent.name])
-
-  const pills = [
-    { cmd: 'openclaw backup create', label: 'Create', desc: 'Full backup archive', confirm: true },
-    { cmd: 'openclaw backup create --no-include-workspace', label: 'No workspace', desc: 'Skip workspace files', confirm: true },
-    { cmd: 'openclaw backup create --only-config', label: 'Config only', desc: 'Just openclaw.json', confirm: true },
-  ]
-  const visible = pills.filter((x) => matches(query, x.label, x.cmd))
-  const shown = backups.filter((b) => matches(query, b.name))
-  if (query && visible.length === 0 && shown.length === 0) return null
-
-  async function deleteBak(file) {
-    if (!confirm('Delete backup?')) return
-    await api(`/api/agents/_/backups/delete`, { method: 'POST', body: { file } })
-    load()
-  }
-
-  return (
-    <>
-      {msg && <span className="text-[11px] text-cyan-400">{msg}</span>}
-      <GroupLabel color="amber" title="Backups" />
-      {visible.map((x) => (
-        <Pill key={x.label} label={x.label} desc={x.desc} color={COLORS.amber.pill}
-              disabled={!!runningCmd} active={runningCmd === x.cmd} onClick={() => run(x.cmd, x)} />
-      ))}
-      {shown.slice(0, 10).map((b) => (
-        <DataChip key={b.name}>
-          <span className="font-mono text-slate-300">{b.name}</span>
-          {b.size_hr && <span className="text-[10px] text-slate-500">{b.size_hr}</span>}
-          <MiniBtn label="×" color="text-red-400 hover:text-red-300" onClick={() => deleteBak(b.name)} />
-        </DataChip>
-      ))}
     </>
   )
 }
@@ -544,7 +419,6 @@ export default function CommandsPane({ agent, termRef, run, runningCmd }) {
         <ModelsFlow agent={agent} query={query} runningCmd={runningCmd} run={run} prompt={prompt} />
         <McpFlow agent={agent} query={query} runningCmd={runningCmd} run={run} />
         <SkillsFlow agent={agent} query={query} runningCmd={runningCmd} run={run} prompt={prompt} />
-        <BackupsFlow agent={agent} query={query} runningCmd={runningCmd} run={run} />
       </div>
     </div>
   )

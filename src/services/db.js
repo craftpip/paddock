@@ -78,10 +78,20 @@ function migrate(db) {
       FOREIGN KEY (agent_id) REFERENCES agents(id)
     );
 
+    CREATE TABLE IF NOT EXISTS vault_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      description TEXT DEFAULT '',
+      enc_value TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE INDEX IF NOT EXISTS idx_activity_agent ON activity_events(agent_id);
     CREATE INDEX IF NOT EXISTS idx_activity_ts ON activity_events(timestamp);
     CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id);
     CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_vault_name ON vault_items(name);
   `);
 
   // Add owner_id to agents if missing (from older schema)

@@ -8,6 +8,7 @@
 *.wasm
 
 # Runtime data
+.env
 src/data/app.db
 src/data/app.db-wal
 src/data/app.db-shm

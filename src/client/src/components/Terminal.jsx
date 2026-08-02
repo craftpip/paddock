@@ -487,12 +487,6 @@ const Terminal = forwardRef(function Terminal(
             <span className={`w-2 h-2 rounded-full ${connected ? 'bg-emerald-400' : 'bg-slate-600'}`} />
             <span className="text-xs text-slate-400 font-medium">{connected ? 'Connected' : 'Disconnected'}</span>
           </div>
-          {cmdRunning && (
-            <span className="flex items-center gap-1.5 text-xs text-cyan-300 font-medium">
-              <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
-              Running
-            </span>
-          )}
           {uiLocked && !cmdRunning && (
             <span className="flex items-center gap-1.5 text-xs text-amber-400 font-medium">
               <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
