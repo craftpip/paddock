@@ -87,7 +87,6 @@ export default function AgentDetail() {
   const fetchAgents = useAgents((s) => s.fetchAgents)
   const termRef = useRef(null)
   const [runningCmd, setRunningCmd] = useState(null)
-  const [cmdDoneTick, setCmdDoneTick] = useState(0)
   const lastRunCmdRef = useRef('')
 
   useEffect(() => {
@@ -114,7 +113,6 @@ export default function AgentDetail() {
   /** Fired when a tracked command finishes in the terminal. */
   const handleCmdDone = useCallback((cmd) => {
     setRunningCmd(null)
-    setCmdDoneTick((t) => t + 1)
     const toLog = lastRunCmdRef.current || cmd
     lastRunCmdRef.current = ''
     if (toLog && agent?.name) {
@@ -155,7 +153,7 @@ export default function AgentDetail() {
       {/* Mode content */}
       <div className="flex-1 min-h-0 overflow-y-auto p-6" id="mode-content">
         {mode === 'commands' && (
-          <CommandsPane agent={agent} termRef={termRef} run={run} runningCmd={runningCmd} refreshKey={cmdDoneTick} />
+          <CommandsPane agent={agent} termRef={termRef} run={run} runningCmd={runningCmd} />
         )}
         {mode === 'workspace' && <WorkspaceTab agent={agent} />}
         {mode === 'config' && <ConfigTab agent={agent} />}

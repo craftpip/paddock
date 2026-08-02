@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { api } from '../../lib/api'
 
 /**
@@ -538,15 +538,8 @@ function BackupsCard({ agent, query, runningCmd, run }) {
 
 // ─── Main CommandsPane ───────────────────────────────────────────
 
-export default function CommandsPane({ agent, termRef, run, runningCmd, refreshKey }) {
+export default function CommandsPane({ agent, termRef, run, runningCmd }) {
   const [query, setQuery] = useState('')
-  const [activity, setActivity] = useState([])
-
-  function reloadAll() {
-    api(`/api/agents/${agent.name}/activity?limit=6`).then((d) => setActivity(d.activity || [])).catch(() => {})
-  }
-  useEffect(reloadAll, [agent.name])
-  useEffect(() => { if (refreshKey > 0) reloadAll() }, [refreshKey])
 
   return (
     <div className="space-y-4">
@@ -562,25 +555,6 @@ export default function CommandsPane({ agent, termRef, run, runningCmd, refreshK
           </span>
         )}
       </div>
-
-      {/* Recent activity */}
-      {activity.length > 0 && (
-        <div className="border border-slate-800 rounded-xl px-4 py-3">
-          <div className="flex items-center gap-2 mb-2">
-            <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Recent activity</h3>
-          </div>
-          <div className="flex flex-col gap-1.5">
-            {activity.slice(0, 6).map((e, i) => (
-              <div key={i} className="flex items-center gap-2 text-[11px]">
-                <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${e.status === 'ok' ? 'bg-emerald-400' : 'bg-red-400'}`} />
-                <span className="text-slate-300">{e.action}</span>
-                {e.details && <span className="text-slate-500 font-mono truncate flex-1 min-w-0">{e.details}</span>}
-                <span className="text-slate-600 flex-shrink-0">{e.timestamp ? new Date(e.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
 
       {/* Command groups */}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
