@@ -110,12 +110,16 @@ function GroupCard({ title, color, children, className = '' }) {
   )
 }
 
-function SimpleGroupCard({ group, query, runningCmd, run }) {
+function SimpleGroupRow({ group, query, runningCmd, run }) {
   const c = COLORS[group.color] || COLORS.slate
   const visible = group.commands.filter((x) => matches(query, x.label, x.cmd, x.desc))
   if (query && visible.length === 0) return null
   return (
-    <GroupCard title={group.title} color={group.color}>
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 py-1.5 border-b border-slate-800/50 last:border-b-0">
+      <div className="flex items-center gap-1.5 w-[110px] shrink-0">
+        <div className={`w-1.5 h-3 rounded-full ${c.dot}`} />
+        <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">{group.title}</span>
+      </div>
       <div className="flex flex-wrap gap-1.5">
         {visible.map((x) => (
           <Pill
@@ -130,7 +134,7 @@ function SimpleGroupCard({ group, query, runningCmd, run }) {
           />
         ))}
       </div>
-    </GroupCard>
+    </div>
   )
 }
 
@@ -556,11 +560,15 @@ export default function CommandsPane({ agent, termRef, run, runningCmd }) {
         )}
       </div>
 
-      {/* Command groups */}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+      {/* Merged command groups */}
+      <div className="border border-slate-800 rounded-xl p-4">
         {SIMPLE_GROUPS.map((g) => (
-          <SimpleGroupCard key={g.title} group={g} query={query} runningCmd={runningCmd} run={run} />
+          <SimpleGroupRow key={g.title} group={g} query={query} runningCmd={runningCmd} run={run} />
         ))}
+      </div>
+
+      {/* Data cards */}
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
         <MessagingCard agent={agent} query={query} runningCmd={runningCmd} run={run} termRef={termRef} />
         <ModelsCard agent={agent} query={query} runningCmd={runningCmd} run={run} />
         <McpCard agent={agent} query={query} runningCmd={runningCmd} run={run} />
