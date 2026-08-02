@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../../lib/api'
+import { usePrompt } from '../../lib/prompt'
 
 /**
  * Commands — the "home" mode of an agent page.
@@ -225,7 +226,7 @@ function MessagingFlow({ agent, query, runningCmd, run, termRef }) {
 
 // ─── Models ──────────────────────────────────────────────────────
 
-function ModelsFlow({ agent, query, runningCmd, run }) {
+function ModelsFlow({ agent, query, runningCmd, run, prompt }) {
   const [config, setConfig] = useState(null)
 
   function load() {
@@ -239,19 +240,36 @@ function ModelsFlow({ agent, query, runningCmd, run }) {
   const fallback = config?.agents?.defaults?.model?.fallback || ''
 
   const pills = [
-    { cmd: 'openclaw configure --section model', label: 'Configure', desc: 'Interactive setup — API key, token or OAuth' },
-    { label: 'Logout', desc: 'Log out the selected provider profile', click: () => {
-      const prof = window.prompt('Profile ID to log out (see Auth list):')
-      if (!prof) return
-      run(`openclaw models auth logout ${prof} --yes`, { confirm: true })
+    { cmd: 'openclaw configure --section model', label: 'Add provider', desc: 'Interactive setup — API key, token or OAuth' },
+    { label: 'Logout profile', desc: 'Log out one saved auth profile', click: async () => {
+      const v = await prompt({
+        title: 'Logout model provider',
+        message: 'Log out one auth profile. Run "Auth profiles" first to see the exact profile IDs.',
+        confirmText: 'Logout',
+        danger: true,
+        fields: [{
+          key: 'profile', label: 'Profile ID', placeholder: 'e.g. openai:work',
+          hint: 'Found in "Auth profiles" — each row has an id like openai:manual or openai:work.',
+        }],
+      })
+      if (!v?.profile) return
+      run(`openclaw models auth logout ${v.profile} --yes`, { confirm: true })
     } },
-    { cmd: 'openclaw models auth list', label: 'Auth list', desc: 'Configured auth profiles' },
-    { cmd: 'openclaw models list', label: 'Logged in', desc: 'Models available with current auth (no --all)' },
-    { cmd: 'openclaw models status', label: 'Status', desc: 'Auth + model status' },
-    { label: 'Set default', desc: 'Set primary model by id', click: () => {
-      const m = window.prompt('Model id (provider/model), e.g. openai/gpt-5.6-sol:')
-      if (!m) return
-      run(`openclaw models set ${m}`)
+    { cmd: 'openclaw models auth list', label: 'Auth profiles', desc: 'List saved auth profiles' },
+    { cmd: 'openclaw models list', label: 'Available models', desc: 'Models you are logged in to (no --all)' },
+    { cmd: 'openclaw models status', label: 'Model status', desc: 'Auth + model status overview' },
+    { label: 'Set default model', desc: 'Pick the primary model by id', click: async () => {
+      const v = await prompt({
+        title: 'Set default model',
+        message: 'Set the primary model used by this agent.',
+        confirmText: 'Set model',
+        fields: [{
+          key: 'model', label: 'Model id', placeholder: 'e.g. openai/gpt-5.5',
+          hint: 'Format: provider/model. Pick from "Available models" or use any catalog id.',
+        }],
+      })
+      if (!v?.model) return
+      run(`openclaw models set ${v.model}`)
     } },
   ]
   const visible = pills.filter((x) => matches(query, x.label, x.cmd))
@@ -339,7 +357,7 @@ function sourceLabel(source) {
   return { label: source || 'User', color: 'bg-emerald-700' }
 }
 
-function SkillsFlow({ agent, query, runningCmd, run }) {
+function SkillsFlow({ agent, query, runningCmd, run, prompt }) {
   const [skills, setSkills] = useState([])
   const [msg, setMsg] = useState('')
   const [showInstall, setShowInstall] = useState(false)
@@ -352,10 +370,18 @@ function SkillsFlow({ agent, query, runningCmd, run }) {
   useEffect(load, [agent.name])
 
   const pills = [
-    { label: 'Search', desc: 'Search the skill catalog', click: () => {
-      const q = window.prompt('Search query:')
-      if (!q) return
-      run(`openclaw skills search ${q}`)
+    { label: 'Search', desc: 'Search the skill catalog', click: async () => {
+      const v = await prompt({
+        title: 'Search skills',
+        message: 'Find skills on the ClawHub catalog.',
+        confirmText: 'Search',
+        fields: [{
+          key: 'query', label: 'Search query', placeholder: 'e.g. redis, kubernetes',
+          hint: 'Keywords match skill names, descriptions and tags.',
+        }],
+      })
+      if (!v?.query) return
+      run(`openclaw skills search ${v.query}`)
     } },
     { cmd: 'openclaw skills update --all', label: 'Update all', desc: 'Update every installed skill', confirm: true },
     { label: 'Install', desc: 'Open the install box', click: () => setShowInstall(!showInstall) },
@@ -492,6 +518,7 @@ function BackupsFlow({ agent, query, runningCmd, run }) {
 
 export default function CommandsPane({ agent, termRef, run, runningCmd }) {
   const [query, setQuery] = useState('')
+  const prompt = usePrompt()
 
   return (
     <div className="space-y-4">
@@ -514,9 +541,9 @@ export default function CommandsPane({ agent, termRef, run, runningCmd }) {
           <FlowGroup key={g.title} group={g} query={query} runningCmd={runningCmd} run={run} />
         ))}
         <MessagingFlow agent={agent} query={query} runningCmd={runningCmd} run={run} termRef={termRef} />
-        <ModelsFlow agent={agent} query={query} runningCmd={runningCmd} run={run} />
+        <ModelsFlow agent={agent} query={query} runningCmd={runningCmd} run={run} prompt={prompt} />
         <McpFlow agent={agent} query={query} runningCmd={runningCmd} run={run} />
-        <SkillsFlow agent={agent} query={query} runningCmd={runningCmd} run={run} />
+        <SkillsFlow agent={agent} query={query} runningCmd={runningCmd} run={run} prompt={prompt} />
         <BackupsFlow agent={agent} query={query} runningCmd={runningCmd} run={run} />
       </div>
     </div>

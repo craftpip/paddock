@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { useAuth } from './stores/auth'
 import { ToastProvider } from './lib/toast'
 import { ConfirmProvider } from './lib/confirm'
+import { PromptProvider } from './lib/prompt'
 import Login from './pages/Login'
 import Setup from './pages/Setup'
 import Dashboard from './pages/Dashboard'
@@ -48,7 +49,8 @@ export default function App() {
   return (
     <ToastProvider>
       <ConfirmProvider>
-        <BrowserRouter>
+        <PromptProvider>
+          <BrowserRouter>
           <AuthGate>
             <Routes>
               <Route path="/login" element={<Login />} />
@@ -66,6 +68,7 @@ export default function App() {
             </Routes>
           </AuthGate>
         </BrowserRouter>
+        </PromptProvider>
       </ConfirmProvider>
     </ToastProvider>
   )
