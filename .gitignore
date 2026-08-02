@@ -14,16 +14,10 @@ src/data/app.db-shm
 src/data/bot-prefixes.json
 src/opencode.json
 
-# Instance build artifacts
-instances/*/openclaw/npm/
-
-# Instance runtime data (any agent type)
-instances/*/state/
-instances/*/agents/*/agent/
-instances/*/agents/*/sessions/
-instances/*/devices/
-instances/*/identity/
-instances/*/workspace-attestations/
+# Instance runtime data (PADs live on disk, not in git).
+# Folder itself stays tracked; ignore everything inside it.
+instances/*
+!instances/README.md
 
 # Backups
 backups/

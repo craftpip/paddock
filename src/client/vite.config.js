@@ -9,8 +9,8 @@ export default defineConfig({
     port: 5173,
     host: '0.0.0.0',
     proxy: {
-      '/api': { target: 'http://localhost:5050', changeOrigin: true },
-      '/ws': { target: 'ws://localhost:5050', ws: true },
+      '/api': { target: 'http://localhost:6789', changeOrigin: true },
+      '/ws': { target: 'ws://localhost:6789', ws: true },
     },
   },
   build: {

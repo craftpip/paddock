@@ -56,9 +56,38 @@ function append(job, event) {
   if (event.type === 'done') { job.done = true; job.state = 'done'; }
   if (event.type === 'error') { job.failed = true; job.state = 'failed'; job.error = event.message; }
   for (const sub of job.subs) {
-    try { sub.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`); } catch {}
+    try { sub.write(encodeEvent(event)); } catch {}
   }
   return event.n;
+}
+
+function encodeEvent(event) {
+  return `event: ${event.type}\nid: ${event.n}\ndata: ${JSON.stringify(event)}\n\n`;
+}
+
+/** Attach an SSE response to a job and replay events after `since`. */
+function subscribe(job, res, since = 0) {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  res.write('retry: 3000\n\n');
+  job.subs.add(res);
+  for (const ev of job.events) {
+    if (ev.n >= since) {
+      try { res.write(encodeEvent(ev)); } catch {}
+    }
+  }
+  // Keep-alive so proxies don't drop the stream during long quiet builds.
+  const keepAlive = setInterval(() => {
+    try { res.write(': keepalive\n\n'); } catch { clearInterval(keepAlive); }
+  }, 15000);
+  res.on('close', () => {
+    clearInterval(keepAlive);
+    job.subs.delete(res);
+  });
 }
 
 function setStep(job, step, state) {
@@ -79,24 +108,6 @@ function fail(job, message) {
   const n = append(job, { type: 'error', message });
   scheduleCleanup(job.name);
   return n;
-}
-
-/** Attach an SSE response to a job and replay events after `since`. */
-function subscribe(job, res, since = 0) {
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    Connection: 'keep-alive',
-    'X-Accel-Buffering': 'no',
-  });
-  res.write('retry: 3000\n\n');
-  job.subs.add(res);
-  for (const ev of job.events) {
-    if (ev.n >= since) {
-      try { res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`); } catch {}
-    }
-  }
-  res.on('close', () => job.subs.delete(res));
 }
 
 /** Simple polling fallback status. Returns null if the job is gone. */

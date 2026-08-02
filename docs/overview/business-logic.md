@@ -94,7 +94,7 @@ Workspace files can be viewed and edited in a modal. Editable types are determin
 5. **meta.env**: Write `ROOT_PASSWORD`, `AGENT`, `PORT` to the instance dir
 6. **Compose file**: Generate `docker-compose.yml` with absolute host paths (fixes bind-mount split-brain)
 7. **Container start**: `docker compose -f <compose> up -d`
-8. **Workspace setup**: For OpenClaw/PicoClaw agents, run `openclaw setup` inside the container (retry up to 15 times with 1s delay)
+8. **Workspace setup**: For OpenClaw/PicoClaw agents, run `openclaw setup --baseline` inside the container (retry up to 15 times with 1s delay)
 9. **Restart**: Restart container after setup
 
 ### Start / Stop / Restart

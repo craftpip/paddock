@@ -177,17 +177,24 @@ The `npm/` folder is OpenClaw's internal plugin cache (not project dependencies)
 sudo find instances/ -name '.git' -type d -exec rm -rf {} + 2>/dev/null
 ```
 
-### PAD Creation: `openclaw setup` hangs or workspace is empty
+### PAD Creation: `openclaw setup` requires a TTY (v2026.7.x)
 
-**Root cause:** The `openclaw setup` command in v2026.6.34 is already non-interactive by default (creates config + workspace + session dirs). But:
-- Using `--baseline` flag fails with "does not recognize option --baseline" (flag was removed in this version)
-- Not using any flags is correct: `openclaw setup`
+**Root cause:** Since v2026.7.x, `openclaw setup` is an **alias for `openclaw onboard`** and refuses to run without an interactive TTY:
+```
+Onboarding needs an interactive TTY. Use `openclaw onboard --non-interactive --accept-risk ...` for automation.
+```
+Running plain `openclaw setup` via `docker exec` (no TTY) fails every retry and the create flow hangs.
+
+**Fix:** Use `openclaw setup --baseline` — it creates config + workspace + session dirs non-interactively (no onboarding):
+```
+$ docker exec <pad> openclaw setup --baseline
+Wrote ~/.openclaw/openclaw.json
+Workspace OK: ~/.openclaw/workspace
+Sessions OK: ~/.openclaw/agents/main/sessions
+Setup complete: config, workspace, and session directories are ready.
+```
 
 **Always check the current docs** before using OpenClaw CLI: https://docs.openclaw.ai/cli/setup
-
-**Fix for createVm flow:**
-- Use `openclaw setup` without flags in `docker exec` — it creates workspace files non-interactively
-- Verify with `docker exec <pad> openclaw setup` and check for "Workspace OK" in output
 
 ### PAD Creation: Redundant `docker compose up --force-recreate` kills bind mount
 

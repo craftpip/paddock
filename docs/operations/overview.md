@@ -9,7 +9,7 @@ POST `/api/agents/create` triggers async creation:
 2. Save `meta.env` with agent metadata
 3. Generate `docker-compose.yml` with absolute host paths
 4. If clone source: backup source, restore into target
-5. Run `openclaw setup` inside container
+5. Run `openclaw setup --baseline` inside container (non-interactive; plain `openclaw setup` requires a TTY since v2026.7.x)
 6. `docker compose up -d` for the instance
 
 Progress tracked in-memory, polled via `/api/agents/create-status/:name`.

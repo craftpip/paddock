@@ -137,7 +137,7 @@ Form to create a new PAD, laid out in three rows:
 1. Form submits via fetch (no page navigation)
 2. Inline progress bar appears on the same page (no layout-breaking body swap):
    - "Creating container…"
-   - "Running setup…" (for OpenClaw/PicoClaw — runs `openclaw setup`)
+   - "Running setup…" (for OpenClaw/PicoClaw — runs `openclaw setup --baseline`)
    - "Done"
 3. Redirects to agent detail on completion
 

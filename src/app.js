@@ -16,6 +16,7 @@ const creds = require('./creds');
 const registry = require('./services/agent-registry');
 const vm = require('./services/vm-manager');
 const backup = require('./services/backup-manager');
+const jobLog = require('./services/job-log');
 const { getDb } = require('./services/db');
 const { setupSession, requireAuth, requireAdmin, csrfToken, hashPassword, verifyPassword, checkNeedsSetup } = require('./middleware/auth');
 const { rateLimit } = require('./middleware/rateLimit');
@@ -1268,38 +1269,101 @@ app.post('/api/agents/create', async (req, res) => {
   const { name, agent, backup_file, assign_to } = req.body;
   if (!name) return res.status(400).json({ error: 'Name is required' });
   if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
+  if (registry.getAgent(name)) return res.status(409).json({ error: 'Agent already exists' });
+  if (backup_file && !safeBackupPath(backup_file)) return res.status(400).json({ error: 'Invalid backup file' });
 
-  try {
-    await vm.createVm(name, {
-      agent: agent || 'openclaw',
-      mode: 'fresh',
-    });
-    registry.dockerPsList(true);
+  const job = jobLog.getOrCreateJob(name);
+  const log = (stream, text) => jobLog.line(job, stream, text);
+  const step = (stepName, state) => jobLog.setStep(job, stepName, state);
 
-    // Set owner_id in DB
+  // Respond immediately; the create runs in the background and streams its
+  // output to the SSE endpoint (GET /api/agents/:name/create-log).
+  res.status(202).json({ ok: true, job: name, streaming: true });
+
+  setImmediate(async () => {
     try {
-      const db = getDb();
-      let ownerId = req.session.userId;
-      if (assign_to && req.session.role === 'admin') {
-        const user = db.prepare('SELECT id FROM users WHERE id = ?').get(assign_to);
-        if (user) ownerId = assign_to;
-      }
-      if (ownerId) {
-        db.prepare('UPDATE agents SET owner_id = ? WHERE name = ?').run(ownerId, name);
-      }
-    } catch {}
+      const isClone = !!backup_file;
+      await vm.createVm(name, {
+        agent: agent || 'openclaw',
+        mode: 'fresh',
+        skipSetup: isClone,
+        onLog: log,
+        onStep: step,
+      });
+      registry.discoverAgents();
 
-    // Optionally restore from backup
-    if (backup_file) {
+      // Set owner_id in DB
       try {
-        await backup.restoreAgent(name, backup_file);
-      } catch (e) { console.error('Backup restore error:', e.message); }
-    }
+        const db = getDb();
+        let ownerId = req.session.userId;
+        if (assign_to && req.session.role === 'admin') {
+          const user = db.prepare('SELECT id FROM users WHERE id = ?').get(assign_to);
+          if (user) ownerId = assign_to;
+        }
+        if (ownerId) {
+          db.prepare('UPDATE agents SET owner_id = ? WHERE name = ?').run(ownerId, name);
+        }
+      } catch {}
 
-    res.json({ ok: true, name });
-  } catch (e) {
-    res.status(400).json({ error: e.message });
+      // Clone from backup: import the archive into the container
+      if (isClone) {
+        step('restore', 'start');
+        await backup.restoreAgent(name, backup_file, log);
+        step('restore', 'end');
+      }
+
+      registry.recordActivity(name, 'lifecycle', 'create', 'ok', `Agent created (type=${agent || 'openclaw'})`);
+      jobLog.finish(job, true);
+    } catch (e) {
+      console.error(`Create failed for ${name}:`, e.message);
+      // The agent may not exist in the agents table yet (createVm failed before
+      // the registry sync), so recordActivity can hit an FK violation and crash
+      // the whole process. Guard it.
+      try {
+        registry.dockerPsList(true);
+        registry.discoverAgents();
+        registry.recordActivity(name, 'lifecycle', 'create', 'error', e.message);
+      } catch (auditErr) {
+        console.error('Failed to record create error activity:', auditErr.message);
+      }
+      jobLog.fail(job, e.message);
+    }
+  });
+});
+
+// ─── API: Create Agent — live log stream (SSE) ──────────────
+
+app.get('/api/agents/:name/create-log', (req, res) => {
+  const name = safeVmName(req.params.name);
+  if (!name) return res.status(400).json({ error: 'Invalid agent name' });
+
+  const since = parseInt(req.headers['last-event-id'], 10) || Math.max(0, parseInt(req.query.since, 10) || 0);
+  const job = jobLog.getJob(name);
+
+  if (!job) {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    // No job (or already cleaned up): send a terminal "gone" event.
+    res.write(`event: error\ndata: ${JSON.stringify({ message: 'Create job not found (server may have restarted)' })}\n\n`);
+    res.end();
+    return;
   }
+
+  jobLog.subscribe(job, res, since);
+});
+
+// ─── API: Create Agent — status poll (fallback) ─────────────
+
+app.get('/api/agents/:name/create-status', (req, res) => {
+  const name = safeVmName(req.params.name);
+  if (!name) return res.status(400).json({ error: 'Invalid agent name' });
+  const status = jobLog.getStatus(name);
+  if (!status) return res.json({ done: false, found: false });
+  res.json({ found: true, ...status });
 });
 
 // ─── API: Onboard Agent ─────────────────────────────────────
@@ -1482,7 +1546,7 @@ app.use((err, req, res, next) => {
 
 // ─── Boot ───────────────────────────────────────────────────
 
-const server = app.listen(5050, () => console.log('VM WebUI listening on port 5050'));
+const server = app.listen(6789, () => console.log('VM WebUI listening on port 6789'));
 
 const wss = new WebSocketServer({ server });
 

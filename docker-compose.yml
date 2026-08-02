@@ -3,10 +3,10 @@ services:
     build:
       context: ./src
     image: paddock-webui:latest
-    container_name: paddock-webui
+    container_name: paddock
     restart: unless-stopped
     ports:
-      - "5051:5050"
+      - "6789:6789"
       - "5173:5173"
     volumes:
       - .:/workspace:rw

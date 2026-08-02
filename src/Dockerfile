@@ -17,6 +17,6 @@ COPY . .
 
 RUN mkdir -p /app/data /app/views/partials
 
-EXPOSE 5050
+EXPOSE 6789
 
 CMD ["node", "app.js"]

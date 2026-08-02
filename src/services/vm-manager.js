@@ -64,11 +64,15 @@ function generateInstanceCompose(name, agent, password, port) {
   let yaml = 'services:\n';
   yaml += `  ${name}:\n`;
   yaml += `    build:\n`;
-  yaml += `      context: ${path.resolve(HOST_WORKSPACE, 'instances', name, build)}\n`;
+  // Build context must be resolvable by the docker CLI, which runs INSIDE the
+  // webui container → use WORKSPACE (the container's /workspace view).
+  yaml += `      context: ${path.resolve(WORKSPACE, 'instances', name, build)}\n`;
   yaml += `    image: ${image}\n`;
   yaml += `    container_name: ${name}\n`;
   yaml += `    restart: unless-stopped\n`;
   if (port) yaml += `    ports:\n      - "${port}:22"\n`;
+  // Volume sources are resolved by the Docker DAEMON → use HOST_WORKSPACE
+  // (the daemon's host view, e.g. /www2/paddock).
   yaml += `    volumes:\n      - ${HOST_WORKSPACE}/instances/${name}/${agent}:${dataDir}\n`;
   yaml += `    environment:\n      TZ: Asia/Kolkata\n      ROOT_PASSWORD: ${password || ''}\n`;
   return yaml;
@@ -195,7 +199,7 @@ async function createVm(name, options = {}) {
     let ready = false;
     for (let i = 0; i < 15; i++) {
       try {
-        await runCmdStream('docker', ['exec', name, 'openclaw', 'setup'], { onLog, timeout: 60000 });
+        await runCmdStream('docker', ['exec', name, 'openclaw', 'setup', '--baseline'], { onLog, timeout: 60000 });
         ready = true;
         break;
       } catch {
@@ -206,7 +210,7 @@ async function createVm(name, options = {}) {
     }
     if (!ready) {
       onStep('setup', 'error');
-      throw new Error(`Container '${name}' did not become ready for openclaw setup`);
+      throw new Error(`Container '${name}' did not become ready for openclaw setup --baseline`);
     }
     onStep('setup', 'end');
   }

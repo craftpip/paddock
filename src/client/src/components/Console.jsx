@@ -60,6 +60,8 @@ export default function Console({
               <span><span className="text-slate-500">{line.ts}</span> <span className="text-cyan-400">$ {line.cmd}</span></span>
             ) : line.type === 'err' ? (
               <span className="text-red-400">{line.text}</span>
+            ) : line.type === 'sys' ? (
+              <span className="text-slate-500 italic">{line.text}</span>
             ) : (
               <span className="text-slate-300">{line.text}</span>
             )}

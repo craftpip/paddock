@@ -1,17 +1,18 @@
 # Terminal-First UI
 
-## Status: Updated 2026-08-02 — one persistent terminal per agent
+## Status: Final design (2026-08-02) — one home page + 5 modes, one terminal per agent
 
 ## Core Concept
 
 The agent page is a **terminal emulator with a GUI command picker**.
 
-The terminal is **always on screen**. It is mounted **once per agent** at the page
-level and stays alive the whole time you're on that agent's page. Switching tabs
-swaps the **button toolbar** above the terminal — the shell is never torn down.
-Pages that don't need a shell (workspace, sessions, ...) hide the terminal, but it
-stays mounted underneath, so when you come back to a terminal tab your scrollback
-and your shell session are still exactly where you left them.
+The terminal is the home. It is mounted **once per agent**, at the page level, and
+stays alive the whole time you're on that agent's page. It is **always visible** —
+docked at the bottom — no matter what mode you're in.
+
+The old 13 tabs collapse to **6**: one **Commands** home (all terminal-driven tabs
+merged into grouped buttons) plus 5 GUI modes that genuinely need real GUIs
+(workspace, config, logs, sessions, activity).
 
 GUI elements (tables, cards, lists) are for **displaying information**. For
 **entering things, setting things up, configuring** — the terminal flow takes over.
@@ -24,28 +25,21 @@ also type straight into the shell — it is a real bash session, not a mock.
 Every command run for this agent accumulates in that one terminal. You never juggle
 multiple terminals — **one terminal per agent, it remembers everything.**
 
-## Why This Update
+## Why This Design
 
-The original version of this plan (below) described a per-page console where each
-tab owned its own terminal session. Practically that meant: switch tab → session
-killed, history gone, connect again. User feedback was clear:
+Two decisions drive the whole layout:
 
-> Show the terminal forever. Tabs change the buttons, keep the terminal. For pages
-> that don't need the terminal, hide it. All commands run in that one terminal and
-> the user can scroll back and see what was previously run for this agent. No more
-> switching between different terminals.
+1. **One terminal per agent, always visible.** Switching pages must never kill the
+   shell or the scrollback. The user scrolls up to see everything ever run for this
+   agent — health checks, model setups, messaging auth, all in one place.
+2. **Most tabs are just command launchers.** Health, messaging, models, mcp,
+   skills, backups, config — they all do the same thing: spawn an `openclaw`
+   command. Keeping them as separate pages meant separate terminal instances,
+   separate sessions, lost history. Merging them into one Commands page means
+   **one page owns the terminal** — least maintenance possible.
 
-So the architecture changed:
-
-- **Before:** one `<Terminal>` / `<Console>` per tab, unmounted on tab switch,
-  scrollback + shell session lost.
-- **After:** one `<Terminal>` at the `AgentDetail` page level, mounted once,
-  shown/hidden by tab, never unmounted while on the agent page. Tabs become
-  button toolbars that feed commands into that shared instance.
-
-The **Health tab** stays the reference implementation (buttons + terminal), but
-every terminal-driven tab now reuses the *same* mounted terminal instead of
-spawning its own.
+The `Terminal` component (`src/client/src/components/Terminal.jsx`) stays the
+single source of truth for the shell. One component, one page, one instance.
 
 ## Scope
 
@@ -53,26 +47,74 @@ spawning its own.
 - **Phase 2**: Nanopot
 - **Phase 3**: Hermes PAD
 
+## The Merge Map
+
+**13 tabs → 1 Commands home + 5 GUI modes.**
+
+### Merged into the Commands page (9 tabs disappear)
+
+| Old tab | Becomes |
+|---------|---------|
+| Terminal | The persistent dock itself — no tab needed |
+| Health | Command groups: Diagnostics, Doctor, Security, Memory |
+| Messaging | Group "Messaging" + creds panel (paste bot tokens / user IDs) |
+| Models | Group "Models" + strip showing current primary / fallback model |
+| MCP | Group "MCP" + server list |
+| Skills | Group "Skills" + skill list |
+| Backups | Group "Backups" + backup table |
+| Config | Group "Config" (validate / reload / set) — the JSON editor is a mode |
+| Overview | Absorbed into the agent header (type, runtime, model) + a recent-activity strip on the Commands page |
+
+### Stay as GUI modes (real GUIs, not commands)
+
+| Mode | Why it stays |
+|------|--------------|
+| Workspace | File browser — needs tables + a file editor |
+| Config | JSON editor — needs a textarea |
+| Logs | Streamed viewer |
+| Sessions | Table |
+| Activity | Table |
+
 ## Layout
 
 ```
-┌──────────┬───────────────────────────────────────────────────────┐
-│ Sidebar  │  Tab content (scrollable)                             │
-│          │  ┌─────────────────────────────────────────────────┐  │
-│ Overview │  │  Toolbar: [Group: cmd] [cmd]  [Group: cmd] ... │  │  ← tab-specific buttons
-│ Workspace│  └─────────────────────────────────────────────────┘  │
-│ Terminal │  Status / display widgets (per tab, optional)         │
-│ Health   │  ┌─────────────────────────────────────────────────┐  │
-│ ...      │  │  TERMINAL (docked, always visible on shell tabs)│  │  ← one shared instance
-│          │  │  $ openclaw health --json                       │  │
-│          │  └─────────────────────────────────────────────────┘  │
-└──────────┴───────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│ name · status ● · cpu/mem · type/runtime/model           │  ← agent header (persistent)
+│                          [▶ start] [⏸ stop] [⏻] [lock]    │
+├──────────────────────────────────────────────────────────┤
+│ [Commands] [Workspace] [Config] [Logs] [Sessions] [Activity] │  ← mode tabs (transient)
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│  MODE CONTENT (scrolls, swaps per mode)                  │
+│                                                          │
+│  Commands mode = the merged tabs as grouped buttons:     │
+│   [Diagnostics]  Health  Status  Logs                    │
+│   [Doctor]       Doctor  Fix  Lint  Deep                 │
+│   [Security]     Audit  Audit deep  Audit fix            │
+│   [Memory]       Status  Reindex  Force reindex  Promote │
+│   [Messaging]    Create Telegram  Login  Logout  Remove  │
+│   [Models]       API key  OAuth  Set primary  List       │
+│   [MCP]          Add  Remove  Probe                      │
+│   [Skills]       Install  Update  Remove  Verify         │
+│   [Backups]      Create  Restore                        │
+│   [Config]       Validate  Reload  Set                  │
+│   [Other]        Backup  Update  Channels probe          │
+│                                                          │
+├──────────────────────────────────────────────────────────┤
+│  TERMINAL DOCK (fixed height, ALWAYS visible)            │  ← persistent
+│  $ openclaw health --json                                │
+└──────────────────────────────────────────────────────────┘
 ```
 
-The right column is a **flex column**: tab content on top (scrolls itself), the
-terminal docked at the bottom on shell tabs. The terminal has a fixed-ish height
-(e.g. `40vh`, min `320px`), so it never competes with the tab content for scroll
-space.
+The right area is a **flex column**: mode content on top (scrolls itself), the
+terminal docked at the bottom (fixed-ish height, `40vh`, min `320px`). The
+terminal never competes with mode content for scroll space.
+
+- **Commands is the default and the landing page** — after agent creation the
+  user lands here, terminal already live.
+- Switching to Workspace / Config / Logs does **not** unmount the terminal — it
+  stays docked with its session and scrollback intact.
+- The agent sidebar is gone; the header carries name, status, stats, controls.
 
 ## Terminal States
 
@@ -83,30 +125,7 @@ space.
 | **Running** | Output streaming live. If the CLI prompts, terminal unfreezes | Yes — stdin of the running command |
 
 The lock is a **per-agent toggle** (persisted in `localStorage`) in the terminal
-header. `Interactive` is the default: the point of one persistent terminal is that
-it behaves like a real shell you can just use, while the buttons give you a
-shortcut for every OpenClaw command.
-
-## Tab Classification
-
-| Tab | Type | What changes |
-|-----|------|--------------|
-| Health | **Terminal-driven** | Done — buttons + terminal (reference impl) |
-| Messaging | **Terminal-driven** | Buttons (Create/Login/Remove per channel) + creds panel + terminal |
-| Models | **Terminal-driven** | Buttons (auth login / paste-api-key / set model) + provider list + terminal |
-| MCP | **Terminal-driven** | Buttons (add/remove/probe server) + server list + terminal |
-| Skills | **Terminal-driven** | Buttons (install/update/remove/verify) + skill list + terminal |
-| Backups | **Terminal-driven** | Buttons (create/restore/list) + backup table + terminal |
-| Config | **Hybrid** | Keep the JSON editor (it's a text file), add terminal buttons (validate / reload / set) |
-| Terminal | **Full-height shell** | No toolbar, terminal fills the tab. Same instance, just taller |
-| Overview | GUI-only | No terminal — stat cards, quick links, activity |
-| Workspace | GUI-only | No terminal — file browser |
-| Logs | GUI-only | No terminal — streamed container logs |
-| Sessions | GUI-only | No terminal — table |
-| Activity | GUI-only | No terminal — table |
-
-For **GUI-only** tabs the terminal is hidden but *stays mounted* (see below), so
-the shell session and scrollback survive the detour.
+header. `Interactive` is the default.
 
 ## How the Persistent Terminal Works
 
@@ -117,19 +136,21 @@ function AgentDetail() {
   const termRef = useRef(null)
 
   return (
-    <div className="flex h-full" id="agent-layout">
-      <aside>… tabs …</aside>
-      <div className="flex-1 min-w-0 flex flex-col">
+    <div className="flex flex-col h-full">
+      <AgentHeader agent={agent} />
+      <ModeTabs current={mode} onChange={setMode} />
+      <div className="flex-1 min-h-0 flex flex-col">
         <div className="flex-1 min-h-0 overflow-y-auto p-6">
-          {currentTab === 'health'    && <HealthToolbar  agent={agent} termRef={termRef} />}
-          {currentTab === 'messaging' && <MessagingToolbar agent={agent} termRef={termRef} />}
-          … only the toolbar/content renders per tab …
+          {mode === 'commands'  && <CommandsPane agent={agent} termRef={termRef} />}
+          {mode === 'workspace' && <WorkspacePane agent={agent} />}
+          {mode === 'config'    && <ConfigPane agent={agent} termRef={termRef} />}
+          {mode === 'logs'      && <LogsPane agent={agent} />}
+          {mode === 'sessions'  && <SessionsPane agent={agent} />}
+          {mode === 'activity'  && <ActivityPane agent={agent} />}
         </div>
-        {SHELL_TABS.has(currentTab) && (
-          <div className="h-[40vh] min-h-[320px] shrink-0 px-6 pb-6">
-            <Terminal ref={termRef} name={agent.name} title={agent.display_name} height="100%" />
-          </div>
-        )}
+        <div className="h-[40vh] min-h-[320px] shrink-0 px-6 pb-6">
+          <Terminal ref={termRef} name={agent.name} title={agent.display_name} height="100%" />
+        </div>
       </div>
     </div>
   )
@@ -138,31 +159,27 @@ function AgentDetail() {
 
 Key rules:
 
-- The `<Terminal>` sits **outside** the per-tab render. It never unmounts while
-  the agent page is open. Tab switches only change what renders above it.
-- "Hide on GUI-only tabs" is done by **not rendering the wrapper div** — which
-  would unmount the terminal and kill the session. Instead the wrapper stays and
-  is toggled with a `hidden` class (`display: none`). The xterm buffer and the
-  WebSocket bash session survive, and the existing **ResizeObserver** refits the
-  terminal automatically when it becomes visible again.
-  - xterm inside `display: none` reports zero size — that's fine. On reveal the
-    ResizeObserver fires and calls `fit()` + sends a `resize` frame. No extra work.
+- The `<Terminal>` sits **outside** the per-mode render. It never unmounts while
+  the agent page is open. Mode switches only change what renders above it.
+- The dock is always rendered — on every mode. Nothing needs a `display: none`
+  dance because the terminal is never hidden at all. GUI modes simply have no
+  buttons above it.
 - Switching **agents** (`name` prop changes) tears down and starts a fresh session
   — that behavior already exists in the component.
-- The dock height can grow: the **Terminal tab** passes `height="100%"` inside a
-  `flex-1` wrapper so it becomes the full-height shell.
+- The dock can grow later (e.g. a full-height "big terminal" toggle in the header)
+  by changing the wrapper's height — the ResizeObserver + resize frame already
+  handle it.
 
 ## Terminal Component Changes Needed
 
-The shared `<Terminal>` component (`src/client/src/components/Terminal.jsx`)
-needs three additions to support this:
+The shared `<Terminal>` component needs three additions:
 
 1. **Tracked `runCommand`** — today completion is only detected in locked mode
    (sentinel). Buttons on an *unlocked* terminal need a busy indicator too. Add
    `runCommand(cmd, { track: true })` which injects the completion sentinel
    (`stty -echo\r` + `stty echo; <cmd>; echo __PAD_DONE_<id>__\r`) but **does not
-   lock input** the way `disabled` mode does. `onCommandStart` / `onCommandDone`
-   fire so buttons can show a spinner and stay disabled while running.
+   lock input**. `onCommandStart` / `onCommandDone` fire so buttons can show a
+   spinner and stay disabled while running.
 
 2. **Secret paste** — pasting a credential into the shared shell with `write()`
    would echo the secret into the scrollback (and history). Wrap pastes the same
@@ -174,8 +191,8 @@ needs three additions to support this:
    appears in the visible buffer.
 
 3. **Lock toggle** — a `Lock` / `Unlock` button in the terminal header (persisted
-   per agent), so `disabled` mode is now a user-facing feature instead of a
-   per-tab prop. Buttons keep working in both modes.
+   per agent), so `disabled` mode is a user-facing feature instead of a per-tab
+   prop. Buttons keep working in both modes.
 
 ## Command History
 
@@ -184,13 +201,11 @@ The user should always be able to see "what was run for this agent". Two layers:
 1. **In-session scrollback** (free). The persistent terminal keeps one running
    buffer (10000 lines). Scrolling up shows every command + output since you
    opened the agent page. This is the primary experience.
-
 2. **Persistent command log** (survives refresh / agent switch). The backend
-   records every button-issued command in the activity store (same place
-   start/stop/restart events go). A small **history popover** (clock icon in the
-   terminal header) lists past commands with timestamps + exit status; clicking
-   one re-runs it. Optional: also capture the user's own typed commands from the
-   shell's `~/.bash_history`.
+   records every button-issued command in the activity store. A **history popover**
+   (clock icon in the terminal header) lists past commands with timestamps + exit
+   status; clicking one re-runs it. Optional: also capture the user's typed
+   commands from the shell's `~/.bash_history`.
 
 - **Clear** wipes the visible scrollback only, never the log.
 - **Reconnect** starts a fresh bash session and is destructive to the current
@@ -274,6 +289,11 @@ const DOT_COLORS = {
 Buttons are disabled while any tracked command is running. Only one tracked
 command at a time (free typing in the shell is unaffected).
 
+**Group layout on the Commands page:** groups render as cards (2–3 per row) rather
+than one long bar, since we now have ~11 groups. Each card: colored group header +
+pill buttons inside. A search box at the top filters buttons by label/command
+across all groups.
+
 ## Shared `run()` helper
 
 One helper per agent page, used by every toolbar:
@@ -295,9 +315,9 @@ File: `src/client/src/components/Console.jsx`
 
 Still exists, but its role shrinks. It is the **display-only sibling** for pages
 that just show command output without an interactive shell — after the migration,
-mostly nothing on the agent page uses it. It stays for any future read-only
-"run and show" surfaces (e.g. fleet-wide commands). The interactive shell is
-always the shared `<Terminal>`.
+nothing on the agent page uses it. It stays for any future read-only "run and show"
+surfaces (e.g. fleet-wide commands). The interactive shell is always the shared
+`<Terminal>`.
 
 ## Credential Paste Pattern
 
@@ -316,21 +336,22 @@ terminal buffer or history. This replaces the old `/ws/messaging`
 `credential-paste` message — the PTY already gives us stdin, we just need the
 echo suppression.
 
-### Split Layout Variant (Messaging)
+### Split Layout Variant (Messaging group)
 
-Pages that need a credentials side panel keep it, now beside the shared terminal:
+Pages that need a credentials side panel keep it, now beside the shared terminal.
+On the Commands page the creds panel lives **inside the Messaging group card**
+(compact list of saved bot tokens / user IDs):
 
 ```
-┌──────────────────────────────────────┬──────────────┐
-│  TERMINAL (3/4)                      │ Creds (1/4)  │
-│  $ openclaw channels add --channel ..│ [bot1] [bot2]│
-│  Enter bot token: █                  │ [user1]      │
-└──────────────────────────────────────┴──────────────┘
+┌── Messaging ───────────────────────┬──────────────┐
+│ [Create telegram] [Login] [Logout] │ Creds        │
+│ [Remove] [Status]                  │ [bot1] [bot2]│
+└────────────────────────────────────┴──────────────┘
 ```
 
 - Creds panel shows saved bot tokens / user IDs (from `/api/credentials`).
 - Clicking a credential calls `pasteSecret()` → into the running command.
-- Refresh: after a command completes, the display strip reloads.
+- After a command completes, display strips reload.
 
 ## Command Definitions
 
@@ -393,28 +414,35 @@ Order matters — do the risky/loved pages first, retire old WS endpoints last.
 
 - [x] `Terminal.jsx` extracted as the one shell component (see `terminal-component.md`)
 - [x] Health tab = buttons + terminal (reference implementation)
-- [ ] **Lift** `<Terminal>` to page level, mount once, keep mounted, toggle visibility per tab
+- [ ] Restructure `AgentDetail.jsx`: header + 6 mode tabs + docked `<Terminal>`
 - [ ] Add tracked `runCommand(cmd, { track: true })` to the terminal
 - [ ] Add `pasteSecret()` to the terminal
 - [ ] Add Lock toggle (persisted per agent)
+- [ ] Build `CommandsPane`: group cards + search + status strips
+  - [ ] Health groups (Diagnostics / Doctor / Security / Memory / Other)
+  - [ ] Messaging group + creds panel
+  - [ ] Models group + primary/fallback strip
+  - [ ] MCP group + server list
+  - [ ] Skills group + skill list
+  - [ ] Backups group + backup table
+  - [ ] Config group (validate / reload / set)
+- [ ] Agent header: name, status, stats, type/runtime/model, start/stop/restart, lock
+- [ ] Recent-activity strip on the Commands page (from old Overview)
+- [ ] Move Workspace / Config / Logs / Sessions / Activity into modes (mostly copy)
 - [ ] Add history popover + backend `command-log` recording
-- [ ] **Messaging** → toolbar + creds panel + shared terminal (retire `/ws/messaging`)
-- [ ] **Models** → toolbar + provider list + shared terminal
-- [ ] **MCP** → toolbar + server list + shared terminal
-- [ ] **Skills** → toolbar + skill list + shared terminal
-- [ ] **Backups** → toolbar + backup table + shared terminal
-- [ ] **Config** → hybrid: JSON editor + terminal buttons (validate / reload / set)
-- [ ] **Terminal** tab → full-height shell on the same instance
-- [ ] Retire `/ws/exec/:name`, `/api/agents/:name/exec-stream`
-- [ ] Browser-test: tab switching keeps scrollback + session; GUI-only tabs hide terminal; refresh restores history popover
+- [ ] Retire `/ws/messaging`, `/ws/exec/:name`, `/api/agents/:name/exec-stream`
+- [ ] Browser-test: mode switching keeps terminal session + scrollback; after
+      creation lands on Commands; history popover survives refresh
 
 ## Rules
 
 - **One terminal per agent.** It mounts once, lives at the page level, and is
-  never unmounted while the agent page is open. Tabs swap the toolbar, not the shell.
-- **Hiding ≠ unmounting.** GUI-only tabs use `display: none` on the wrapper so
-  scrollback and the bash session survive.
-- Command definitions are hardcoded per-tab — not a config file, not scraped.
+  never unmounted while the agent page is open. Modes swap the content above it,
+  never the shell.
+- **The terminal is always visible** — docked on every mode. Never collapsed,
+  never hidden, never re-created on mode switch.
+- **Commands is the default landing mode**, including right after agent creation.
+- Command definitions are hardcoded per-group — not a config file, not scraped.
 - The user can free-type. The buttons are shortcuts, not the only input path.
 - Only one **tracked** command runs at a time. Free typing is unaffected.
 - Command history is logged — exact CLI command + exit status, viewable from the
@@ -424,17 +452,16 @@ Order matters — do the risky/loved pages first, retire old WS endpoints last.
 - Terminal prompt style: simple `$` is fine.
 - Multi-command flows run sequentially in the same terminal. Post-setup
   verification commands can run internally without terminal display.
-- **The terminal is always visible on shell tabs** — never collapsed, never hidden.
 
 ## Open Questions
 
 - **Long-running commands** — background mode? Progress indicator? (e.g. `openclaw
-  memory index` can take a while; do we block the tab or let it stream?)
+  memory index` can take a while; do we block the mode or let it stream?)
 - **Ctrl+C / interrupt** — should buttons offer a Stop that sends `\x03` to the
   shell? It's natural in an interactive terminal, but a button would be nicer
   than reaching for the keyboard.
 - **Command log retention** — cap the log (e.g. last 100 entries per agent)?
 - **bash_history capture** — worth wiring the user's typed commands into the
   history popover, or is scrollback enough?
-- **Multi-agent superpowers later** — can the same terminal dock concept scale to
-  a fleet view (pick agent → same dock, new session)?
+- **"Big terminal" toggle** — a way to temporarily maximize the dock over the
+  mode content for a focused shell session?
