@@ -13,7 +13,8 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.l
     make \
     build-essential \
     jq \
-    python3 && \
+    python3 \
+    tmux && \
     rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /var/run/sshd && \

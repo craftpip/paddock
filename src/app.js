@@ -259,6 +259,84 @@ async function dockerLogs(vmName, tail = 100) {
   return r.stdout + r.stderr;
 }
 
+// ─── Terminal sessions (persistent tmux shells inside the PAD) ─────────────
+// Each terminal session is a tmux session living inside the PAD container, so
+// it survives WebSocket disconnects and page reloads. The WS handler only
+// attaches to it; closing a WS kills the attach client (a clean detach), never
+// the session itself. Sessions die only when the PAD container stops or the
+// user kills them from the sessions dropdown.
+
+const SESSION_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
+const tmuxReady = new Set(); // PAD names where tmux is confirmed present
+
+function safeSessionName(s) {
+  if (typeof s === 'string' && SESSION_NAME_RE.test(s)) return s;
+  return 'main';
+}
+
+async function containerHasTmux(vmName) {
+  const r = await runCmd('docker', ['exec', vmName, 'sh', '-lc', 'command -v tmux'], { timeout: 15000, check: false });
+  return r.code === 0;
+}
+
+/** Lazy-install tmux once per PAD (images that predate the Dockerfile change). */
+async function ensureTmux(vmName) {
+  if (tmuxReady.has(vmName)) return;
+  if (await containerHasTmux(vmName)) {
+    tmuxReady.add(vmName);
+    return;
+  }
+  const inst = await runCmd(
+    'docker',
+    ['exec', vmName, 'sh', '-lc', 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y --no-install-recommends tmux'],
+    { timeout: 240000, check: false }
+  );
+  if (inst.code !== 0) throw new Error(`tmux install failed: ${String(inst.stderr || inst.stdout || '').trim()}`);
+  if (!(await containerHasTmux(vmName))) throw new Error('tmux still missing after install');
+  tmuxReady.add(vmName);
+}
+
+/** Make sure a tmux session exists (create it if missing). Colored prompt is
+ *  hooked into /root/.bashrc because tmux-created shells inherit the tmux
+ *  server env, not the attach exec env, so the old PS1-on-exec trick is moot. */
+async function ensureTmuxSession(vmName, session, cols, rows) {
+  await ensureTmux(vmName);
+  await runCmd(
+    'docker',
+    ['exec', vmName, 'sh', '-lc',
+      `grep -q '__PAD_PS1__' /root/.bashrc 2>/dev/null || echo "export PS1='\\[\\e[1;36m\\]\\u@\\h\\[\\e[0m\\]:\\w\\$ '  # __PAD_PS1__" >> /root/.bashrc`],
+    { timeout: 15000, check: false }
+  );
+  const has = await runCmd('docker', ['exec', vmName, 'tmux', 'has-session', '-t', session], { timeout: 15000, check: false });
+  if (has.code !== 0) {
+    const c = Math.max(40, Math.min(400, parseInt(cols, 10) || 120));
+    const r = Math.max(12, Math.min(120, parseInt(rows, 10) || 32));
+    await runCmd('docker', ['exec', vmName, 'tmux', 'new-session', '-d', '-s', session, '-x', String(c), '-y', String(r)], { timeout: 20000, check: false });
+  }
+}
+
+async function listTmuxSessions(vmName) {
+  await ensureTmux(vmName);
+  // tmux 3.3a converts `\t` inside `-F` formats into `_`, so use a `|`
+  // delimiter (session names are restricted to [a-zA-Z0-9._-], never `|`).
+  const r = await runCmd('docker', ['exec', vmName, 'tmux', 'list-sessions', '-F', '#{session_name}|#{session_attached}|#{session_created}'], { timeout: 15000, check: false });
+  const sessions = [];
+  for (const line of (r.stdout || '').split('\n')) {
+    const [name, attached, created] = line.split('|');
+    if (!name) continue;
+    sessions.push({ name, attached: attached === '1', created: parseInt(created, 10) || 0 });
+  }
+  return sessions;
+}
+
+async function killTmuxSession(vmName, session) {
+  await ensureTmux(vmName);
+  const r = await runCmd('docker', ['exec', vmName, 'tmux', 'kill-session', '-t', session], { timeout: 15000, check: false });
+  if (r.code !== 0 && !/can't find|no such|no server/i.test(String(r.stderr))) {
+    throw new Error(String(r.stderr || 'tmux kill-session failed').trim());
+  }
+}
+
 function parseCookies(cookieHeader) {
   const cookies = {};
   if (!cookieHeader) return cookies;
@@ -1101,6 +1179,32 @@ app.get('/api/agents/:name/sessions', (req, res) => {
   res.json({ sessions });
 });
 
+app.get('/api/agents/:name/terminal-sessions', async (req, res) => {
+  const name = req.params.name;
+  if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid name' });
+  const containers = await dockerPsList();
+  if ((containers[name]?.State || '').toLowerCase() !== 'running') {
+    return res.json({ sessions: [] });
+  }
+  try {
+    res.json({ sessions: await listTmuxSessions(name) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/agents/:name/terminal-sessions/:id', async (req, res) => {
+  const name = req.params.name;
+  const id = safeSessionName(req.params.id);
+  if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid name' });
+  try {
+    await killTmuxSession(name, id);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/agents/:name/backups', (req, res) => {
   const backups = getBackups(req.params.name);
   res.json({ backups });
@@ -1623,6 +1727,7 @@ wss.on('connection', async (ws, req) => {
   if (wsType === 'terminal') {
     const cols = Math.max(40, Math.min(400, parseInt(url.searchParams.get('cols') || '120', 10) || 120));
     const rows = Math.max(12, Math.min(120, parseInt(url.searchParams.get('rows') || '32', 10) || 32));
+    const session = safeSessionName(url.searchParams.get('session') || 'main');
 
     let dockerExec = null;
     let dockerStream = null;
@@ -1631,10 +1736,22 @@ wss.on('connection', async (ws, req) => {
     const cleanup = () => {
       if (closed) return;
       closed = true;
-      // Destroying the hijacked stream makes the Docker daemon kill the exec process.
+      // Destroying the hijacked stream makes the Docker daemon kill the exec
+      // process. That process is only the `tmux attach` client — the tmux
+      // session inside the PAD keeps running, so state survives the disconnect.
       if (dockerStream) { try { dockerStream.destroy(); } catch {} dockerStream = null; }
       dockerExec = null;
     };
+
+    try {
+      // Make sure the tmux session exists (lazily installs tmux on old images).
+      await ensureTmuxSession(vmName, session, cols, rows);
+    } catch (err) {
+      console.error('[wss/terminal] tmux setup error:', err.message);
+      if (ws.readyState === ws.OPEN) ws.send(`\r\n\x1b[31m[Terminal error: ${err.message}]\x1b[0m\r\n`);
+      ws.close();
+      return;
+    }
 
     try {
       const container = dockerClient.getContainer(vmName);
@@ -1643,17 +1760,11 @@ wss.on('connection', async (ws, req) => {
         AttachStdout: true,
         AttachStderr: true,
         Tty: true,
-        // A colored PS1 highlights `user@host` so the start of each command
-        // is easy to spot in the scrollback. SUDO_USER + SUDO_PS1 are set so
-        // /etc/bash.bashrc does not overwrite our PS1 (its default prompt is
-        // monochrome `\u@\h:\w\$ `).
-        Env: [
-          'TERM=xterm-256color',
-          'PS1=\\[\\e[1;36m\\]\\u@\\h\\[\\e[0m\\]:\\w\\$ ',
-          'SUDO_USER=pad',
-          'SUDO_PS1=1',
-        ],
-        Cmd: ['bash', '-i'],
+        Env: ['TERM=xterm-256color'],
+        // Attach to the persistent tmux session instead of spawning a throwaway
+        // `bash -i`. On WS close the attach client dies but the session stays,
+        // so reloads and tab switches pick up exactly where they left off.
+        Cmd: ['tmux', 'attach-session', '-t', session],
       });
       dockerStream = await dockerExec.start({ hijack: true, stdin: true, stdout: true, stderr: true });
     } catch (err) {

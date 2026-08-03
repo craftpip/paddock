@@ -63,14 +63,28 @@ import { useEffect, useRef, useImperativeHandle, forwardRef, useState, useCallba
  *  Backend contract (see src/app.js — "Terminal WebSocket", and
  *  src/docs/terminal.md for the full write-up)
  * ─────────────────────────────────────────────────────────────────────────────
- *  - Connect:  ws://<host>/ws/terminal/<name>?cols=<n>&rows=<n>
+ *  - Connect:  ws://<host>/ws/terminal/<name>?session=<id>&cols=<n>&rows=<n>
+ *  - Each session is a persistent **tmux session** inside the PAD container.
+ *    The backend creates it on first connect, then attaches. Closing the WS
+ *    detaches (state + scrollback survive); reloads and tab switches reattach.
  *  - The backend uses dockerode (`Tty: true`) so Docker allocates a REAL PTY:
- *      container.exec({ Tty: true, Env: ['TERM=xterm-256color'], Cmd: ['bash','-i'] })
+ *      container.exec({ Tty: true, Env: ['TERM=xterm-256color'],
+ *                       Cmd: ['tmux', 'attach-session', '-t', <id>] })
  *      → exec.start({ hijack: true, ... })
  *  - Client → server: raw keystroke bytes, plus JSON resize frames:
  *      { type: 'resize', cols: <n>, rows: <n> }  →  exec.resize({ h, w })
  *  - Server → client: raw PTY output (StringDecoder-decoded) rendered verbatim
  *    by xterm. No `\r` → `\n` conversion — the PTY line discipline handles CR/LF.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ *  Sessions (header dropdown next to the connection status)
+ * ─────────────────────────────────────────────────────────────────────────────
+ *  - The dropdown lists the PAD's active tmux sessions (GET
+ *    /api/agents/:name/terminal-sessions) and lets you switch, create
+ *    ("+ New session" → next free `term-N`), or close (DELETE) a session.
+ *  - The selected session is persisted in localStorage
+ *    (`pad-term-session-<name>`), so a page reload returns to the same session.
+ *  - Closing the current session falls back to `main` (auto-created on demand).
  *
  * ─────────────────────────────────────────────────────────────────────────────
  *  Tracked/locked mode: how "command is done" is detected
@@ -128,6 +142,12 @@ const Terminal = forwardRef(function Terminal(
   const genRef = useRef(0) // generation token for async init
   const mountedRef = useRef(true) // guards setState after unmount
 
+  // Auto-reconnect: when the connection drops (e.g. the PAD is restarted or
+  // started from stopped), retry with a backoff until it comes back.
+  const reconnectTimerRef = useRef(null)
+  const retryDelayRef = useRef(2000)
+  const wasConnectedRef = useRef(false) // only announce the first close after a connected state
+
   const disabledRef = useRef(!!disabled) // external lock (the `disabled` prop)
   const manualLockRef = useRef(false) // imperative lock()/unlock()/Lock toggle
   const cmdRunningRef = useRef(false) // an injected command is in flight
@@ -143,6 +163,22 @@ const Terminal = forwardRef(function Terminal(
   const [cmdRunning, setCmdRunning] = useState(false)
   const [uiLocked, setUiLocked] = useState(false)
   const [fullscreen, setFullscreen] = useState(false)
+
+  // ── Sessions (persistent tmux shells per PAD) ────────────────────────────
+  const SAFE_SESSION_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/
+  const [sessionId, setSessionId] = useState(() => {
+    try {
+      const s = localStorage.getItem(`pad-term-session-${name}`)
+      return s && SAFE_SESSION_RE.test(s) ? s : 'main'
+    } catch {
+      return 'main'
+    }
+  })
+  const sessionIdRef = useRef(sessionId) // sync'd below; initTerminal reads this
+  const [sessions, setSessions] = useState([])
+  const [sessionsLoading, setSessionsLoading] = useState(false)
+  const [showSessions, setShowSessions] = useState(false)
+  const sessionMenuRef = useRef(null)
 
   // Command history popover
   const historyRef = useRef(null)
@@ -245,7 +281,7 @@ const Terminal = forwardRef(function Terminal(
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     setStateSafe(setConnState, 'connecting')
     const ws = new WebSocket(
-      `${protocol}//${window.location.host}/ws/terminal/${name}?cols=${term.cols}&rows=${term.rows}`
+      `${protocol}//${window.location.host}/ws/terminal/${name}?session=${encodeURIComponent(sessionIdRef.current || 'main')}&cols=${term.cols}&rows=${term.rows}`
     )
     wsRef.current = ws
 
@@ -266,6 +302,10 @@ const Terminal = forwardRef(function Terminal(
 
     ws.onopen = () => {
       if (gen !== genRef.current) return // superseded session
+      // Connection is healthy — cancel any pending auto-reconnect and reset the backoff.
+      if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null }
+      retryDelayRef.current = 2000
+      wasConnectedRef.current = true
       setStateSafe(setConnState, 'connected')
       pushResize(term.cols, term.rows)
       const pending = pendingRef.current
@@ -306,8 +346,17 @@ const Terminal = forwardRef(function Terminal(
     }
 
     ws.onclose = () => {
+      // A superseded session (explicit teardown / session switch) bumps the gen
+      // counter, so its late close is ignored here and never schedules a retry.
+      if (gen !== genRef.current) return
       setStateSafe(setConnState, 'disconnected')
-      writeTerm('\r\n\x1b[31m[Connection closed]\x1b[0m\r\n')
+      // Announce only the first close after a healthy connection — repeated
+      // failed retries (PAD stopped) must not spam the scrollback.
+      if (wasConnectedRef.current) {
+        writeTerm('\r\n\x1b[31m[Connection closed — reconnecting…]\x1b[0m\r\n')
+        wasConnectedRef.current = false
+      }
+      scheduleReconnect()
     }
 
     ws.onerror = () => setStateSafe(setConnState, 'disconnected')
@@ -341,6 +390,14 @@ const Terminal = forwardRef(function Terminal(
   // Mount / name change: create session. Unmount: full teardown.
   useEffect(() => {
     mountedRef.current = true
+    // Restore the persisted session for this PAD (handles name changes too).
+    try {
+      const s = localStorage.getItem(`pad-term-session-${name}`)
+      if (s && SAFE_SESSION_RE.test(s)) {
+        sessionIdRef.current = s
+        setSessionId(s)
+      }
+    } catch {}
     if (!containerRef.current) return
     initTerminal().catch(() => {})
     return () => {
@@ -349,6 +406,11 @@ const Terminal = forwardRef(function Terminal(
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [name])
+
+  // Keep the ref in sync with the visible session id (initTerminal reads ref).
+  useEffect(() => {
+    sessionIdRef.current = sessionId
+  }, [sessionId])
 
   // The `disabled` prop controls the external lock.
   useEffect(() => {
@@ -404,6 +466,75 @@ const Terminal = forwardRef(function Terminal(
     return () => document.removeEventListener('mousedown', onDocClick)
   }, [showHistory])
 
+  // Close the sessions dropdown when clicking outside it.
+  useEffect(() => {
+    if (!showSessions) return
+    function onDocClick(e) {
+      if (sessionMenuRef.current && !sessionMenuRef.current.contains(e.target)) setShowSessions(false)
+    }
+    document.addEventListener('mousedown', onDocClick)
+    return () => document.removeEventListener('mousedown', onDocClick)
+  }, [showSessions])
+
+  /** Load the PAD's active tmux sessions. */
+  const refreshSessions = useCallback(async () => {
+    if (!name) return
+    setSessionsLoading(true)
+    try {
+      const res = await fetch(`/api/agents/${encodeURIComponent(name)}/terminal-sessions`)
+      if (res.ok) {
+        const data = await res.json()
+        setSessions(data.sessions || [])
+      }
+    } catch {}
+    setSessionsLoading(false)
+  }, [name])
+
+  function toggleSessions() {
+    const next = !showSessions
+    setShowSessions(next)
+    if (next) refreshSessions()
+  }
+
+  /** Switch to a session: persist choice, tear down, reconnect (backend
+   *  auto-creates the tmux session on attach if it does not exist yet). */
+  const switchSession = useCallback(
+    (id) => {
+      if (!id || id === sessionIdRef.current) return
+      sessionIdRef.current = id
+      setSessionId(id)
+      try { localStorage.setItem(`pad-term-session-${name}`, id) } catch {}
+      teardown()
+      initTerminal().catch(() => {})
+    },
+    [name]
+  )
+
+  /** Create a new session with the next free `term-N` name. */
+  const newSession = useCallback(async () => {
+    if (!name) return
+    await refreshSessions()
+    const used = new Set([...sessions.map((s) => s.name), sessionIdRef.current])
+    let n = 1
+    while (used.has(`term-${n}`)) n += 1
+    switchSession(`term-${n}`)
+    refreshSessions()
+  }, [name, sessions, switchSession, refreshSessions])
+
+  /** Kill a tmux session. Closing the current one falls back to `main`. */
+  const closeSession = useCallback(
+    async (id) => {
+      if (!name) return
+      if (!window.confirm(`Close terminal session "${id}"? Its shell and scrollback will be lost.`)) return
+      try {
+        await fetch(`/api/agents/${encodeURIComponent(name)}/terminal-sessions/${encodeURIComponent(id)}`, { method: 'DELETE' })
+      } catch {}
+      if (sessionIdRef.current === id) switchSession('main')
+      refreshSessions()
+    },
+    [name, switchSession, refreshSessions]
+  )
+
   /** Load past commands from the activity log (category 'command'). */
   const loadHistory = useCallback(async () => {
     if (!name) return
@@ -427,7 +558,7 @@ const Terminal = forwardRef(function Terminal(
   }
 
   function reconnect() {
-    if (!window.confirm('Restart the terminal session? Scrollback will be cleared.')) return
+    if (!window.confirm('Reconnect to this terminal session? Scrollback is preserved.')) return
     teardown()
     initTerminal().catch(() => {})
   }
@@ -495,7 +626,7 @@ const Terminal = forwardRef(function Terminal(
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
             <span className={`w-2 h-2 rounded-full ${connState === 'connected' ? 'bg-emerald-400' : connState === 'connecting' ? 'bg-amber-400' : 'bg-slate-600'}`} />
-            <span className="text-xs text-slate-400 font-medium">
+            <span className="text-xs text-slate-400 font-medium min-w-[8rem] whitespace-nowrap shrink-0">
               {connState === 'connected' ? 'Terminal Connected' : connState === 'connecting' ? 'Terminal Connecting' : 'Terminal Disconnected'}
             </span>
           </div>
@@ -508,6 +639,70 @@ const Terminal = forwardRef(function Terminal(
               Locked
             </span>
           )}
+          <div ref={sessionMenuRef} className="relative">
+            <button
+              onClick={toggleSessions}
+              title="Terminal sessions"
+              className="flex items-center gap-1 px-2 py-0.5 text-xs font-mono text-slate-300 bg-slate-800/60 border border-slate-700 rounded hover:border-cyan-700 hover:text-cyan-300 transition-colors"
+            >
+              <span className="max-w-[8rem] truncate">{sessionId}</span>
+              <svg className="w-3 h-3 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M6 9l6 6 6-6" />
+              </svg>
+            </button>
+            {showSessions && (
+              <div className="absolute left-0 top-full mt-1 w-64 max-h-72 overflow-y-auto rounded-lg border border-slate-700 bg-slate-900 shadow-xl z-50">
+                <div className="flex items-center justify-between px-3 py-2 border-b border-slate-800">
+                  <span className="text-xs font-medium text-slate-300">Terminal sessions</span>
+                  <button
+                    onClick={refreshSessions}
+                    title="Refresh session list"
+                    className="text-slate-500 hover:text-white text-xs px-1"
+                  >
+                    ↻
+                  </button>
+                </div>
+                <div className="py-1">
+                  {sessionsLoading && <div className="px-3 py-2 text-xs text-slate-500">Loading…</div>}
+                  {!sessionsLoading && sessions.length === 0 && (
+                    <div className="px-3 py-2 text-xs text-slate-500">No sessions yet.</div>
+                  )}
+                  {!sessionsLoading &&
+                    sessions.map((s) => {
+                      const isCur = s.name === sessionId
+                      return (
+                        <div key={s.name} className="flex items-center group">
+                          <button
+                            onClick={() => switchSession(s.name)}
+                            className="flex-1 text-left px-3 py-1.5 text-xs font-mono text-slate-300 hover:bg-slate-800 hover:text-cyan-300 transition-colors truncate"
+                            title={`Switch to session ${s.name}`}
+                          >
+                            {s.name}
+                            {s.attached && <span className="ml-2 text-[10px] text-emerald-500">● active</span>}
+                            {isCur && <span className="ml-2 text-[10px] text-cyan-400">current</span>}
+                          </button>
+                          <button
+                            onClick={() => closeSession(s.name)}
+                            className="px-2 py-1.5 text-slate-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity text-xs"
+                            title={`Close session ${s.name}`}
+                          >
+                            ×
+                          </button>
+                        </div>
+                      )
+                    })}
+                </div>
+                <div className="border-t border-slate-800 p-1">
+                  <button
+                    onClick={newSession}
+                    className="w-full text-left px-3 py-1.5 text-xs text-cyan-400 hover:bg-slate-800 hover:text-cyan-300 rounded transition-colors"
+                  >
+                    + New session
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
           <span className="w-px h-4 bg-slate-700" />
           <span className="text-xs text-slate-300 font-mono">{title || name}</span>
         </div>
