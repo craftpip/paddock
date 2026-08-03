@@ -113,6 +113,11 @@ function buildAgent(vmName, dockerState) {
   const status = dockerState[vmName] || 'missing';
 
   let displayName = vmName.replace(new RegExp('^' + PREFIX + '-'), '');
+  // The container name embeds the agent type (e.g. pad-openclaw-work-pls).
+  // Strip it so the display name is the name the user actually placed.
+  if (agentType && displayName.startsWith(agentType + '-')) {
+    displayName = displayName.slice(agentType.length + 1);
+  }
   displayName = displayName.charAt(0).toUpperCase() + displayName.slice(1);
 
   let defaultModel = null;

@@ -395,10 +395,26 @@ export default function CommandsPane({ agent, termRef, run, runningCmd }) {
   const [query, setQuery] = useState('')
   const prompt = usePrompt()
 
+  /** Launch the openclaw interactive TUI directly in the terminal. */
+  function runTool() {
+    run('openclaw')
+  }
+
   return (
     <div className="space-y-4">
       {/* Search */}
       <div className="flex items-center gap-2">
+        <button
+          onClick={runTool}
+          disabled={!!runningCmd}
+          title="Run openclaw interactively in the terminal"
+          className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-sm font-medium transition-colors whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <polygon points="5 3 19 12 5 21 5 3" />
+          </svg>
+          Run TUI
+        </button>
         <input type="text" value={query} onChange={(e) => setQuery(e.target.value)}
                placeholder="Filter commands…"
                className="flex-1 max-w-md px-3 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white focus:border-cyan-500 focus:outline-none placeholder-slate-600" />

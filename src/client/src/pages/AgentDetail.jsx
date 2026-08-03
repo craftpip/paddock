@@ -33,7 +33,7 @@ function AgentHeader({ agent }) {
 
   const isTransition = ['starting', 'stopping', 'restarting'].includes(agent.status)
   const cpuPct = stats ? parseFloat(stats.CPUPerc) || 0 : 0
-  const memUsage = stats?.MemUsage || ''
+  const memUsage = stats?.MemUsage ? stats.MemUsage.split('/')[0].trim() : ''
 
   return (
     <div className="flex items-center gap-4 px-6 py-3 border-b border-slate-800 bg-slate-900/40 flex-wrap">
@@ -55,8 +55,8 @@ function AgentHeader({ agent }) {
       </span>
       <span className="w-px h-5 bg-slate-700" />
       <div className="flex items-center gap-3 text-xs">
-        <span className="text-slate-500">CPU <span className="text-slate-200 font-mono">{agent.status === 'running' ? (cpuPct.toFixed(1) + '%') : '—'}</span></span>
-        <span className="text-slate-500">MEM <span className="text-slate-200 font-mono">{agent.status === 'running' && stats ? memUsage : '—'}</span></span>
+        <span className="text-slate-500">CPU <span className="text-slate-200 font-mono ml-1">{agent.status === 'running' ? (cpuPct.toFixed(1) + '%') : '—'}</span></span>
+        <span className="text-slate-500">MEM <span className="text-slate-200 font-mono ml-1">{agent.status === 'running' && stats ? memUsage : '—'}</span></span>
       </div>
       <div className="flex-1" />
       <div className="flex items-center gap-2">
@@ -82,6 +82,9 @@ export default function AgentDetail() {
   const termRef = useRef(null)
   const [runningCmd, setRunningCmd] = useState(null)
   const lastRunCmdRef = useRef('')
+  const [termCollapsed, setTermCollapsed] = useState(false)
+  const [termHeight, setTermHeight] = useState(null) // custom dock height (px); null = 50vh default
+  const dockRef = useRef(null)
 
   useEffect(() => {
     fetchAgents()
@@ -90,6 +93,37 @@ export default function AgentDetail() {
   const agent = agents.find((a) => a.name === agentId)
   const currentMode = location.hash.replace('#', '') || 'commands'
   const mode = MODES.find((m) => m.id === currentMode) ? currentMode : 'commands'
+
+  // Leaving the commands page minimizes the terminal by default; coming back
+  // to it expands again. Custom drag-resize heights reset on every switch.
+  useEffect(() => {
+    setTermCollapsed(mode !== 'commands')
+    setTermHeight(null)
+  }, [mode])
+
+  /** Drag the top edge of the dock to resize the terminal height. */
+  const startTermResize = (e) => {
+    e.preventDefault()
+    const startY = e.clientY
+    const startH = dockRef.current ? dockRef.current.getBoundingClientRect().height : 320
+    document.body.classList.add('select-none')
+    document.body.style.cursor = 'ns-resize'
+    try { e.currentTarget.setPointerCapture(e.pointerId) } catch {}
+    const onMove = (ev) => {
+      const min = 320
+      const max = Math.max(min, window.innerHeight - 140)
+      const h = Math.round(Math.min(Math.max(startH - (ev.clientY - startY), min), max))
+      setTermHeight(h)
+    }
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      document.body.classList.remove('select-none')
+      document.body.style.cursor = ''
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }
 
   /** Run a command in the docked terminal, tracked. opts: {confirm, danger, secret}. */
   const run = useCallback((cmd, opts = {}) => {
@@ -145,7 +179,12 @@ export default function AgentDetail() {
       </div>
 
       {/* Mode content */}
-      <div className="flex-1 min-h-0 overflow-y-auto p-6" id="mode-content">
+      <div
+        className={`min-h-0 overflow-y-auto p-6 ${
+          termCollapsed || mode !== 'commands' ? 'flex-1' : 'shrink-0 max-h-[45vh]'
+        }`}
+        id="mode-content"
+      >
         {mode === 'commands' && (
           <CommandsPane agent={agent} termRef={termRef} run={run} runningCmd={runningCmd} />
         )}
@@ -157,7 +196,29 @@ export default function AgentDetail() {
       </div>
 
       {/* Persistent docked terminal */}
-      <div className="h-[40vh] min-h-[320px] shrink-0 px-6 pb-6 pt-2" id="terminal-dock">
+      <div
+        ref={dockRef}
+        className={`shrink-0 px-6 pb-6 pt-2 ${
+          termCollapsed
+            ? ''
+            : mode === 'commands'
+              ? 'flex-1 min-h-[240px]'
+              : termHeight
+                ? 'min-h-[320px]'
+                : 'h-[50vh] min-h-[320px]'
+        }`}
+        style={termHeight && mode !== 'commands' && !termCollapsed ? { height: termHeight + 'px' } : undefined}
+        id="terminal-dock"
+      >
+        {mode !== 'commands' && !termCollapsed && (
+          <div
+            onPointerDown={startTermResize}
+            title="Drag to resize terminal"
+            className="group -mt-2 mb-1.5 flex h-2 items-center justify-center cursor-ns-resize select-none"
+          >
+            <div className="h-1 w-32 rounded-full bg-slate-700 group-hover:bg-cyan-500 transition-colors" />
+          </div>
+        )}
         <Terminal
           ref={termRef}
           name={agent.name}
@@ -165,6 +226,9 @@ export default function AgentDetail() {
           height="100%"
           minHeight="300px"
           className="h-full"
+          collapsed={termCollapsed}
+          showCollapse={mode !== 'commands'}
+          onToggleCollapse={() => setTermCollapsed((v) => !v)}
           onCommandDone={handleCmdDone}
         />
       </div>

@@ -22,6 +22,9 @@ import { useEffect, useRef, useImperativeHandle, forwardRef, useState, useCallba
  *  | `title`          | string   | `name`   | Label shown in the header bar.          |
  *  | `height`         | string   | `'70vh'` | CSS height of the terminal area.        |
  *  | `minHeight`      | string   | `'480px'`| CSS min-height of the terminal area.    |
+ *  | `collapsed`      | boolean  | `false`  | Hide the terminal body; only the header bar shows. The session stays alive. |
+ *  | `onToggleCollapse`| fn      | (none)   | Fired when the collapse/expand chevron is clicked. |
+ *  | `showCollapse`   | boolean  | `true`   | Show the collapse/expand chevron (ignored without `onToggleCollapse`). |
  *  | `disabled`       | boolean  | `false`  | Lock the terminal: the user cannot type their own commands. Only `runCommand()`-injected commands run. During an injected command the user can type again; when it finishes, it auto-locks. |
  *  | `onCommandStart` | fn       | (none)   | Fired when a tracked/locked injected command starts. |
  *  | `onCommandDone`  | fn       | (none)   | Fired with the command string when a tracked/locked injected command finishes. |
@@ -107,9 +110,13 @@ import { useEffect, useRef, useImperativeHandle, forwardRef, useState, useCallba
  *  - Ctrl/Cmd+C with a selection is left to the browser (copy) rather than
  *    killing the shell. In locked mode Ctrl+C is dropped entirely (user cannot
  *    interrupt injected commands). The `scrollback` is 10000 lines.
+ *  - Fullscreen: the header's expand button overlays the terminal across the
+ *    whole viewport (`fixed inset-0`). The ResizeObserver re-fits the PTY on
+ *    toggle. Escape (or the header button) exits. The collapse button is
+ *    hidden while fullscreen since collapsing a fullscreen pane is meaningless.
  */
 const Terminal = forwardRef(function Terminal(
-  { name, title, height = '70vh', minHeight = '480px', disabled = false, onCommandStart, onCommandDone, className = '' },
+  { name, title, height = '70vh', minHeight = '480px', disabled = false, collapsed = false, showCollapse = true, onToggleCollapse, onCommandStart, onCommandDone, className = '' },
   ref
 ) {
   const containerRef = useRef(null)
@@ -130,11 +137,12 @@ const Terminal = forwardRef(function Terminal(
   const outputTailRef = useRef('') // rolling output tail for sentinel detection
   const markerSeqRef = useRef(0)
 
-  const [connected, setConnected] = useState(false)
+  const [connState, setConnState] = useState('connecting') // connecting | connected | disconnected
   const [fontSize, setFontSize] = useState(14)
   const [initError, setInitError] = useState('')
   const [cmdRunning, setCmdRunning] = useState(false)
   const [uiLocked, setUiLocked] = useState(false)
+  const [fullscreen, setFullscreen] = useState(false)
 
   // Command history popover
   const historyRef = useRef(null)
@@ -235,6 +243,7 @@ const Terminal = forwardRef(function Terminal(
     setStateSafe(setInitError, '')
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    setStateSafe(setConnState, 'connecting')
     const ws = new WebSocket(
       `${protocol}//${window.location.host}/ws/terminal/${name}?cols=${term.cols}&rows=${term.rows}`
     )
@@ -257,7 +266,7 @@ const Terminal = forwardRef(function Terminal(
 
     ws.onopen = () => {
       if (gen !== genRef.current) return // superseded session
-      setStateSafe(setConnected, true)
+      setStateSafe(setConnState, 'connected')
       pushResize(term.cols, term.rows)
       const pending = pendingRef.current
       pendingRef.current = []
@@ -297,11 +306,11 @@ const Terminal = forwardRef(function Terminal(
     }
 
     ws.onclose = () => {
-      setStateSafe(setConnected, false)
+      setStateSafe(setConnState, 'disconnected')
       writeTerm('\r\n\x1b[31m[Connection closed]\x1b[0m\r\n')
     }
 
-    ws.onerror = () => setStateSafe(setConnected, false)
+    ws.onerror = () => setStateSafe(setConnState, 'disconnected')
 
     const ro = new ResizeObserver(() => {
       try {
@@ -326,7 +335,7 @@ const Terminal = forwardRef(function Terminal(
     if (termRef.current) { try { termRef.current.dispose() } catch {} ; termRef.current = null }
     if (fitAddonRef.current) fitAddonRef.current = null
     if (roRef.current) { try { roRef.current.disconnect() } catch {} ; roRef.current = null }
-    setStateSafe(setConnected, false)
+    setStateSafe(setConnState, 'disconnected')
   }
 
   // Mount / name change: create session. Unmount: full teardown.
@@ -375,6 +384,16 @@ const Terminal = forwardRef(function Terminal(
     if (term) term.options.cursorBlink = !uiLocked
   }, [uiLocked])
 
+  // Escape exits fullscreen mode.
+  useEffect(() => {
+    if (!fullscreen) return
+    function onKey(e) {
+      if (e.key === 'Escape') setFullscreen(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [fullscreen])
+
   // Close the history popover when clicking outside it.
   useEffect(() => {
     if (!showHistory) return
@@ -405,15 +424,6 @@ const Terminal = forwardRef(function Terminal(
   function toggleHistory() {
     if (!showHistory) loadHistory()
     setShowHistory(!showHistory)
-  }
-
-  function toggleLock() {
-    const v = !manualLockRef.current
-    manualLockRef.current = v
-    try {
-      localStorage.setItem(`pad-term-lock-${name}`, v ? '1' : '0')
-    } catch {}
-    refreshLockUI()
   }
 
   function reconnect() {
@@ -480,12 +490,14 @@ const Terminal = forwardRef(function Terminal(
   )
 
   return (
-    <div className={`relative flex flex-col border border-slate-800 rounded-xl overflow-hidden bg-[#0f172a] ${className}`}>
+    <div className={`flex flex-col border border-slate-800 overflow-hidden bg-[#0f172a] ${fullscreen ? 'fixed inset-0 z-[100] rounded-none' : 'relative rounded-xl'} ${className}`}>
       <div className="flex items-center justify-between px-4 py-2 border-b border-slate-800 bg-slate-900/80 select-none">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
-            <span className={`w-2 h-2 rounded-full ${connected ? 'bg-emerald-400' : 'bg-slate-600'}`} />
-            <span className="text-xs text-slate-400 font-medium">{connected ? 'Connected' : 'Disconnected'}</span>
+            <span className={`w-2 h-2 rounded-full ${connState === 'connected' ? 'bg-emerald-400' : connState === 'connecting' ? 'bg-amber-400' : 'bg-slate-600'}`} />
+            <span className="text-xs text-slate-400 font-medium">
+              {connState === 'connected' ? 'Terminal Connected' : connState === 'connecting' ? 'Terminal Connecting' : 'Terminal Disconnected'}
+            </span>
           </div>
           {uiLocked && !cmdRunning && (
             <span className="flex items-center gap-1.5 text-xs text-amber-400 font-medium">
@@ -511,17 +523,6 @@ const Terminal = forwardRef(function Terminal(
               <path d="M12 7v5l4 2" />
             </svg>
           </button>
-          <button
-            onClick={toggleLock}
-            title={uiLocked ? 'Unlock terminal' : 'Lock terminal (read-only, commands only via buttons)'}
-            className={`px-2 py-1 text-xs rounded transition-colors ${
-              uiLocked
-                ? 'text-amber-300 hover:text-amber-200 hover:bg-slate-700'
-                : 'text-slate-400 hover:text-white hover:bg-slate-700'
-            }`}
-          >
-            {uiLocked ? 'Unlock' : 'Lock'}
-          </button>
           <span className="w-px h-4 bg-slate-700" />
           <button onClick={() => setFontSize((s) => Math.max(10, s - 1))} className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">A-</button>
           <span className="text-xs text-slate-600 w-6 text-center">{fontSize}</span>
@@ -529,6 +530,55 @@ const Terminal = forwardRef(function Terminal(
           <span className="w-px h-4 bg-slate-700" />
           <button onClick={() => termRef.current?.clear()} className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">Clear</button>
           <button onClick={reconnect} className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">Reconnect</button>
+
+          {onToggleCollapse && showCollapse && !fullscreen && (
+            <>
+              <span className="w-px h-4 bg-slate-700" />
+              <button
+                onClick={onToggleCollapse}
+                title={collapsed ? 'Expand terminal' : 'Collapse terminal'}
+                className="px-2 py-1 text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors"
+              >
+                {collapsed ? (
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M6 15l6-6 6 6" />
+                  </svg>
+                ) : (
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M6 9l6 6 6-6" />
+                  </svg>
+                )}
+              </button>
+            </>
+          )}
+
+          {fullscreen ? (
+            <button
+              onClick={() => setFullscreen(false)}
+              title="Exit fullscreen (Esc)"
+              className="px-2 py-1 text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors"
+            >
+              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M4 14h6v6" />
+                <path d="M20 10h-6V4" />
+                <path d="M14 10l7-7" />
+                <path d="M3 21l7-7" />
+              </svg>
+            </button>
+          ) : (
+            <button
+              onClick={() => setFullscreen(true)}
+              title="Fullscreen"
+              className="px-2 py-1 text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors"
+            >
+              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M15 3h6v6" />
+                <path d="M9 21H3v-6" />
+                <path d="M21 3l-7 7" />
+                <path d="M3 21l7-7" />
+              </svg>
+            </button>
+          )}
 
           {showHistory && (
             <div className="absolute bottom-full right-0 mb-2 w-96 max-h-72 overflow-y-auto rounded-lg border border-slate-700 bg-slate-900 shadow-xl z-50">
@@ -560,7 +610,7 @@ const Terminal = forwardRef(function Terminal(
           )}
         </div>
       </div>
-      <div ref={containerRef} className="w-full" style={{ height, minHeight }}>
+      <div ref={containerRef} className={`w-full ${collapsed ? 'hidden' : ''}`} style={{ height, minHeight }}>
         {initError && (
           <div className="p-4 text-sm text-red-400 font-mono whitespace-pre-wrap">{initError}</div>
         )}

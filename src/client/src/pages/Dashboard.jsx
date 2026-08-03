@@ -10,6 +10,7 @@ export default function Dashboard() {
   const fetchAgents = useAgents((s) => s.fetchAgents)
   const [query, setQuery] = useState('')
   const [fleetStats, setFleetStats] = useState([])
+  const [fleetLoading, setFleetLoading] = useState(true)
   const fleetIntervalRef = useRef(null)
 
   useEffect(() => {
@@ -19,6 +20,7 @@ export default function Dashboard() {
   useEffect(() => {
     async function load() {
       try { const d = await api('/api/agents/stats/fleet'); if (d.stats) setFleetStats(d.stats) } catch {}
+      setFleetLoading(false)
     }
     load()
     fleetIntervalRef.current = setInterval(load, 5000)
@@ -26,7 +28,38 @@ export default function Dashboard() {
   }, [])
 
   const avgCpu = fleetStats.length ? (fleetStats.reduce((s, c) => s + (parseFloat(c.CPUPerc) || 0), 0) / fleetStats.length).toFixed(1) : '0'
-  const avgMem = fleetStats.length ? (fleetStats.reduce((s, c) => s + (parseFloat(c.MemPerc) || 0), 0) / fleetStats.length).toFixed(1) : '0'
+
+  // Parse a docker MemUsage string like "1.012GiB / 15.5GiB" into bytes.
+  function parseMemUsage(s) {
+    const toBytes = (p) => {
+      const m = /([\d.]+)\s*([KMGTP]?i?B)/i.exec(p)
+      if (!m) return null
+      const units = { B: 1, KIB: 1024, MIB: 1024 ** 2, GIB: 1024 ** 3, TIB: 1024 ** 4 }
+      return parseFloat(m[1]) * (units[m[2].toUpperCase()] || 1)
+    }
+    const parts = String(s || '').split('/').map((p) => p.trim()).filter(Boolean)
+    const used = toBytes(parts[0])
+    const total = toBytes(parts[1])
+    if (used == null && total == null) return null
+    return { used: used || 0, total: total || 0 }
+  }
+
+  function fmtBytes(b) {
+    const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
+    let i = 0
+    while (b >= 1024 && i < units.length - 1) { b /= 1024; i++ }
+    return `${b.toFixed(2)}${units[i]}`
+  }
+
+  const mem = fleetStats.reduce(
+    (acc, c) => {
+      const m = parseMemUsage(c.MemUsage)
+      if (m) { acc.used += m.used; acc.total += m.total }
+      return acc
+    },
+    { used: 0, total: 0 }
+  )
+  const memText = mem.used ? fmtBytes(mem.used) : '0'
 
   const filtered = query
     ? agents.filter(
@@ -76,27 +109,31 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {fleetStats.length > 0 && (
-        <div className="flex flex-wrap items-center gap-4 mb-6 px-4 py-3 border border-slate-800 rounded-xl bg-slate-900/50">
-          <span className="text-xs text-slate-500 font-medium">Fleet Resources</span>
-          <span className="w-px h-4 bg-slate-700" />
-          <span className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-cyan-500" />
-            <span className="text-xs text-slate-400">CPU avg</span>
-            <span className="text-sm font-mono text-white">{avgCpu}%</span>
-          </span>
-          <span className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-emerald-500" />
-            <span className="text-xs text-slate-400">Mem avg</span>
-            <span className="text-sm font-mono text-white">{avgMem}%</span>
-          </span>
-          <span className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-amber-500" />
-            <span className="text-xs text-slate-400">Containers</span>
-            <span className="text-sm font-mono text-white">{fleetStats.length}</span>
-          </span>
-        </div>
-      )}
+      <div className="flex flex-wrap items-center gap-4 mb-6 px-4 py-3 border border-slate-800 rounded-xl bg-slate-900/50">
+        <span className="text-xs text-slate-500 font-medium">Fleet Resources</span>
+        <span className="w-px h-4 bg-slate-700" />
+        <span className="flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-cyan-500" />
+          <span className="text-xs text-slate-400">CPU avg</span>
+          {fleetLoading
+            ? <span className="skeleton h-5 w-10 rounded" />
+            : <span className="text-sm font-mono text-white">{avgCpu}%</span>}
+        </span>
+        <span className="flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-emerald-500" />
+          <span className="text-xs text-slate-400">Mem</span>
+          {fleetLoading
+            ? <span className="skeleton h-5 w-24 rounded" />
+            : <span className="text-sm font-mono text-white">{memText}</span>}
+        </span>
+        <span className="flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-amber-500" />
+          <span className="text-xs text-slate-400">Containers</span>
+          {fleetLoading
+            ? <span className="skeleton h-5 w-10 rounded" />
+            : <span className="text-sm font-mono text-white">{fleetStats.length}</span>}
+        </span>
+      </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {filtered.map((agent) => (
