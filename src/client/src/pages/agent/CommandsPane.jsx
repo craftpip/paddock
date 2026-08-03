@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef, useCallback } from 'react'
 import { api } from '../../lib/api'
 import { usePrompt } from '../../lib/prompt'
+import { useToast } from '../../lib/toast'
 
 /**
  * Commands — the "home" mode of an agent page.
@@ -29,8 +30,6 @@ const SIMPLE_GROUPS = [
     title: 'Memory', color: 'violet',
     commands: [
       { cmd: 'openclaw memory status', label: 'Status', desc: 'Index health' },
-      { cmd: 'openclaw memory index', label: 'Reindex', desc: 'Incremental rebuild' },
-      { cmd: 'openclaw memory index --force', label: 'Force Reindex', desc: 'Full vector rebuild', confirm: true, danger: true },
       { cmd: 'openclaw memory promote --apply', label: 'Promote', desc: 'Short-term → MEMORY.md', confirm: true },
     ],
   },
@@ -40,14 +39,14 @@ const SIMPLE_GROUPS = [
       { cmd: 'openclaw config validate', label: 'Validate', desc: 'Check config against schema' },
       { cmd: 'openclaw config file', label: 'File path', desc: 'Show active config path' },
       { cmd: 'openclaw config get agents.defaults.model --json', label: 'Model config', desc: 'Primary + fallback models' },
-      { cmd: 'openclaw config schema --json', label: 'Schema', desc: 'Dump JSON schema' },
+      { cmd: 'openclaw config schema', label: 'Schema', desc: 'Dump JSON schema' },
     ],
   },
   {
     title: 'Other', color: 'slate',
     commands: [
       { cmd: 'openclaw backup create', label: 'Backup', desc: 'Create a backup archive', confirm: true },
-      { cmd: 'openclaw update', label: 'Update', desc: 'Check for updates', confirm: true },
+      { cmd: 'openclaw update status', label: 'Check updates', desc: 'Update channel + availability' },
       { cmd: 'openclaw mcp doctor', label: 'MCP Doctor', desc: 'Check MCP servers' },
     ],
   },
@@ -72,9 +71,8 @@ const SIMPLE_GROUPS = [
   {
     title: 'Diagnostics', color: 'cyan',
     commands: [
-      { cmd: 'openclaw health', label: 'Health', desc: 'Cached health snapshot' },
-      { cmd: 'openclaw status', label: 'Status', desc: 'Quick channels + sessions' },
-      { cmd: 'openclaw logs --tail 50', label: 'Logs', desc: 'Recent gateway logs (50 lines)' },
+      { cmd: 'openclaw status', label: 'Status', desc: 'Overview + gateway state' },
+      { cmd: 'openclaw gateway status', label: 'Gateway status', desc: 'Bind, port + connectivity' },
     ],
   },
 ]
@@ -236,7 +234,7 @@ function ModelsFlow({ agent, query, runningCmd, run, prompt }) {
       {visible.map((x) => (
         <Pill key={x.label} label={x.label} desc={x.desc} color={COLORS.blue.pill}
               disabled={!!runningCmd} active={runningCmd === x.cmd}
-              onClick={() => (x.click ? x.click() : run(x.cmd))} />
+              onClick={() => (x.click ? x.click() : run(x.cmd, x))} />
       ))}
       {primary && (
         <DataChip className="border-cyan-800/40 text-cyan-300 bg-cyan-950/20 font-mono">★ {primary}</DataChip>
@@ -250,7 +248,7 @@ function ModelsFlow({ agent, query, runningCmd, run, prompt }) {
 
 // ─── MCP ─────────────────────────────────────────────────────────
 
-function McpFlow({ agent, query, runningCmd, run }) {
+function McpFlow({ agent, query, runningCmd, run, prompt }) {
   const [servers, setServers] = useState([])
   const [removing, setRemoving] = useState('')
   const [msg, setMsg] = useState('')
@@ -260,13 +258,29 @@ function McpFlow({ agent, query, runningCmd, run }) {
   }
   useEffect(load, [agent.name])
 
+  const serverHint = servers.length
+    ? 'Configured servers: ' + servers.map((s) => s.name).join(', ')
+    : 'No servers configured — run "List" first.'
+
   const pills = [
     { cmd: 'openclaw mcp list', label: 'List', desc: 'Configured MCP servers' },
     { cmd: 'openclaw mcp status', label: 'Status', desc: 'Server status' },
     { cmd: 'openclaw mcp doctor', label: 'Doctor', desc: 'Check server health' },
     { cmd: 'openclaw mcp probe', label: 'Probe', desc: 'Probe all servers' },
     { cmd: 'openclaw mcp reload', label: 'Reload', desc: 'Reload server config' },
-    { cmd: 'openclaw mcp tools', label: 'Tools', desc: 'List available tools' },
+    { label: 'Tools', desc: 'List one server\'s available tools', click: async () => {
+      const v = await prompt({
+        title: 'List MCP tools',
+        message: 'Which MCP server should we connect to?',
+        confirmText: 'Probe',
+        fields: [{
+          key: 'name', label: 'Server name', placeholder: 'e.g. filesystem',
+          hint: serverHint,
+        }],
+      })
+      if (!v?.name) return
+      run(`openclaw mcp probe ${v.name}`)
+    } },
   ]
   const visible = pills.filter((x) => matches(query, x.label, x.cmd))
   const shown = servers.filter((s) => matches(query, s.name))
@@ -289,7 +303,8 @@ function McpFlow({ agent, query, runningCmd, run }) {
       <GroupLabel color="emerald" title="MCP" />
       {visible.map((x) => (
         <Pill key={x.label} label={x.label} desc={x.desc} color={COLORS.emerald.pill}
-              disabled={!!runningCmd} active={runningCmd === x.cmd} onClick={() => run(x.cmd)} />
+              disabled={!!runningCmd} active={runningCmd === x.cmd}
+              onClick={() => (x.click ? x.click() : run(x.cmd))} />
       ))}
       {shown.map((s) => (
         <DataChip key={s.name} title={s.command || s.url || ''}>
@@ -368,6 +383,224 @@ function SkillsFlow({ agent, query, runningCmd, run, prompt }) {
   )
 }
 
+// ─── Vault dropdown ───────────────────────────────────────────
+
+/**
+ * VaultDropdown — right-aligned vault button at the end of the command flow.
+ * Opens a backdrop-less dropdown (fixed-position popover anchored to the
+ * button) listing saved vault items. Only names/descriptions are fetched from
+ * `/api/vault`; the decrypted value is fetched per-click via
+ * `/api/vault/:id/decrypt` and pasted straight into the terminal. A small form
+ * at the bottom adds a new vault item.
+ */
+function VaultDropdown({ termRef }) {
+  const toast = useToast()
+  const [open, setOpen] = useState(false)
+  const [anchor, setAnchor] = useState(null)
+  const [items, setItems] = useState([])
+  const [loading, setLoading] = useState(false)
+  const [pastingId, setPastingId] = useState('')
+  const [filter, setFilter] = useState('')
+  const [name, setName] = useState('')
+  const [value, setValue] = useState('')
+  const [saving, setSaving] = useState(false)
+  const wrapRef = useRef(null)
+  const btnRef = useRef(null)
+  const filterRef = useRef(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const d = await api('/api/vault')
+      setItems(d?.items || [])
+    } catch (err) {
+      toast.error('Failed to load vault: ' + (err.error || err.message))
+    } finally {
+      setLoading(false)
+    }
+  }, [toast])
+
+  const filtered = items.filter((it) => {
+    const q = filter.trim().toLowerCase()
+    if (!q) return true
+    return (it.name || '').toLowerCase().includes(q) || (it.description || '').toLowerCase().includes(q)
+  })
+
+  function toggle() {
+    const next = !open
+    setOpen(next)
+    if (next) {
+      setAnchor(btnRef.current?.getBoundingClientRect() || null)
+      setFilter('')
+      load()
+    }
+  }
+
+  // Close on outside click or Escape (Escape clears the filter first).
+  useEffect(() => {
+    if (!open) return
+    function onDoc(e) {
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false)
+    }
+    function onKey(e) {
+      if (e.key === 'Escape') {
+        if (filter) setFilter('')
+        else setOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onDoc)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDoc)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open, filter])
+
+  // Focus the filter input when the dropdown opens.
+  useEffect(() => {
+    if (open) filterRef.current?.focus()
+  }, [open])
+
+  /** Fetch the decrypted value ONLY on click, then paste it into the terminal.
+   *  No trailing newline — the value sits in the shell input buffer and the
+   *  user presses Enter themselves. */
+  async function pasteItem(item) {
+    setPastingId(item.id)
+    try {
+      const d = await api(`/api/vault/${item.id}/decrypt`)
+      if (!d?.value) throw new Error('Empty vault value')
+      termRef.current?.write(d.value)
+      toast.success(`"${item.name}" pasted to terminal`)
+    } catch (err) {
+      toast.error((err.error || err.message) || 'Failed to fetch vault value')
+    } finally {
+      setPastingId('')
+    }
+  }
+
+  async function addItem(e) {
+    e.preventDefault()
+    if (!name.trim() || !value.trim()) return
+    setSaving(true)
+    try {
+      await api('/api/vault', { method: 'POST', body: { name: name.trim(), value: value.trim() } })
+      setName('')
+      setValue('')
+      toast.success('Vault item added')
+      load()
+    } catch (err) {
+      toast.error((err.error || err.message) || 'Failed to add vault item')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div ref={wrapRef} className="relative ml-auto">
+      <button
+        ref={btnRef}
+        onClick={toggle}
+        title="Vault — paste a saved secret into the terminal"
+        className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium transition-colors whitespace-nowrap border shrink-0
+          ${open ? 'border-amber-500/70 bg-amber-950/40 text-amber-200' : 'border-amber-800/40 text-amber-300 bg-amber-950/20 hover:bg-amber-900/30 hover:text-amber-200'}`}
+      >
+        <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+          <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+        </svg>
+        Vault
+        {items.length > 0 && <span className="text-[10px] text-amber-500/80">{items.length}</span>}
+        <svg className="w-3 h-3 text-amber-500/70" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M6 9l6 6 6-6" />
+        </svg>
+      </button>
+
+      {open && anchor && (
+        <div
+          className="fixed z-50 w-80 rounded-lg border border-slate-700 bg-slate-900 shadow-xl overflow-hidden"
+          style={{ top: anchor.bottom + 6, right: Math.max(8, window.innerWidth - anchor.right) }}
+        >
+          <div className="flex items-center justify-between px-3 py-2 border-b border-slate-800">
+            <span className="text-xs font-medium text-slate-300">Vault</span>
+            <button onClick={load} title="Refresh vault list" className="text-slate-500 hover:text-white text-xs px-1">
+              ↻
+            </button>
+          </div>
+
+          <div className="px-2 py-1.5 border-b border-slate-800">
+            <div className="relative">
+              <svg className="w-3 h-3 text-slate-500 absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="11" cy="11" r="8" />
+                <path d="m21 21-4.3-4.3" />
+              </svg>
+              <input
+                ref={filterRef}
+                type="text"
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+                placeholder="Filter vault…"
+                className="w-full pl-6 pr-6 py-1 rounded text-[11px] bg-slate-950 border border-slate-700 text-white focus:border-amber-500 focus:outline-none placeholder-slate-600"
+              />
+              {filter && (
+                <button onClick={() => setFilter('')} title="Clear filter"
+                        className="absolute right-1.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white text-xs px-0.5">
+                  ×
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="max-h-56 overflow-y-auto py-1">
+            {loading && items.length === 0 && (
+              <div className="px-3 py-2 text-xs text-slate-500">Loading…</div>
+            )}
+            {!loading && filtered.length === 0 && (
+              <div className="px-3 py-2 text-xs text-slate-500">
+                {items.length === 0 ? 'No vault items yet.' : `No matches for "${filter}".`}
+              </div>
+            )}
+            {filtered.map((item) => (
+              <button
+                key={item.id}
+                onClick={() => pasteItem(item)}
+                disabled={!!pastingId}
+                className="w-full text-left px-3 py-1.5 flex items-center gap-2 text-xs hover:bg-slate-800 hover:text-cyan-300 transition-colors group disabled:opacity-40"
+                title="Fetch value and paste into terminal"
+              >
+                <svg className="w-3 h-3 text-amber-500/70 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" />
+                </svg>
+                <span className="min-w-0">
+                  <span className="block font-medium text-slate-200 group-hover:text-cyan-300 truncate">{item.name}</span>
+                  {item.description && (
+                    <span className="block text-[10px] text-slate-500 truncate">{item.description}</span>
+                  )}
+                </span>
+                {pastingId === item.id && <span className="ml-auto text-[10px] text-cyan-400">fetching…</span>}
+              </button>
+            ))}
+          </div>
+
+          <form onSubmit={addItem} className="flex flex-col gap-1.5 border-t border-slate-800 p-2">
+            <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider px-1">Add vault item</span>
+            <div className="flex gap-1.5">
+              <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="name"
+                     className="flex-1 min-w-0 px-2 py-1 rounded text-[11px] bg-slate-950 border border-slate-700 text-white focus:border-amber-500 focus:outline-none placeholder-slate-600" />
+              <input type="password" value={value} onChange={(e) => setValue(e.target.value)} placeholder="value"
+                     autoComplete="new-password"
+                     className="flex-1 min-w-0 px-2 py-1 rounded text-[11px] bg-slate-950 border border-slate-700 text-white focus:border-amber-500 focus:outline-none placeholder-slate-600 font-mono" />
+            </div>
+            <button type="submit" disabled={saving || !name.trim() || !value.trim()}
+                    className="px-2 py-1 rounded text-[11px] bg-amber-600 hover:bg-amber-500 disabled:bg-slate-700 disabled:text-slate-500 text-white transition-colors">
+              {saving ? 'Adding…' : '+ Add'}
+            </button>
+          </form>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── Main CommandsPane ───────────────────────────────────────────
 
 export default function CommandsPane({ agent, termRef, run, runningCmd }) {
@@ -409,11 +642,12 @@ export default function CommandsPane({ agent, termRef, run, runningCmd }) {
       <div className="flex flex-wrap items-center gap-1.5">
         <MessagingFlow query={query} runningCmd={runningCmd} run={run} />
         <ModelsFlow agent={agent} query={query} runningCmd={runningCmd} run={run} prompt={prompt} />
-        <McpFlow agent={agent} query={query} runningCmd={runningCmd} run={run} />
+        <McpFlow agent={agent} query={query} runningCmd={runningCmd} run={run} prompt={prompt} />
         <SkillsFlow agent={agent} query={query} runningCmd={runningCmd} run={run} prompt={prompt} />
         {SIMPLE_GROUPS.map((g) => (
           <FlowGroup key={g.title} group={g} query={query} runningCmd={runningCmd} run={run} />
         ))}
+        <VaultDropdown termRef={termRef} />
       </div>
     </div>
   )

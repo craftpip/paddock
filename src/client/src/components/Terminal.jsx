@@ -177,6 +177,7 @@ const Terminal = forwardRef(function Terminal(
   const sessionIdRef = useRef(sessionId) // sync'd below; initTerminal reads this
   const [sessions, setSessions] = useState([])
   const [sessionsLoading, setSessionsLoading] = useState(false)
+  const [sessionsLoaded, setSessionsLoaded] = useState(false)
   const [showSessions, setShowSessions] = useState(false)
   const sessionMenuRef = useRef(null)
 
@@ -380,11 +381,34 @@ const Terminal = forwardRef(function Terminal(
   /** Tear down the current session. Idempotent and safe mid-init. */
   function teardown() {
     genRef.current++ // invalidate any in-flight init
+    if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null }
     if (wsRef.current) { try { wsRef.current.close() } catch {} ; wsRef.current = null }
     if (termRef.current) { try { termRef.current.dispose() } catch {} ; termRef.current = null }
     if (fitAddonRef.current) fitAddonRef.current = null
     if (roRef.current) { try { roRef.current.disconnect() } catch {} ; roRef.current = null }
+    // Remove ANY terminal element from the container — a reconnect that skipped
+    // teardown could have stacked stale .terminal divs on top, and a dead one on
+    // top swallows keyboard input while the live one sits hidden underneath.
+    const host = containerRef.current
+    if (host) {
+      for (const el of Array.from(host.querySelectorAll('.terminal'))) {
+        try { el.remove() } catch {}
+      }
+    }
     setStateSafe(setConnState, 'disconnected')
+  }
+
+  /** Retry connecting after an unexpected close, with a backoff that doubles
+   *  each attempt (capped at 30s) and resets on a successful open. Explicit
+   *  teardown/session-switch cancels any pending retry. */
+  function scheduleReconnect() {
+    if (reconnectTimerRef.current) return
+    reconnectTimerRef.current = setTimeout(() => {
+      reconnectTimerRef.current = null
+      retryDelayRef.current = Math.min(retryDelayRef.current * 2, 30000)
+      teardown()
+      initTerminal().catch(() => {})
+    }, retryDelayRef.current)
   }
 
   // Mount / name change: create session. Unmount: full teardown.
@@ -478,16 +502,20 @@ const Terminal = forwardRef(function Terminal(
 
   /** Load the PAD's active tmux sessions. */
   const refreshSessions = useCallback(async () => {
-    if (!name) return
+    if (!name) return []
     setSessionsLoading(true)
+    let list = []
     try {
       const res = await fetch(`/api/agents/${encodeURIComponent(name)}/terminal-sessions`)
       if (res.ok) {
         const data = await res.json()
-        setSessions(data.sessions || [])
+        list = data.sessions || []
+        setSessions(list)
       }
     } catch {}
+    setSessionsLoaded(true)
     setSessionsLoading(false)
+    return list
   }, [name])
 
   function toggleSessions() {
@@ -513,26 +541,74 @@ const Terminal = forwardRef(function Terminal(
   /** Create a new session with the next free `term-N` name. */
   const newSession = useCallback(async () => {
     if (!name) return
-    await refreshSessions()
-    const used = new Set([...sessions.map((s) => s.name), sessionIdRef.current])
+    const list = await refreshSessions()
+    const used = new Set([...list.map((s) => s.name), sessionIdRef.current])
     let n = 1
     while (used.has(`term-${n}`)) n += 1
-    switchSession(`term-${n}`)
-    refreshSessions()
-  }, [name, sessions, switchSession, refreshSessions])
+    const target = `term-${n}`
+    // Show the new session in the list immediately, like the header does. The
+    // backend creates the tmux session on WS attach, so the API can lag behind.
+    // Poll until the API reports it; only then swap in the authoritative list
+    // (keeps the optimistic entry visible instead of it flashing away).
+    setSessions((prev) => (prev.some((s) => s.name === target) ? prev : [...prev, { name: target, attached: true, created: Date.now() }]))
+    switchSession(target)
+    let attempts = 0
+    while (attempts < 8) {
+      try {
+        const res = await fetch(`/api/agents/${encodeURIComponent(name)}/terminal-sessions`)
+        if (res.ok) {
+          const data = await res.json()
+          const got = (data.sessions || []).map((s) => (s.name === target ? { ...s, name: target } : s))
+          if (got.some((s) => s.name === target)) {
+            setSessions(got)
+            break
+          }
+        }
+      } catch {}
+      attempts += 1
+      if (attempts < 8) await new Promise((r) => setTimeout(r, 300))
+    }
+  }, [name, switchSession, refreshSessions])
 
-  /** Kill a tmux session. Closing the current one falls back to `main`. */
+  /** Kill a tmux session. Closing the current one falls back to the previous
+   *  session in the list (or `main`, which the backend recreates on attach). */
   const closeSession = useCallback(
     async (id) => {
       if (!name) return
-      if (!window.confirm(`Close terminal session "${id}"? Its shell and scrollback will be lost.`)) return
+      const currentWasClosed = sessionIdRef.current === id
+      // Pick the fallback BEFORE deleting: the session listed just before the
+      // one being closed, or `main` if there is no previous one.
+      let fallback = 'main'
+      if (currentWasClosed) {
+        const idx = sessions.findIndex((s) => s.name === id)
+        const prev = idx > 0 ? sessions[idx - 1] : null
+        if (prev) fallback = prev.name
+      }
+      // Remove it from the list immediately; the poll below swaps in the
+      // authoritative list once the backend confirms.
+      setSessions((prev) => prev.filter((s) => s.name !== id))
       try {
         await fetch(`/api/agents/${encodeURIComponent(name)}/terminal-sessions/${encodeURIComponent(id)}`, { method: 'DELETE' })
       } catch {}
-      if (sessionIdRef.current === id) switchSession('main')
-      refreshSessions()
+      if (currentWasClosed) switchSession(fallback)
+      let list = await refreshSessions()
+      // The backend recreates the current session when the WS reconnects (the
+      // attach auto-creates the tmux session), so the list fetch can race ahead
+      // of it. Poll briefly until the current session shows up again, so the
+      // dropdown can mark it "current" instead of showing a stale list.
+      if (currentWasClosed) {
+        const target = sessionIdRef.current
+        let attempts = 0
+        // Window covers the WS reconnect backoff (2s) + tmux session creation,
+        // so a recreated `main` still shows up in the list as "current".
+        while (attempts < 15 && !list.some((s) => s.name === target)) {
+          await new Promise((r) => setTimeout(r, 300))
+          list = await refreshSessions()
+          attempts += 1
+        }
+      }
     },
-    [name, switchSession, refreshSessions]
+    [name, sessions, switchSession, refreshSessions]
   )
 
   /** Load past commands from the activity log (category 'command'). */
@@ -667,12 +743,13 @@ const Terminal = forwardRef(function Terminal(
                   </button>
                 </div>
                 <div className="py-1">
-                  {sessionsLoading && <div className="px-3 py-2 text-xs text-slate-500">Loading…</div>}
-                  {!sessionsLoading && sessions.length === 0 && (
+                  {(sessionsLoading || !sessionsLoaded) && sessions.length === 0 && (
+                    <div className="px-3 py-2 text-xs text-slate-500">Loading…</div>
+                  )}
+                  {!sessionsLoading && sessionsLoaded && sessions.length === 0 && (
                     <div className="px-3 py-2 text-xs text-slate-500">No sessions yet.</div>
                   )}
-                  {!sessionsLoading &&
-                    sessions.map((s) => {
+                  {sessions.map((s) => {
                       const isCur = s.name === sessionId
                       return (
                         <div key={s.name} className="flex items-center group">
@@ -682,7 +759,6 @@ const Terminal = forwardRef(function Terminal(
                             title={`Switch to session ${s.name}`}
                           >
                             {s.name}
-                            {s.attached && <span className="ml-2 text-[10px] text-emerald-500">● active</span>}
                             {isCur && <span className="ml-2 text-[10px] text-cyan-400">current</span>}
                           </button>
                           <button
