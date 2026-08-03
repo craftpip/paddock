@@ -13,6 +13,7 @@ src/data/app.db
 src/data/app.db-wal
 src/data/app.db-shm
 src/data/bot-prefixes.json
+src/data/credentials.json
 src/opencode.json
 
 # Instance runtime data (PADs live on disk, not in git).

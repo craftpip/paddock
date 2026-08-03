@@ -639,6 +639,10 @@ const Terminal = forwardRef(function Terminal(
               Locked
             </span>
           )}
+          <span className="w-px h-4 bg-slate-700" />
+          <span className="text-xs text-slate-300 font-mono">{title || name}</span>
+        </div>
+        <div ref={historyRef} className="relative flex items-center gap-1.5">
           <div ref={sessionMenuRef} className="relative">
             <button
               onClick={toggleSessions}
@@ -651,7 +655,7 @@ const Terminal = forwardRef(function Terminal(
               </svg>
             </button>
             {showSessions && (
-              <div className="absolute left-0 top-full mt-1 w-64 max-h-72 overflow-y-auto rounded-lg border border-slate-700 bg-slate-900 shadow-xl z-50">
+              <div className="absolute right-0 top-full mt-1 w-64 max-h-72 overflow-y-auto rounded-lg border border-slate-700 bg-slate-900 shadow-xl z-50">
                 <div className="flex items-center justify-between px-3 py-2 border-b border-slate-800">
                   <span className="text-xs font-medium text-slate-300">Terminal sessions</span>
                   <button
@@ -704,9 +708,6 @@ const Terminal = forwardRef(function Terminal(
             )}
           </div>
           <span className="w-px h-4 bg-slate-700" />
-          <span className="text-xs text-slate-300 font-mono">{title || name}</span>
-        </div>
-        <div ref={historyRef} className="relative flex items-center gap-1.5">
           <button
             onClick={toggleHistory}
             title="Command history"

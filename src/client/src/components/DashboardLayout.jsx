@@ -33,7 +33,6 @@ export default function DashboardLayout({ children, fullHeight, fullWidth }) {
             <div className="flex items-center gap-0.5">
               <Link to="/agents" className="px-3 py-1.5 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-slate-800 transition-colors">Agents</Link>
               <Link to="/agents/create" className="px-3 py-1.5 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-slate-800 transition-colors">+ Agent</Link>
-              <Link to="/credentials" className="px-3 py-1.5 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-slate-800 transition-colors">Creds</Link>
               <Link to="/vault" className="px-3 py-1.5 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-slate-800 transition-colors">Vault</Link>
               <Link to="/backups" className="px-3 py-1.5 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-slate-800 transition-colors">Backups</Link>
               {role === 'admin' && (

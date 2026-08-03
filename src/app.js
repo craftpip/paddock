@@ -12,7 +12,6 @@ const Docker = require('dockerode');
 
 const dockerClient = new Docker({ socketPath: '/var/run/docker.sock' });
 
-const creds = require('./creds');
 const vault = require('./services/vault');
 const registry = require('./services/agent-registry');
 const vm = require('./services/vm-manager');
@@ -1250,144 +1249,6 @@ app.post('/api/agents/:name/backups/delete', (req, res) => {
   res.json({ ok: true });
 });
 
-// ─── API: Credentials ───────────────────────────────────────
-
-function scanCredentialUsage() {
-  const apiKeys = creds.apiKeys();
-  const botTokens = creds.botTokens();
-  const userIds = creds.userIDs();
-
-  const usedBy = { apiKeys: {}, botTokens: {}, userIds: {} };
-  for (const k of Object.keys(apiKeys)) usedBy.apiKeys[k] = [];
-  for (const k of Object.keys(botTokens)) usedBy.botTokens[k] = [];
-  for (const k of Object.keys(userIds)) usedBy.userIds[k] = [];
-
-  const containerStates = registry.dockerPsList();
-
-  if (!fs.existsSync(INSTANCES_DIR)) return usedBy;
-  for (const dir of fs.readdirSync(INSTANCES_DIR)) {
-    const configPath = path.join(INSTANCES_DIR, dir, 'openclaw', 'openclaw.json');
-    if (!fs.existsSync(configPath)) continue;
-    try {
-      const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-      const status = (containerStates[dir] || 'stopped').toLowerCase();
-
-      // API keys: match by provider name
-      for (const [name, ak] of Object.entries(apiKeys)) {
-        const prov = ak.provider;
-        if (config.models?.providers?.[prov]) {
-          usedBy.apiKeys[name].push({ name: dir, status });
-          continue;
-        }
-        for (const p of Object.values(config.auth?.profiles || {})) {
-          if (p.provider === prov) {
-            usedBy.apiKeys[name].push({ name: dir, status });
-            break;
-          }
-        }
-      }
-
-      // Bot tokens: match by value
-      for (const [name, bt] of Object.entries(botTokens)) {
-        const tokenVal = typeof bt === 'string' ? bt : bt.token;
-        for (const ch of Object.values(config.channels || {})) {
-          if (ch.botToken === tokenVal || ch.token === tokenVal) {
-            usedBy.botTokens[name].push({ name: dir, status });
-            break;
-          }
-        }
-      }
-
-      // User IDs: match by value
-      for (const [name, uid] of Object.entries(userIds)) {
-        const uidVal = typeof uid === 'string' ? uid : (uid.uid || uid.token);
-        for (const ch of Object.values(config.channels || {})) {
-          if (ch.allowFrom?.includes(uidVal)) {
-            usedBy.userIds[name].push({ name: dir, status });
-            break;
-          }
-        }
-      }
-    } catch (e) {
-      console.error(`Failed to parse ${configPath}:`, e.message);
-    }
-  }
-  return usedBy;
-}
-
-function enrichUsedBy(credsFn, usedByKey) {
-  const items = credsFn();
-  const usage = scanCredentialUsage()[usedByKey] || {};
-  const out = {};
-  for (const [name, val] of Object.entries(items)) {
-    out[name] = { ...(typeof val === 'object' ? val : { token: val, platform: 'telegram' }), used_by: usage[name] || [] };
-  }
-  return out;
-}
-
-function filterCredsByOwner(creds, userId, role) {
-  if (role === 'admin') return creds;
-  const filtered = {};
-  for (const [name, val] of Object.entries(creds)) {
-    if (!val.owner || val.owner === userId) filtered[name] = val;
-  }
-  return filtered;
-}
-
-app.get('/api/credentials', (req, res) => {
-  const apiKeys = filterCredsByOwner(enrichUsedBy(creds.apiKeys, 'apiKeys'), req.session.userId, req.session.role);
-  const botTokens = filterCredsByOwner(enrichUsedBy(creds.botTokens, 'botTokens'), req.session.userId, req.session.role);
-  const userIds = filterCredsByOwner(enrichUsedBy(creds.userIDs, 'userIds'), req.session.userId, req.session.role);
-  res.json({ api_keys: apiKeys, bot_tokens: botTokens, user_ids: userIds });
-});
-
-app.post('/api/credentials/api-key', (req, res) => {
-  const { name, provider, key } = req.body;
-  if (!name || !provider || !key) return res.status(400).json({ error: 'Name, provider, and key are required' });
-  try {
-    creds.addApiKey(name.trim(), provider.trim(), key.trim(), req.session.userId);
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
-});
-
-app.post('/api/credentials/bot-token', (req, res) => {
-  const { name, token } = req.body;
-  if (!name || !token) return res.status(400).json({ error: 'Name and token are required' });
-  try {
-    creds.addBotToken(name.trim(), token.trim(), 'telegram', req.session.userId);
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
-});
-
-app.post('/api/credentials/user-id', (req, res) => {
-  const { name, uid } = req.body;
-  if (!name || !uid) return res.status(400).json({ error: 'Name and user ID are required' });
-  try {
-    creds.addUserId(name.trim(), uid.trim(), 'telegram', req.session.userId);
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
-});
-
-app.post('/api/credentials/delete', (req, res) => {
-  const { type, name } = req.body;
-  if (!type || !name) return res.status(400).json({ error: 'type and name are required' });
-  try {
-    if (type === 'api_key') creds.deleteApiKey(name);
-    else if (type === 'bot_token') creds.deleteBotToken(name);
-    else if (type === 'user_id') creds.deleteUserId(name);
-    else return res.status(400).json({ error: 'Invalid type' });
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
-});
-
 // ─── API: Vault (encrypted key-value store) ────────────────
 
 app.get('/api/vault', (req, res) => {
@@ -1760,7 +1621,10 @@ wss.on('connection', async (ws, req) => {
         AttachStdout: true,
         AttachStderr: true,
         Tty: true,
-        Env: ['TERM=xterm-256color'],
+        // LANG is required: without a UTF-8 locale tmux assumes the client
+        // cannot do Unicode and substitutes every non-ASCII glyph with `_`
+        // (TUI bullets ● ◆ ○ ↑/↓ • all arrive as underscores).
+        Env: ['TERM=xterm-256color', 'LANG=C.UTF-8'],
         // Attach to the persistent tmux session instead of spawning a throwaway
         // `bash -i`. On WS close the attach client dies but the session stays,
         // so reloads and tab switches pick up exactly where they left off.
@@ -1833,4 +1697,3 @@ wss.on('connection', async (ws, req) => {
 });
 
 try { getDb(); console.log('App metadata database initialized'); } catch (e) { console.error('DB init error:', e.message); }
-creds.importFromBotPrefixes();

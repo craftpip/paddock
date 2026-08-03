@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-03
 **Status:** Plan
-**Sources:** `plans/reconstruction.md` (dead settings.ejs), `plans/coding-agent-builds.md` Part 2 (docker checkbox), `plans/paddock-own-mcp.md` (fleet MCP server)
+**Sources:** `plans/reconstruction.md` (dead settings.ejs), `plans/coding-agent-builds.md` Part 2 (docker checkbox), `plans/paddock-own-mcp.md` (fleet MCP server), `plans/create-agent.md` (SSE/job-log streaming the Update card reuses)
 
 ## Goal
 
@@ -10,6 +10,10 @@ Add a **Settings** tab to the agent page that brings back the old settings page
 (container info + delete) that was never ported to React, plus the docker/control
 checkbox from the coding-agent-builds plan and a new **Network** option:
 
+- **Update** button — redownload the image (`build --pull`), rebuild it, and
+  recreate the container from the fresh image, streaming the whole run into a
+  **console-style pane** (real-time output, not the interactive terminal). The
+  recreate restarts the container automatically when it's done.
 - **"Allow docker in the container"** checkbox — gives the agent raw docker
   (socket + CLI) **and** installs the **Paddock project MCP** into the agent, so
   it can manage other agents through `paddock_*` MCP tools
@@ -18,7 +22,7 @@ checkbox from the coding-agent-builds plan and a new **Network** option:
   namespace
 - Danger Zone delete
 
-One tab, four cards.
+One tab, five cards.
 
 ## What we know from the old plans
 
@@ -47,7 +51,7 @@ Add `{ id: 'settings', label: 'Settings' }` to `MODES` in
 `AgentDetail.jsx:8-15`.
 
 The Settings tab (old settings.ejs + coding-agent-builds Part 2 + new Network
-option). Four cards, top to bottom:
+option + new Update). Five cards, top to bottom:
 
 ### 1. Container Info (read-only)
 
@@ -59,7 +63,58 @@ option). Four cards, top to bottom:
 | Status | `agent.status` |
 | Image | `AGENT_IMAGES[agent_type]` from `vm-manager.js`, or `docker inspect` on the container |
 
-### 2. Allow docker in the container (toggle)
+### 2. Update (image refresh)
+
+> **Update** — redownload the base image, rebuild it, and recreate the
+> container from the new image. The whole run shows in a console-style pane
+> (real-time output), and when it's done the container restarts automatically.
+
+- Sits right under Container Info — it's the "image" card: one **Update** button
+  plus a short "what it does" note.
+- Clicking it starts a background job (same shape as `plans/create-agent.md`):
+  1. **Pull + build** — `docker compose -f <instance-compose> build --pull <name>`.
+     `--pull` always redownloads the base image first, so a `:latest` tag gets a
+     fresh copy, then rebuilds (installs the docker CLI, openclaw, etc.).
+  2. **Recreate** — `docker compose -f <instance-compose> up -d --no-deps
+     --force-recreate <name>`. This tears down the old container and starts a
+     new one from the fresh image — **the restart is automatic, no separate
+     restart step**.
+- Output streams into a **console-style pane** (a read-only line feed, the same
+  `Console` component used by Create Agent / Health / Messaging) — a console,
+  not the interactive xterm terminal. Steps are labeled as they start:
+  - **Pull/build** — `build --pull` output
+  - **Recreate** — `up -d --force-recreate` output
+  - **Done** — success line, then the tab refetches agent status so the info
+    card / dashboard reflect the new image and uptime.
+- Same transport as create-agent: `POST /api/agents/:name/update` returns `202`
+  and starts a job; `GET /api/agents/:name/update-log?since=<n>` is an SSE
+  stream of `step`/`line`/`done`/`error` events with replay-on-reconnect. Reuses
+  `src/services/job-log.js` and `runCmdStream()` from the create-agent plan.
+- **Failure:** the console keeps the error tail, the agent is left as-is (if
+  the recreate step failed, the old container is still running — the recreate is
+  the last step), and a **Retry** button shows. Never navigate away.
+
+Card look:
+
+```
+┌── Update ─────────────────────────────────────────────────────────────────────┐
+│                                                                               │
+│  Update                                                                       │
+│  Redownloads the image, rebuilds it, and recreates the container.             │
+│  The container restarts automatically when it's done.                         │
+│                                                                               │
+│  [  Update  ]                                                                 │
+│                                                                               │
+│  ┌─ console pane (appears while running) ───────────────────────────┐        │
+│  │ $ docker compose build --pull <name>                             │        │
+│  │ …pull/build output…                                               │        │
+│  │ $ docker compose up -d --no-deps --force-recreate <name>         │        │
+│  │ …up output…  → Recreated — container restarted                   │        │
+│  └────────────────────────────────────────────────────────────────────┘        │
+└───────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 3. Allow docker in the container (toggle)
 
 > **Allow docker in the container** — lets this agent run `docker` commands
 > (docker CLI + host socket) **and** installs the Paddock project MCP into the
@@ -106,7 +161,7 @@ option). Four cards, top to bottom:
 > docker socket is the *raw* capability on top. If we ever want the MCP without
 > raw docker, split this into two toggles — see Open questions.
 
-### 3. Network (dropdown)
+### 4. Network (dropdown)
 
 > **Network** — route this agent's traffic through another running container
 > by joining its network namespace (e.g. a gluetun container for VPN).
@@ -152,7 +207,7 @@ Card look:
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 4. Danger Zone — Delete Container
+### 5. Danger Zone — Delete Container
 
 - Same as the old `settings.ejs`: warning text + red "Delete Container" button.
 - Wires up the **existing** `POST /api/agents/:name/delete` (`app.js:554`) —
@@ -174,6 +229,14 @@ Card look:
   - `network` read from `meta.env` `NETWORK=<container>` (absent = `''`).
   - `image` from `AGENT_IMAGES[agent_type]` (export the map from
     `vm-manager.js` or move it to a shared constant).
+- `POST /api/agents/:name/update` — `202` + background job (same job-log
+  pattern as create-agent): `build --pull` then `up -d --no-deps
+  --force-recreate` on the instance compose file. No body. The compose file is
+  the source of truth and needs no edits — an update just rebuilds the image and
+  recreates the container.
+- `GET /api/agents/:name/update-log?since=<n>` — SSE stream of
+  `step`/`line`/`done`/`error` events (same shape as `create-log`), replaying
+  buffered lines after `since` for reconnect recovery. Uses `job-log.js`.
 - `POST /api/agents/:name/settings` `{ allowDocker?: boolean, network?: string }`
   1. Validate name (`safeVmName`).
   2. If `network` is set, validate the target exists and is running (no
@@ -198,6 +261,10 @@ Card look:
   - when `network` set, add:
     `    network_mode: container:<network>`
 - `writeInstanceCompose()` passes the options through.
+- New helper `updateAgent(name, { onLog, onStep })` — runs
+  `docker compose -f <path> build --pull <name>` (long timeout, ~900s), then
+  `up -d --no-deps --force-recreate <name>`, feeding every chunk through
+  `onLog`. Built on `runCmdStream()`.
 - New helper `applySettings(name, { allowDocker, network })` — reads meta,
   regenerates compose, returns the yaml (the route does the MCP install +
   stop/start around it). Keep `app.js` thin.
@@ -223,9 +290,11 @@ Card look:
 - `src/client/src/pages/AgentDetail.jsx` — add `settings` to `MODES`, render
   `<SettingsTab agent={agent} />`
 - `src/app.js` — `GET/POST /api/agents/:name/settings` + `GET /api/containers` +
-  `installPaddockMcp`/`removePaddockMcp` helpers
-- `src/services/vm-manager.js` — `allowDocker` + `network` options and an
-  `applySettings()` helper + export `AGENT_IMAGES`
+  `installPaddockMcp`/`removePaddockMcp` helpers + `POST /api/agents/:name/update`
+  and `GET /api/agents/:name/update-log` (reuses `job-log.js`)
+- `src/services/vm-manager.js` — `allowDocker` + `network` options, an
+  `applySettings()` helper, `updateAgent()` (build --pull + force-recreate), and
+  export `AGENT_IMAGES`
 - `src/services/agent-registry.js` — optional `allowDocker`/`network`/`image`
   on agent
 - `src/docs/architecture.md` + `docs/` tree — document the new settings tab
@@ -251,6 +320,11 @@ can't install the project MCP (falls back to docker-socket-only, or errors).
 | Agent compromised | It holds `MCP_TOKEN` = full fleet control (same trust as a webui session) — warn in the popup and docs |
 | MCP install fails mid-toggle | Don't write `DOCKER=1`; roll back compose; report the mcp add error |
 | `mcp remove` on an agent without the server | No-op, continue (idempotent) |
+| Update while registry/network down | `build --pull` fails → old container untouched (recreate never runs); error tail in the console, Retry available |
+| Build succeeds but recreate fails | Container left stopped or half-recreated; console shows the `up` error; Retry re-runs from `build --pull` |
+| `:latest` version bump changes storage format | AGENTS.md "Updating OpenClaw to latest": after the recreate the agent may need `openclaw doctor --fix` (e.g. cron JSON → SQLite). Surface a hint in the Done line for openclaw-type agents |
+| Update while agent is running | Fine — `--force-recreate` handles it; the running session is lost (same warning text as the docker toggle) |
+| Update on an agent pinned to a version | `build --pull` still pulls the pinned tag; no surprise (pin = no drift) |
 
 ## Phases
 
@@ -259,13 +333,21 @@ can't install the project MCP (falls back to docker-socket-only, or errors).
   `POST /api/agents/:name/delete`.
 - Pure read + an already-existing write route. No vm-manager changes needed.
 
-### Phase 2 — Docker toggle + Network
+### Phase 2 — Update (image refresh)
+- Needs the streaming infra from `plans/create-agent.md` (`job-log.js` +
+  `runCmdStream()`).
+- Update card + `POST /api/agents/:name/update` + SSE `update-log` route +
+  console pane in `SettingsTab.jsx`.
+- Build is the risky/long step — generous timeout, SSE keep-alives, failure
+  leaves the old container running.
+
+### Phase 3 — Docker toggle + Network
 - `allowDocker` + `network` in compose generation, `meta.env` `DOCKER`/`NETWORK`
   flags, `GET /api/containers`, `GET/POST /api/agents/:name/settings`,
   stop/edit/start flow, confirm popup, image-no-CLI guard, network-target
   validation.
 
-### Phase 3 — Paddock MCP install (fleet control)
+### Phase 4 — Paddock MCP install (fleet control)
 - Requires `paddock-own-mcp.md` shipped (`/mcp` + `MCP_TOKEN`).
 - Toggle-on runs `openclaw mcp add paddock --url http://<webui>:6789/mcp`
   (with token) inside the agent; toggle-off runs `mcp remove`.
@@ -279,7 +361,25 @@ Phase 1:
   confirm; confirming removes the agent (container + instance files gone,
   dashboard updates).
 
-Phase 2:
+Phase 2 (Update):
+```bash
+curl -X POST http://10.69.1.164:6789/api/agents/<pad>/update
+```
+- Settings tab shows the console pane streaming `build --pull` then
+  `up -d --no-deps --force-recreate` output in real time; ends with a
+  "Recreated — container restarted" line.
+- Container is up and restarted automatically afterward:
+  ```bash
+  docker inspect <pad> --format '{{.Image}}'          # new image digest
+  docker ps --filter name=<pad> --format '{{.Status}}' # Up — recreated
+  ```
+- Dashboard + info card show the agent running again; a failed build (registry
+  down) leaves the old container running and shows a Retry button.
+- Pull the image before updating and confirm a "no changes" run still recreates
+  cleanly (proves `--pull` + `--force-recreate` behave even when the image is
+  unchanged).
+
+Phase 3:
 ```bash
 curl -X POST http://10.69.1.164:6789/api/agents/<pad>/settings -d '{"allowDocker":true}' -H 'Content-Type: application/json' -H 'X-CSRF-Token: ...'
 docker inspect <pad> --format '{{range .Mounts}}{{.Source}} {{.Destination}}{{"\n"}}{{end}}'
@@ -303,7 +403,7 @@ docker exec <pad> ip route       # shows the target container's routing (VPN)
 - Dropdown lists running containers; currently-set stopped target still visible
   and clearable.
 
-Paddock MCP (Phase 3):
+Paddock MCP (Phase 4):
 ```bash
 docker exec <pad> openclaw mcp list
 # → paddock  (streamable-http, http://10.69.1.164:6789/mcp)
@@ -333,12 +433,17 @@ docker exec <pad> openclaw mcp test paddock   # or ask the agent to list agents
 - **Connectivity**: host IP (`10.69.1.164:6789/mcp`) vs putting agents on the
   webui's network so they reach it as `http://paddock:6789/mcp`. Host IP is
   simplest and matches the MCP plan's client configs.
+- **Version pinning**: Update follows whatever `:latest` is. AGENTS.md flags the
+  `:latest` risk (breaking changes land under the same tag). Should update also
+  offer pinning a version (e.g. `v2026.6.1`) instead of always chasing the tag?
 
 ## Related
 
 - `plans/coding-agent-builds.md` — Part 2 is the docker checkbox this pulls in;
-  Phase 2 of that plan becomes Phase 2 here.
+  Phase 2 of that plan becomes Phase 3 here.
+- `plans/create-agent.md` — the **streaming infra** the Update card reuses:
+  `job-log.js`, `runCmdStream()`, SSE `create-log` shape, `Console.jsx`.
 - `plans/paddock-own-mcp.md` — **prerequisite**; the `/mcp` fleet server +
-  `MCP_TOKEN` that Phase 3 installs into enabled agents.
+  `MCP_TOKEN` that Phase 4 installs into enabled agents.
 - `plans/reconstruction.md` — §"Dead Settings Page" section this revives.
 - `src/views/agents/settings.ejs` — the old page being replaced (delete after).

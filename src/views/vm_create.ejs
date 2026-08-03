@@ -88,62 +88,6 @@
       </div>
     </section>
 
-    <section class="bg-slate-800/60 border border-slate-700 rounded-xl p-6">
-      <div class="flex items-center gap-2 mb-5">
-        <div class="w-8 h-8 rounded-lg bg-purple-900/50 border border-purple-800 flex items-center justify-center text-sm text-purple-400 font-bold">4</div>
-        <h2 class="text-base font-semibold text-white">Credentials &amp; API Keys</h2>
-      </div>
-
-      <p class="text-xs text-slate-500 mb-5">All fields optional. Saved entries can be selected from the dropdowns below each field.</p>
-
-      <div class="space-y-5">
-        <div>
-          <label class="block text-xs font-medium text-slate-400 mb-1.5 uppercase tracking-wider">Telegram Bot Token</label>
-          <input type="text" name="bot_token" placeholder="123456:ABCdef..."
-                 class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-500 placeholder-slate-500 font-mono mb-2">
-          <select name="saved_bot_token" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-500">
-            <option value="">-- Or pick from saved --</option>
-            <% for (const [name, token] of Object.entries(bots)) { %>
-            <option value="<%= name %>"><%= name %></option>
-            <% } %>
-          </select>
-        </div>
-
-        <div>
-          <label class="block text-xs font-medium text-slate-400 mb-1.5 uppercase tracking-wider">Telegram User ID</label>
-          <input type="text" name="user_id" placeholder="532156945"
-                 class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-500 placeholder-slate-500 font-mono mb-2">
-          <select name="saved_user_id" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-500">
-            <option value="">-- Or pick from saved --</option>
-            <% for (const [name, uid] of Object.entries(users)) { %>
-            <option value="<%= name %>"><%= name %> (<%= uid %>)</option>
-            <% } %>
-          </select>
-        </div>
-
-        <div>
-          <label class="block text-xs font-medium text-slate-400 mb-1.5 uppercase tracking-wider">API Key</label>
-          <div class="flex gap-2 mb-2">
-            <select name="api_key_provider" class="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-500">
-              <option value="">Provider</option>
-              <option value="openai">OpenAI</option>
-              <option value="openrouter">OpenRouter</option>
-              <option value="ollama-cloud">Ollama Cloud</option>
-              <option value="anthropic">Anthropic</option>
-            </select>
-            <input type="text" name="api_key_value" placeholder="sk-..."
-                   class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-500 placeholder-slate-500 font-mono">
-          </div>
-          <select name="saved_api_key" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-500">
-            <option value="">-- Or pick from saved --</option>
-            <% for (const [name, ak] of Object.entries(apikeys)) { %>
-            <option value="<%= name %>"><%= name %> (<%= ak.provider || '?' %>)</option>
-            <% } %>
-          </select>
-        </div>
-      </div>
-    </section>
-
     <button type="submit" class="w-full bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-semibold py-3.5 rounded-xl transition-all duration-200 shadow-lg shadow-cyan-900/30">
       Create VM
     </button>

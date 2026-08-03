@@ -96,6 +96,11 @@ The `npm/` folder is OpenClaw's internal plugin cache (not project dependencies)
 
 ## Onboard Bot Script
 
+> **STALE (2026-08-03):** `scripts/` no longer exists — the external
+> `onboard-bot.sh` was absorbed into the Node webui (`app.js` route handlers +
+> `vm-manager.js`). `bot-prefixes.json` is gone; secrets live in the Vault now.
+> Kept below as historical record only.
+
 - **Script**: `scripts/onboard-bot.sh` — automates `openclaw onboard` + Telegram + API key setup for a running PAD.
 - **Flow**:
   1. First run: generates skeleton config, adds Telegram channel with allowlist.
@@ -323,7 +328,7 @@ docker compose ps <pad>`, `docker exec <pad> openclaw --version`, `docker exec <
 
 ### Files Created
 - `src/app.js` — Express server with all routes, helpers, auth middleware, WebSocket terminal
-- `src/creds.js` — Credential manager ported from `creds.py` (already existed)
+- `src/services/vault.js` — Encrypted Vault (`VAULT_KEY`, AES-256-GCM) — replaces the removed `creds.js`
 - `src/views/` — 18 EJS templates (layout + 11 pages + 6 partials), replacing Jinja2 `templates/`
 - `src/package.json` — dependencies (express, ejs, express-ejs-layouts, ws, cookie-parser)
 - `src/Dockerfile` — `node:20-slim` with docker-ce-cli installed
@@ -380,7 +385,7 @@ The system has been rewritten from a VM-centric dashboard to an PAD-first manage
 ```
 src/
 ├── app.js                    # Express server, legacy routes, WS terminal
-├── creds.js                  # Credential manager
+├── services/vault.js         # Encrypted Vault (replaces removed creds.js)
 ├── middleware/
 │   ├── auth.js               # Session-based auth, CSRF, login/logout
 │   └── rateLimit.js          # IP-based rate limiter
@@ -411,7 +416,8 @@ src/
 ### Key Design Decisions
 
 - **PAD-first, not VM-first**: All new routes use `/agents/:id` instead of `/vm/:name`
-- **Legacy routes preserved**: `/vm/*`, `/backups`, `/credentials` still work
+- **Legacy routes preserved**: `/vm/*`, `/backups` still work
+- **Credentials page/system removed (2026-08-03)**: replaced by the Vault (`/vault`, `/api/vault*`). `/credentials` redirects to `/vault`.
 - **SQLite metadata store**: `src/data/app.db` stores PADs, activity events, sessions
 - **Filesystem-derived state**: PADs discovered from `instances/*/meta.env` + Docker state
 - **Session-based auth**: Replaces Basic Auth. Uses `express-session` with CSRF tokens
@@ -486,7 +492,7 @@ docker exec -d paddock-webui sh -c 'cd /app/client && npm run dev'
 **Default workflow for me:** When doing frontend development, I must start the Vite dev server first (if not already running) and test on port 5173. No rebuild needed. Only use port 5051 for production/demo verification.
 
 ### Nav Items (current order)
-Dashboard, +PAD, Backups, Creds
+Dashboard, +PAD, Vault, Backups
 - **Usage tab removed** — it was an external OpenAI report, not useful in the panel.
 
 ### Cleanup Completed

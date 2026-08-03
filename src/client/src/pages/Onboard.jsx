@@ -6,15 +6,9 @@ export default function Onboard() {
   const { agentId } = useParams()
   const [agent, setAgent] = useState(null)
   const [botToken, setBotToken] = useState('')
-  const [botTokenName, setBotTokenName] = useState('')
   const [userId, setUserId] = useState('')
-  const [userIdName, setUserIdName] = useState('')
   const [apiKeyProvider, setApiKeyProvider] = useState('')
   const [apiKeyValue, setApiKeyValue] = useState('')
-  const [apiKeyName, setApiKeyName] = useState('')
-  const [botTokens, setBotTokens] = useState({})
-  const [userIds, setUserIds] = useState({})
-  const [apiKeys, setApiKeys] = useState({})
   const [output, setOutput] = useState('Output will appear here...')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -22,13 +16,6 @@ export default function Onboard() {
   useEffect(() => {
     api(`/api/agents/${agentId}`).then((d) => {
       if (d) setAgent(d)
-    }).catch(() => {})
-    api('/api/credentials').then((d) => {
-      if (d) {
-        setBotTokens(d.bot_tokens || {})
-        setUserIds(d.user_ids || {})
-        setApiKeys(d.api_keys || {})
-      }
     }).catch(() => {})
   }, [agentId])
 
@@ -38,19 +25,14 @@ export default function Onboard() {
     setError('')
     setOutput('Running onboard...')
 
-    const resolvedBotToken = botToken || (botTokenName ? (botTokens[botTokenName]?.token || botTokens[botTokenName] || '') : '')
-    const resolvedUserId = userId || (userIdName ? (userIds[userIdName]?.uid || userIds[userIdName] || '') : '')
-    const resolvedApiKeyProvider = apiKeyProvider || (apiKeyName ? (apiKeys[apiKeyName]?.provider || '') : '')
-    const resolvedApiKeyValue = apiKeyValue || (apiKeyName ? (apiKeys[apiKeyName]?.key || '') : '')
-
     try {
       await api(`/api/agents/${agentId}/onboard`, {
         method: 'POST',
         body: {
-          bot_token: resolvedBotToken,
-          user_id: resolvedUserId,
-          api_key_provider: resolvedApiKeyProvider,
-          api_key_value: resolvedApiKeyValue,
+          bot_token: botToken,
+          user_id: userId,
+          api_key_provider: apiKeyProvider,
+          api_key_value: apiKeyValue,
         },
         timeout: 60000,
       })
@@ -89,28 +71,15 @@ export default function Onboard() {
           <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">Telegram Bot</h2>
 
           <div>
-            <label className="block text-sm text-slate-300 mb-1">Bot Token (or pick saved)</label>
+            <label className="block text-sm text-slate-300 mb-1">Bot Token</label>
             <input type="text" value={botToken} onChange={(e) => setBotToken(e.target.value)} placeholder="123456:ABCdef..."
-                   className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-500 placeholder-slate-500 mb-2" />
-            <select value={botTokenName} onChange={(e) => setBotTokenName(e.target.value)} className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white">
-              <option value="">-- Saved tokens --</option>
-              {Object.entries(botTokens).map(([name]) => (
-                <option key={name} value={name}>{name}</option>
-              ))}
-            </select>
+                   className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-500 placeholder-slate-500" />
           </div>
 
           <div>
-            <label className="block text-sm text-slate-300 mb-1">Allow User ID (or pick saved)</label>
+            <label className="block text-sm text-slate-300 mb-1">Allow User ID</label>
             <input type="text" value={userId} onChange={(e) => setUserId(e.target.value)} placeholder="532156945"
-                   className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-500 placeholder-slate-500 mb-2" />
-            <select value={userIdName} onChange={(e) => setUserIdName(e.target.value)} className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white">
-              <option value="">-- Saved users --</option>
-              {Object.entries(userIds).map(([name, val]) => {
-                const uid = val?.uid || val
-                return <option key={name} value={name}>{name} ({uid})</option>
-              })}
-            </select>
+                   className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-500 placeholder-slate-500" />
           </div>
         </div>
 
@@ -118,8 +87,8 @@ export default function Onboard() {
           <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">Provider API Key</h2>
 
           <div>
-            <label className="block text-sm text-slate-300 mb-1">API Key — custom value or pick saved</label>
-            <div className="flex gap-2 mb-2">
+            <label className="block text-sm text-slate-300 mb-1">API Key</label>
+            <div className="flex gap-2">
               <select value={apiKeyProvider} onChange={(e) => setApiKeyProvider(e.target.value)} className="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-500">
                 <option value="">Provider</option>
                 <option value="openai">OpenAI</option>
@@ -130,12 +99,6 @@ export default function Onboard() {
               <input type="text" value={apiKeyValue} onChange={(e) => setApiKeyValue(e.target.value)} placeholder="sk-..."
                      className="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-500 placeholder-slate-500 font-mono" />
             </div>
-            <select value={apiKeyName} onChange={(e) => setApiKeyName(e.target.value)} className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white">
-              <option value="">-- Or pick from saved --</option>
-              {Object.entries(apiKeys).map(([name, ak]) => (
-                <option key={name} value={name}>{name} ({ak.provider || '?'})</option>
-              ))}
-            </select>
           </div>
         </div>
 

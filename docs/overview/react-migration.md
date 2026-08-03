@@ -21,7 +21,6 @@ src/
 ├── routes/agents.js       JSON-only API
 ├── services/              Docker, workspace, VM, backup
 ├── middleware/             Auth, rate limit
-├── creds.js               Credential manager
 ├── client/                React SPA
 │   ├── src/
 │   │   ├── pages/         Page components
@@ -37,7 +36,7 @@ src/
 │   ├── tailwind.config.js
 │   └── package.json
 ├── public/                Built React SPA (served by Express in prod)
-└── data/                  SQLite + credentials
+└── data/                  SQLite + Vault (encrypted secrets)
 ```
 
 ## Routes
@@ -49,7 +48,7 @@ src/
 | `/agents/create` | CreateAgentPage | `pages/CreateAgent.jsx` |
 | `/agents/:id` | AgentDetailPage | `pages/AgentDetail.jsx` |
 | `/backups` | GlobalBackupsPage | `pages/Backups.jsx` |
-| `/credentials` | CredentialsPage | `pages/Credentials.jsx` |
+| `/vault` | VaultPage | `pages/Vault.jsx` |
 
 AgentDetail tabs: Overview, Workspace, Terminal, Logs, Sessions, Config, MCP, Skills, Models, Messaging, Backups, Health, Activity.
 

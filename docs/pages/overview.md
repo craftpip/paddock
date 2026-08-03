@@ -42,7 +42,7 @@ Implemented enhancements for user experience and functionality:
 
 ### Consistent Page Layout
 
-- **Credentials page** — `max-w-7xl mx-auto px-4 sm:px-6 py-8` wrapper added.
+- **Vault page** — `max-w-7xl mx-auto px-4 sm:px-6 py-8` wrapper added.
 - **Global Backups page** — same wrapper added.
 - **Create Agent page** — `py-8` added to existing `max-w-xl mx-auto`.
 
@@ -221,55 +221,14 @@ Global listing of all backup archives from the `backups/` folder. Features:
 - **Delete** — with confirmation dialog
 - **Empty state** — icon with message when no backups exist
 
-## Credentials (`/credentials`)
+## Vault (`/vault`)
 
-File: `Credentials.jsx`
+File: `Vault.jsx`
 
-Three credential types managed from a single page with a sidebar tab switcher:
-
-| Section | What It Stores |
-|---------|---------------|
-| **API Keys** | Provider API keys (openai, openrouter, ollama-cloud, anthropic) |
-| **Bot Tokens** | Telegram bot tokens for messaging |
-| **Allowed User IDs** | Telegram user IDs for DM allowlist |
-
-Each table has an add form at the top and a row per credential. Token/key values are masked (first 4 + last 4 chars, stars in between).
-
-### Used By Column
-
-Every table has a **Used By** column that shows which PADs use each credential. On page load, the frontend calls `GET /api/credentials`. The backend (`app.js:879-958`) scans all PAD configs under `instances/*/openclaw/openclaw.json` and attaches a `used_by` array:
-
-```json
-{
-  "api_keys": {
-    "my-key": {
-      "provider": "openai",
-      "key": "sk-...",
-      "used_by": [{ "name": "ozden", "status": "running" }]
-    }
-  }
-}
-```
-
-Matching logic:
-
-- **API keys** — matches by provider name against `models.providers.<name>` and `auth.profiles.*.provider`
-- **Bot tokens** — matches by token value against `channels.*.botToken` / `channels.*.token`
-- **User IDs** — matches by ID value against `channels.*.allowFrom` arrays
-
-Frontend renders a `UsedByBadges` component per row. Running PADs get a cyan badge, stopped ones get slate. No usage shows a muted `—`.
-
-### Backend API
-
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/api/credentials` | GET | Returns all credentials with `used_by` enrichment |
-| `/api/credentials/api-key` | POST | Add API key (name, provider, key) |
-| `/api/credentials/bot-token` | POST | Add bot token (name, token) |
-| `/api/credentials/user-id` | POST | Add user ID (name, uid) |
-| `/api/credentials/delete` | POST | Delete credential (type, name) |
-
-Credentials persist to `/app/data/credentials.json`. On startup, `bot-prefixes.json` is imported if it exists.
+The encrypted secret store that replaced the Credentials page. Items are stored
+in `src/data/vault.json`, AES-256-GCM encrypted with the `VAULT_KEY` environment
+variable. Add / edit / delete via `/api/vault*`. The old `/credentials` URL
+redirects to `/vault`.
 
 ## Onboard (`/onboard/:name`)
 

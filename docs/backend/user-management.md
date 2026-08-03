@@ -22,10 +22,10 @@ Multi-user system with owner-based scoping. Every resource in Paddock belongs to
 
 Every resource has an `owner_id` that references `users(id)`. The rule:
 
-| Who | Agents | Credentials | Backups | Users |
-|-----|--------|-------------|---------|-------|
-| **admin** | All agents | All credentials | All backups | All users |
-| **regular user** | Only their agents | Only their creds | Only their backups | Only own profile |
+| Who | Agents | Backups | Users |
+|-----|--------|---------|-------|
+| **admin** | All agents | All backups | All users |
+| **regular user** | Only their agents | Only their backups | Only own profile |
 
 No exceptions. No "view other user's data" unless you're admin.
 
@@ -152,21 +152,11 @@ if (!agent || (role !== 'admin' && agent.owner_id !== userId)) {
 }
 ```
 
-### Credentials — Scoped by Owner
+### Vault — Not Owner-Scoped
 
-Each credential entry has an `owner_id` field:
-
-```json
-[
-  { "id": "cred_1", "provider": "openai", "key": "sk-...", "owner_id": "user_abc" },
-  { "id": "cred_2", "provider": "anthropic", "key": "sk-...", "owner_id": "user_abc" }
-]
-```
-
-**API scoping:**
-- `GET /api/credentials` — admin sees all; user sees only `owner_id = self`
-- `POST /api/credentials` — sets `owner_id = req.session.userId` (admin can override with `owner_id` in body)
-- `DELETE /api/credentials/:id` — checks owner
+Vault items (`src/data/vault.json`) are encrypted at rest and shared by all
+authenticated users. They are **not** owner-scoped — the Vault replaced the old
+owner-scoped credentials system, which has been removed.
 
 ### Backups — Scoped by Owner
 
@@ -191,7 +181,7 @@ CREATE TABLE IF NOT EXISTS backups (
 
 ### Dashboard — Scoped Stats
 
-Fleet stats (total agents, running, stopped, credentials, backups) are filtered by role and userId. Admin sees orphan count. Regular users see only their own numbers.
+Fleet stats (total agents, running, stopped, backups) are filtered by role and userId. Admin sees orphan count. Regular users see only their own numbers.
 
 ### Agent Registry Sync — Preserve Owners
 
@@ -284,7 +274,7 @@ If the last admin is somehow deleted (e.g., direct DB manipulation), the system 
 | `src/services/agent-registry.js` | Owner scoping in getAgents(), preserve owner in sync |
 | `src/services/vm-manager.js` | Set owner_id on agent creation |
 | `src/services/backup-manager.js` | Backup scoping by owner |
-| `src/creds.js` | Credential scoping by owner |
+| `src/services/vault.js` | Encrypted Vault (not owner-scoped) |
 | `src/client/src/pages/Login.jsx` | Login form |
 | `src/client/src/pages/Setup.jsx` | First-run admin creation |
 | `src/client/src/pages/Users.jsx` | Admin user management |

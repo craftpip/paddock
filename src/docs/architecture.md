@@ -14,7 +14,7 @@ VM Friends is a **self-hosted AI agent management platform**. It manages a fleet
 - Provide a file browser (workspace) for each agent
 - Provide a WebSocket-based terminal to each agent
 - Manage `openclaw.json` configuration files
-- Manage API keys, Telegram bot tokens, and user credentials
+- Manage secrets via the encrypted Vault (`/vault`, AES-256-GCM)
 - Create and restore agent state backups
 - Track model providers (OpenAI, OpenRouter, Ollama Cloud, etc.)
 - Track session and activity history per agent
@@ -79,11 +79,9 @@ VM Friends is a **self-hosted AI agent management platform**. It manages a fleet
 ├── docker-compose.override.yml     # Auto-generated override (adds all other VMs)
 ├── .env                            # Environment variables (WEBUI_PASSWORD, etc.)
 ├── AGENTS.md                       # Agent operational learnings (not business logic)
-├── bot-prefixes.json               # Legacy bot token storage (gitignored)
 │
 ├── src/                            # vm-webui application
 │   ├── app.js                      # Express server + legacy routes + WS terminal
-│   ├── creds.js                    # Credential manager (API keys, bot tokens, user IDs)
 │   ├── Dockerfile                  # node:20-slim + docker-ce-cli
 │   ├── package.json                # express, ejs, ws, better-sqlite3, multer
 │   ├── data/
@@ -103,7 +101,6 @@ VM Friends is a **self-hosted AI agent management platform**. It manages a fleet
 │   │   ├── layout.ejs              # Main layout (Tailwind, HTMX, xterm.js, CodeMirror)
 │   │   ├── login.ejs               # Session-based login page
 │   │   ├── backups.ejs             # Global backups page (all agents)
-│   │   ├── credentials.ejs         # Credential management (API keys, bot tokens, user IDs)
 │   │   ├── onboard.ejs             # Onboard form (Telegram + API key setup)
 │   │   ├── agents/
 │   │   │   ├── dashboard.ejs       # Agent fleet grid with search/filter
@@ -267,8 +264,6 @@ When an HTMX request is detected (`req.headers['hx-request']`), the middleware a
 | GET | `/backups/:file/download` | Direct | Download backup |
 | GET | `/onboard/:name` | Direct | Onboard form |
 | POST | `/onboard/:name/run` | Direct | Execute onboard |
-| GET | `/credentials` | Direct | Credential manager |
-| POST | `/credentials/*` | Direct | CRUD credentials |
 | GET | `/api/vms\|backups\|user-ids\|api-keys` | Direct | JSON APIs |
 | POST | `/api/providers/add` | Direct | Add model provider |
 | POST | `/api/config/backup\|restore/:agent` | Direct | Config save/restore |
@@ -509,41 +504,29 @@ The `isPreviewable()` function determines if a file can be opened in the CodeMir
 
 ---
 
-## 10. Credential Management (`src/creds.js`)
+## 10. Vault (Secret Storage)
+
+The legacy credentials system (`src/creds.js`, `/api/credentials*`, the Credentials
+page) has been **removed**. Secrets now live in the encrypted Vault.
 
 ### 10.1 Storage
 
-Credentials are stored in `/app/data/credentials.json` inside the vm-webui container (persisted via the bind-mount of `src/`).
+`src/services/vault.js` stores secrets in `src/data/vault.json`, encrypted with
+AES-256-GCM using the `VAULT_KEY` environment variable. The Vault is a simple
+key-value store; items are not owner-scoped.
 
-**Structure:**
-```json
-{
-  "api_keys": {
-    "my-openai": { "provider": "openai", "key": "sk-..." }
-  },
-  "bot_tokens": {
-    "my_bot": { "token": "123456:ABCdef...", "platform": "telegram" }
-  },
-  "user_ids": {
-    "boniface": { "uid": "532156945", "platform": "telegram" }
-  }
-}
-```
+### 10.2 API
 
-### 10.2 Import from Legacy File
+| Method | Route | Description |
+|--------|-------|-------------|
+| GET | `/api/vault` | List all items (values decrypted) |
+| POST | `/api/vault` | Add/update an item |
+| DELETE | `/api/vault/:id` | Remove an item |
 
-On startup, `creds.importFromBotPrefixes()` reads `/workspace/bot-prefixes.json` (the old credential format from the bash script era) and merges any entries that don't already exist in the new format.
+### 10.3 UI
 
-### 10.3 Key Masking
-
-`maskKey(key)` shows only the first 4 and last 4 characters:
-```
-sk-proj-abc...xyz-defg → sk-p*...*efg
-```
-
-### 10.4 Uniqueness
-
-Each credential name must be unique. If a duplicate name is added with different content, the system appends `-1`, `-2`, etc.
+`src/client/src/pages/Vault.jsx` renders the Vault at `/vault` (nav item "Vault").
+The old `/credentials` URL redirects to `/vault`.
 
 ---
 
@@ -557,7 +540,7 @@ Common to all pages:
 - "VM Friends" logo → `/agents`
 - "Agents" → `/agents`
 - "+ Agent" → `/agents/create`
-- "Creds" → `/credentials`
+- "Vault" → `/vault`
 - "Backups" → `/backups`
 - Logout button
 
@@ -799,7 +782,6 @@ function filterAgents(query) {
 3. Merge saved config with new auth info
 4. Restore config, keeping new `auth` and `meta` sections
 5. Populate model list from `openclaw models list --all --json`
-6. Save credential to credential manager
 
 ### 11.12 Messaging (`agents/messaging.ejs`)
 
@@ -814,7 +796,7 @@ function filterAgents(query) {
   - Allowed User IDs:
     - Saved user IDs shown as toggleable pills (cyan = active, gray = inactive)
     - Clicking a pill toggles that user ID in the allowlist
-    - Custom ID input + Add button (saves to credentials on add)
+    - Custom ID input + Add button (saves to the agent allowlist)
     - In pairing mode, the allowlist is hidden
 - Save button (dirty tracking, saves full config to `/agents/:name/config`)
 
@@ -874,21 +856,11 @@ function filterAgents(query) {
   - Size
   - Actions: Download, Delete
 
-### 11.17 Credentials Page (`views/credentials.ejs`)
+### 11.17 Vault Page (`/vault`)
 
-**Route:** `GET /credentials`
-
-**Layout:** Two-tab sidebar (API Keys, Messaging)
-
-**API Keys tab:**
-- Add form: Name, Provider (dropdown), Key
-- Table: Name, Provider, Key (masked), Delete button
-
-**Messaging tab:**
-- **Bot Tokens**: Add form (Name, Token), Table (Name, Token masked, Platform, Delete)
-- **User IDs**: Add form (Name, UID), Table (Name, UID, Platform, Delete)
-
-**Import from bot-prefixes.json:** HTMX POST button, merges legacy credentials.
+The encrypted Vault page (`src/client/src/pages/Vault.jsx`) replaces the removed
+Credentials page. It lists Vault items with add/edit/delete actions backed by
+`/api/vault*`. Legacy `/credentials` URLs redirect here.
 
 ### 11.18 Onboard Page (`views/onboard.ejs`)
 
@@ -1051,8 +1023,9 @@ Since a PTY has no "command finished" signal, `runCommand()` in locked mode
 appends a sentinel to the injected line — `<cmd>; echo; echo __PAD_DONE_<id>__`.
 The client scans the output for `\n__PAD_DONE_<id>__` on a rolling tail; the
 PTY-echoed copy of the injected line can't false-match (the sentinel sits
-mid-line there, after `echo `). `onCommandStart`/`onCommandDone` fire around the
-run, and a Locked/Running badge + stopped cursor blink reflect the state.
+mid-line there).
+`onCommandStart`/`onCommandDone` fire around the run, and a Locked/Running badge
++ stopped cursor blink reflect the state.
 
 Timing gotcha: the `disabled` prop reaches the lock via a React effect, so
 `runCommand()` called in the same tick that `disabled` flips to `true` runs
@@ -1263,7 +1236,6 @@ Two types of providers:
 4. Restore saved config, merging in new `auth` and `meta` from the overwritten file
 5. Query `openclaw models list --all --json` to populate the model list for the provider
 6. Write merged config back
-7. Save API key to credential manager
 
 **OAuth flow** (`POST /agents/:id/models/oauth-login`):
 1. Spawn `docker exec <name> script -q -c 'openclaw models auth login --provider <name> --device-code' /dev/null`

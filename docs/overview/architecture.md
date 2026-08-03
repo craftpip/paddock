@@ -28,7 +28,6 @@ The webui container (paddock-webui) manages PAD containers via the host's Docker
 ```
 src/
 ├── app.js                    Express server, API routes, WebSocket terminal, auth
-├── creds.js                  Credential manager (API keys, bot tokens)
 ├── middleware/
 │   ├── auth.js               Session-based auth, CSRF tokens, login/logout
 │   └── rateLimit.js          IP-based rate limiter

@@ -15,9 +15,8 @@ Write `docs/architecture.md` — the single source of truth for VM Friends proje
    - [x] `src/services/workspace.js` (File operations)
    - [x] `src/services/db.js` (SQLite schema)
    - [x] `src/middleware/auth.js` (Session auth, CSRF)
-   - [x] `src/middleware/rateLimit.js` (Rate limiting)
-   - [x] `src/creds.js` (Credential storage)
-   - [x] All 12 EJS view templates + 7 partials
+    - [x] `src/middleware/rateLimit.js` (Rate limiting)
+    - [x] All 12 EJS view templates + 7 partials
    - [x] `docker-compose.yml` + `docker-compose.override.yml`
    - [x] `src/package.json` + `src/Dockerfile`
    - [x] `src/test/services.test.js`
@@ -31,7 +30,7 @@ Write `docs/architecture.md` — the single source of truth for VM Friends proje
    - [x] VM/Agent Lifecycle (create, clone, start, stop, restart, remove, reset)
    - [x] Backup System
    - [x] Workspace Service & Path Safety
-   - [x] Credential Management
+   - [x] Vault (encrypted secrets)
    - [x] Web UI Pages (all pages, tabs, HTMX interactions)
    - [x] WebSocket Terminal
    - [x] SQLite Data Model
@@ -48,7 +47,7 @@ Write `docs/architecture.md` — the single source of truth for VM Friends proje
    - [x] VM/Agent Lifecycle (create, clone, start, stop, restart, remove, reset)
    - [x] Backup System
    - [x] Workspace Service & Path Safety
-   - [x] Credential Management
+   - [x] Vault (encrypted secrets)
    - [x] Web UI Pages (all pages, tabs, HTMX interactions)
    - [x] WebSocket Terminal
    - [x] SQLite Data Model

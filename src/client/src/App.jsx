@@ -9,7 +9,6 @@ import Setup from './pages/Setup'
 import Dashboard from './pages/Dashboard'
 import AgentDetail from './pages/AgentDetail'
 import CreateAgent from './pages/CreateAgent'
-import Credentials from './pages/Credentials'
 import Vault from './pages/Vault'
 import GlobalBackups from './pages/GlobalBackups'
 import Onboard from './pages/Onboard'
@@ -60,11 +59,11 @@ export default function App() {
               <Route path="/agents/create" element={<AuthPage><CreateAgent /></AuthPage>} />
               <Route path="/agents/:agentId/onboard" element={<AuthPage><Onboard /></AuthPage>} />
               <Route path="/agents/:agentId" element={<AuthPage fullHeight><AgentDetail /></AuthPage>} />
-              <Route path="/credentials" element={<AuthPage><Credentials /></AuthPage>} />
               <Route path="/vault" element={<AuthPage><Vault /></AuthPage>} />
               <Route path="/backups" element={<AuthPage><GlobalBackups /></AuthPage>} />
               <Route path="/users" element={<AuthPage><Users /></AuthPage>} />
               <Route path="/profile" element={<AuthPage><Profile /></AuthPage>} />
+              <Route path="/credentials" element={<Navigate to="/vault" replace />} />
               <Route path="/" element={<Navigate to="/agents" replace />} />
               <Route path="*" element={<Navigate to="/agents" replace />} />
             </Routes>

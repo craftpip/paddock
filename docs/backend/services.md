@@ -102,23 +102,8 @@ CREATE TABLE sessions (
 );
 ```
 
-## Credential Manager (creds.js)
+## Vault (vault.js)
 
-Stores API keys and bot tokens in `src/data/credentials.json`.
-
-**Structure:**
-```json
-{
-  "api_keys": {
-    "my-key": { "provider": "openai", "key": "sk-..." }
-  },
-  "bot_tokens": {
-    "my_bot": { "token": "123:ABC", "platform": "telegram" }
-  },
-  "user_ids": {
-    "me": { "id": "532156945", "platform": "telegram" }
-  }
-}
-```
-
-**Functions:** `getCredentials()`, `addCredential(type, name, value, provider)`, `removeCredential(type, name)`
+Encrypted secret store replacing the old `creds.js` credential manager. Items
+live in `src/data/vault.json`, AES-256-GCM encrypted with the `VAULT_KEY`
+environment variable. Routes: `GET/POST /api/vault`, `DELETE /api/vault/:id`.

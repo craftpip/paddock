@@ -8,7 +8,7 @@ import { usePrompt } from '../../lib/prompt'
  * The whole pane is ONE continuous wrapped flow of pill buttons (float-left):
  * every group's commands sit inline in a single line that wraps, no cards, no
  * rows. Group labels are small chips inline before their buttons. Data
- * (servers, skills, backups, creds) shows as compact chips in the same flow.
+ * (servers, skills, backups) shows as compact chips in the same flow.
  * Commands run in the docked terminal below. The `run`/`runningCmd`/`termRef`
  * plumbing lives in AgentDetail.
  */
@@ -25,32 +25,6 @@ const COLORS = {
 }
 
 const SIMPLE_GROUPS = [
-  {
-    title: 'Diagnostics', color: 'cyan',
-    commands: [
-      { cmd: 'openclaw health', label: 'Health', desc: 'Cached health snapshot' },
-      { cmd: 'openclaw status', label: 'Status', desc: 'Quick channels + sessions' },
-      { cmd: 'openclaw logs --tail 50', label: 'Logs', desc: 'Recent gateway logs (50 lines)' },
-    ],
-  },
-  {
-    title: 'Doctor', color: 'amber',
-    commands: [
-      { cmd: 'openclaw doctor', label: 'Doctor', desc: 'Diagnose issues' },
-      { cmd: 'openclaw doctor --fix', label: 'Fix', desc: 'Auto-repair issues', confirm: true },
-      { cmd: 'openclaw doctor --lint', label: 'Lint', desc: 'Read-only CI-style checks' },
-      { cmd: 'openclaw doctor --deep', label: 'Deep', desc: 'Scan for extra gateways' },
-      { cmd: 'openclaw doctor --state-sqlite compact', label: 'SQLite Compact', desc: 'Compact SQLite state (stop first)', confirm: true, danger: true },
-    ],
-  },
-  {
-    title: 'Security', color: 'rose',
-    commands: [
-      { cmd: 'openclaw security audit', label: 'Audit', desc: 'Cold security audit' },
-      { cmd: 'openclaw security audit --deep', label: 'Audit (deep)', desc: 'Live probes' },
-      { cmd: 'openclaw security audit --fix', label: 'Audit & Fix', desc: 'Auto-fix issues', confirm: true },
-    ],
-  },
   {
     title: 'Memory', color: 'violet',
     commands: [
@@ -75,6 +49,32 @@ const SIMPLE_GROUPS = [
       { cmd: 'openclaw backup create', label: 'Backup', desc: 'Create a backup archive', confirm: true },
       { cmd: 'openclaw update', label: 'Update', desc: 'Check for updates', confirm: true },
       { cmd: 'openclaw mcp doctor', label: 'MCP Doctor', desc: 'Check MCP servers' },
+    ],
+  },
+  {
+    title: 'Security', color: 'rose',
+    commands: [
+      { cmd: 'openclaw security audit', label: 'Audit', desc: 'Cold security audit' },
+      { cmd: 'openclaw security audit --deep', label: 'Audit (deep)', desc: 'Live probes' },
+      { cmd: 'openclaw security audit --fix', label: 'Audit & Fix', desc: 'Auto-fix issues', confirm: true },
+    ],
+  },
+  {
+    title: 'Doctor', color: 'amber',
+    commands: [
+      { cmd: 'openclaw doctor', label: 'Doctor', desc: 'Diagnose issues' },
+      { cmd: 'openclaw doctor --fix', label: 'Fix', desc: 'Auto-repair issues', confirm: true },
+      { cmd: 'openclaw doctor --lint', label: 'Lint', desc: 'Read-only CI-style checks' },
+      { cmd: 'openclaw doctor --deep', label: 'Deep', desc: 'Scan for extra gateways' },
+      { cmd: 'openclaw doctor --state-sqlite compact', label: 'SQLite Compact', desc: 'Compact SQLite state (stop first)', confirm: true, danger: true },
+    ],
+  },
+  {
+    title: 'Diagnostics', color: 'cyan',
+    commands: [
+      { cmd: 'openclaw health', label: 'Health', desc: 'Cached health snapshot' },
+      { cmd: 'openclaw status', label: 'Status', desc: 'Quick channels + sessions' },
+      { cmd: 'openclaw logs --tail 50', label: 'Logs', desc: 'Recent gateway logs (50 lines)' },
     ],
   },
 ]
@@ -155,16 +155,7 @@ function FlowGroup({ group, query, runningCmd, run }) {
 
 // ─── Messaging ───────────────────────────────────────────────────
 
-function MessagingFlow({ agent, query, runningCmd, run, termRef }) {
-  const [creds, setCreds] = useState({ bot_tokens: {}, user_ids: {} })
-
-  function loadCreds() {
-    api('/api/credentials').then((d) => {
-      if (d) setCreds({ bot_tokens: d.bot_tokens || {}, user_ids: d.user_ids || {} })
-    }).catch(() => {})
-  }
-  useEffect(() => { loadCreds() }, [agent.name])
-
+function MessagingFlow({ query, runningCmd, run }) {
   const pills = [
     { cmd: 'openclaw configure --section channels', label: 'Configure channel', desc: 'Interactive wizard — add, update, login or remove channel accounts' },
     { cmd: 'openclaw channels list --all', label: 'List channels', desc: 'Configured + available channels' },
@@ -174,11 +165,7 @@ function MessagingFlow({ agent, query, runningCmd, run, termRef }) {
     { cmd: 'openclaw agents bindings', label: 'Routing', desc: 'Which agent owns which channel' },
   ]
   const visible = pills.filter((x) => matches(query, x.label, x.cmd))
-  const tokenEntries = [
-    ...Object.entries(creds.bot_tokens).map(([name, data]) => ({ key: 'b' + name, name, value: typeof data === 'string' ? data : data.token, hint: 'Paste bot token' })),
-    ...Object.entries(creds.user_ids).map(([name, data]) => ({ key: 'u' + name, name, value: typeof data === 'string' ? data : data.uid, hint: 'Paste user ID' })),
-  ]
-  if (query && visible.length === 0 && tokenEntries.length === 0) return null
+  if (query && visible.length === 0) return null
 
   return (
     <>
@@ -187,14 +174,6 @@ function MessagingFlow({ agent, query, runningCmd, run, termRef }) {
         <Pill key={x.label} label={x.label} desc={x.desc} color={COLORS.cyan.pill} danger={x.danger}
               disabled={!!runningCmd} active={runningCmd === x.cmd}
               onClick={() => (x.click ? x.click() : run(x.cmd, x))} />
-      ))}
-      {tokenEntries.map((t) => (
-        <button key={t.key}
-                onClick={() => termRef.current?.pasteSecret(t.value)}
-                title={t.hint}
-                className="px-2 py-1 rounded text-[11px] font-mono border border-emerald-800/30 text-emerald-300 bg-emerald-950/20 hover:bg-emerald-900/30 hover:text-emerald-200 transition-colors whitespace-nowrap">
-          {t.name}
-        </button>
       ))}
     </>
   )
@@ -216,7 +195,7 @@ function ModelsFlow({ agent, query, runningCmd, run, prompt }) {
   const fallback = config?.agents?.defaults?.model?.fallback || ''
 
   const pills = [
-    { cmd: 'openclaw configure --section model', label: 'Add provider', desc: 'Interactive setup — API key, token or OAuth' },
+    { cmd: 'openclaw configure --section model', label: 'Configure models', desc: 'Interactive setup — API key, token or OAuth' },
     { label: 'Logout profile', desc: 'Log out one saved auth profile', click: async () => {
       const v = await prompt({
         title: 'Logout model provider',
@@ -428,13 +407,13 @@ export default function CommandsPane({ agent, termRef, run, runningCmd }) {
 
       {/* Everything flows in one wrapped line, float-left, no cards */}
       <div className="flex flex-wrap items-center gap-1.5">
-        {SIMPLE_GROUPS.map((g) => (
-          <FlowGroup key={g.title} group={g} query={query} runningCmd={runningCmd} run={run} />
-        ))}
-        <MessagingFlow agent={agent} query={query} runningCmd={runningCmd} run={run} termRef={termRef} />
+        <MessagingFlow query={query} runningCmd={runningCmd} run={run} />
         <ModelsFlow agent={agent} query={query} runningCmd={runningCmd} run={run} prompt={prompt} />
         <McpFlow agent={agent} query={query} runningCmd={runningCmd} run={run} />
         <SkillsFlow agent={agent} query={query} runningCmd={runningCmd} run={run} prompt={prompt} />
+        {SIMPLE_GROUPS.map((g) => (
+          <FlowGroup key={g.title} group={g} query={query} runningCmd={runningCmd} run={run} />
+        ))}
       </div>
     </div>
   )

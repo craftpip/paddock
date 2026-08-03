@@ -184,8 +184,9 @@ Full user management and owner-based scoping docs: [`backend/user-management.md`
 - `users` table stores credentials and roles (`admin` / `user`)
 - On first startup, `admin`/`admin` is seeded automatically
 - Admin creates all users (no public registration)
-- Every resource (agents, credentials, backups) has an `owner_id` referencing `users(id)`
+- Every resource (agents, backups) has an `owner_id` referencing `users(id)`
 - Admin sees all resources; regular users see only their own
+- Vault items (`src/data/vault.json`) are encrypted and **not** owner-scoped
 
 ### Auth Bypass Rules
 
