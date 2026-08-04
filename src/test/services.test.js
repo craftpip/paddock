@@ -175,6 +175,15 @@ describe('Database - Schema', () => {
   });
 });
 
+describe('Auth - WebSocket session validation', () => {
+  const { getSessionFromCookie } = require('../middleware/auth');
+
+  it('rejects missing and malformed session cookies', async () => {
+    assert.strictEqual(await getSessionFromCookie(''), null);
+    assert.strictEqual(await getSessionFromCookie('vmf.sid=not-a-signed-session'), null);
+  });
+});
+
 describe('Auth - CSRF Token', () => {
   it('generates and validates CSRF tokens', () => {
     const crypto = require('crypto');

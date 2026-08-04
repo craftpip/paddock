@@ -18,7 +18,7 @@ const vm = require('./services/vm-manager');
 const backup = require('./services/backup-manager');
 const jobLog = require('./services/job-log');
 const { getDb } = require('./services/db');
-const { setupSession, requireAuth, requireAdmin, csrfToken, csrfCheck, hashPassword, verifyPassword, checkNeedsSetup } = require('./middleware/auth');
+const { setupSession, getSessionFromCookie, requireAuth, requireAdmin, csrfToken, csrfCheck, hashPassword, verifyPassword, checkNeedsSetup } = require('./middleware/auth');
 const { rateLimit } = require('./middleware/rateLimit');
 
 const WORKSPACE = '/workspace';
@@ -306,12 +306,29 @@ async function ensureTmuxSession(vmName, session, cols, rows) {
       `grep -q '__PAD_PS1__' /root/.bashrc 2>/dev/null || echo "export PS1='\\[\\e[1;36m\\]\\u@\\h\\[\\e[0m\\]:\\w\\$ '  # __PAD_PS1__" >> /root/.bashrc`],
     { timeout: 15000, check: false }
   );
+  // tmux attach switches the client to the alternate screen, which has no
+  // scrollback — xterm.js then maps the mouse wheel to up/down arrow keys (the
+  // shell recalls history instead of scrolling). Strip smcup/rmcup from the
+  // attach terminal so tmux stays on the normal screen: output lands in the
+  // terminal's real scrollback and the wheel scrolls it natively.
+  await runCmd(
+    'docker',
+    ['exec', vmName, 'sh', '-lc',
+      `grep -q '__PAD_TMUX_V2__' /root/.tmux.conf 2>/dev/null || echo "set -ga terminal-overrides ',xterm-256color:smcup@:rmcup@'  # __PAD_TMUX_V2__" >> /root/.tmux.conf`],
+    { timeout: 15000, check: false }
+  );
   const has = await runCmd('docker', ['exec', vmName, 'tmux', 'has-session', '-t', session], { timeout: 15000, check: false });
   if (has.code !== 0) {
     const c = Math.max(40, Math.min(400, parseInt(cols, 10) || 120));
     const r = Math.max(12, Math.min(120, parseInt(rows, 10) || 32));
     await runCmd('docker', ['exec', vmName, 'tmux', 'new-session', '-d', '-s', session, '-x', String(c), '-y', String(r)], { timeout: 20000, check: false });
   }
+  await runCmd(
+    'docker',
+    ['exec', vmName, 'sh', '-lc',
+      `tmux show-options -gqv terminal-overrides | grep -Fq 'xterm-256color:smcup@:rmcup@' || tmux set-option -ga terminal-overrides ',xterm-256color:smcup@:rmcup@'`],
+    { timeout: 15000, check: false }
+  );
 }
 
 async function listTmuxSessions(vmName) {
@@ -336,17 +353,6 @@ async function killTmuxSession(vmName, session) {
   }
 }
 
-function parseCookies(cookieHeader) {
-  const cookies = {};
-  if (!cookieHeader) return cookies;
-  for (const part of cookieHeader.split(';')) {
-    const idx = part.indexOf('=');
-    if (idx > 0) {
-      cookies[part.slice(0, idx).trim()] = part.slice(idx + 1).trim();
-    }
-  }
-  return cookies;
-}
 
 function requireAgentAccess(req, res, next) {
   if (req.session.role === 'admin') return next();
@@ -449,6 +455,7 @@ app.post('/api/login', (req, res) => {
     if (!user) return res.status(401).json({ error: 'Invalid username or password' });
     if (!verifyPassword(password, user.password_hash)) return res.status(401).json({ error: 'Invalid username or password' });
 
+    req.session.authenticated = true;
     req.session.userId = user.id;
     req.session.username = user.username;
     req.session.role = user.role;
@@ -1548,35 +1555,33 @@ wss.on('connection', async (ws, req) => {
   const wsType = parts[1];
   const vmName = parts[2];
 
+  // Authenticate before inspecting Docker or revealing whether the PAD exists.
+  if (!AUTO_LOGIN) {
+    try {
+      const session = await getSessionFromCookie(req.headers.cookie || '');
+      if (!session?.authenticated || !session.userId) {
+        ws.close(1008, 'Unauthorized');
+        return;
+      }
+      if (session.role !== 'admin') {
+        const agentRow = getDb().prepare('SELECT owner_id FROM agents WHERE name = ?').get(vmName);
+        if (!agentRow || agentRow.owner_id !== session.userId) {
+          ws.close(1008, 'Unauthorized');
+          return;
+        }
+      }
+    } catch (e) {
+      console.error('WS auth error:', e.message);
+      ws.close(1008, 'Unauthorized');
+      return;
+    }
+  }
+
   const containers = await dockerPsList(true);
 
   if ((containers[vmName]?.State || '').toLowerCase() !== 'running') {
     ws.close();
     return;
-  }
-
-  // ─── Auth check (shared) ───
-  if (!AUTO_LOGIN) {
-    try {
-      const cookies = parseCookies(req.headers.cookie || '');
-      const sid = cookies['vmf.sid'];
-      if (sid) {
-        const db = getDb();
-        const row = db.prepare(`SELECT data FROM user_sessions WHERE sid = ?`).get(sid);
-        if (row) {
-          const session = JSON.parse(row.data);
-          if (session.role !== 'admin' && session.userId) {
-            const agentRow = db.prepare('SELECT owner_id FROM agents WHERE name = ?').get(vmName);
-            if (!agentRow || agentRow.owner_id !== session.userId) {
-              ws.close(4003, 'Access denied');
-              return;
-            }
-          }
-        }
-      }
-    } catch (e) {
-      console.error('WS auth error:', e.message);
-    }
   }
 
   // ─── Terminal WebSocket (full interactive shell via Docker Engine API) ───

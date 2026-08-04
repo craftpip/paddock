@@ -1,12 +1,15 @@
 const crypto = require('crypto');
+const { signedCookie } = require('cookie-parser');
 
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
-const AUTH_PASSWORD = process.env.AUTH_PASSWORD || '';
+let sessionStore = null;
 
 function setupSession(app) {
   const session = require('express-session');
+  sessionStore = new session.MemoryStore();
   app.use(session({
     secret: SESSION_SECRET,
+    store: sessionStore,
     resave: false,
     saveUninitialized: false,
     name: 'vmf.sid',
@@ -18,8 +21,31 @@ function setupSession(app) {
   }));
 }
 
+
+function getSessionFromCookie(cookieHeader) {
+  if (!sessionStore || !cookieHeader) return Promise.resolve(null);
+  const raw = cookieHeader.split(';')
+    .map((part) => part.trim())
+    .find((part) => part.startsWith('vmf.sid='))
+    ?.slice('vmf.sid='.length);
+  if (!raw) return Promise.resolve(null);
+
+  let signedValue;
+  try {
+    signedValue = decodeURIComponent(raw);
+  } catch {
+    return Promise.resolve(null);
+  }
+  if (!signedValue.startsWith('s:')) return Promise.resolve(null);
+
+  const sid = signedCookie(signedValue, SESSION_SECRET);
+  if (!sid || sid === signedValue) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    sessionStore.get(sid, (err, session) => resolve(err ? null : session || null));
+  });
+}
+
 function requireAuth(req, res, next) {
-  if (!AUTH_PASSWORD) return next();
   if (req.session && req.session.authenticated) return next();
   if (req.xhr || req.path.startsWith('/api/') || req.path.startsWith('/ws/')) {
     return res.status(401).json({ error: 'unauthorized' });
@@ -83,4 +109,4 @@ function csrfCheck(req, res, next) {
   next();
 }
 
-module.exports = { setupSession, requireAuth, requireAdmin, csrfToken, csrfCheck, hashPassword, verifyPassword, checkNeedsSetup, AUTH_PASSWORD };
+module.exports = { setupSession, getSessionFromCookie, requireAuth, requireAdmin, csrfToken, csrfCheck, hashPassword, verifyPassword, checkNeedsSetup };

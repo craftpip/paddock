@@ -170,10 +170,14 @@ export default function AgentDetail() {
             key={m.id}
             onClick={() => navigate(`/agents/${agent.name}#${m.id}`, { replace: true })}
             className={`px-3 py-1.5 text-sm font-medium rounded-lg transition-colors whitespace-nowrap ${
-              mode === m.id ? 'bg-slate-800 text-cyan-400' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+              mode === m.id ? 'bg-slate-800' : 'hover:bg-slate-800/50'
+            } ${
+              m.id === 'commands'
+                ? 'text-amber-300'
+                : mode === m.id ? 'text-cyan-400' : 'text-slate-400 hover:text-slate-200'
             }`}
           >
-            {m.label}
+            {m.id === 'commands' ? (agent.agent_type ? agent.agent_type.charAt(0).toUpperCase() + agent.agent_type.slice(1) : 'Commands') : m.label}
           </button>
         ))}
       </div>

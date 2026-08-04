@@ -41,7 +41,7 @@ export default function GlobalBackups() {
   }
 
   return (
-    <>
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-8">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold">Backups</h1>
         <span className="text-sm text-slate-400">{backups.length} backup{backups.length !== 1 ? 's' : ''}</span>
@@ -121,6 +121,6 @@ export default function GlobalBackups() {
           </div>
         </div>
       )}
-    </>
+    </div>
   )
 }

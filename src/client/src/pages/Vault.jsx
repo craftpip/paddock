@@ -76,7 +76,7 @@ export default function Vault() {
   }
 
   return (
-    <>
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-8">
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-3">
           <h1 className="text-2xl font-bold tracking-tight">Vault</h1>
@@ -138,7 +138,7 @@ export default function Vault() {
           </table>
         </div>
       </div>
-    </>
+    </div>
   )
 }
 
@@ -165,8 +165,7 @@ function EditorRow({ form, setForm, isNew, saving, onSave, onCancel }) {
       </td>
       <td className="py-2 px-3 text-xs text-slate-600">{isNew ? '—' : ''}</td>
       <td className="py-2 px-3 text-right whitespace-nowrap">
-        <button onClick={onSave} disabled={saving}
-                className="bg-cyan-700 hover:bg-cyan-600 text-white px-3 py-1.5 rounded-lg text-xs font-medium transition-colors disabled:opacity-50">
+        <button onClick={onSave} disabled={saving} className="mr-2 bg-cyan-700 hover:bg-cyan-600 text-white px-3 py-1.5 rounded-lg text-xs font-medium transition-colors disabled:opacity-50">
           {saving ? 'Saving…' : isNew ? 'Add' : 'Save'}
         </button>
         <button onClick={onCancel} disabled={saving}
