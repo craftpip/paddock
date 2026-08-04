@@ -82,6 +82,7 @@ export default function AgentDetail() {
   const termRef = useRef(null)
   const [runningCmd, setRunningCmd] = useState(null)
   const lastRunCmdRef = useRef('')
+  const [termConnected, setTermConnected] = useState(false)
   const [termCollapsed, setTermCollapsed] = useState(false)
   const [termHeight, setTermHeight] = useState(null) // custom dock height (px); null = 50vh default
   const dockRef = useRef(null)
@@ -125,18 +126,18 @@ export default function AgentDetail() {
     window.addEventListener('pointerup', onUp)
   }
 
-  /** Run a command in the docked terminal, tracked. opts: {confirm, danger, secret}. */
+  /** Run a command in the docked terminal, tracked. opts: {confirm, danger}.
+   *  No-op until the terminal is connected — buttons are disabled anyway. */
   const run = useCallback((cmd, opts = {}) => {
     if (!cmd) return
+    if (!termConnected) return
     if (opts.confirm && !window.confirm(`Run "${cmd}"?`)) return
     if (opts.danger && !window.confirm(`⚠ DANGER: "${cmd}" — are you sure?`)) return
     lastRunCmdRef.current = cmd
-    const finalCmd = opts.secret ? `stty -echo; ${cmd}; stty echo` : cmd
-    setRunningCmd(finalCmd)
-    const ok = termRef.current?.runCommand(finalCmd, { track: true })
-    if (!ok) { setRunningCmd(null); return }
-    if (opts.secret) setTimeout(() => termRef.current?.pasteSecret(opts.secret), 500)
-  }, [termRef])
+    setRunningCmd(cmd)
+    const ok = termRef.current?.runCommand(cmd, { track: true })
+    if (!ok) setRunningCmd(null)
+  }, [termRef, termConnected])
 
   /** Fired when a tracked command finishes in the terminal. */
   const handleCmdDone = useCallback((cmd) => {
@@ -190,7 +191,7 @@ export default function AgentDetail() {
         id="mode-content"
       >
         {mode === 'commands' && (
-          <CommandsPane agent={agent} termRef={termRef} run={run} runningCmd={runningCmd} />
+          <CommandsPane agent={agent} termRef={termRef} run={run} runningCmd={runningCmd} connected={termConnected} />
         )}
         {mode === 'workspace' && <WorkspaceTab agent={agent} />}
         {mode === 'config' && <ConfigTab agent={agent} />}
@@ -234,6 +235,7 @@ export default function AgentDetail() {
           showCollapse={mode !== 'commands'}
           onToggleCollapse={() => setTermCollapsed((v) => !v)}
           onCommandDone={handleCmdDone}
+          onConnChange={setTermConnected}
         />
       </div>
     </div>

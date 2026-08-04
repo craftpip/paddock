@@ -36,9 +36,8 @@ import { useEffect, useRef, useImperativeHandle, forwardRef, useState, useCallba
  *
  *  | Method           | Returns  | Description                                 |
  *  |------------------|----------|---------------------------------------------|
- *  | `runCommand(cmd, {track})` | boolean | Sends `cmd` to the shell (newline appended). With `{track:true}` (or when locked) it appends a completion sentinel, fires onCommandStart/onCommandDone, and shows the "Running" indicator without locking input. Queued until the WS is open. |
- *  | `pasteSecret(v)` | boolean  | Pastes a raw value + newline into the shell stdin WITHOUT echoing it in the scrollback. Callers are expected to wrap secret-reading commands as `stty -echo; <cmd>; stty echo` first. |
- *  | `write(text)`    | boolean  | Raw write to shell stdin. Queued when disconnected. |
+ *  | `runCommand(cmd, {track})` | boolean | Sends `cmd` to the shell (newline appended). With `{track:true}` (or when locked) it appends a completion sentinel, fires onCommandStart/onCommandDone, and shows the "Running" indicator without locking input. No queue — returns `false` when the WS isn't open. |
+ *  | `write(text)`    | boolean  | Raw write to shell stdin. No queue — drops and returns `false` when disconnected. |
  *  | `clear()`        | —        | Clears the visible scrollback.               |
  *  | `reconnect()`    | —        | Confirms, then tears down and starts a fresh shell session. |
  *  | `focus()`        | —        | Focuses the terminal.                        |
@@ -117,8 +116,9 @@ import { useEffect, useRef, useImperativeHandle, forwardRef, useState, useCallba
  *    import can never double-mount a terminal.
  *  - Resize: after `fit()` and after font-size changes a `{type:'resize'}`
  *    frame is sent so the container PTY matches the pane.
- *  - Commands written while disconnected are queued (capped at 64) and flushed
- *    on `onopen`.
+ *  - No write queue: command buttons are disabled until the WS is open (the
+ *    parent is told via `onConnChange`), and writes attempted while disconnected
+ *    are dropped, never buffered.
  *  - Init failures (bad `name`, xterm load error) render a visible error inside
  *    the terminal area instead of failing silently.
  *  - Ctrl/Cmd+C with a selection is left to the browser (copy) rather than
@@ -130,7 +130,7 @@ import { useEffect, useRef, useImperativeHandle, forwardRef, useState, useCallba
  *    hidden while fullscreen since collapsing a fullscreen pane is meaningless.
  */
 const Terminal = forwardRef(function Terminal(
-  { name, title, height = '70vh', minHeight = '480px', disabled = false, collapsed = false, showCollapse = true, onToggleCollapse, onCommandStart, onCommandDone, className = '' },
+  { name, title, height = '70vh', minHeight = '480px', disabled = false, collapsed = false, showCollapse = true, onToggleCollapse, onCommandStart, onCommandDone, onConnChange, className = '' },
   ref
 ) {
   const containerRef = useRef(null)
@@ -138,7 +138,6 @@ const Terminal = forwardRef(function Terminal(
   const fitAddonRef = useRef(null) // current FitAddon instance
   const wsRef = useRef(null) // current WebSocket
   const roRef = useRef(null) // current ResizeObserver
-  const pendingRef = useRef([]) // writes queued until the WS opens
   const genRef = useRef(0) // generation token for async init
   const mountedRef = useRef(true) // guards setState after unmount
 
@@ -204,15 +203,15 @@ const Terminal = forwardRef(function Terminal(
     setStateSafe(setUiLocked, isInputLocked())
   }, [isInputLocked])
 
-  /** Write raw text to shell stdin. Queues when the WebSocket is not yet open
-   *  (capped to avoid unbounded memory). Returns true when sent immediately. */
+  /** Write raw text to shell stdin. Returns true when the WebSocket was open
+   *  and the text was sent. Writes while disconnected are dropped — there is
+   *  no queue; the parent disables command buttons until the terminal is ready. */
   const sendToShell = useCallback((text) => {
     const ws = wsRef.current
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(text)
       return true
     }
-    if (pendingRef.current.length < 64) pendingRef.current.push(text)
     return false
   }, [])
 
@@ -309,9 +308,6 @@ const Terminal = forwardRef(function Terminal(
       wasConnectedRef.current = true
       setStateSafe(setConnState, 'connected')
       pushResize(term.cols, term.rows)
-      const pending = pendingRef.current
-      pendingRef.current = []
-      pending.forEach((text) => { if (ws.readyState === WebSocket.OPEN) ws.send(text) })
     }
 
     ws.onmessage = (evt) => {
@@ -435,6 +431,13 @@ const Terminal = forwardRef(function Terminal(
   useEffect(() => {
     sessionIdRef.current = sessionId
   }, [sessionId])
+
+  // Tell the parent when the terminal becomes ready/not-ready so command
+  // buttons can be disabled until writes can actually reach the shell.
+  useEffect(() => {
+    onConnChange?.(connState === 'connected')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connState])
 
   // The `disabled` prop controls the external lock.
   useEffect(() => {
@@ -665,13 +668,6 @@ const Terminal = forwardRef(function Terminal(
           // tracked mode input stays whatever it was.
           return injectTracked(text)
         }
-        return sendToShell(text + '\n')
-      },
-      pasteSecret: (value) => {
-        const text = String(value ?? '').replace(/\r/g, '')
-        if (!text) return false
-        // Raw paste — echo suppression is the caller's job via the
-        // `stty -echo; <cmd>; stty echo` wrapper (see CommandsPane.run).
         return sendToShell(text + '\n')
       },
       write: sendToShell,

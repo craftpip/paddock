@@ -128,7 +128,7 @@ function MiniBtn({ label, onClick, color = 'text-slate-400 hover:text-slate-200'
   )
 }
 
-function FlowGroup({ group, query, runningCmd, run }) {
+function FlowGroup({ group, query, runningCmd, run, connected }) {
   const c = COLORS[group.color] || COLORS.slate
   const visible = group.commands.filter((x) => matches(query, x.label, x.cmd, x.desc))
   if (query && visible.length === 0) return null
@@ -142,7 +142,7 @@ function FlowGroup({ group, query, runningCmd, run }) {
           desc={x.desc}
           color={c.pill}
           danger={x.danger}
-          disabled={!!runningCmd}
+          disabled={!!runningCmd || !connected}
           active={runningCmd === x.cmd}
           onClick={() => run(x.cmd, x)}
         />
@@ -153,7 +153,7 @@ function FlowGroup({ group, query, runningCmd, run }) {
 
 // ─── Messaging ───────────────────────────────────────────────────
 
-function MessagingFlow({ query, runningCmd, run }) {
+function MessagingFlow({ query, runningCmd, run, connected }) {
   const pills = [
     { cmd: 'openclaw configure --section channels', label: 'Configure channel', desc: 'Interactive wizard — add, update, login or remove channel accounts' },
     { cmd: 'openclaw channels list --all', label: 'List channels', desc: 'Configured + available channels' },
@@ -170,7 +170,7 @@ function MessagingFlow({ query, runningCmd, run }) {
       <GroupLabel color="cyan" title="Messaging" />
       {visible.map((x) => (
         <Pill key={x.label} label={x.label} desc={x.desc} color={COLORS.cyan.pill} danger={x.danger}
-              disabled={!!runningCmd} active={runningCmd === x.cmd}
+              disabled={!!runningCmd || !connected} active={runningCmd === x.cmd}
               onClick={() => (x.click ? x.click() : run(x.cmd, x))} />
       ))}
     </>
@@ -179,7 +179,7 @@ function MessagingFlow({ query, runningCmd, run }) {
 
 // ─── Models ──────────────────────────────────────────────────────
 
-function ModelsFlow({ agent, query, runningCmd, run, prompt }) {
+function ModelsFlow({ agent, query, runningCmd, run, prompt, connected }) {
   const [config, setConfig] = useState(null)
 
   function load() {
@@ -233,7 +233,7 @@ function ModelsFlow({ agent, query, runningCmd, run, prompt }) {
       <GroupLabel color="blue" title="Models" />
       {visible.map((x) => (
         <Pill key={x.label} label={x.label} desc={x.desc} color={COLORS.blue.pill}
-              disabled={!!runningCmd} active={runningCmd === x.cmd}
+              disabled={!!runningCmd || !connected} active={runningCmd === x.cmd}
               onClick={() => (x.click ? x.click() : run(x.cmd, x))} />
       ))}
       {primary && (
@@ -248,7 +248,7 @@ function ModelsFlow({ agent, query, runningCmd, run, prompt }) {
 
 // ─── MCP ─────────────────────────────────────────────────────────
 
-function McpFlow({ agent, query, runningCmd, run, prompt }) {
+function McpFlow({ agent, query, runningCmd, run, prompt, connected }) {
   const [servers, setServers] = useState([])
   const [removing, setRemoving] = useState('')
   const [msg, setMsg] = useState('')
@@ -303,7 +303,7 @@ function McpFlow({ agent, query, runningCmd, run, prompt }) {
       <GroupLabel color="emerald" title="MCP" />
       {visible.map((x) => (
         <Pill key={x.label} label={x.label} desc={x.desc} color={COLORS.emerald.pill}
-              disabled={!!runningCmd} active={runningCmd === x.cmd}
+              disabled={!!runningCmd || !connected} active={runningCmd === x.cmd}
               onClick={() => (x.click ? x.click() : run(x.cmd))} />
       ))}
       {shown.map((s) => (
@@ -321,7 +321,7 @@ function McpFlow({ agent, query, runningCmd, run, prompt }) {
 
 // ─── Skills ──────────────────────────────────────────────────────
 
-function SkillsFlow({ agent, query, runningCmd, run, prompt }) {
+function SkillsFlow({ agent, query, runningCmd, run, prompt, connected }) {
   const [msg, setMsg] = useState('')
   const [showInstall, setShowInstall] = useState(false)
   const [installRef, setInstallRef] = useState('')
@@ -365,7 +365,7 @@ function SkillsFlow({ agent, query, runningCmd, run, prompt }) {
       <GroupLabel color="violet" title="Skills" />
       {visible.map((x) => (
         <Pill key={x.label} label={x.label} desc={x.desc} color={COLORS.violet.pill}
-              disabled={!!runningCmd} active={runningCmd === x.cmd}
+              disabled={!!runningCmd || !connected} active={runningCmd === x.cmd}
               onClick={() => (x.click ? x.click() : run(x.cmd, x))} />
       ))}
       {showInstall && (
@@ -393,7 +393,7 @@ function SkillsFlow({ agent, query, runningCmd, run, prompt }) {
  * `/api/vault/:id/decrypt` and pasted straight into the terminal. A small form
  * at the bottom adds a new vault item.
  */
-function VaultDropdown({ termRef }) {
+function VaultDropdown({ termRef, connected }) {
   const toast = useToast()
   const [open, setOpen] = useState(false)
   const [anchor, setAnchor] = useState(null)
@@ -500,8 +500,9 @@ function VaultDropdown({ termRef }) {
       <button
         ref={btnRef}
         onClick={toggle}
-        title="Vault — paste a saved secret into the terminal"
-        className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium transition-colors whitespace-nowrap border shrink-0
+        disabled={!connected}
+        title={connected ? 'Vault — paste a saved secret into the terminal' : 'Vault — waiting for the terminal to connect'}
+        className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium transition-colors whitespace-nowrap border shrink-0 disabled:opacity-40 disabled:cursor-not-allowed
           ${open ? 'border-amber-500/70 bg-amber-950/40 text-amber-200' : 'border-amber-800/40 text-amber-300 bg-amber-950/20 hover:bg-amber-900/30 hover:text-amber-200'}`}
       >
         <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -563,7 +564,7 @@ function VaultDropdown({ termRef }) {
               <button
                 key={item.id}
                 onClick={() => pasteItem(item)}
-                disabled={!!pastingId}
+                disabled={!!pastingId || !connected}
                 className="w-full text-left px-3 py-1.5 flex items-center gap-2 text-xs hover:bg-slate-800 hover:text-cyan-300 transition-colors group disabled:opacity-40"
                 title="Fetch value and paste into terminal"
               >
@@ -603,7 +604,7 @@ function VaultDropdown({ termRef }) {
 
 // ─── Main CommandsPane ───────────────────────────────────────────
 
-export default function CommandsPane({ agent, termRef, run, runningCmd }) {
+export default function CommandsPane({ agent, termRef, run, runningCmd, connected }) {
   const [query, setQuery] = useState('')
   const prompt = usePrompt()
 
@@ -618,8 +619,8 @@ export default function CommandsPane({ agent, termRef, run, runningCmd }) {
       <div className="flex items-center gap-2">
         <button
           onClick={runTool}
-          disabled={!!runningCmd}
-          title="Run openclaw interactively in the terminal"
+          disabled={!!runningCmd || !connected}
+          title={connected ? 'Run openclaw interactively in the terminal' : 'Waiting for the terminal to connect'}
           className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-sm font-medium transition-colors whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed"
         >
           <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -640,14 +641,14 @@ export default function CommandsPane({ agent, termRef, run, runningCmd }) {
 
       {/* Everything flows in one wrapped line, float-left, no cards */}
       <div className="flex flex-wrap items-center gap-1.5">
-        <MessagingFlow query={query} runningCmd={runningCmd} run={run} />
-        <ModelsFlow agent={agent} query={query} runningCmd={runningCmd} run={run} prompt={prompt} />
-        <McpFlow agent={agent} query={query} runningCmd={runningCmd} run={run} prompt={prompt} />
-        <SkillsFlow agent={agent} query={query} runningCmd={runningCmd} run={run} prompt={prompt} />
+        <MessagingFlow query={query} runningCmd={runningCmd} run={run} connected={connected} />
+        <ModelsFlow agent={agent} query={query} runningCmd={runningCmd} run={run} prompt={prompt} connected={connected} />
+        <McpFlow agent={agent} query={query} runningCmd={runningCmd} run={run} prompt={prompt} connected={connected} />
+        <SkillsFlow agent={agent} query={query} runningCmd={runningCmd} run={run} prompt={prompt} connected={connected} />
         {SIMPLE_GROUPS.map((g) => (
-          <FlowGroup key={g.title} group={g} query={query} runningCmd={runningCmd} run={run} />
+          <FlowGroup key={g.title} group={g} query={query} runningCmd={runningCmd} run={run} connected={connected} />
         ))}
-        <VaultDropdown termRef={termRef} />
+        <VaultDropdown termRef={termRef} connected={connected} />
       </div>
     </div>
   )

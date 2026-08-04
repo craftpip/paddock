@@ -85,8 +85,8 @@ Imperative API through `ref`:
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `runCommand(cmd)` | boolean | Sends `cmd` + newline to the shell. Queued until the WS opens. True if sent immediately. |
-| `write(text)` | boolean | Raw write to shell stdin. Queued when disconnected. |
+| `runCommand(cmd)` | boolean | Sends `cmd` + newline to the shell. **No queue** — returns `false` if the WS isn't open (command buttons are disabled until it is). |
+| `write(text)` | boolean | Raw write to shell stdin. **No queue** — drops and returns `false` when disconnected. |
 | `clear()` | — | Clears visible scrollback. |
 | `reconnect()` | — | Tears down and starts a fresh session. |
 | `focus()` | — | Focuses the terminal. |
@@ -99,8 +99,8 @@ Preset-button pattern (Health tab uses this):
 <button onClick={() => termRef.current?.runCommand('openclaw health')}>
 ```
 
-Commands written while the socket is down are queued (capped at 64) and
-flushed on `onopen`.
+Commands written while the socket is down are dropped (no queue). Command
+buttons are disabled until the terminal reports connected via `onConnChange`.
 
 ## WebSocket protocol
 
