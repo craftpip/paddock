@@ -180,12 +180,6 @@ const Terminal = forwardRef(function Terminal(
   const [showSessions, setShowSessions] = useState(false)
   const sessionMenuRef = useRef(null)
 
-  // Command history popover
-  const historyRef = useRef(null)
-  const [showHistory, setShowHistory] = useState(false)
-  const [history, setHistory] = useState([])
-  const [historyLoading, setHistoryLoading] = useState(false)
-
   /** Set state only while the component is mounted. */
   function setStateSafe(setter, value) {
     if (mountedRef.current) setter(value)
@@ -483,16 +477,6 @@ const Terminal = forwardRef(function Terminal(
     return () => window.removeEventListener('keydown', onKey)
   }, [fullscreen])
 
-  // Close the history popover when clicking outside it.
-  useEffect(() => {
-    if (!showHistory) return
-    function onDocClick(e) {
-      if (historyRef.current && !historyRef.current.contains(e.target)) setShowHistory(false)
-    }
-    document.addEventListener('mousedown', onDocClick)
-    return () => document.removeEventListener('mousedown', onDocClick)
-  }, [showHistory])
-
   // Close the sessions dropdown when clicking outside it.
   useEffect(() => {
     if (!showSessions) return
@@ -614,28 +598,6 @@ const Terminal = forwardRef(function Terminal(
     [name, sessions, switchSession, refreshSessions]
   )
 
-  /** Load past commands from the activity log (category 'command'). */
-  const loadHistory = useCallback(async () => {
-    if (!name) return
-    setHistoryLoading(true)
-    try {
-      const res = await fetch(`/api/agents/${encodeURIComponent(name)}/activity?limit=50`)
-      if (!res.ok) return
-      const data = await res.json()
-      const cmds = (data.activity || [])
-        .filter((a) => a.category === 'command')
-        .map((a) => a.details)
-        .filter(Boolean)
-      setHistory(cmds)
-    } catch {}
-    setHistoryLoading(false)
-  }, [name])
-
-  function toggleHistory() {
-    if (!showHistory) loadHistory()
-    setShowHistory(!showHistory)
-  }
-
   function reconnect() {
     if (!window.confirm('Reconnect to this terminal session? Scrollback is preserved.')) return
     teardown()
@@ -714,7 +676,7 @@ const Terminal = forwardRef(function Terminal(
           <span className="w-px h-4 bg-slate-700" />
           <span className="text-xs text-slate-300 font-mono">{title || name}</span>
         </div>
-        <div ref={historyRef} className="relative flex items-center gap-1.5">
+        <div className="relative flex items-center gap-1.5">
           <div ref={sessionMenuRef} className="relative">
             <button
               onClick={toggleSessions}
@@ -780,18 +742,6 @@ const Terminal = forwardRef(function Terminal(
             )}
           </div>
           <span className="w-px h-4 bg-slate-700" />
-          <button
-            onClick={toggleHistory}
-            title="Command history"
-            className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors"
-          >
-            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M3 3v5h5" />
-              <path d="M3.05 13A9 9 0 1 0 6 5.3L3 8" />
-              <path d="M12 7v5l4 2" />
-            </svg>
-          </button>
-          <span className="w-px h-4 bg-slate-700" />
           <button onClick={() => setFontSize((s) => Math.max(10, s - 1))} className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">A-</button>
           <span className="text-xs text-slate-600 w-6 text-center">{fontSize}</span>
           <button onClick={() => setFontSize((s) => Math.min(24, s + 1))} className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">A+</button>
@@ -846,35 +796,6 @@ const Terminal = forwardRef(function Terminal(
                 <path d="M3 21l7-7" />
               </svg>
             </button>
-          )}
-
-          {showHistory && (
-            <div className="absolute bottom-full right-0 mb-2 w-96 max-h-72 overflow-y-auto rounded-lg border border-slate-700 bg-slate-900 shadow-xl z-50">
-              <div className="flex items-center justify-between px-3 py-2 border-b border-slate-800">
-                <span className="text-xs font-medium text-slate-300">Command history</span>
-                <button onClick={() => setShowHistory(false)} className="text-slate-500 hover:text-white text-xs">×</button>
-              </div>
-              <div className="py-1">
-                {historyLoading && <div className="px-3 py-2 text-xs text-slate-500">Loading…</div>}
-                {!historyLoading && history.length === 0 && (
-                  <div className="px-3 py-2 text-xs text-slate-500">No tracked commands yet.</div>
-                )}
-                {!historyLoading &&
-                  history.map((cmd, i) => (
-                    <button
-                      key={i}
-                      onClick={() => {
-                        setShowHistory(false)
-                        injectTracked(cmd)
-                      }}
-                      className="block w-full text-left px-3 py-1.5 text-xs font-mono text-slate-300 hover:bg-slate-800 hover:text-cyan-300 transition-colors truncate"
-                      title={cmd}
-                    >
-                      {cmd}
-                    </button>
-                  ))}
-              </div>
-            </div>
           )}
         </div>
       </div>

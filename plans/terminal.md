@@ -16,8 +16,8 @@ All terminal-related work in one place: UI design, component, sessions, review, 
 | dockerode real-PTY backend (`/ws/terminal/:name`) | **Done** — real PTY, demux, resize API |
 | tmux persistent sessions | **Done** — create/switch/kill dropdown, localStorage, lazy tmux install |
 | Terminal-first UI (6 modes + docked terminal) | **Done** — Commands is the default landing mode |
-| Command logging + history popover | **Done** — `POST /command-log`, clock button in terminal header |
-| Code review fixes | **Partial** — 4 fixed, 5 open (see §Review Findings) |
+| Command logging + history popover | **History button removed (2026-08-04)** — logging stays for the Activity tab |
+| Code review fixes | **Partial** — 5 fixed, 4 open (see §Review Findings) |
 
 ---
 
@@ -87,7 +87,7 @@ Single reusable xterm.js + WebSocket interactive shell. One component, one page,
 1. **Tracked `runCommand(cmd, {track: true})`** — appends a completion sentinel (`__PAD_DONE_<id>__`), fires `onCommandStart`/`onCommandDone`, shows the "Running" indicator, does not lock input. ✓
 2. **`pasteSecret(value)`** — raw paste; secret flow redesigned (see review #2). ✓
 3. **Lock toggle** — persisted per agent via `localStorage['pad-term-lock-<name>']`, restored on mount. **Note: there is no visible Lock button in the header** — locking is imperative only (or via the `disabled` prop). The plan's header `[lock]` button was never built.
-4. **History button** — clock icon → popover of past commands (activity log, category `command`), click re-runs. ✓ (kept — see review #7 for the "remove it?" decision)
+4. ~~**History button**~~ — clock icon → popover of past commands. **Removed 2026-08-04** (review #7): redundant with shell history + Activity tab. `POST /command-log` recording stays.
 
 ### Backend Contract (current — tmux attach, not `bash -i`)
 
@@ -256,11 +256,9 @@ No wheel policy implemented — no non-passive wheel handler added. In alternate
 
 **Fix:** send scrollback-only clear (`CSI 3 J`) instead — keeps the prompt and status line.
 
-### 7. Command-history button is redundant (Low) — ❌ OPEN (decision needed)
+### 7. Command-history button is redundant (Low) — ✅ REMOVED
 
-The clock button + popover **still exists** in the terminal header (fetches last 50 activity records of category `command`, re-runs on click). The review said remove it (ambiguous with shell history and the Activity tab). The migration checklist wanted it added. It's built and works.
-
-**Decision needed:** keep it (nice for re-running past commands) or remove it. The `POST /command-log` recording stays either way (powers the Activity tab).
+The clock button + popover in the terminal header has been **removed** (2026-08-04). It was redundant with shell history and the Activity tab, and the user confirmed it served no function. The `POST /command-log` recording stays — it powers the Activity tab.
 
 ### 8. Client/server multiplex control frames with raw bytes (Low) — ❌ OPEN
 
@@ -276,13 +274,12 @@ Backend still runs `JSON.parse()` on every client frame and falls through to `do
 
 ### Suggested Fix Order (next)
 
-1. Decide history button fate (review #7)
-2. Scrollback-only Clear (`CSI 3 J`) (review #6)
-3. Control-frame framing (review #8)
-4. Wheel policy (review #4)
-5. Rewrite `src/docs/terminal.md` + fix `Terminal.jsx` header comment (review #9)
-6. Bump tmux history-limit to 10000
-7. *(If TUI Escape lag resurfaces)* `set -s escape-time 10` in PAD `~/.tmux.conf`
+1. Scrollback-only Clear (`CSI 3 J`) (review #6)
+2. Control-frame framing (review #8)
+3. Wheel policy (review #4)
+4. Rewrite `src/docs/terminal.md` + fix `Terminal.jsx` header comment (review #9)
+5. Bump tmux history-limit to 10000
+6. *(If TUI Escape lag resurfaces)* `set -s escape-time 10` in PAD `~/.tmux.conf`
 
 ---
 
@@ -312,8 +309,8 @@ Backend still runs `JSON.parse()` on every client frame and falls through to `do
 - [x] Review #5: Escape inside TUI apps — resolved, no code change (was misread as fullscreen-exit)
 - [x] Review #3: no write queue + command buttons disabled until terminal connects
 - [ ] Review #4: wheel policy
+- [x] Review #7: history button removed (logging stays for the Activity tab)
 - [ ] Review #6: scrollback-only clear
-- [ ] Review #7: history button decision
 - [ ] Review #8: control-frame framing
 - [ ] Review #9: rewrite `src/docs/terminal.md`
 - [ ] Header lock button (optional)
@@ -338,7 +335,6 @@ Backend still runs `JSON.parse()` on every client frame and falls through to `do
 
 ## Open Questions
 
-- **History button** — keep the clock-arrow popover or remove it? (review #7)
 - **Header lock button** — build a visible Lock/Unlock toggle (the plan's `[lock]` header control) or keep lock imperative-only?
 - **Command log retention** — cap the log (e.g. last 100 entries per agent)?
 - **bash_history capture** — wire the user's typed commands into the history popover?
