@@ -17,7 +17,7 @@ All terminal-related work in one place: UI design, component, sessions, review, 
 | tmux persistent sessions | **Done** — create/switch/kill dropdown, localStorage, lazy tmux install |
 | Terminal-first UI (6 modes + docked terminal) | **Done** — Commands is the default landing mode |
 | Command logging + history popover | **History button removed (2026-08-04)** — logging stays for the Activity tab |
-| Code review fixes | **Partial** — 5 fixed, 4 open (see §Review Findings) |
+| Code review fixes | **Partial** — 6 fixed, 3 open (see §Review Findings) |
 
 ---
 
@@ -75,7 +75,7 @@ Single reusable xterm.js + WebSocket interactive shell. One component, one page,
 | `runCommand(cmd, {track})` | `boolean` | Sends a command + newline. With `{track:true}` (or when locked) appends a completion sentinel and fires `onCommandStart`/`onCommandDone` — does **not** lock input in track mode. **No queue** — returns `false` if the WS isn't open (command buttons are disabled until it is) |
 | `pasteSecret(value)` | `boolean` | Raw write + newline. **Echo suppression is the caller's job** (`stty -echo; <cmd>; stty echo` wrapper) — the component does not touch the buffer |
 | `write(text)` | `boolean` | Raw write to shell stdin. **No queue** — drops and returns `false` when disconnected |
-| `clear()` | — | Clears the visible scrollback (**currently plain `term.clear()` — see review #6**) |
+| `clear()` | — | Sends `clear` to the shell (like typing it) — clears the pane screen, survives refresh |
 | `reconnect()` | — | Confirms, then tears down and starts a fresh shell. Scrollback is preserved (tmux) |
 | `focus()` | — | Focuses the terminal |
 | `isConnected()` | `boolean` | Current WebSocket state |
@@ -250,11 +250,13 @@ No wheel policy implemented — no non-passive wheel handler added. In alternate
 
 **Status: ✅ DONE (no code change).** The user reports the TUI Escape problem now works — likely resolved previously, or a stale opencode/tmux session was eating input (a fresh `opencode` session registers keys fine; opencode has known tmux input-glitch issues). If Escape lag / Escape+key merging ever resurfaces inside TUIs, the fix is `set -s escape-time 10` in the PAD's `~/.tmux.conf`.
 
-### 6. Clear removes tmux status bar (Low) — ❌ OPEN
+### 6. Clear button didn't clear the shell (Low) — ✅ FIXED
 
-`clear()` still maps to `term.clear()`, which clears the whole viewport including the tmux status line.
+**Original issue:** the header Clear button called `termRef.current?.clear()` — xterm's built-in `clear()`, which only clears the browser's display client-side. The shell/tmux pane was never touched, so the old content reappeared on refresh.
 
-**Fix:** send scrollback-only clear (`CSI 3 J`) instead — keeps the prompt and status line.
+**Fix (2026-08-04):** the Clear button now calls the imperative handle (`ref.current?.clear()`), which runs `sendToShell('clear\n')` — exactly as if the user typed `clear` + Enter. The tmux pane really clears and the clear survives refresh. No backend change needed; `src/app.js` was left at its original state.
+
+**Verified live:** filled terminal with `seq` output → clicked Clear → tmux `capture-pane` shows the shell cleared, stays cleared after reload.
 
 ### 7. Command-history button is redundant (Low) — ✅ REMOVED
 
@@ -274,12 +276,12 @@ Backend still runs `JSON.parse()` on every client frame and falls through to `do
 
 ### Suggested Fix Order (next)
 
-1. Scrollback-only Clear (`CSI 3 J`) (review #6)
-2. Control-frame framing (review #8)
-3. Wheel policy (review #4)
-4. Rewrite `src/docs/terminal.md` + fix `Terminal.jsx` header comment (review #9)
-5. Bump tmux history-limit to 10000
-6. *(If TUI Escape lag resurfaces)* `set -s escape-time 10` in PAD `~/.tmux.conf`
+1. Control-frame framing (review #8)
+2. Wheel policy (review #4)
+3. Rewrite `src/docs/terminal.md` + fix `Terminal.jsx` header comment (review #9)
+4. Bump tmux history-limit to 10000
+5. *(If TUI Escape lag resurfaces)* `set -s escape-time 10` in PAD `~/.tmux.conf`
+6. *(Found 2026-08-04)* Fix tmux attach-client leak: every terminal WS disconnect leaves a `docker exec tmux attach` process + tmux client behind (22+ accumulated on `main`), making screens stale. `dockerStream.destroy()` on WS close isn't killing the exec — needs a robust kill (e.g. `docker exec <pad> pkill -f "tmux attach-session -t <session>"` scoped to that session).
 
 ---
 
@@ -310,9 +312,10 @@ Backend still runs `JSON.parse()` on every client frame and falls through to `do
 - [x] Review #3: no write queue + command buttons disabled until terminal connects
 - [ ] Review #4: wheel policy
 - [x] Review #7: history button removed (logging stays for the Activity tab)
-- [ ] Review #6: scrollback-only clear
+- [x] Review #6: Clear button now sends `clear` to the shell (button was calling xterm's client-side `clear()`, leaving the real pane untouched)
 - [ ] Review #8: control-frame framing
 - [ ] Review #9: rewrite `src/docs/terminal.md`
+- [ ] tmux attach-client leak on WS disconnect (found 2026-08-04) — see Suggested Fix Order
 - [ ] Header lock button (optional)
 - [ ] Browser-test: mode switching keeps terminal session + scrollback; session dropdown reflects `main`
 

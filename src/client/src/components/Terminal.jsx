@@ -38,7 +38,7 @@ import { useEffect, useRef, useImperativeHandle, forwardRef, useState, useCallba
  *  |------------------|----------|---------------------------------------------|
  *  | `runCommand(cmd, {track})` | boolean | Sends `cmd` to the shell (newline appended). With `{track:true}` (or when locked) it appends a completion sentinel, fires onCommandStart/onCommandDone, and shows the "Running" indicator without locking input. No queue — returns `false` when the WS isn't open. |
  *  | `write(text)`    | boolean  | Raw write to shell stdin. No queue — drops and returns `false` when disconnected. |
- *  | `clear()`        | —        | Clears the visible scrollback.               |
+ *  | `clear()`        | —        | Runs `clear` in the shell (clears the visible screen). |
  *  | `reconnect()`    | —        | Confirms, then tears down and starts a fresh shell session. |
  *  | `focus()`        | —        | Focuses the terminal.                        |
  *  | `isConnected()`  | boolean  | True when the WebSocket is OPEN.             |
@@ -633,7 +633,7 @@ const Terminal = forwardRef(function Terminal(
         return sendToShell(text + '\n')
       },
       write: sendToShell,
-      clear: () => termRef.current?.clear(),
+      clear: () => sendToShell('clear\n'),
       reconnect,
       focus: () => termRef.current?.focus(),
       isConnected: () => wsRef.current?.readyState === WebSocket.OPEN,
@@ -746,7 +746,7 @@ const Terminal = forwardRef(function Terminal(
           <span className="text-xs text-slate-600 w-6 text-center">{fontSize}</span>
           <button onClick={() => setFontSize((s) => Math.min(24, s + 1))} className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">A+</button>
           <span className="w-px h-4 bg-slate-700" />
-          <button onClick={() => termRef.current?.clear()} className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">Clear</button>
+          <button onClick={() => ref.current?.clear()} className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">Clear</button>
           <button onClick={reconnect} className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">Reconnect</button>
 
           {onToggleCollapse && showCollapse && !fullscreen && (
