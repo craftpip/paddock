@@ -643,6 +643,9 @@ Terminal appeared small/constrained because xterm.js FitAddon calls `fit()` befo
 - This caused every WebSocket connection to be **immediately rejected** with `ws.close()`.
 - The fix: `(containers[vmName]?.State || '').toLowerCase() !== 'running'`.
 
+### Tmux Scrollback Replay Formatting
+- `tmux capture-pane` emits LF-only lines. Before replaying pane history to xterm over WebSocket, convert `\r?\n` to `\r\n`; otherwise xterm preserves the prior column and restored output renders diagonally.
+
 ## Models/Providers Page — Models Tab (2026-07-19)
 
 ### `getCatalogProviders` `r.stdout` Bug

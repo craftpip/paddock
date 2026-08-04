@@ -118,6 +118,10 @@ import { useEffect, useRef, useImperativeHandle, forwardRef, useState, useCallba
  *    import can never double-mount a terminal.
  *  - Resize: after `fit()` and after font-size changes a NUL-NUL-prefixed
  *    `{type:'resize'}` frame is sent so the container PTY matches the pane.
+ *  - Wheel policy: the wheel only scrolls local scrollback. In alternate-screen
+ *    (TUI) mode xterm's arrow-key alternate scroll is suppressed so the wheel
+ *    never types ^[[A/^[[B into apps; apps with mouse reporting still get real
+ *    wheel events and scroll themselves.
  *  - No write queue: command buttons are disabled until the WS is open (the
  *    parent is told via `onConnChange`), and writes attempted while disconnected
  *    are dropped, never buffered.
@@ -342,11 +346,20 @@ const Terminal = forwardRef(function Terminal(
       }
     }
 
-    ws.onclose = () => {
+    ws.onclose = (evt) => {
       // A superseded session (explicit teardown / session switch) bumps the gen
       // counter, so its late close is ignored here and never schedules a retry.
       if (gen !== genRef.current) return
       setStateSafe(setConnState, 'disconnected')
+      // 4001 = the server replaced this connection with a newer one for the
+      // same PAD/session (single-client policy). The replacement client is
+      // already attached, so auto-reconnecting here would start a kick fight.
+      // Show the reason and let the user retake manually.
+      if (evt.code === 4001) {
+        wasConnectedRef.current = false
+        writeTerm('\r\n\x1b[33m[Terminal taken over by another connection — click Reconnect to retake.]\x1b[0m\r\n')
+        return
+      }
       // Announce only the first close after a healthy connection — repeated
       // failed retries (PAD stopped) must not spam the scrollback.
       if (wasConnectedRef.current) {
@@ -356,7 +369,9 @@ const Terminal = forwardRef(function Terminal(
       scheduleReconnect()
     }
 
-    ws.onerror = () => setStateSafe(setConnState, 'disconnected')
+    ws.onerror = () => {
+      setStateSafe(setConnState, 'disconnected')
+    }
 
     const ro = new ResizeObserver(() => {
       try {
@@ -370,6 +385,25 @@ const Terminal = forwardRef(function Terminal(
     term.attachCustomKeyEventHandler((e) => {
       // Allow Ctrl/Cmd+C to copy when text is selected (default copy action).
       if ((e.ctrlKey || e.metaKey) && e.key === 'c' && term.hasSelection()) return true
+      return true
+    })
+
+    term.attachCustomWheelEventHandler((e) => {
+      // Wheel policy (review #4): the wheel never becomes arrow-key input inside
+      // a full-screen TUI. xterm's alternate-scroll default turns the wheel into
+      // ^[[A/^[[B for apps without mouse reporting (opencode, htop, top), which
+      // moves their cursor/selection instead of scrolling. In alternate-screen
+      // mode there is no xterm scrollback to scroll, so swallow the event
+      // (return false = xterm emits no arrow sequence) and cancel it so the page
+      // doesn't scroll instead. In normal mode return true — xterm's viewport
+      // scrolls the scrollback natively. Apps that enable mouse reporting never
+      // reach this handler: xterm feeds them real wheel events and they scroll
+      // themselves.
+      if (term.buffer.active.type === 'alternate') {
+        e.preventDefault()
+        e.stopPropagation()
+        return false
+      }
       return true
     })
   }

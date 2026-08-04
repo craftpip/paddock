@@ -267,10 +267,44 @@ async function dockerLogs(vmName, tail = 100) {
 
 const SESSION_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 const tmuxReady = new Set(); // PAD names where tmux is confirmed present
+// tmux history depth to keep + replay on fresh connections (matches xterm's
+// 10000-line scrollback so the terminal behaves like a real terminal: the
+// scroll survives reloads and re-attaches).
+const TMUX_HISTORY = 10000;
+
+/** One live terminal WebSocket per `${vmName}/${session}` key.
+ *
+ * tmux supports multiple attached clients, but each extra client makes tmux
+ * full-redraw the pane from home instead of scrolling output incrementally,
+ * which silently destroys xterm's scrollback. Worse, when two browser tabs (or
+ * two users) have the terminal open, every connect sweeps the other's attach,
+ * killing its stream and triggering a reconnect loop that fights forever.
+ *
+ * Single-client policy: the NEWEST connection wins. Any older connection for
+ * the same key is kicked with close code 4001 (`replaced`), and the client
+ * treats 4001 as "do not auto-reconnect". This guarantees exactly one attached
+ * tmux client per session, so scrollback survives. */
+const activeTerminals = new Map();
 
 function safeSessionName(s) {
   if (typeof s === 'string' && SESSION_NAME_RE.test(s)) return s;
   return 'main';
+}
+
+/** Kill every `tmux attach-session -t <session>` client in the PAD.
+ *
+ * The dockerode hijacked stream's destroy() does NOT reliably terminate the
+ * docker exec process, so every WebSocket close used to leave an orphaned
+ * tmux client attached. With many clients of different sizes attached, tmux
+ * full-redraws the pane from the home position instead of scrolling output
+ * incrementally, so xterm's scrollback never grows (the wheel then has
+ * nothing to scroll). Sweeping on connect AND close guarantees a single
+ * sized client stays attached and output scrolls like a real terminal.
+ * `[t]mux` avoids pkill matching its own wrapping shell command line. */
+async function sweepStaleAttaches(vmName, session) {
+  try {
+    await runCmd('docker', ['exec', vmName, 'sh', '-lc', `pkill -f '[t]mux attach-session -t ${session}' 2>/dev/null || true`], { timeout: 10000, check: false });
+  } catch {}
 }
 
 async function containerHasTmux(vmName) {
@@ -323,6 +357,8 @@ async function ensureTmuxSession(vmName, session, cols, rows) {
     const r = Math.max(12, Math.min(120, parseInt(rows, 10) || 32));
     await runCmd('docker', ['exec', vmName, 'tmux', 'new-session', '-d', '-s', session, '-x', String(c), '-y', String(r)], { timeout: 20000, check: false });
   }
+  // Keep enough history that a fresh attach has something real to replay.
+  await runCmd('docker', ['exec', vmName, 'sh', '-lc', `tmux set-option -g history-limit ${TMUX_HISTORY} 2>/dev/null || true`], { timeout: 15000, check: false });
   await runCmd(
     'docker',
     ['exec', vmName, 'sh', '-lc',
@@ -1595,28 +1631,80 @@ wss.on('connection', async (ws, req) => {
     const rows = Math.max(12, Math.min(120, parseInt(url.searchParams.get('rows') || '32', 10) || 32));
     const session = safeSessionName(url.searchParams.get('session') || 'main');
 
+    const termKey = `${vmName}/${session}`;
     let dockerExec = null;
     let dockerStream = null;
     let closed = false;
+    const connId = Math.random().toString(36).slice(2, 6);
 
-    const cleanup = () => {
+    const cleanup = (reason) => {
       if (closed) return;
       closed = true;
+      console.log(`[wss/terminal] cleanup ${connId} ${session} reason=${reason}`);
       // Destroying the hijacked stream makes the Docker daemon kill the exec
       // process. That process is only the `tmux attach` client — the tmux
       // session inside the PAD keeps running, so state survives the disconnect.
       if (dockerStream) { try { dockerStream.destroy(); } catch {} dockerStream = null; }
       dockerExec = null;
+      // destroy() does not reliably kill the exec, so sweep the session's
+      // tmux clients as a backstop. Otherwise orphaned attach processes pile
+      // up (multi-client redraws kill scrollback). Skipped when this
+      // connection was superseded — the newer connection has already attached
+      // (or is about to) and a sweep here would kill ITS tmux client too.
+      if (entry.replaced) {
+        console.log(`[wss/terminal] ${connId} replaced — skipping sweep`);
+      } else {
+        sweepStaleAttaches(vmName, session);
+      }
+      if (activeTerminals.get(termKey)?.cleanup === cleanup) activeTerminals.delete(termKey);
     };
+
+    const entry = { ws, cleanup, connId, replaced: false };
+
+    // Single-client policy: this connection replaces any older one for the
+    // same PAD/session. Kicking it with 4001 makes its client stop retrying,
+    // so two attached clients can never fight each other again.
+    const prev = activeTerminals.get(termKey);
+    if (prev && prev.ws && prev.ws.readyState === ws.OPEN) {
+      console.log(`[wss/terminal] ${connId} supersedes ${prev.connId} (${termKey})`);
+      prev.replaced = true;
+      try { prev.ws.close(4001, 'replaced by a newer terminal connection'); } catch {}
+    }
+    activeTerminals.set(termKey, entry);
 
     try {
       // Make sure the tmux session exists (lazily installs tmux on old images).
+      // Sweep stale attaches from crashed connections first so exactly one
+      // client attaches below.
+      await sweepStaleAttaches(vmName, session);
       await ensureTmuxSession(vmName, session, cols, rows);
     } catch (err) {
       console.error('[wss/terminal] tmux setup error:', err.message);
       if (ws.readyState === ws.OPEN) ws.send(`\r\n\x1b[31m[Terminal error: ${err.message}]\x1b[0m\r\n`);
       ws.close();
       return;
+    }
+
+    // Fresh connection → replay tmux's persistent scrollback into the new
+    // xterm first, so the terminal behaves like a real one: output from before
+    // this connection (reload, PAD switch, reconnect) is still scrollable.
+    // capture-pane -S grabs the whole history + current screen; the attach
+    // repaint that follows redraws the same visible screen over it. If the
+    // pane is mid-TUI (alternate screen) there is no history to replay and the
+    // capture is just the current screen, which is still correct.
+    try {
+      const hist = await runCmd(
+        'docker',
+        ['exec', vmName, 'sh', '-lc', `tmux capture-pane -t ${session} -p -e -S -${TMUX_HISTORY} 2>/dev/null`],
+        { timeout: 20000, check: false }
+      );
+      if (hist.code === 0 && hist.stdout && ws.readyState === ws.OPEN) {
+        // capture-pane emits LF-only lines. xterm needs CRLF to return to
+        // column zero; otherwise each restored line starts after the last.
+        ws.send(hist.stdout.replace(/\r?\n/g, '\r\n'));
+      }
+    } catch (err) {
+      console.error('[wss/terminal] scrollback replay error:', err.message);
     }
 
     try {
@@ -1655,7 +1743,9 @@ wss.on('connection', async (ws, req) => {
     // byte — leak into the WebSocket and show up as stray characters.)
     const forward = () => new Writable({
       write(chunk, _enc, cb) {
-        if (ws.readyState === ws.OPEN) ws.send(decoder.write(chunk));
+        if (ws.readyState === ws.OPEN) {
+          ws.send(decoder.write(chunk));
+        }
         cb();
       },
     });
@@ -1671,13 +1761,14 @@ wss.on('connection', async (ws, req) => {
     }
 
     dockerStream.on('end', () => {
+      console.log(`[wss/terminal] stream end ${connId} ${session}`);
       if (ws.readyState === ws.OPEN) { ws.send(decoder.end()); ws.close(); }
-      cleanup();
+      cleanup('stream-end');
     });
     dockerStream.on('error', (err) => {
-      console.error('[wss/terminal] stream error:', err.message);
+      console.error(`[wss/terminal] stream error ${connId}:`, err.message);
       if (ws.readyState === ws.OPEN) { ws.send(`\r\n\x1b[31m[Terminal error: ${err.message}]\x1b[0m\r\n`); ws.close(); }
-      cleanup();
+      cleanup('stream-error');
     });
 
     ws.on('message', (data) => {
@@ -1705,7 +1796,7 @@ wss.on('connection', async (ws, req) => {
       dockerStream.write(data);
     });
 
-    ws.on('close', cleanup);
+    ws.on('close', () => cleanup('ws-close'));
     ws.on('error', cleanup);
     return;
   }
