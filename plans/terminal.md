@@ -17,7 +17,7 @@ All terminal-related work in one place: UI design, component, sessions, review, 
 | tmux persistent sessions | **Done** — create/switch/kill dropdown, localStorage, lazy tmux install |
 | Terminal-first UI (6 modes + docked terminal) | **Done** — Commands is the default landing mode |
 | Command logging + history popover | **History button removed (2026-08-04)** — logging stays for the Activity tab |
-| Code review fixes | **Partial** — 6 fixed, 3 open (see §Review Findings) |
+| Code review fixes | **Partial** — 7 fixed, 2 open (see §Review Findings) |
 
 ---
 
@@ -262,11 +262,17 @@ No wheel policy implemented — no non-passive wheel handler added. In alternate
 
 The clock button + popover in the terminal header has been **removed** (2026-08-04). It was redundant with shell history and the Activity tab, and the user confirmed it served no function. The `POST /command-log` recording stays — it powers the Activity tab.
 
-### 8. Client/server multiplex control frames with raw bytes (Low) — ❌ OPEN
+### 8. Client/server multiplex control frames with raw bytes (Low) — ✅ FIXED
 
-Backend still runs `JSON.parse()` on every client frame and falls through to `dockerStream.write(data)`. A pasted value that happens to look like `{ type: 'resize', ... }` is swallowed as a resize frame.
+Backend used to run `JSON.parse()` on **every** client frame and fell through to `dockerStream.write(data)`. A pasted value that happened to look like `{ "type": "resize", ... }` was swallowed as a resize frame (single paste = single WS message, so the whole document vanished instead of reaching the shell).
 
-**Fix:** reserved prefix (e.g. `\x1b[50;` or a `{json}` prefix) or a binary/text discriminator; everything else is shell bytes.
+**Fix (2026-08-04):** control frames are now framed with an unambiguous double-NUL prefix:
+- Client `pushResize` sends `'\x00\x00' + JSON.stringify({type:'resize',cols,rows})`.
+- Server checks `msg.charCodeAt(0) === 0 && msg.charCodeAt(1) === 0`; only then does it parse JSON (`msg.slice(2)`) and resize. Everything else goes to the shell as raw bytes — no `JSON.parse` on keystrokes at all.
+
+Why NUL-NUL and not `\x1b[50;` (the original suggestion): an ESC-prefixed marker can appear at the start of pasted terminal output; a single `\x00` can arrive from Ctrl+Space, so it must keep passing through. Two leading NULs cannot be typed or pasted by a browser, so the marker never collides.
+
+**Verified live (pad-openclaw-work-pls):** pasted `{"type":"resize","cols":120,"rows":40}` into the terminal → it appeared in the shell and bash reported `type:resize: command not found` (bytes reached the shell — previously this was silently eaten). Then A+ font change fired a resize frame with no backend errors, and a normal `echo` round-tripped fine.
 
 ### 9. Documentation drift (Low) — ⚠️ PARTIAL
 
@@ -276,18 +282,17 @@ Backend still runs `JSON.parse()` on every client frame and falls through to `do
 
 ### Suggested Fix Order (next)
 
-1. Control-frame framing (review #8)
-2. Wheel policy (review #4)
-3. Rewrite `src/docs/terminal.md` + fix `Terminal.jsx` header comment (review #9)
-4. Bump tmux history-limit to 10000
-5. *(If TUI Escape lag resurfaces)* `set -s escape-time 10` in PAD `~/.tmux.conf`
-6. *(Found 2026-08-04)* Fix tmux attach-client leak: every terminal WS disconnect leaves a `docker exec tmux attach` process + tmux client behind (22+ accumulated on `main`), making screens stale. `dockerStream.destroy()` on WS close isn't killing the exec — needs a robust kill (e.g. `docker exec <pad> pkill -f "tmux attach-session -t <session>"` scoped to that session).
+1. Wheel policy (review #4)
+2. Rewrite `src/docs/terminal.md` + fix `Terminal.jsx` header comment (review #9)
+3. Bump tmux history-limit to 10000
+4. *(If TUI Escape lag resurfaces)* `set -s escape-time 10` in PAD `~/.tmux.conf`
+5. *(Found 2026-08-04)* Fix tmux attach-client leak: every terminal WS disconnect leaves a `docker exec tmux attach` process + tmux client behind (22+ accumulated on `main`), making screens stale. `dockerStream.destroy()` on WS close isn't killing the exec — needs a robust kill (e.g. `docker exec <pad> pkill -f "tmux attach-session -t <session>"` scoped to that session).
 
 ---
 
 ## Backend Changes
 
-- **Done:** `/ws/terminal/:name` with dockerode PTY + tmux attach, WS auth, sessions API (`GET/DELETE /api/agents/:name/terminal-sessions[/:id]`), command log (`POST /api/agents/:name/command-log`).
+- **Done:** `/ws/terminal/:name` with dockerode PTY + tmux attach, WS auth, sessions API (`GET/DELETE /api/agents/:name/terminal-sessions[/:id]`), command log (`POST /api/agents/:name/command-log`), NUL-NUL-framed JSON control frames (review #8).
 - **Retired:** `/ws/messaging/:name` + `credential-paste`, `/ws/exec/:name`, and `/api/agents/:name/exec-stream` are all gone — the WS handler now handles only `wsType === 'terminal'`. Everything shell-related uses the shared terminal.
 - Legacy `views/terminal.ejs` / `views/agents/terminal.ejs` are dead files (SPA owns the terminal) — leave them or delete, no work needed.
 
@@ -313,7 +318,7 @@ Backend still runs `JSON.parse()` on every client frame and falls through to `do
 - [ ] Review #4: wheel policy
 - [x] Review #7: history button removed (logging stays for the Activity tab)
 - [x] Review #6: Clear button now sends `clear` to the shell (button was calling xterm's client-side `clear()`, leaving the real pane untouched)
-- [ ] Review #8: control-frame framing
+- [x] Review #8: NUL-NUL-framed JSON control frames — no JSON.parse on raw keystrokes, pasted resize-shaped JSON reaches the shell
 - [ ] Review #9: rewrite `src/docs/terminal.md`
 - [ ] tmux attach-client leak on WS disconnect (found 2026-08-04) — see Suggested Fix Order
 - [ ] Header lock button (optional)

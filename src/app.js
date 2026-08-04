@@ -1682,16 +1682,26 @@ wss.on('connection', async (ws, req) => {
 
     ws.on('message', (data) => {
       if (closed || !dockerStream || dockerStream.destroyed) return;
+      // Control frames are NUL-NUL-prefixed JSON:
+      //   `\x00\x00{"type":"resize","cols":n,"rows":n}`
+      // Raw shell bytes never start with two NULs — browsers cannot paste a
+      // NUL, and a lone Ctrl+Space (single \x00) still passes through to the
+      // shell. So there is no JSON.parse on keystrokes and a pasted document
+      // that happens to look like a resize frame goes straight to the shell.
       const msg = data.toString();
-      try {
-        const parsed = JSON.parse(msg);
-        if (parsed.type === 'resize' && parsed.cols && parsed.rows) {
-          const w = Math.max(2, parseInt(parsed.cols, 10) || 0);
-          const h = Math.max(2, parseInt(parsed.rows, 10) || 0);
-          if (w && h && dockerExec) dockerExec.resize({ h, w }).catch(() => {});
-          return;
+      if (msg.charCodeAt(0) === 0 && msg.charCodeAt(1) === 0) {
+        try {
+          const parsed = JSON.parse(msg.slice(2));
+          if (parsed.type === 'resize' && parsed.cols && parsed.rows) {
+            const w = Math.max(2, parseInt(parsed.cols, 10) || 0);
+            const h = Math.max(2, parseInt(parsed.rows, 10) || 0);
+            if (w && h && dockerExec) dockerExec.resize({ h, w }).catch(() => {});
+          }
+        } catch {
+          // Malformed control frame — drop it rather than corrupting the shell.
         }
-      } catch {}
+        return;
+      }
       dockerStream.write(data);
     });
 

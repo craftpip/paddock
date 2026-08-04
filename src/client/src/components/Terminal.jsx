@@ -70,8 +70,10 @@ import { useEffect, useRef, useImperativeHandle, forwardRef, useState, useCallba
  *      container.exec({ Tty: true, Env: ['TERM=xterm-256color'],
  *                       Cmd: ['tmux', 'attach-session', '-t', <id>] })
  *      → exec.start({ hijack: true, ... })
- *  - Client → server: raw keystroke bytes, plus JSON resize frames:
- *      { type: 'resize', cols: <n>, rows: <n> }  →  exec.resize({ h, w })
+ *  - Client → server: raw keystroke bytes, plus NUL-NUL-prefixed JSON control
+ *    frames (the prefix can't be typed or pasted, so it never collides with
+ *    shell input — the backend only parses JSON after the prefix):
+ *      \x00\x00{ type: 'resize', cols: <n>, rows: <n> }  →  exec.resize({ h, w })
  *  - Server → client: raw PTY output (StringDecoder-decoded) rendered verbatim
  *    by xterm. No `\r` → `\n` conversion — the PTY line discipline handles CR/LF.
  *
@@ -114,8 +116,8 @@ import { useEffect, useRef, useImperativeHandle, forwardRef, useState, useCallba
  *  - Reconnect: confirms first; safe to call repeatedly; stale in-flight init
  *    is invalidated by a generation counter, so a reconnect during a slow
  *    import can never double-mount a terminal.
- *  - Resize: after `fit()` and after font-size changes a `{type:'resize'}`
- *    frame is sent so the container PTY matches the pane.
+ *  - Resize: after `fit()` and after font-size changes a NUL-NUL-prefixed
+ *    `{type:'resize'}` frame is sent so the container PTY matches the pane.
  *  - No write queue: command buttons are disabled until the WS is open (the
  *    parent is told via `onConnChange`), and writes attempted while disconnected
  *    are dropped, never buffered.
@@ -209,13 +211,17 @@ const Terminal = forwardRef(function Terminal(
     return false
   }, [])
 
-  /** Tell the backend the PTY size has changed. */
+  /** Tell the backend the PTY size has changed. Sent as a NUL-NUL-prefixed
+   *  JSON control frame (`\x00\x00{"type":"resize",...}`) so it can never be
+   *  confused with pasted shell bytes — the backend does no JSON parse on raw
+   *  input, and a pasted document that looks like a resize frame goes to the
+   *  shell like any other text. */
   const pushResize = useCallback((cols, rows) => {
     if (!cols || !rows) return
     const ws = wsRef.current
     if (!ws || ws.readyState !== WebSocket.OPEN) return
     try {
-      ws.send(JSON.stringify({ type: 'resize', cols, rows }))
+      ws.send('\x00\x00' + JSON.stringify({ type: 'resize', cols, rows }))
     } catch {}
   }, [])
 
