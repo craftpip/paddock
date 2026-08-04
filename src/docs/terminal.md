@@ -1,17 +1,22 @@
 # Terminal — The Interactive Shell
 
-The terminal is the app's one interactive shell. It runs a real bash session
-inside a PAD container and shows it in the browser with xterm.js. Everything
-you type in the pane runs live in that container — Enter, arrows, and
-raw-mode TUI apps (opencode, fzf, htop) behave exactly like a local terminal.
+The terminal is the app's one interactive shell. It runs a **persistent tmux
+session** inside a PAD container and shows it in the browser with xterm.js.
+Everything you type in the pane runs live in that container — Enter, arrows,
+and raw-mode TUI apps (opencode, fzf, htop) behave exactly like a local
+terminal. The session survives page reloads, mode switches, and even webui
+restarts; the only thing that kills it is stopping the PAD itself.
 
 ## Where the code lives
 
 | Piece | File | What it does |
 |-------|------|--------------|
-| Frontend component | `src/client/src/components/Terminal.jsx` | The one-and-only shell component (xterm.js + WebSocket). |
-| Backend WS handler | `src/app.js` — "Terminal WebSocket" block (`wsType === 'terminal'`) | Talks to Docker and runs the real PTY. |
-| Used by | `src/client/src/pages/AgentDetail.jsx` | Terminal tab + Health tab both render `<Terminal>`. |
+| Frontend component | `src/client/src/components/Terminal.jsx` | The one-and-only shell component (xterm.js + WebSocket + sessions dropdown). |
+| Backend WS handler | `src/app.js` — "Terminal WebSocket" block (`wsType === 'terminal'`) | tmux session setup, scrollback replay, real PTY attach. |
+| Sessions API | `src/app.js` — `GET/DELETE /api/agents/:name/terminal-sessions[/:id]` | List, switch, create, kill tmux sessions. |
+| Command log | `src/app.js` — `POST /api/agents/:name/command-log` | Records run commands for the Activity tab. |
+| Used by | `src/client/src/pages/AgentDetail.jsx` | The agent page — docked terminal, always mounted, one per agent. |
+| Plan | `plans/terminal.md` | The unified terminal plan (UI design, reviews, migration). |
 
 There is exactly one terminal component in the app. If a page needs a shell,
 use `<Terminal>`. Do not copy the xterm/WebSocket setup elsewhere.
@@ -19,31 +24,47 @@ use `<Terminal>`. Do not copy the xterm/WebSocket setup elsewhere.
 ## How it works
 
 Two halves: a React component that owns xterm.js, and an Express WebSocket
-handler that owns a Docker exec session. They talk over one socket.
+handler that owns a tmux attach over Docker's real PTY. They talk over one
+socket, and each tmux session is bound to one shell that keeps running between
+connections.
 
 ```
-Browser (Terminal.jsx)  ──ws://host/ws/terminal/<name>──▶  Express (app.js)
-     xterm.js  ◀── raw PTY output (text frames) ────  dockerode hijack stream
-     keystrokes ──▶ raw bytes ───────────────────────────▶ docker exec PTY
-     resize JSON ──▶ { type:'resize', cols, rows } ──────▶ /exec/:id/resize
+Browser (Terminal.jsx)  ──ws://host/ws/terminal/<name>?session=<id>──▶  Express (app.js)
+     xterm.js  ◀── capture-pane replay + raw PTY output ───────  dockerode hijack stream
+     keystrokes ──▶ raw bytes ────────────────────────────────▶  tmux attach -t <session>
+     resize \x00\x00{...} ──▶ control frame ─────────────────▶  /exec/:id/resize
 ```
 
-### Backend — real PTY via Docker Engine API
+### Backend — persistent tmux sessions via Docker Engine API
 
-The old approach ran `docker exec -i` with a `script -qfec` wrapper and then
-mangled `\r` → `\n` on the way in, because there was no PTY line discipline.
-That made raw-mode TUI apps hang on Enter in popups. It's gone.
+Each terminal session is a **tmux session** inside the PAD container (default
+`main`, more via the dropdown: `term-1`, `term-2`, ...). The WS handler only
+**attaches**; closing the WebSocket detaches the client and leaves the session
+running. The next connection reattaches and replays the pane history.
 
-Now the handler uses **dockerode** against `/var/run/docker.sock` and lets
-Docker allocate the PTY (`Tty: true`):
+Setup is idempotent and runs on every connect (`ensureTmuxSession`):
+
+1. **Lazy tmux install** — tmux is in the base image, and installed on demand
+   for older images (`apt-get install -y tmux`), cached in a `tmuxReady` set.
+2. **Colored PS1** — appended to `/root/.bashrc` (idempotent) because
+   tmux-created shells inherit the tmux server env, not the attach exec env.
+3. **`/root/.tmux.conf`** — `set -ga terminal-overrides ',xterm-256color:smcup@:rmcup@'`
+   strips the alternate-screen enter/exit from the attach terminal, so output
+   lands on the normal screen and accumulates in the scrollback instead of
+   being discarded.
+4. **Create if missing** — `tmux new-session -d -s <session> -x <cols> -y <rows>`.
+5. **history-limit** — bumped to **10000** (`TMUX_HISTORY`) so the pane
+   history matches xterm's scrollback.
+
+Then it attaches with a real PTY allocated by Docker:
 
 ```js
 const container = dockerClient.getContainer(name);
 const exec = await container.exec({
   AttachStdin: true, AttachStdout: true, AttachStderr: true,
   Tty: true,
-  Env: ['TERM=xterm-256color'],
-  Cmd: ['bash', '-i'],
+  Env: ['TERM=xterm-256color', 'LANG=C.UTF-8'],
+  Cmd: ['tmux', 'attach-session', '-t', session],
 });
 const stream = await exec.start({ hijack: true, stdin: true, stdout: true, stderr: true });
 await exec.resize({ h: rows, w: cols });   // initial size from ?cols=&rows=
@@ -52,6 +73,40 @@ await exec.resize({ h: rows, w: cols });   // initial size from ?cols=&rows=
 No `\r` → `\n` conversion, no `script` wrapper. The PTY line discipline
 handles CR/LF. Output is decoded with `StringDecoder('utf8')` so a multibyte
 character split across two chunks doesn't garble.
+
+### Scrollback survives refresh
+
+On every fresh connection the handler replays tmux's persistent history into
+the new xterm before attaching, so output from before the reload is still
+scrollable:
+
+```js
+const hist = await runCmd('docker', [
+  'exec', vmName, 'sh', '-lc',
+  `tmux capture-pane -t ${session} -p -e -S -${TMUX_HISTORY}`,
+]);
+ws.send(hist.stdout.replace(/\r?\n/g, '\r\n'));   // LF → CRLF, lines land at col 0
+```
+
+`capture-pane -S` grabs the whole history + current screen; the attach repaint
+that follows redraws the same visible screen over it. If the pane is mid-TUI
+(alternate screen) there is no history to replay and the capture is just the
+current screen, which is still correct. The LF→CRLF conversion matters: xterm
+treats a bare LF as "move down, keep column", which renders replayed lines
+diagonally ("waterfall") instead of at column 0.
+
+### Single-client policy
+
+tmux allows multiple attached clients, but every extra client makes tmux
+full-redraw the pane from home instead of scrolling output incrementally —
+which silently destroys xterm's scrollback. Two open browser tabs also fight
+each other (each connect sweeps the other's attach → reconnect loop).
+
+So there is **exactly one attached client per session**: the newest connection
+wins, older ones are kicked with close code 4001 (`replaced`), and the client
+treats 4001 as "do not auto-reconnect". `sweepStaleAttaches()` (`pkill -f
+'[t]mux attach-session -t <session>'`) runs on connect **and** close so
+orphaned attach processes never pile up.
 
 ### Demuxing (why output needs a demux step)
 
@@ -70,9 +125,15 @@ dockerClient.modem.demuxStream(stream, stdoutW, stderrW);
 dockerode's demux falls back to raw passthrough if the stream turns out not to
 be multiplexed (e.g. TTY-only streams).
 
-### Frontend — `<Terminal>` component
+### Authentication
 
-Props:
+The WS handler resolves the session cookie and requires a valid authenticated
+session **before** any container inspection or Docker exec. Non-admin users
+must own the PAD. Skipped only when `AUTO_LOGIN=true`.
+
+## Frontend — `<Terminal>` component
+
+Props (current — see `Terminal.jsx` header for the full table):
 
 | Prop | Type | Default | Description |
 |------|------|---------|-------------|
@@ -80,49 +141,64 @@ Props:
 | `title` | string | `name` | Label in the header bar. |
 | `height` | string | `'70vh'` | CSS height of the terminal area. |
 | `minHeight` | string | `'480px'` | CSS min-height of the terminal area. |
+| `collapsed` | boolean | `false` | Hide the body; only the header bar shows. Session stays alive. |
+| `onConnChange` | fn | — | Called `true`/`false` as the WS connects/disconnects. AgentDetail gates every command button on it. |
+| `disabled` | boolean | `false` | Lock input from outside. Injected commands still run. |
 
 Imperative API through `ref`:
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `runCommand(cmd)` | boolean | Sends `cmd` + newline to the shell. **No queue** — returns `false` if the WS isn't open (command buttons are disabled until it is). |
-| `write(text)` | boolean | Raw write to shell stdin. **No queue** — drops and returns `false` when disconnected. |
-| `clear()` | — | Clears visible scrollback. |
-| `reconnect()` | — | Tears down and starts a fresh session. |
+| `runCommand(cmd, {track})` | boolean | Sends `cmd` + newline. With `{track:true}` appends a completion sentinel and fires `onCommandStart`/`onCommandDone`. **No queue** — returns `false` if the WS isn't open. |
+| `write(text)` | boolean | Raw write to shell stdin. **No queue** — drops when disconnected. |
+| `clear()` | — | Sends `clear` to the shell — clears the real pane, survives refresh. |
+| `reconnect()` | — | Confirms, tears down, and starts a fresh session. Scrollback is preserved (tmux). |
 | `focus()` | — | Focuses the terminal. |
 | `isConnected()` | boolean | True when the WebSocket is OPEN. |
+| `setLocked(v)` / `lock()` / `unlock()` | — | Imperative lock control (independent of the `disabled` prop). |
 
-Preset-button pattern (Health tab uses this):
+### Docked layout (AgentDetail)
 
-```jsx
-<Terminal ref={termRef} name={agent.name} />
-<button onClick={() => termRef.current?.runCommand('openclaw health')}>
-```
+The terminal dock is **always mounted** on the agent page, one per agent. It
+never unmounts while the page is open. On non-Commands modes it auto-collapses
+to its header bar (session stays alive); Commands mode takes the full remaining
+height. A drag handle resizes the dock outside Commands, and the header has a
+fullscreen overlay toggle.
 
-Commands written while the socket is down are dropped (no queue). Command
-buttons are disabled until the terminal reports connected via `onConnChange`.
+### Session dropdown
+
+The header dropdown lists the PAD's active tmux sessions (`GET
+/api/agents/:name/terminal-sessions`) and lets you switch, create
+("+ New session" → next free `term-N`), or close (DELETE) a session. The
+selected session is persisted in `localStorage` (`pad-term-session-<name>`), so
+a page reload returns to the same session. Closing the current session falls
+back to `main`.
 
 ## WebSocket protocol
 
-Endpoint: `ws://<host>/ws/terminal/<name>?cols=<n>&rows=<n>`
+Endpoint: `ws://<host>/ws/terminal/<name>?session=<id>&cols=<n>&rows=<n>`
+(`session` optional → `main`).
 
-- **Client → server:** raw keystroke bytes, plus JSON frames:
-  `{ type: 'resize', cols: <n>, rows: <n> }`
+- **Client → server:** raw keystroke bytes, plus control frames framed with a
+  double-NUL prefix — `\x00\x00{ type: 'resize', cols, rows }`. The prefix
+  can't be typed or pasted, so it never collides with shell input. The server
+  only parses JSON after the prefix; everything else goes to the shell as raw
+  bytes (no `JSON.parse` on keystrokes).
 - **Server → client:** raw PTY output as text frames (rendered verbatim by
-  xterm.js).
+  xterm.js), prefixed on a fresh connection by the tmux scrollback replay.
 
-The connection is only accepted when the container is `running`
-(`dockerPsList` + `State` check) — otherwise `ws.close()`.
+The connection is only accepted when the container is `running` and the
+session cookie passes auth — otherwise `ws.close()`.
 
 ## Resize
 
-- **Initial size** comes from the `?cols=&rows=` URL params and is applied
-  right after `exec.start()` via `exec.resize({ h, w })`.
-- **Live resize:** the client sends `{ type: 'resize', cols, rows }` after
-  every `fit()` (a `ResizeObserver` on the pane) and after font-size changes.
-  The server calls the official `POST /exec/:id/resize`, which resizes the
-  actual running PTY. The old `docker exec stty` approach never worked because
-  it targeted a brand-new process, not the real PTY.
+- **Initial size** comes from the `?cols=&rows=` URL params (clamped) and is
+  applied right after `exec.start()` via `exec.resize({ h, w })`.
+- **Live resize:** the client sends `\x00\x00{ type: 'resize', cols, rows }`
+  after every `fit()` (a `ResizeObserver` on the pane) and after font-size
+  changes. The server calls the official `POST /exec/:id/resize`, which resizes
+  the actual running PTY. The old `docker exec stty` approach never worked
+  because it targeted a brand-new process, not the real PTY.
 
 ## Lifecycle & robustness
 
@@ -134,56 +210,28 @@ The connection is only accepted when the container is `running`
 - **Reconnect:** safe to call repeatedly. A generation counter invalidates
   stale in-flight init, so a reconnect during a slow import can never
   double-mount a terminal.
+- **Auto-reconnect:** on an unexpected close, retries with backoff that doubles
+  to a 30s cap and resets on a successful open. Close code **4001** means
+  "replaced by a newer connection" — no auto-reconnect, the user clicks
+  Reconnect to retake.
 - **Cleanup on the server:** closing/erroring either side destroys the
-  hijacked docker stream (which makes the Docker daemon kill the exec
-  process) and closes the WebSocket. A `closed` guard makes cleanup run once.
+  hijacked docker stream and sweeps orphaned `tmux attach-session` processes.
+  A `closed` guard makes cleanup run once.
 - **Init failures** (bad name, xterm load error) render a visible error inside
   the terminal area instead of failing silently.
 - **Ctrl/Cmd+C with a selection** is left to the browser (copy), not sent to
   the shell.
-- **Scrollback:** 10,000 lines.
+- **Wheel policy:** the wheel never becomes arrow-key input inside a TUI. In
+  alternate-screen mode xterm's arrow-key alternate-scroll is suppressed; in
+  normal mode xterm's viewport scrolls the scrollback natively. Apps with mouse
+  reporting still get real wheel events and scroll themselves.
+- **Scrollback:** 10,000 lines on both sides (xterm `scrollback` option +
+  tmux `history-limit`).
 
-## Locked / read-only mode
+## Tracked commands ("command is done")
 
-The terminal can be locked from outside so the viewer cannot type their own
-commands — only commands injected through `runCommand()` execute. While an
-injected command is running the user can type again (to answer prompts or poke
-the command); when it finishes, the terminal auto-locks.
-
-### Props / API
-
-| Prop             | Type    | Description |
-|------------------|---------|-------------|
-| `disabled`       | boolean | Lock the terminal from outside. Default `false`. |
-| `onCommandStart` | fn      | Fired when an injected command starts (locked mode only). |
-| `onCommandDone`  | fn      | Fired when an injected command finishes (locked mode only). |
-
-Imperative: `setLocked(v)`, `lock()`, `unlock()`, `isLocked()`.
-
-```jsx
-<Terminal ref={termRef} name={agent.name} disabled
-         onCommandStart={() => setBusy(true)}
-         onCommandDone={() => setBusy(false)} />
-<button onClick={() => termRef.current?.runCommand('git pull')}>
-```
-
-> **Prop-change timing gotcha:** the `disabled` prop reaches the lock via React's
-> effect lifecycle, so it is **not** visible if you call `runCommand()` in the
-> *same* tick that you set `disabled={true}` — the command runs unlocked (no
-> sentinel). For operator-driven flows that lock and inject in one handler, use
-> the imperative API instead — it is synchronous:
->
-> ```jsx
-> <button onClick={() => {
->   termRef.current?.lock();
->   termRef.current?.runCommand('git pull');
-> }}>
-> ```
-
-### How "command is done" is detected
-
-A PTY has no "command finished" signal, so in locked mode `runCommand()` appends
-a unique sentinel to the injected line:
+A PTY has no "command finished" signal, so `runCommand(cmd, {track:true})`
+appends a unique sentinel to the injected line:
 
 ```bash
 <cmd>; echo; echo __PAD_DONE_<id>__
@@ -198,48 +246,49 @@ a unique sentinel to the injected line:
   frames is still found. The PTY echoes the injected line too, but there the
   sentinel sits mid-line after `echo `, so it can never false-trigger a
   premature "done".
-- Multiple injected commands queue: a sentinel set is tracked and the terminal
-  only re-locks when the last sentinel resolves.
+- Multiple injected commands queue: a sentinel set is tracked and `onCommandDone`
+  fires only when the last sentinel resolves.
 
-(An earlier draft used `stty -echo` to hide the injected line — dropped because
-the echo change races with the next line's bytes. The sentinel stays visible in
-the output; treat it as a "command finished" indicator.)
+## Locked / read-only mode
 
-### Behavior while locked
+The terminal can be locked from outside so the viewer cannot type their own
+commands — only commands injected through `runCommand()` execute. While an
+injected command is running the user can type again (to answer prompts); when
+it finishes, the terminal auto-locks.
 
 - Keystrokes, paste, and Ctrl+C from the user are dropped entirely (selection
   copy via Ctrl/Cmd+C still works in the browser).
 - `runCommand()` and `write()` are unaffected — they bypass the lock.
-- A `Locked` badge shows in the header and the cursor stops blinking.
-- While an injected command runs, a `Running` pulse shows instead.
+- A `Locked` badge shows in the header and the cursor stops blinking; a
+  `Running` pulse shows while an injected command runs.
 
-## What it is NOT
-
-The **Messaging tab** has its own one-shot WS command runner (`wsType ===
-'messaging'`) that still uses `docker exec` + `script`. That is a separate
-"run one command, show output" feature, not an interactive shell. If its
-interactive prompts ever misbehave, revisit it separately — do not confuse it
-with this terminal.
+> **Prop-change timing gotcha:** the `disabled` prop reaches the lock via React's
+> effect lifecycle, so it is **not** visible if you call `runCommand()` in the
+> *same* tick that you set `disabled={true}`. For operator-driven flows that
+> lock and inject in one handler, use the imperative API — it is synchronous:
+>
+> ```jsx
+> <button onClick={() => {
+>   termRef.current?.lock();
+>   termRef.current?.runCommand('git pull');
+> }}>
+> ```
 
 ## Verifying it works
 
-Quick protocol test against a running PAD (run inside the webui container or
-on a host that can reach the published WS port):
-
-```js
-const WebSocket = require('ws');
-const ws = new WebSocket('ws://127.0.0.1:5051/ws/terminal/<pad>?cols=120&rows=32');
-ws.on('open', () => {
-  ws.send('echo hi\r');                     // Enter goes straight through
-  ws.send(JSON.stringify({ type: 'resize', cols: 60, rows: 12 })); // live resize
-  ws.send('stty size\r');                   // should report "12 60"
-});
-ws.on('message', (d) => console.log(String(d)));
-```
-
-Browser E2E: open the PAD → Terminal tab → type `echo ok`, press Enter → you
+Browser E2E: open a PAD → Commands mode → type `echo ok`, press Enter → you
 should see `ok` echo back and a fresh prompt. Also try a raw-mode app like
-`opencode` — popups that used to hang on Enter should now work.
+`opencode` — popups that used to hang on Enter should now work. Then reload the
+page: the same output should come back (scrollback replay) and the wheel should
+scroll it.
+
+Check a PAD's tmux state directly:
+
+```bash
+docker exec <pad> tmux list-sessions
+docker exec <pad> tmux show-options -gqv history-limit   # 10000
+docker exec <pad> tmux capture-pane -t main -p -e -S -20  # last 20 lines
+```
 
 ## Troubleshooting
 
@@ -247,7 +296,14 @@ should see `ok` echo back and a fresh prompt. Also try a raw-mode app like
   exec into the container. Usually the container stopped between the check and
   the exec. Restart the PAD and reconnect.
 - **`[Connection closed]` appears immediately** — the container is not in
-  `running` state, or the WS handshake was rejected. Check the PAD status.
+  `running` state, or the WS handshake was rejected (auth). Check the PAD
+  status and your session.
+- **`[Terminal taken over by another connection]`** — another tab/session
+  attached to the same PAD/session and the single-client policy kicked this
+  one. Click Reconnect to retake.
+- **Replayed history renders diagonally / "waterfall"** — a stale backend
+  without the LF→CRLF conversion. Recreate the `webui` container with the
+  current `src/app.js`.
 - **TUI app hangs on Enter** — you are almost certainly running the OLD
-  backend (pre-dockerode). Rebuild/redeploy `webui` with the current
+  backend (pre-dockerode `bash -i`). Rebuild/redeploy `webui` with the current
   `src/app.js`.

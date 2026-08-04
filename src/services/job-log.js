@@ -45,7 +45,13 @@ function getJob(name) {
 }
 
 function getOrCreateJob(name) {
-  return jobs.get(name) || createJob(name);
+  const existing = jobs.get(name);
+  if (existing && existing.state === 'running') return existing;
+  return createJob(name);
+}
+
+function clearJob(name) {
+  jobs.delete(name);
 }
 
 function append(job, event) {
@@ -129,6 +135,7 @@ module.exports = {
   createJob,
   getJob,
   getOrCreateJob,
+  clearJob,
   append,
   setStep,
   line,

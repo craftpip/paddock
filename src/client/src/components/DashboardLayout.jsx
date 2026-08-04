@@ -35,12 +35,9 @@ export default function DashboardLayout({ children, fullHeight, fullWidth }) {
               <Link to="/agents/create" className="px-3 py-1.5 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-slate-800 transition-colors">+ Agent</Link>
               <Link to="/vault" className="px-3 py-1.5 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-slate-800 transition-colors">Vault</Link>
               <Link to="/backups" className="px-3 py-1.5 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-slate-800 transition-colors">Backups</Link>
-              {role === 'admin' && (
-                <Link to="/users" className="px-3 py-1.5 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-slate-800 transition-colors">Users</Link>
-              )}
               <span className="w-px h-5 bg-slate-700 mx-1.5" />
               {username && (
-                <Link to="/profile" className="px-3 py-1.5 rounded-lg text-sm text-slate-400 hover:text-white hover:bg-slate-800 transition-colors" title="Profile">
+                <Link to="/profile" className="px-3 py-1.5 rounded-lg text-sm text-slate-400 hover:text-white hover:bg-slate-800 transition-colors" title="Settings">
                   {username}
                 </Link>
               )}

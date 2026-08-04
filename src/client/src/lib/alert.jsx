@@ -1,31 +1,32 @@
 import { createContext, useContext, useState, useCallback, useRef, useEffect } from 'react'
 
-const ConfirmContext = createContext()
+const AlertContext = createContext()
 
-export function ConfirmProvider({ children }) {
+export function AlertProvider({ children }) {
   const [state, setState] = useState(null)
   const resolveRef = useRef(null)
   const dialogRef = useRef(null)
 
-  const showConfirm = useCallback(({ title, message, danger, confirmText, cancelText }) => {
+  const showAlert = useCallback(({ title, message, danger, okText, cancelText }) => {
     return new Promise((resolve) => {
       resolveRef.current = resolve
-      setState({ title, message, danger, confirmText, cancelText })
+      setState({ title, message, danger, okText, cancelText })
     })
   }, [])
 
-  function handleConfirm() {
+  function close(result) {
     const resolve = resolveRef.current
     setState(null)
     resolveRef.current = null
-    if (resolve) resolve(true)
+    if (resolve) resolve(result)
+  }
+
+  function handleOk() {
+    close(true)
   }
 
   function handleCancel() {
-    const resolve = resolveRef.current
-    setState(null)
-    resolveRef.current = null
-    if (resolve) resolve(false)
+    close(false)
   }
 
   function handleBackdrop(e) {
@@ -41,7 +42,7 @@ export function ConfirmProvider({ children }) {
         handleCancel()
       } else if (e.key === 'Enter' && e.target.tagName !== 'BUTTON') {
         e.preventDefault()
-        handleConfirm()
+        handleOk()
       }
     }
     window.addEventListener('keydown', onKeyDown)
@@ -50,7 +51,7 @@ export function ConfirmProvider({ children }) {
   }, [state])
 
   return (
-    <ConfirmContext.Provider value={showConfirm}>
+    <AlertContext.Provider value={showAlert}>
       {children}
       {state && (
         <div
@@ -61,42 +62,42 @@ export function ConfirmProvider({ children }) {
             ref={dialogRef}
             tabIndex={-1}
             className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-full max-w-md mx-4 overflow-hidden focus:outline-none"
-            role="dialog"
+            role="alertdialog"
             aria-modal="true"
           >
             <div className="px-6 pt-5 pb-3">
               <h3 className={`text-base font-semibold ${state.danger ? 'text-red-400' : 'text-slate-100'}`}>
-                {state.title || 'Confirm'}
+                {state.title || 'Alert'}
               </h3>
               {state.message && (
                 <div className="mt-2 text-sm text-slate-400 leading-relaxed whitespace-pre-wrap">{state.message}</div>
               )}
             </div>
             <div className="flex items-center justify-end gap-3 px-6 pb-5 pt-2">
+              {state.cancelText && (
+                <button
+                  onClick={handleCancel}
+                  className="px-4 py-2 text-sm font-medium text-slate-300 hover:text-white hover:bg-slate-800 rounded-lg transition-colors"
+                >
+                  {state.cancelText}
+                </button>
+              )}
               <button
-                onClick={handleCancel}
-                className="px-4 py-2 text-sm font-medium text-slate-300 hover:text-white hover:bg-slate-800 rounded-lg transition-colors"
-              >
-                {state.cancelText || 'Cancel'}
-              </button>
-              <button
-                onClick={handleConfirm}
+                onClick={handleOk}
                 className={`px-4 py-2 text-sm font-medium text-white rounded-lg transition-colors ${
-                  state.danger
-                    ? 'bg-red-600 hover:bg-red-500'
-                    : 'bg-cyan-600 hover:bg-cyan-500'
+                  state.danger ? 'bg-red-600 hover:bg-red-500' : 'bg-cyan-600 hover:bg-cyan-500'
                 }`}
               >
-                {state.confirmText || 'Confirm'}
+                {state.okText || 'OK'}
               </button>
             </div>
           </div>
         </div>
       )}
-    </ConfirmContext.Provider>
+    </AlertContext.Provider>
   )
 }
 
-export function useConfirm() {
-  return useContext(ConfirmContext)
+export function useAlert() {
+  return useContext(AlertContext)
 }

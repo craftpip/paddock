@@ -17,7 +17,9 @@ const registry = require('./services/agent-registry');
 const vm = require('./services/vm-manager');
 const backup = require('./services/backup-manager');
 const jobLog = require('./services/job-log');
+const apiKeys = require('./services/api-keys');
 const { getDb } = require('./services/db');
+const { runCmdStream } = require('./services/cmd');
 const { setupSession, getSessionFromCookie, requireAuth, requireAdmin, csrfToken, csrfCheck, hashPassword, verifyPassword, checkNeedsSetup } = require('./middleware/auth');
 const { rateLimit } = require('./middleware/rateLimit');
 
@@ -53,6 +55,30 @@ setupSession(app);
 app.use(csrfToken);
 app.use(rateLimit);
 
+// Autologin on every request (AUTO_LOGIN mode) so a fresh session never hits
+// requireAdmin/requireAuth without a role (e.g. after a container restart
+// wipes the in-memory session store while a browser tab stays open).
+function ensureAutoLogin(req) {
+  if (!AUTO_LOGIN || !req.session || req.session.userId) return;
+  try {
+    const db = getDb();
+    let admin = db.prepare("SELECT * FROM users WHERE role = 'admin' ORDER BY created_at ASC LIMIT 1").get();
+    if (!admin) {
+      const id = 'admin_' + Date.now();
+      const passwordHash = hashPassword('admin');
+      db.prepare('INSERT INTO users (id, username, display_name, role, password_hash) VALUES (?, ?, ?, ?, ?)').run(id, 'admin', 'Admin', 'admin', passwordHash);
+      admin = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+    }
+    req.session.userId = admin.id;
+    req.session.username = admin.username;
+    req.session.role = admin.role;
+    req.session.loginTime = Date.now();
+  } catch (e) {
+    console.error('Auto-login error:', e.message);
+  }
+}
+app.use((req, res, next) => { ensureAutoLogin(req); next(); });
+
 // ─── Auth: public paths, then enforce on everything else ───
 
 app.use(checkNeedsSetup);
@@ -60,13 +86,18 @@ app.use(checkNeedsSetup);
 app.use((req, res, next) => {
   if (AUTO_LOGIN) return next();
   // Public paths — no auth needed
-  const publicPaths = ['/api/setup', '/api/login', '/api/session', '/login', '/setup'];
+  const publicPaths = ['/api/setup', '/api/login', '/api/session', '/login', '/setup', '/mcp'];
   if (publicPaths.includes(req.path)) return next();
   if (req.path.startsWith('/api/') || req.path.startsWith('/ws/')) {
     return requireAuth(req, res, next);
   }
   return requireAuth(req, res, next);
 });
+
+// ─── MCP server (API-key auth, see src/mcp.js) ───────────────
+if (process.env.MCP_ENABLED !== 'false') {
+  require('./mcp').mountMcp(app);
+}
 
 let envCache = null;
 function loadEnv() {
@@ -420,25 +451,8 @@ app.param('name', (req, res, next, name) => {
 
 // ─── Routes: Auth API ───────────────────────────────────────
 
-app.get('/api/session', async (req, res) => {
-  if (AUTO_LOGIN && (!req.session || !req.session.userId)) {
-    try {
-      const db = getDb();
-      let admin = db.prepare("SELECT * FROM users WHERE role = 'admin' ORDER BY created_at ASC LIMIT 1").get();
-      if (!admin) {
-        const id = 'admin_' + Date.now();
-        const passwordHash = hashPassword('admin');
-        db.prepare('INSERT INTO users (id, username, display_name, role, password_hash) VALUES (?, ?, ?, ?, ?)').run(id, 'admin', 'Admin', 'admin', passwordHash);
-        admin = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
-      }
-      req.session.userId = admin.id;
-      req.session.username = admin.username;
-      req.session.role = admin.role;
-      req.session.loginTime = Date.now();
-    } catch (e) {
-      console.error('Auto-login error:', e.message);
-    }
-  }
+app.get('/api/session', (req, res) => {
+  ensureAutoLogin(req);
   res.json({
     authenticated: !!req.session?.userId,
     userId: req.session?.userId || null,
@@ -466,14 +480,16 @@ app.post('/api/setup', (req, res) => {
   } catch { return res.status(500).json({ error: 'DB error' }); }
 
   const { username, password } = req.body;
-  if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
+  const uname = String(username || '').trim();
+  if (!uname || !password) return res.status(400).json({ error: 'Username and password required' });
+  if (!/^[A-Za-z0-9]{3,32}$/.test(uname)) return res.status(400).json({ error: 'Username must be 3-32 letters or numbers' });
   if (password.length < 4) return res.status(400).json({ error: 'Password must be at least 4 characters' });
 
   try {
     const db = getDb();
     const id = 'admin_' + Date.now();
     const passwordHash = hashPassword(password);
-    db.prepare('INSERT INTO users (id, username, display_name, role, password_hash) VALUES (?, ?, ?, ?, ?)').run(id, username.trim(), 'Admin', 'admin', passwordHash);
+    db.prepare('INSERT INTO users (id, username, display_name, role, password_hash) VALUES (?, ?, ?, ?, ?)').run(id, uname, 'Admin', 'admin', passwordHash);
     res.json({ ok: true });
   } catch (e) {
     if (e.message.includes('UNIQUE')) return res.status(409).json({ error: 'Username already taken' });
@@ -525,8 +541,10 @@ app.get('/api/users', requireAdmin, (req, res) => {
 });
 
 app.post('/api/users', requireAdmin, (req, res) => {
-  const { username, password, role } = req.body;
+  const { password, role } = req.body;
+  const username = String(req.body.username || '').trim();
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
+  if (!/^[A-Za-z0-9]{3,32}$/.test(username)) return res.status(400).json({ error: 'Username must be 3-32 letters or numbers' });
   if (password.length < 4) return res.status(400).json({ error: 'Password must be at least 4 characters' });
 
   try {
@@ -534,7 +552,7 @@ app.post('/api/users', requireAdmin, (req, res) => {
     const id = 'user_' + Date.now() + '_' + crypto.randomBytes(4).toString('hex');
     const passwordHash = hashPassword(password);
     db.prepare('INSERT INTO users (id, username, display_name, role, password_hash) VALUES (?, ?, ?, ?, ?)')
-      .run(id, username.trim(), username.trim(), role === 'admin' ? 'admin' : 'user', passwordHash);
+      .run(id, username, username, role === 'admin' ? 'admin' : 'user', passwordHash);
     res.json({ ok: true, id });
   } catch (e) {
     if (e.message.includes('UNIQUE')) return res.status(409).json({ error: 'Username already taken' });
@@ -592,10 +610,12 @@ app.get('/api/profile', (req, res) => {
 });
 
 app.patch('/api/profile', (req, res) => {
-  const { email } = req.body;
+  const email = String(req.body.email || '').trim();
+  if (!email) return res.status(400).json({ error: 'Email is required' });
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Enter a valid email address' });
   try {
     const db = getDb();
-    db.prepare('UPDATE users SET email = ?, updated_at = datetime(\'now\') WHERE id = ?').run(email || null, req.session.userId);
+    db.prepare('UPDATE users SET email = ?, updated_at = datetime(\'now\') WHERE id = ?').run(email, req.session.userId);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -615,6 +635,50 @@ app.post('/api/profile/change-password', (req, res) => {
 
     const passwordHash = hashPassword(new_password);
     db.prepare('UPDATE users SET password_hash = ?, updated_at = datetime(\'now\') WHERE id = ?').run(passwordHash, req.session.userId);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── Routes: Profile API Keys (MCP bearer tokens) ───────────
+
+app.get('/api/profile/keys', (req, res) => {
+  try {
+    res.json({ keys: apiKeys.listForUser(req.session.userId) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/profile/keys', csrfCheck, (req, res) => {
+  const { name, scopes } = req.body;
+  if (!name || !String(name).trim()) return res.status(400).json({ error: 'Name is required' });
+  const trimmedName = String(name).trim().slice(0, 64);
+  if (!/^[A-Za-z0-9]{3,64}$/.test(trimmedName)) return res.status(400).json({ error: 'Key name must be 3-64 letters or numbers' });
+
+  try {
+    const allowedScopes = ['default', 'read', 'control'];
+    let scopesStr = 'default';
+    if (scopes) {
+      const list = Array.isArray(scopes) ? scopes : String(scopes).split(',').map((s) => s.trim());
+      const unknown = list.filter((s) => !allowedScopes.includes(s));
+      if (unknown.length) return res.status(400).json({ error: `Unknown scope(s): ${unknown.join(', ')}` });
+      if (!list.length) return res.status(400).json({ error: 'At least one scope required' });
+      scopesStr = [...new Set(list)].join(',');
+    }
+    const { key, row } = apiKeys.create(req.session.userId, trimmedName, scopesStr);
+    res.json({ key, ...row });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/api/profile/keys/:id', csrfCheck, (req, res) => {
+  try {
+    if (!apiKeys.remove(req.params.id, req.session.userId)) {
+      return res.status(404).json({ error: 'Key not found' });
+    }
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -676,11 +740,242 @@ app.post('/api/agents/:name/delete', async (req, res) => {
   try {
     await vm.removeVm(req.params.name);
     registry.removeAgentFromDb(req.params.name);
+    jobLog.clearJob(req.params.name);
+    jobLog.clearJob('update:' + req.params.name);
     registry.dockerPsList(true);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// ─── Agent Settings / Update ────────────────────────────────
+
+/** All containers visible to the webui — the Network dropdown source. */
+app.get('/api/containers', async (req, res) => {
+  try {
+    const containers = await dockerPsList();
+    const list = Object.values(containers)
+      .map((c) => ({
+        name: Array.isArray(c.Names) ? String(c.Names[0] || '').replace(/^\//, '') : String(c.Names || c.ID || '').replace(/^\//, ''),
+        image: c.Image || '',
+        state: (c.State || '').toLowerCase(),
+      }))
+      .filter((c) => c.name);
+    res.json({ containers: list });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/agents/:name/settings', async (req, res) => {
+  const name = safeVmName(req.params.name);
+  if (!name) return res.status(400).json({ error: 'Invalid agent name' });
+  try {
+    const meta = readMeta(name);
+    if (!meta.AGENT && !meta.ROOT_PASSWORD) return res.status(404).json({ error: 'Agent not found' });
+    const agentType = meta.AGENT || 'openclaw';
+    res.json({
+      allowDocker: meta.DOCKER === '1',
+      network: meta.NETWORK || '',
+      image: vm.AGENT_IMAGES[agentType] || '',
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** Whether the image currently has a docker CLI. Checks the running
+ *  container when up, else spins a throwaway container from the image. */
+async function imageHasDockerCli(name, image, wasRunning) {
+  try {
+    const r = wasRunning
+      ? await runCmd('docker', ['exec', name, 'sh', '-lc', 'command -v docker'], { timeout: 15000 })
+      : await runCmd('docker', ['run', '--rm', '--entrypoint', 'sh', image, '-lc', 'command -v docker'], { timeout: 30000 });
+    return r.code === 0 && !!(r.stdout || '').trim();
+  } catch {
+    return false;
+  }
+}
+
+app.post('/api/agents/:name/settings', async (req, res) => {
+  const name = safeVmName(req.params.name);
+  if (!name) return res.status(400).json({ error: 'Invalid agent name' });
+  const { allowDocker, network } = req.body || {};
+  try {
+    const meta = readMeta(name);
+    if (!meta.AGENT && !meta.ROOT_PASSWORD) return res.status(404).json({ error: 'Agent not found' });
+
+    const containers = await dockerPsList();
+    const current = containers[name];
+    const wasRunning = current && (current.State || '').toLowerCase() === 'running';
+    const oldAllow = meta.DOCKER === '1';
+    const oldNetwork = meta.NETWORK || '';
+    const newAllow = allowDocker !== undefined ? !!allowDocker : oldAllow;
+    const newNetwork = network !== undefined ? (network || '') : oldNetwork;
+
+    // Network target validation (only on a real change to a non-empty target)
+    if (newNetwork !== oldNetwork && newNetwork) {
+      if (newNetwork === name) return res.status(400).json({ error: 'Cannot route an agent through itself' });
+      const target = containers[newNetwork];
+      if (!target) return res.status(400).json({ error: `Container '${newNetwork}' not found` });
+      if ((target.State || '').toLowerCase() !== 'running') {
+        return res.status(400).json({ error: `Container '${newNetwork}' is not running` });
+      }
+    }
+
+    const agentType = meta.AGENT || 'openclaw';
+    const image = vm.AGENT_IMAGES[agentType] || vm.AGENT_IMAGES.openclaw;
+    const dockerChanged = newAllow !== oldAllow;
+    const networkChanged = newNetwork !== oldNetwork;
+    if (!dockerChanged && !networkChanged) {
+      return res.json({ allowDocker: newAllow, network: newNetwork, image });
+    }
+
+    // Any change that needs a recreate runs as an SSE job (like Update) so the
+    // frontend can stream the live command output in a popup console.
+    // Enabling docker on an image without the CLI additionally rebuilds the
+    // image with INSTALL_DOCKER=1 — base images ship without the CLI on purpose.
+    const needRebuild = newAllow && !oldAllow && !(await imageHasDockerCli(name, image, wasRunning));
+
+    const jobKey = 'update:' + name;
+    const job = jobLog.getOrCreateJob(jobKey);
+    const log = (stream, text) => jobLog.line(job, stream, text);
+    const step = (stepName, state) => jobLog.setStep(job, stepName, state);
+
+    const reason = needRebuild ? 'rebuild' : dockerChanged ? 'docker' : 'network';
+    res.status(202).json({ ok: true, job: jobKey, streaming: true, reason });
+
+    setImmediate(async () => {
+      registry.setRestarting(name, true);
+      try {
+        if (wasRunning) {
+          step('stop', 'start');
+          await runCmd('docker', ['stop', name], { timeout: 30000 });
+          step('stop', 'end');
+        }
+
+        const summary = [];
+        if (dockerChanged) summary.push(`allowDocker=${newAllow}`);
+        if (networkChanged) summary.push(`network=${newNetwork || 'default'}`);
+        log('system', `Applying settings: ${summary.join(', ')}`);
+
+        vm.applySettings(name, { allowDocker: newAllow, network: newNetwork });
+        registry.dockerPsList(true);
+
+        if (needRebuild) {
+          log('system', 'Image has no docker CLI — rebuilding it with the docker CLI, then recreating…');
+          await vm.updateAgent(name, { buildArgs: ['INSTALL_DOCKER=1'], pull: false, onLog: log, onStep: step });
+        } else {
+          // `docker start` reuses the old container config, and network_mode +
+          // volume mounts are create-time settings — a plain start would
+          // silently ignore the compose change. Recreate so the new config
+          // actually applies.
+          step('recreate', 'start');
+          await runCmdStream('docker', ['compose', '-f', vm.instanceComposePath(name), 'up', '-d', '--no-deps', '--force-recreate', name], { onLog: log, timeout: 300000 });
+          step('recreate', 'end');
+        }
+
+        if (!wasRunning) {
+          try { await runCmd('docker', ['stop', name], { timeout: 30000 }); } catch {}
+        }
+
+        registry.dockerPsList(true);
+        registry.discoverAgents();
+        try {
+          registry.recordActivity(name, 'settings', 'update', 'ok', `Settings updated (${summary.join(', ')})`);
+        } catch {}
+        log('system', 'Done — container recreated');
+        jobLog.finish(job, true);
+      } catch (e) {
+        console.error(`Settings change failed for ${name}:`, e.message);
+        // Roll settings back so the agent stays usable, then bring it back up
+        // if it was running.
+        try {
+          vm.applySettings(name, { allowDocker: oldAllow, network: oldNetwork });
+          if (wasRunning) {
+            await runCmd('docker', ['compose', '-f', vm.instanceComposePath(name), 'up', '-d', '--no-deps', '--force-recreate', name], { timeout: 180000 });
+          }
+          registry.dockerPsList(true);
+        } catch {}
+        try {
+          registry.recordActivity(name, 'settings', 'update', 'error', e.message);
+        } catch {}
+        jobLog.fail(job, e.message);
+      } finally {
+        registry.setRestarting(name, false);
+      }
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/agents/:name/update', async (req, res) => {
+  const name = safeVmName(req.params.name);
+  if (!name) return res.status(400).json({ error: 'Invalid agent name' });
+  const meta = readMeta(name);
+  if (!meta.AGENT && !meta.ROOT_PASSWORD) return res.status(404).json({ error: 'Agent not found' });
+
+  const jobKey = 'update:' + name;
+  const job = jobLog.getOrCreateJob(jobKey);
+  const log = (stream, text) => jobLog.line(job, stream, text);
+  const step = (stepName, state) => jobLog.setStep(job, stepName, state);
+
+  res.status(202).json({ ok: true, job: jobKey, streaming: true });
+
+  setImmediate(async () => {
+    try {
+      await vm.updateAgent(name, {
+        onLog: log,
+        onStep: (stepName, state) => {
+          step(stepName, state);
+          // The old container stays up through the build; only during the
+          // recreate is it actually down. Report `restarting` for that window.
+          if (stepName === 'recreate') {
+            if (state === 'start') registry.setRestarting(name, true);
+            else if (state === 'end' || state === 'error') registry.setRestarting(name, false);
+          }
+        },
+      });
+      registry.dockerPsList(true);
+      registry.discoverAgents();
+      jobLog.line(job, 'system', 'Done — container recreated');
+      jobLog.finish(job, true);
+      try {
+        registry.recordActivity(name, 'lifecycle', 'update', 'ok', 'Image updated and container recreated');
+      } catch {}
+    } catch (e) {
+      console.error(`Update failed for ${name}:`, e.message);
+      try {
+        registry.recordActivity(name, 'lifecycle', 'update', 'error', e.message);
+      } catch {}
+      jobLog.fail(job, e.message);
+    } finally {
+      registry.setRestarting(name, false);
+    }
+  });
+});
+
+app.get('/api/agents/:name/update-log', (req, res) => {
+  const name = safeVmName(req.params.name);
+  if (!name) return res.status(400).json({ error: 'Invalid agent name' });
+  const since = parseInt(req.headers['last-event-id'], 10) || Math.max(0, parseInt(req.query.since, 10) || 0);
+  const job = jobLog.getJob('update:' + name);
+
+  if (!job) {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    res.write(`event: error\ndata: ${JSON.stringify({ message: 'Update job not found (server may have restarted)' })}\n\n`);
+    res.end();
+    return;
+  }
+
+  jobLog.subscribe(job, res, since);
 });
 
 app.get('/api/config', (req, res) => {

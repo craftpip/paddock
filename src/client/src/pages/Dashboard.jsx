@@ -23,9 +23,15 @@ export default function Dashboard() {
       setFleetLoading(false)
     }
     load()
-    fleetIntervalRef.current = setInterval(load, 5000)
+    // Refetch the fleet too so transient statuses (e.g. a settings change that
+    // stopped/restarted an agent) self-correct instead of sticking as "Stopped".
+    fetchAgents()
+    fleetIntervalRef.current = setInterval(() => {
+      load()
+      fetchAgents()
+    }, 5000)
     return () => clearInterval(fleetIntervalRef.current)
-  }, [])
+  }, [fetchAgents])
 
   const avgCpu = fleetStats.length ? (fleetStats.reduce((s, c) => s + (parseFloat(c.CPUPerc) || 0), 0) / fleetStats.length).toFixed(1) : '0'
 

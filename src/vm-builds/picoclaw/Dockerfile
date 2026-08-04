@@ -1,5 +1,7 @@
 FROM sipeed/picoclaw:v0.2.5-launcher
 
+ARG INSTALL_DOCKER=0
+
 ENV TZ=Asia/Kolkata
 
 RUN apk add --no-cache \
@@ -9,6 +11,10 @@ RUN apk add --no-cache \
     tzdata \
     nodejs \
     npm
+
+RUN if [ "$INSTALL_DOCKER" = "1" ]; then \
+      apk add --no-cache docker-cli; \
+    fi
 
 RUN mkdir -p /var/run/sshd && \
     sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config && \

@@ -267,6 +267,9 @@ When an HTMX request is detected (`req.headers['hx-request']`), the middleware a
 | GET | `/api/vms\|backups\|user-ids\|api-keys` | Direct | JSON APIs |
 | POST | `/api/providers/add` | Direct | Add model provider |
 | POST | `/api/config/backup\|restore/:agent` | Direct | Config save/restore |
+| POST | `/mcp` | `mcp.js` | MCP tools call (Streamable HTTP, API-key auth) |
+| GET | `/mcp` | `mcp.js` | MCP SSE client connection (API-key auth) |
+| DELETE | `/mcp` | `mcp.js` | Terminate MCP SSE session (API-key auth) |
 | WS | `/ws/terminal/:name` | Direct | WebSocket terminal |
 
 ### 5.4 Environment Variables
@@ -1418,6 +1421,130 @@ For backward compatibility, the following routes still work (but redirect to the
 8. **Terminals are real PTYs via Docker Engine API** — `Tty: true` allocates a PTY, so no `\r` → `\n` conversion is needed (see section 13 / `src/docs/terminal.md`)
 9. **Config secrets are double-redacted** — once for JSON API, once for the raw config editor (with preservation on save)
 10. **HTMX responses skip layout** — only the partial is returned
+
+---
+
+## 25. MCP Server (`src/mcp.js`)
+
+The webui exposes its own MCP server (Streamable HTTP transport) at **`/mcp`** so external MCP clients — opencode, Claude Code, Cursor, Claude Desktop, or another OpenClaw instance — can connect **in** and manage PADs (list, start/stop, exec, workspace, logs, config, backups).
+
+Today MCP also goes the other way: each PAD connects **out** to third-party MCP servers (the MCP tab in `AgentDetail.jsx` / `openclaw mcp add`). This endpoint is the reverse: paddock exposes its own tools.
+
+```
+┌──────────┐  stdio or http   ┌─────────────────────────────┐  docker exec  ┌────────┐
+│ opencode │                   │        paddock webui        │               │  PADs  │
+│  Claude  │ ──── MCP ───────► │  Express :6789 + /mcp        │ ────────────► │        │
+│  Cursor  │   (bearer token)  │  (streamable-http MCP)       │  docker.sock │  ...   │
+└──────────┘                   └─────────────────────────────┘               └────────┘
+```
+
+- No new ports and no new containers — `/mcp` mounts on the existing Express server.
+- Built on `@modelcontextprotocol/sdk` v1.30+ rather than hand-rolled JSON-RPC: the SDK owns Streamable HTTP framing (SSE + POST), capability negotiation, `initialize`, `tools/list`, `tools/call`, and the JSON-RPC error shapes.
+
+### Endpoint
+
+- `POST /mcp` — JSON-RPC (`initialize`, `tools/list`, `tools/call`, `notifications/initialized`).
+- `GET /mcp` / `DELETE /mcp` — SSE session connect/terminate. Stateless mode: no sessions, `sessionIdGenerator` is `undefined`.
+- Mounted in `src/app.js` behind the `MCP_ENABLED` flag (`MCP_ENABLED=false` disables it; default on). Skipped by session auth (`publicPaths`) — the MCP layer does its own auth.
+
+### Auth
+
+- Bearer API key (`Authorization: Bearer pk_live_…`), `X-Api-Key` header, or `?token=` query param, validated by `services/api-keys.authenticate()` (see section 10 and `plans/11-mcp-api-keys.md`). Only the sha256 hash of the key is stored; the raw key is shown once at creation.
+- Keys inherit the creator's webui role: **admin → full fleet**; **user → owned agents only** (same owner rule as `requireAgentAccess`). Ownership is checked inside every tool handler via the `agents.owner_id` column; admins bypass.
+- The authenticated user is carried per-request via `AsyncLocalStorage` (`mcpContext`) and read in handlers with `currentUser()`. The SDK v1.30 does not forward `req.auth` into tool handlers, which is why the context store is needed.
+- No new env var and no static `MCP_TOKEN` — one auth path, so "who used which key" is never a mystery.
+
+### Stateless Transport Pattern
+
+Each request creates a **fresh `McpServer` + fresh `StreamableHTTPServerTransport`**. The SDK throws if a server is connected to a second transport (`server.connect()` asserts `this._transport` is unset) and a stateless transport cannot be reused across requests — so the classic "one server, one transport, reuse per request" V1 example hangs on the second call (the request is received but never routed to a handler). `registerTools(server)` re-registers the 13 tools per request — cheap and deterministic. See `src/mcp.js:mountMcp`.
+
+### Tools
+
+Every tool returns `{ content: [{ type: 'text', text: <JSON> }] }` where `<JSON>` is the payload below. Errors are structured MCP errors (`isError: true`), never stack traces. Tool names use the `paddock_` prefix so clients can group them.
+
+| Tool | Arguments | Returns |
+|------|-----------|---------|
+| `paddock_list_agents` | none | `{ agents: [{ name, status, display_name, agent_type, runtime_ref, default_model, default_provider }] }` — admin sees the full fleet, users only their own |
+| `paddock_get_agent` | `name` | full agent object from `agent-registry.getAgent` |
+| `paddock_agent_logs` | `name`, `tail?` (1–5000, default 100) | `{ name, logs }` (stdout+stderr from `docker logs`) |
+| `paddock_config_get` | `name` | `{ name, config }` from `openclaw.json`, secrets redacted (see below); `config: null` if file missing |
+| `paddock_workspace_list` | `name`, `path?` (default `/`) | directory listing via `services/workspace.listDir` |
+| `paddock_workspace_read` | `name`, `path` | `{ name, path, size, modified, content }` — text only, files > 256 KB rejected |
+| `paddock_workspace_write` | `name`, `path`, `content` | `{ name, path, size, modified }` — creates or overwrites |
+| `paddock_backup_list` | `name?` (filter) | `{ backups: [{ file, size, type, agentType, created }] }` — users without a filter get only their agents' backups |
+| `paddock_backup_create` | `name` | `{ name, archive }` via `backup-manager.backupAgent` (long-running) |
+| `paddock_start_agent` | `name` | `{ ok, name, status }` |
+| `paddock_stop_agent` | `name` | `{ ok, name, status }` |
+| `paddock_restart_agent` | `name` | `{ ok, name, status }` |
+| `paddock_exec` | `name`, `command`, `timeout?` (1000–600000 ms, default 30000) | `{ name, stdout, stderr }` — `docker exec -i <pad> sh -lc '<command>'`; container must be running |
+
+Control tools force a docker-cache refresh after the mutation so the returned status is fresh.
+
+### Secrets redaction (`redactConfig`)
+
+`paddock_config_get` strips: top-level `api_keys`, `channels.telegram.botToken`, and `plugins.*.key` — each replaced with `'[REDACTED]'`. Same fields the webui config route redacts.
+
+### Error mapping / edge cases
+
+| Case | Handling |
+|------|----------|
+| Missing or bad API key | HTTP 401, JSON-RPC error `-32001` "Unauthorized: missing or invalid API key" |
+| Invalid arguments (missing/wrong type) | `-32602` (SDK validation) |
+| Agent not found | `-32600` "Agent not found: <name>" |
+| Agent not owned / not visible to user | `-32600` "Access denied or agent not found: <name>" (never leaks existence) |
+| Container not running (exec) | `-32600` "Container is not running: <name>" |
+| File not found / too large (read) | `-32600` with detail |
+| Workspace path traversal | rejected by `resolveSafePath()` (section 9.1) — "Path traversal rejected" |
+| Long-running exec | same `runCmd` timeout as the webui; `timeout` arg documented on the tool |
+| Request handling error | HTTP 500 JSON-RPC `-32603`, logged as `[mcp] request error:` |
+
+### Verification
+
+```bash
+# unit tests (mcp.test.js: initialize handshake + auth)
+docker exec paddock sh -c 'cd /app && node --test test/mcp.test.js'
+
+# handshake
+curl -s -X POST http://10.69.1.164:6789/mcp \
+  -H "Authorization: Bearer $PADDOCK_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
+
+# MCP Inspector (interactive)
+npx @modelcontextprotocol/inspector
+```
+
+### Client config
+
+opencode (`opencode.json`):
+```json
+{
+  "mcp": {
+    "paddock": {
+      "type": "http",
+      "url": "http://10.69.1.164:6789/mcp",
+      "headers": { "Authorization": "Bearer <pk_live_your_key>" }
+    }
+  }
+}
+```
+
+Claude Code (`~/.claude.json` or project `.mcp.json`):
+```json
+{
+  "mcpServers": {
+    "paddock": {
+      "type": "http",
+      "url": "http://10.69.1.164:6789/mcp",
+      "headers": { "Authorization": "Bearer <pk_live_your_key>" }
+    }
+  }
+}
+```
+
+API keys are minted per-user in **Profile → API Keys**. See also `plans/11-mcp-api-keys.md` (key lifecycle) — the original implementation plan (formerly `plans/06-paddock-own-mcp.md`) is absorbed into this section.
+
 
 ---
 

@@ -663,6 +663,61 @@ Terminal appeared small/constrained because xterm.js FitAddon calls `fit()` befo
 - All three tested with correct DOM updates and CSRF handling.
 
 
+## Settings Tab — Agent Detail Page (2026-08-04)
+
+### Implemented (plan 09, Phases 1-3)
+- `src/client/src/pages/agent/SettingsTab.jsx` — 5 cards: Container Info, Update
+  (SSE console), Allow docker toggle, Network dropdown, Danger Zone delete.
+  Wired into `AgentDetail.jsx` via `{ id: 'settings', label: 'Settings' }` in MODES.
+- Backend: `GET /api/containers`, `GET/POST /api/agents/:name/settings`
+  (`{ allowDocker?, network? }`), `POST /api/agents/:name/update` (202 +
+  job `update:<name>`), `GET /api/agents/:name/update-log` (SSE, same shape as
+  create-log). `vm-manager.js`: `generateInstanceCompose` takes
+  `{ allowDocker, network }` opts, plus `setMetaFlag()`, `applySettings()`,
+  `updateAgent()`, exported `AGENT_IMAGES`.
+- **Split decision**: "Allow docker" (raw socket+CLI) and "Install Paddock MCP"
+  are two separate toggles. The MCP toggle is **deferred** (needs plan 06's
+  `/mcp` server). Don't re-bundle them.
+
+### Fix patterns
+- **`registry.removeAgentFromDb is not a function`**: `POST /api/agents/:name/delete`
+  called a registry function that never existed — `vm.removeVm()` (docker rm +
+  instance dir) ran fine, then the missing call threw 500, so the SPA showed an
+  error and stayed on the page even though the container was gone. The Settings
+  tab was the first UI ever wired to delete, so the dormant bug only surfaced
+  when it shipped. Fix: implemented `removeAgentFromDb(name)` in
+  `agent-registry.js` (deletes `agents` row + related `activity_events`/
+  `sessions` rows) and exported it. Any delete that "half-succeeds" with a 500
+  and leaves stale DB rows — clean the orphan rows the same way.
+- **Delete leaked the compose network**: `vm.removeVm()` only did `docker rm -f`
+  + `rm -rf` the instance dir — it never removed the compose-created bridge
+  network `<name>_default`. Every delete burned a subnet from the host's limited
+  default address pool (172.x range taken by other projects, 192.168.0.0/16
+  carved into 16 × /20 — all allocatable). After many create/delete cycles Docker
+  errors with `all predefined address pools have been fully subnetted` and new
+  agent creates fail at `compose up`. Fix: `removeVm()` now runs
+  `docker network rm <name>_default` (error-swallowed) before removing the dir.
+  Cleanup of already-leaked networks: `docker network ls --filter
+  driver=bridge --format '{{.Name}}' | while read n; do case "$n" in pad-*) c=$
+  (docker network inspect "$n" --format '{{len .Containers}}'); [ "$c" = "0" ]
+  && docker network rm "$n";; esac; done`.
+- **Network clear bug**: in `POST /api/agents/:name/settings`, empty string
+  `network` means "clear the override" — validation of the target must only run
+  when `newNetwork` is non-empty, or clearing errors with "Container '' not found".
+- **API tests via curl need a session**: auto-login only boots on `GET
+  /api/session`. Always fetch it first into a cookie jar, otherwise `:name`
+  routes 403 via `app.param` ("Access denied").
+- **Webui restarts wipe in-memory job logs**: `job-log.js` is in-memory. Any
+  `docker restart paddock` (or a concurrent session's restart) kills running
+  update/create jobs and their SSE streams ("Update job not found (server may
+  have restarted)"). Long jobs are interrupted mid-run.
+
+### Environment facts
+- No `sudo` and no `python3` on this host — we're root. Use the `edit` tool or
+  `node -e` for root-owned files; the edit tool works as root.
+- Host reachability for the webui: `http://10.69.1.164:6789` (localhost:6789 is
+  refused from this shell's network context).
+
 ## Architecture Documentation
 
 - docs/architecture.md — **Source of truth** for business logic, system architecture, page descriptions, routes, data model, security model, and all behavioral contracts.

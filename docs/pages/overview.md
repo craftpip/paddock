@@ -82,33 +82,6 @@ File: `CreateAgent.jsx`
 Form to create a new PAD, laid out in three rows:
 
 ```
-─────────────────────────────────────────────────────┐
-│  ← Back to fleet                                    │
-│                                                     │
-│  Create PAD                                       │
-│                                                     │
-│  ┌─────────────────────────────────────────────┐    │
-│  │ vm-  [openclaw ▼]  -  [my-PAD           ] │    │
-│  └─────────────────────────────────────────────┘    │
-│                                                     │
-│  Clone from backup (optional)                       │
-│  ┌─────────────────────────────────────────────┐    │
-│  │ [No clone — Fresh install              ▼]   │    │
-│  └─────────────────────────────────────────────┘    │
-│                                                     │
-│  ┌─────────────────────────────────────────────┐    │
-│  │         Create vm-openclaw-my-PAD         │    │
-│  └─────────────────────────────────────────────┘    │
-─────────────────────────────────────────────────────┘
-```
-
-## Create Agent (`/agents/create`)
-
-File: `CreateAgent.jsx`
-
-Form to create a new PAD, laid out in three rows:
-
-```
 ┌─────────────────────────────────────────────────────┐
 │  ← Back to fleet                                    │
 │                                                     │
@@ -133,13 +106,15 @@ Form to create a new PAD, laid out in three rows:
 - **Row 2** — Clone from backup dropdown (filtered by selected PAD type — only matching backup types shown). First option: "No clone — Fresh install". Replaces the old clone-from-running-PAD approach.
 - **Row 3** — Create button shows the full name being created (e.g. "Create vm-openclaw-my-PAD")
 
-**Creation flow:**
-1. Form submits via fetch (no page navigation)
-2. Inline progress bar appears on the same page (no layout-breaking body swap):
-   - "Creating container…"
-   - "Running setup…" (for OpenClaw/PicoClaw — runs `openclaw setup --baseline`)
-   - "Done"
-3. Redirects to agent detail on completion
+**Creation flow (live streaming):**
+1. Form submits via fetch — POST `/api/agents/create` returns `202` immediately and a background job starts
+2. The form is replaced by a live log pane (the shared `Console.jsx` component) that streams the **real command output** over SSE — no fake spinner steps
+3. Steps appear as labeled command lines as they start: **build** → **up** → **setup** (fresh OpenClaw/PicoClaw) or **restore** (clone from backup) → **done**
+4. **Clone path:** success banner, then auto-navigates to the agent detail after ~1.8s
+5. **Fresh path:** success banner + prominent "Go to Agents" button — no auto-navigation, so the user can scroll the logs
+6. **Failure:** red banner + error tail in the log pane; "back to form" or retry — never navigates
+
+The SSE stream reconnects with `Last-Event-ID` on drop; polling `/create-status` is the fallback.
 
 **What was removed:**
 - No more clone-from-running-PAD dropdown

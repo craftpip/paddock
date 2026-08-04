@@ -183,6 +183,6 @@ docker exec mycodex docker ps                    # works
 
 ## Related
 
-- `terminal-first-ui.md` — the agent page modes this Settings mode slots into
+- `10-terminal.md` — the agent page modes this Settings mode slots into
 - Existing builds: `src/vm-builds/{openclaw,picoclaw,hermes}/Dockerfile`
-- `paddock-own-mcp.md` — unrelated to this; the harness idea was dropped
+- `06-paddock-own-mcp.md` — unrelated to this; the harness idea was dropped

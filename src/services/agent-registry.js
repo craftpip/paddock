@@ -10,6 +10,16 @@ const VM_NAME_RE = new RegExp('^' + PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'
 let _dockerCache = { data: null, ts: 0 };
 const DOCKER_CACHE_TTL = 3000;
 
+// Names currently being restarted by a settings change / update. While set,
+// a non-running docker state is reported as `restarting` instead of `stopped`
+// so a page load landing mid-restart doesn't flash a false "stopped".
+const _restarting = {};
+
+function setRestarting(name, val) {
+  if (val) _restarting[name] = true;
+  else delete _restarting[name];
+}
+
 function dockerPsList(force) {
   const now = Date.now();
   if (!force && _dockerCache.data && (now - _dockerCache.ts) < DOCKER_CACHE_TTL) {
@@ -103,6 +113,13 @@ function syncAgentToDb(agent) {
   }
 }
 
+function removeAgentFromDb(name) {
+  const db = getDb();
+  db.prepare('DELETE FROM activity_events WHERE agent_id = ?').run(name);
+  db.prepare('DELETE FROM sessions WHERE agent_id = ?').run(name);
+  db.prepare('DELETE FROM agents WHERE name = ? OR id = ?').run(name, name);
+}
+
 function buildAgent(vmName, dockerState) {
   const vmDir = path.join(INSTANCES_DIR, vmName);
   const meta = readMeta(vmDir);
@@ -110,7 +127,8 @@ function buildAgent(vmName, dockerState) {
   const agentDir = findAgentDir(vmDir, agentType);
   const workspaceRoot = path.join(agentDir, 'workspace');
   const configRoot = agentDir;
-  const status = dockerState[vmName] || 'missing';
+  let status = dockerState[vmName] || 'missing';
+  if (_restarting[vmName] && status !== 'running') status = 'restarting';
 
   let displayName = vmName.replace(new RegExp('^' + PREFIX + '-'), '');
   // The container name embeds the agent type (e.g. pad-openclaw-work-pls).
@@ -253,6 +271,8 @@ module.exports = {
   getConfigRoot,
   buildAgent,
   syncAgentToDb,
+  removeAgentFromDb,
+  setRestarting,
   INSTANCES_DIR, PREFIX,
   VM_NAME_RE,
 };

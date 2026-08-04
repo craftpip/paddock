@@ -2,7 +2,7 @@
 
 All terminal-related work in one place: UI design, component, sessions, review, and migration.
 
-> **Last updated:** 2026-08-04. The old per-topic plans (`terminal-component.md`,
+> **Last updated:** 2026-08-05. The old per-topic plans (`terminal-component.md`,
 > `terminal-sessions.md`, `terminal-first-ui.md`, `terminal-first-ui-WIP.md`,
 > `terminal-component-review.md`) were deleted and folded into this one file.
 
@@ -17,7 +17,7 @@ All terminal-related work in one place: UI design, component, sessions, review, 
 | tmux persistent sessions | **Done** — create/switch/kill dropdown, localStorage, lazy tmux install |
 | Terminal-first UI (6 modes + docked terminal) | **Done** — Commands is the default landing mode |
 | Command logging + history popover | **History button removed (2026-08-04)** — logging stays for the Activity tab |
-| Code review fixes | **Partial** — 7 fixed, 2 open (see §Review Findings) |
+| Code review fixes | **Done** — 9/9 fixed (see §Review Findings) |
 
 ---
 
@@ -112,6 +112,9 @@ Single reusable xterm.js + WebSocket interactive shell. One component, one page,
 - Sessions live in the PAD container, survive **webui restarts**. Die when the PAD is stopped/restarted (dropdown degrades to `main`).
 - **Lazy install**: tmux is in the base Dockerfile (`src/vm-builds/openclaw/Dockerfile`) AND installed on demand for older images (`apt-get install -y tmux`), cached in a `tmuxReady` set per PAD.
 - **Colored PS1** is appended to `/root/.bashrc` (idempotent) at first session setup.
+- **history-limit** is set to 10000 (`TMUX_HISTORY`) at every session setup, so the pane history matches xterm's 10000-line scrollback.
+- **Scrollback survives refresh:** a fresh WS connection runs `tmux capture-pane -t <session> -p -e -S -10000` and replays the pane history into the new xterm before attaching (`LF` → `CRLF` so restored lines land at column 0). Committed `9acacbd`.
+- **Single-client policy:** one attached tmux client per session (`activeTerminals` map) — the newest connection kicks older ones with close code 4001 and sweeps orphaned `tmux attach-session` processes, so multi-client full-redraws never destroy xterm's scrollback.
 
 ### Gotchas solved along the way
 
@@ -119,7 +122,6 @@ Single reusable xterm.js + WebSocket interactive shell. One component, one page,
 - **Alternate screen:** tmux attach switches to the alternate screen, which has no scrollback. Fix: `set -ga terminal-overrides ',xterm-256color:smcup@:rmcup@'` written to `/root/.tmux.conf` (idempotent), so output lands on the normal screen and accumulates.
 - **tmux 3.3a `-F` quirk:** `#{session_created}` with `\t` separators converts tabs to `_`. `list-sessions` uses `-F '#{session_name}|#{session_attached}|#{session_created}'`.
 - **Create-then-attach is TOCTOU-prone:** if `new-session` fails with "duplicate session", fall through and attach anyway.
-- **history-limit** still needs bumping to 10000 to match xterm's scrollback (not done — tmux default is 2000).
 
 ### UI — header dropdown
 
@@ -236,11 +238,9 @@ From the deleted `plans/terminal-component-review.md`. Status verified 2026-08-0
 
 **Verified live:** connected PAD → all buttons enabled; stopped PAD (terminal disconnected) → all pills + Run TUI + Vault disabled.
 
-### 4. Wheel scrolling can become arrow-key input (Medium) — ❌ OPEN
+### 4. Wheel scrolling can become arrow-key input (Medium) — ✅ FIXED
 
-No wheel policy implemented — no non-passive wheel handler added. In alternate-screen apps (inside tmux full-screen TUI), the wheel sends arrow keys per xterm's alternate-scroll default.
-
-**Fix:** pick a policy — local scrollback wins: add a capturing non-passive wheel handler that calls `term.scrollLines()` when the buffer isn't at the bottom, and remove it on teardown.
+**Fix (2026-08-05):** `attachCustomWheelEventHandler` in `Terminal.jsx`. In alternate-screen (TUI) mode there is no xterm scrollback to scroll, so the handler swallows the event (`preventDefault` + `stopPropagation`, return `false`) — xterm never emits the `^[[A`/`^[[B` arrow-key alternate-scroll. In normal mode it returns `true` so xterm's viewport scrolls the scrollback natively. Apps that enable mouse reporting never reach the handler: xterm feeds them real wheel events and they scroll themselves.
 
 ### 5. Escape not working inside TUI apps (e.g. opencode menus) (Medium) — ✅ DONE
 
@@ -274,19 +274,20 @@ Why NUL-NUL and not `\x1b[50;` (the original suggestion): an ESC-prefixed marker
 
 **Verified live (pad-openclaw-work-pls):** pasted `{"type":"resize","cols":120,"rows":40}` into the terminal → it appeared in the shell and bash reported `type:resize: command not found` (bytes reached the shell — previously this was silently eaten). Then A+ font change fired a resize frame with no backend errors, and a normal `echo` round-tripped fine.
 
-### 9. Documentation drift (Low) — ⚠️ PARTIAL
+### 9. Documentation drift (Low) — ✅ FIXED
 
-- The plan files were consolidated into this single `plans/terminal.md` — good.
-- `src/docs/terminal.md` **still documents the pre-tmux era**: `bash -i`, no `session` param, no auth, no sessions API, no dock layout. It needs a rewrite pass to match tmux attach + auth + demux + the dock.
-- `Terminal.jsx`'s header comment still points at the deleted `plans/terminal-component.md`.
+- The plan files were consolidated into this single `plans/10-terminal.md` — good.
+- **2026-08-05:** `src/docs/terminal.md` rewritten to match the tmux era: tmux attach + persistent sessions, auth, demux, single-client policy, scrollback replay (LF→CRLF), dock layout, sessions dropdown, NUL-NUL control frames.
+- **2026-08-05:** `Terminal.jsx` header comment now points at `plans/10-terminal.md` + `src/docs/terminal.md` (was the deleted `plans/terminal-component.md`).
 
 ### Suggested Fix Order (next)
 
-1. Wheel policy (review #4)
-2. Rewrite `src/docs/terminal.md` + fix `Terminal.jsx` header comment (review #9)
-3. Bump tmux history-limit to 10000
+1. ~~Wheel policy (review #4)~~ ✅ done 2026-08-05
+2. ~~Rewrite `src/docs/terminal.md` + fix `Terminal.jsx` header comment~~ ✅ done 2026-08-05
+3. ~~Bump tmux history-limit to 10000~~ ✅ done (`TMUX_HISTORY`)
 4. *(If TUI Escape lag resurfaces)* `set -s escape-time 10` in PAD `~/.tmux.conf`
-5. *(Found 2026-08-04)* Fix tmux attach-client leak: every terminal WS disconnect leaves a `docker exec tmux attach` process + tmux client behind (22+ accumulated on `main`), making screens stale. `dockerStream.destroy()` on WS close isn't killing the exec — needs a robust kill (e.g. `docker exec <pad> pkill -f "tmux attach-session -t <session>"` scoped to that session).
+5. ~~tmux attach-client leak~~ ✅ done 2026-08-05 (`sweepStaleAttaches` on connect + close kills orphaned attach clients)
+6. ~~Scrollback survives refresh~~ ✅ done 2026-08-05 (`capture-pane` replay on fresh connection + LF→CRLF conversion; committed `9acacbd`)
 
 ---
 
@@ -315,12 +316,12 @@ Why NUL-NUL and not `\x1b[50;` (the original suggestion): an ESC-prefixed marker
 - [x] Dormant `opts.secret` timer removed from `run()`; `pasteSecret()` dropped — review #2
 - [x] Review #5: Escape inside TUI apps — resolved, no code change (was misread as fullscreen-exit)
 - [x] Review #3: no write queue + command buttons disabled until terminal connects
-- [ ] Review #4: wheel policy
+- [x] Review #4: wheel policy (`attachCustomWheelEventHandler`, 2026-08-05)
 - [x] Review #7: history button removed (logging stays for the Activity tab)
 - [x] Review #6: Clear button now sends `clear` to the shell (button was calling xterm's client-side `clear()`, leaving the real pane untouched)
 - [x] Review #8: NUL-NUL-framed JSON control frames — no JSON.parse on raw keystrokes, pasted resize-shaped JSON reaches the shell
-- [ ] Review #9: rewrite `src/docs/terminal.md`
-- [ ] tmux attach-client leak on WS disconnect (found 2026-08-04) — see Suggested Fix Order
+- [x] Review #9: rewrite `src/docs/terminal.md` + fix `Terminal.jsx` header comment (2026-08-05)
+- [x] tmux attach-client leak on WS disconnect (`sweepStaleAttaches`, 2026-08-05) — see Suggested Fix Order
 - [ ] Header lock button (optional)
 - [ ] Browser-test: mode switching keeps terminal session + scrollback; session dropdown reflects `main`
 
@@ -346,7 +347,7 @@ Why NUL-NUL and not `\x1b[50;` (the original suggestion): an ESC-prefixed marker
 - **Header lock button** — build a visible Lock/Unlock toggle (the plan's `[lock]` header control) or keep lock imperative-only?
 - **Command log retention** — cap the log (e.g. last 100 entries per agent)?
 - **bash_history capture** — wire the user's typed commands into the history popover?
-- **tmux history-limit** — bump to 10000 to match xterm scrollback.
+- ~~**tmux history-limit**~~ — resolved: bumped to 10000 (`TMUX_HISTORY`), matches xterm scrollback.
 
 ---
 

@@ -28,6 +28,14 @@ export const useAgents = create((set, get) => ({
     set({ agents, stats })
   },
 
+  syncAgent: (agent) => {
+    if (!agent) return
+    const agents = get().agents.map((a) =>
+      a.name === agent.name ? { ...a, ...agent } : a
+    )
+    set({ agents, stats: calcStats(agents) })
+  },
+
   startAgent: async (name) => {
     get().updateAgentStatus(name, 'starting')
     try {

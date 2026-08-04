@@ -4,6 +4,7 @@ import { useAgents } from '../stores/agents'
 import { api } from '../lib/api'
 import Terminal from '../components/Terminal'
 import CommandsPane from './agent/CommandsPane'
+import SettingsTab from './agent/SettingsTab'
 
 const MODES = [
   { id: 'commands', label: 'Commands' },
@@ -12,6 +13,7 @@ const MODES = [
   { id: 'logs', label: 'Logs' },
   { id: 'sessions', label: 'Sessions' },
   { id: 'activity', label: 'Activity' },
+  { id: 'settings', label: 'Settings' },
 ]
 
 function AgentHeader({ agent }) {
@@ -79,6 +81,8 @@ export default function AgentDetail() {
   const navigate = useNavigate()
   const agents = useAgents((s) => s.agents)
   const fetchAgents = useAgents((s) => s.fetchAgents)
+  const syncAgent = useAgents((s) => s.syncAgent)
+  const agentsLoading = useAgents((s) => s.loading)
   const termRef = useRef(null)
   const [runningCmd, setRunningCmd] = useState(null)
   const lastRunCmdRef = useRef('')
@@ -89,7 +93,17 @@ export default function AgentDetail() {
 
   useEffect(() => {
     fetchAgents()
-  }, [])
+    // Light poll so a transient "stopped" (e.g. right after a settings
+    // change that stops/restarts the agent) self-corrects within a few
+    // seconds instead of leaving a stale status stuck on screen.
+    const t = setInterval(async () => {
+      try {
+        const a = await api(`/api/agents/${agentId}`)
+        if (a) syncAgent(a)
+      } catch {}
+    }, 5000)
+    return () => clearInterval(t)
+  }, [agentId, fetchAgents, syncAgent])
 
   const agent = agents.find((a) => a.name === agentId)
   const currentMode = location.hash.replace('#', '') || 'commands'
@@ -153,9 +167,20 @@ export default function AgentDetail() {
   }, [agent?.name])
 
   if (!agent) {
+    if (agentsLoading) {
+      return (
+        <div className="flex items-center justify-center h-64 text-slate-500">
+          <span className="inline-block w-4 h-4 rounded-full border-2 border-cyan-400 border-t-transparent animate-spin mr-3" />
+          <p>Loading agent…</p>
+        </div>
+      )
+    }
     return (
-      <div className="flex items-center justify-center h-64 text-slate-500">
-        <p>Agent not found or loading...</p>
+      <div className="flex flex-col items-center justify-center h-64 text-slate-500 gap-4">
+        <p>Agent not found — it may have been deleted.</p>
+        <Link to="/agents" className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-sm font-medium transition-colors">
+          ← Back to fleet
+        </Link>
       </div>
     )
   }
@@ -198,6 +223,7 @@ export default function AgentDetail() {
         {mode === 'logs' && <LogsTab agent={agent} />}
         {mode === 'sessions' && <SessionsTab agent={agent} />}
         {mode === 'activity' && <ActivityTab agent={agent} />}
+        {mode === 'settings' && <SettingsTab agent={agent} />}
       </div>
 
       {/* Persistent docked terminal */}

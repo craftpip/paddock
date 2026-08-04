@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { useNavigate, Link } from 'react-router-dom'
+import { useNavigate, useParams, Link } from 'react-router-dom'
 import { api } from '../lib/api'
 import Console from '../components/Console'
 
@@ -20,17 +20,18 @@ function fmtTime(ts) {
 
 export default function CreateAgent() {
   const navigate = useNavigate()
+  const { name: urlName } = useParams()
   const [name, setName] = useState('')
   const [agentType, setAgentType] = useState('openclaw')
   const [backupFile, setBackupFile] = useState('')
   const [backups, setBackups] = useState([])
   const [prefix, setPrefix] = useState('vm')
 
-  const [phase, setPhase] = useState('idle') // idle | creating | done | failed
+  const [phase, setPhase] = useState(() => (urlName ? 'creating' : 'idle')) // idle | creating | done | failed
   const [lines, setLines] = useState([])
   const [runningCmd, setRunningCmd] = useState('')
   const [error, setError] = useState('')
-  const [jobName, setJobName] = useState('')
+  const [jobName, setJobName] = useState(urlName || '')
 
   const esRef = useRef(null)
 
@@ -42,6 +43,17 @@ export default function CreateAgent() {
     return () => closeStream()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Progress URL (/agents/create/:name): resume the create job stream on
+  // refresh — the job events live server-side, so reconnect and replay.
+  useEffect(() => {
+    if (!urlName) return
+    setLines([])
+    setRunningCmd('')
+    startStream(urlName)
+    return () => closeStream()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlName])
 
   const filteredBackups = backups.filter(b => {
     if (!b.agentType) return true
@@ -119,10 +131,6 @@ export default function CreateAgent() {
   async function handleSubmit(e) {
     e.preventDefault()
     setError('')
-    setLines([])
-    setRunningCmd('')
-    setJobName('')
-    setPhase('creating')
 
     try {
       const result = await api('/api/agents/create', {
@@ -133,9 +141,7 @@ export default function CreateAgent() {
           backup_file: backupFile || '',
         },
       })
-      const job = result.job
-      setJobName(job)
-      startStream(job)
+      navigate('/agents/create/' + result.job, { replace: true })
     } catch (err) {
       setError(err.error || err.message || 'Failed to create agent')
       setPhase('failed')
@@ -148,6 +154,7 @@ export default function CreateAgent() {
     setError('')
     setLines([])
     setRunningCmd('')
+    navigate('/agents/create')
   }
 
   return (
@@ -243,7 +250,7 @@ export default function CreateAgent() {
           {phase === 'done' && !isClone && (
             <button onClick={() => navigate('/agents/' + jobName)}
                     className="w-full bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-semibold py-3.5 rounded-xl transition-all duration-200 shadow-lg shadow-emerald-900/30">
-              Go to Commands
+              Go to {jobName}
             </button>
           )}
         </div>

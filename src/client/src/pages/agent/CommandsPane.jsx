@@ -142,7 +142,7 @@ function FlowGroup({ group, query, runningCmd, run, connected }) {
           desc={x.desc}
           color={c.pill}
           danger={x.danger}
-          disabled={!!runningCmd || !connected}
+          disabled={!connected}
           active={runningCmd === x.cmd}
           onClick={() => run(x.cmd, x)}
         />
@@ -170,7 +170,7 @@ function MessagingFlow({ query, runningCmd, run, connected }) {
       <GroupLabel color="cyan" title="Messaging" />
       {visible.map((x) => (
         <Pill key={x.label} label={x.label} desc={x.desc} color={COLORS.cyan.pill} danger={x.danger}
-              disabled={!!runningCmd || !connected} active={runningCmd === x.cmd}
+              disabled={!connected} active={runningCmd === x.cmd}
               onClick={() => (x.click ? x.click() : run(x.cmd, x))} />
       ))}
     </>
@@ -233,7 +233,7 @@ function ModelsFlow({ agent, query, runningCmd, run, prompt, connected }) {
       <GroupLabel color="blue" title="Models" />
       {visible.map((x) => (
         <Pill key={x.label} label={x.label} desc={x.desc} color={COLORS.blue.pill}
-              disabled={!!runningCmd || !connected} active={runningCmd === x.cmd}
+              disabled={!connected} active={runningCmd === x.cmd}
               onClick={() => (x.click ? x.click() : run(x.cmd, x))} />
       ))}
       {primary && (
@@ -303,7 +303,7 @@ function McpFlow({ agent, query, runningCmd, run, prompt, connected }) {
       <GroupLabel color="emerald" title="MCP" />
       {visible.map((x) => (
         <Pill key={x.label} label={x.label} desc={x.desc} color={COLORS.emerald.pill}
-              disabled={!!runningCmd || !connected} active={runningCmd === x.cmd}
+              disabled={!connected} active={runningCmd === x.cmd}
               onClick={() => (x.click ? x.click() : run(x.cmd))} />
       ))}
       {shown.map((s) => (
@@ -365,7 +365,7 @@ function SkillsFlow({ agent, query, runningCmd, run, prompt, connected }) {
       <GroupLabel color="violet" title="Skills" />
       {visible.map((x) => (
         <Pill key={x.label} label={x.label} desc={x.desc} color={COLORS.violet.pill}
-              disabled={!!runningCmd || !connected} active={runningCmd === x.cmd}
+              disabled={!connected} active={runningCmd === x.cmd}
               onClick={() => (x.click ? x.click() : run(x.cmd, x))} />
       ))}
       {showInstall && (
@@ -619,7 +619,7 @@ export default function CommandsPane({ agent, termRef, run, runningCmd, connecte
       <div className="flex items-center gap-2">
         <button
           onClick={runTool}
-          disabled={!!runningCmd || !connected}
+          disabled={!connected}
           title={connected ? 'Run openclaw interactively in the terminal' : 'Waiting for the terminal to connect'}
           className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-sm font-medium transition-colors whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed"
         >

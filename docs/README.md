@@ -21,7 +21,8 @@ docs/
 │   ├── overview.md                   ← all 13 tabs described
 │   ├── health.md                     ← diagnostic toolbox
 │   ├── mcp.md                        ← MCP server management
-│   └── skills.md                     ← skill listing and management
+│   ├── skills.md                     ← skill listing and management
+│   └── settings.md                   ← container settings: update, docker, network, delete
 ├── components/                       ← shared/reusable UI pieces
 │   └── stats.md                      ← sidebar Docker stats
 └── operations/                       ← operational workflows

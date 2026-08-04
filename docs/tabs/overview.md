@@ -133,3 +133,13 @@ Status dot: green for ok, red for error.
 Empty state: "No activity recorded yet."
 
 Events tracked: start, stop, restart, create, delete, config updates, workspace operations, backup create/restore.
+
+## Settings Tab
+
+File: `src/client/src/pages/agent/SettingsTab.jsx`
+
+Container-level operations: image refresh, docker access, network routing, delete. See [settings.md](settings.md).
+
+**Cards:** Container Info, Update (SSE console, `build --pull` + force-recreate), Allow docker toggle (host socket + CLI), Network dropdown (`network_mode: container:<name>`), Danger Zone delete.
+
+**API:** `GET /api/containers`, `GET/POST /api/agents/:name/settings`, `POST /api/agents/:name/update`, `GET /api/agents/:name/update-log` (SSE).

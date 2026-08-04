@@ -56,7 +56,8 @@ function instanceComposePath(name) {
   return path.join(INSTANCES_DIR, name, 'docker-compose.yml');
 }
 
-function generateInstanceCompose(name, agent, password, port) {
+function generateInstanceCompose(name, agent, password, port, opts = {}) {
+  const { allowDocker = false, network = '' } = opts;
   const image = AGENT_IMAGES[agent] || AGENT_IMAGES.openclaw;
   const build = AGENT_BUILD_REL[agent] || AGENT_BUILD_REL.openclaw;
   const dataDir = containerDataDir(agent);
@@ -74,15 +75,84 @@ function generateInstanceCompose(name, agent, password, port) {
   // Volume sources are resolved by the Docker DAEMON → use HOST_WORKSPACE
   // (the daemon's host view, e.g. /www2/paddock).
   yaml += `    volumes:\n      - ${HOST_WORKSPACE}/instances/${name}/${agent}:${dataDir}\n`;
+  if (allowDocker) yaml += `      - /var/run/docker.sock:/var/run/docker.sock\n`;
+  if (network) yaml += `    network_mode: container:${network}\n`;
   yaml += `    environment:\n      TZ: Asia/Kolkata\n      ROOT_PASSWORD: ${password || ''}\n`;
   return yaml;
 }
 
-function writeInstanceCompose(name, agent, password, port) {
-  const yaml = generateInstanceCompose(name, agent, password, port);
+function writeInstanceCompose(name, agent, password, port, opts = {}) {
+  const yaml = generateInstanceCompose(name, agent, password, port, opts);
   const composePath = instanceComposePath(name);
   fs.mkdirSync(path.dirname(composePath), { recursive: true });
   fs.writeFileSync(composePath, yaml);
+}
+
+/** Set or clear one KEY=VALUE line in an instance's meta.env (preserves the rest). */
+function setMetaFlag(name, key, value) {
+  const metaPath = path.join(INSTANCES_DIR, name, 'meta.env');
+  let content = fs.existsSync(metaPath) ? fs.readFileSync(metaPath, 'utf8') : '';
+  const re = new RegExp(`^${key}=.*$`, 'm');
+  const line = `${key}=${value}`;
+  if (re.test(content)) {
+    content = content.replace(re, line);
+  } else {
+    content = content.replace(/\s*$/, '') + '\n' + line + '\n';
+  }
+  fs.writeFileSync(metaPath, content);
+}
+
+/** Apply settings (docker socket mount, network join) to an instance's compose
+ *  file + meta.env. Compose files are machine-generated here, so regeneration
+ *  is the source of truth. The route handles stop/start + validation around it. */
+function applySettings(name, opts = {}) {
+  const instDir = path.join(INSTANCES_DIR, name);
+  const meta = readMeta(instDir);
+  const agent = meta.AGENT || 'openclaw';
+  const pw = meta.ROOT_PASSWORD || name.replace(PREFIX_RE, '');
+  const port = meta.PORT || '';
+  const allowDocker = !!opts.allowDocker;
+  const network = opts.network || '';
+
+  writeInstanceCompose(name, agent, pw, port, { allowDocker, network });
+  setMetaFlag(name, 'DOCKER', allowDocker ? '1' : '0');
+  setMetaFlag(name, 'NETWORK', network);
+
+  return {
+    allowDocker,
+    network,
+    image: AGENT_IMAGES[agent] || AGENT_IMAGES.openclaw,
+    agent,
+  };
+}
+
+/** Rebuild the image (--pull to redownload the base) and recreate the
+ *  container. The recreate restarts it automatically when it's done.
+ *  `buildArgs` are passed as `--build-arg K=V` (e.g. INSTALL_DOCKER=1).
+ *  Set `pull: false` to skip redownloading the base image. */
+async function updateAgent(name, { onLog = () => {}, onStep = () => {}, buildArgs = [], pull = true } = {}) {
+  const composePath = instanceComposePath(name);
+  const args = ['compose', '-f', composePath, 'build'];
+  if (pull) args.push('--pull');
+  for (const ba of buildArgs) args.push('--build-arg', ba);
+  args.push(name);
+  onStep('build', 'start');
+  try {
+    await runCmdStream('docker', args, { onLog, timeout: 900000 });
+  } catch (e) {
+    onStep('build', 'error');
+    throw e;
+  }
+  onStep('build', 'end');
+
+  onStep('recreate', 'start');
+  try {
+    await runCmdStream('docker', ['compose', '-f', composePath, 'up', '-d', '--no-deps', '--force-recreate', name], { onLog, timeout: 300000 });
+  } catch (e) {
+    onStep('recreate', 'error');
+    throw e;
+  }
+  onStep('recreate', 'end');
 }
 
 function existingServices() {
@@ -224,6 +294,7 @@ async function createVm(name, options = {}) {
 
 async function removeVm(name) {
   try { await runCmd('docker', ['rm', '-f', name], { timeout: 30000 }); } catch {}
+  try { await runCmd('docker', ['network', 'rm', `${name}_default`], { timeout: 30000 }); } catch {}
   const instDir = path.join(INSTANCES_DIR, name);
   if (fs.existsSync(instDir)) fs.rmSync(instDir, { recursive: true, force: true });
 }
@@ -264,7 +335,9 @@ async function startAgent(name) {
 module.exports = {
   createVm, removeVm, resetVm, readMeta,
   generateInstanceCompose, writeInstanceCompose,
+  applySettings, updateAgent, setMetaFlag,
   instanceComposePath, getComposePath,
   existingServices, startAgent,
+  AGENT_IMAGES, AGENT_BUILD_REL,
   INSTANCES_DIR, PREFIX, PREFIX_RE,
 };

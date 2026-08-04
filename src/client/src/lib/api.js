@@ -32,6 +32,18 @@ export async function api(path, options = {}) {
     throw { status: 401 }
   }
 
+  if (res.status === 403 && !options._retried) {
+    const data = await res.json().catch(() => ({}))
+    if (data.error === 'CSRF token invalid') {
+      try {
+        const s = await fetch('/api/session', { credentials: 'same-origin' }).then((r) => r.json())
+        if (s.csrfToken) setCsrfToken(s.csrfToken)
+        return api(path, { ...options, _retried: true })
+      } catch {}
+    }
+    throw { status: 403, ...data }
+  }
+
   if (!res.ok) {
     const data = await res.json().catch(() => ({}))
     throw { status: res.status, ...data }

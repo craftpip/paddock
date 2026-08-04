@@ -46,14 +46,18 @@ All functions take `(agentId, relativePath)` and internally:
 Business logic: See `overview/business-logic.md` — Agent Lifecycle, Bind-Mount Split-Brain.
 
 **Functions:**
-- `createVm(name, options)` — full creation flow with SSH port allocation
+- `createVm(name, { agent, mode, skipSetup, onLog, onStep })` — full streaming creation flow with SSH port allocation. Emits steps via `onStep('build'|'up'|'setup', 'start'|'end'|'error')` and feeds command output through `onLog(stream, text)`. `skipSetup` skips the `openclaw setup --baseline` + restart block (used on the clone/restore path).
 - `removeVm(name)` — force remove container + delete instance dir
 - `resetVm(name)` — remove container + wipe data + recreate + compose up
 - `startAgent(name)` — docker start with compose fallback
-- `generateInstanceCompose(name, agent, password, port)` — YAML generator using absolute host paths
-- `writeInstanceCompose(name, agent, password, port)` — write YAML to disk
+- `generateInstanceCompose(name, agent, password, port, { allowDocker, network })` — YAML generator using absolute host paths; `allowDocker` adds the `/var/run/docker.sock` volume, `network` adds `network_mode: container:<name>`
+- `writeInstanceCompose(name, agent, password, port, opts)` — write YAML to disk (passes the options through)
+- `applySettings(name, { allowDocker, network })` — regenerates compose + writes `DOCKER=1|0` and `NETWORK=<name>` (or empty) to `meta.env`; returns `{ allowDocker, network, image, agent }`
+- `updateAgent(name, { onLog, onStep })` — streams `docker compose -f <compose> build --pull <name>` (900s) then `up -d --no-deps --force-recreate <name>` (300s); steps `build`/`recreate`
+- `setMetaFlag(name, key, value)` — writes/clears a `KEY=VALUE` line in `meta.env` preserving other lines
 - `existingServices()` — scan instances/ for existing compose files
 - `instanceComposePath(name)`, `getComposePath(name)` — path helpers
+- Exports `AGENT_IMAGES` and `AGENT_BUILD_REL` maps
 
 **Agent images:**
 | Agent | Image tag | Data dir inside container |
@@ -62,6 +66,21 @@ Business logic: See `overview/business-logic.md` — Agent Lifecycle, Bind-Mount
 | picoclaw | paddock-vm-picoclaw:latest | /root/.picoclaw |
 | nanobot | paddock-vm-nanobot:latest | /root/.nanobot |
 | hermes | paddock-vm-hermes:latest | /opt/data |
+
+## Command Runner (cmd.js)
+
+- `runCmd(cmd, args, options)` — `execFile`-based, returns the full combined output string (no streaming)
+- `runCmdStream(cmd, args, { onLog, timeout })` — `spawn`-based; feeds every stdout/stderr chunk through `onLog(stream, text)` so long operations can stream live. Used by create (`build`/`up`/`setup`) and backup restore.
+
+## Job Log (job-log.js)
+
+In-memory event store for long-running operations (create agent, …). Holds an ordered event list per job plus SSE subscriber response objects; lines are fanned out immediately, late/reconnecting subscribers get a replay via the `since` index. Jobs are cleaned up 5 minutes after finishing (only if no subscriber is attached).
+
+Events: `{ n, ts, type: 'step'|'line'|'done'|'error', step?, state?, stream?, text?, message?, ok?, name? }`.
+
+**Functions:** `createJob`, `getJob`, `getOrCreateJob`, `append`, `setStep(job, step, state)`, `line(job, stream, text)`, `finish(job, ok)`, `fail(job, message)`, `subscribe(job, res, since)` (SSE fan-out + keep-alive), `getStatus(name)` (polling fallback).
+
+In-memory is fine for a single-user panel: a create in flight during a server restart is lost (frontend shows "connection lost" and returns to the form).
 
 ## Backup Manager (backup-manager.js)
 

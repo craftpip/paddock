@@ -87,11 +87,26 @@ function migrate(db) {
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS api_keys (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      key_hash TEXT NOT NULL UNIQUE,
+      prefix TEXT NOT NULL,
+      scopes TEXT NOT NULL DEFAULT 'default',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_used_at TEXT,
+      revoked_at TEXT,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
     CREATE INDEX IF NOT EXISTS idx_activity_agent ON activity_events(agent_id);
     CREATE INDEX IF NOT EXISTS idx_activity_ts ON activity_events(timestamp);
     CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id);
     CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_vault_name ON vault_items(name);
+    CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id);
+    CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
   `);
 
   // Add owner_id to agents if missing (from older schema)

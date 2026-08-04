@@ -11,7 +11,7 @@ import { useEffect, useRef, useImperativeHandle, forwardRef, useState, useCallba
  *
  * This is the SINGLE source of truth for interactive shells in the app. If you
  * need a shell somewhere, import this component. Do NOT copy the xterm/WebSocket
- * setup anywhere else (see `plans/terminal-component.md`).
+ * setup anywhere else (see `plans/terminal.md` and `src/docs/terminal.md`).
  *
  * ─────────────────────────────────────────────────────────────────────────────
  *  Props

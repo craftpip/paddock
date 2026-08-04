@@ -1,5 +1,7 @@
 FROM nousresearch/hermes-agent:latest
 
+ARG INSTALL_DOCKER=0
+
 USER root
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -13,6 +15,12 @@ RUN apt-get update && \
     nodejs \
     npm && \
     rm -rf /var/lib/apt/lists/*
+
+RUN if [ "$INSTALL_DOCKER" = "1" ]; then \
+      apt-get update && \
+      apt-get install -y --no-install-recommends docker.io && \
+      rm -rf /var/lib/apt/lists/*; \
+    fi
 
 RUN mkdir -p /var/run/sshd && \
     sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && \
