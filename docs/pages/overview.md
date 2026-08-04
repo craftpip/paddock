@@ -225,10 +225,75 @@ Global listing of all backup archives from the `backups/` folder. Features:
 
 File: `Vault.jsx`
 
-The encrypted secret store that replaced the Credentials page. Items are stored
-in `src/data/vault.json`, AES-256-GCM encrypted with the `VAULT_KEY` environment
-variable. Add / edit / delete via `/api/vault*`. The old `/credentials` URL
-redirects to `/vault`.
+Encrypted key-value store that replaced the Credentials page. One flat list of
+secret entries — no provider/type structure. Just Name, Description, Value.
+
+### Data Model
+
+SQLite table `vault_items` in `src/data/app.db`:
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INTEGER | PK, autoincrement |
+| `name` | TEXT | UNIQUE, required |
+| `description` | TEXT | optional, defaults to `''` |
+| `enc_value` | TEXT | base64(`iv:tag:ciphertext`) |
+| `created_at` | TEXT | datetime |
+| `updated_at` | TEXT | datetime |
+
+Value is **never stored plaintext**. The old `credentials.json` is not touched — this is a separate store.
+
+### Encryption
+
+Service: `src/services/vault.js` (Node built-in `crypto`, no new deps).
+
+- **Algorithm:** AES-256-GCM, random 12-byte IV per item, auth tag stored with ciphertext.
+- **Key source:** `VAULT_KEY` env var (32+ bytes). Falls back to deriving a stable 32-byte key from `SESSION_SECRET` via scrypt (works out of the box, with a warning logged).
+- **Format stored:** `iv:tag:data` all base64 — self-contained per row.
+- **Decrypt** only inside the service. The API layer never returns plaintext in list responses.
+
+### API
+
+| Method | Path | Body | Returns |
+|--------|------|------|---------|
+| GET | `/api/vault` | — | `{ items: [{ id, name, description, updated_at }] }` — **no value** |
+| POST | `/api/vault` | `{ name, description?, value }` | `{ ok: true, item: {...} }` |
+| PUT | `/api/vault/:id` | `{ name?, description?, value? }` — empty `value` = keep existing | `{ ok: true, item: {...} }` |
+| DELETE | `/api/vault/:id` | — | `{ ok: true }` |
+| GET | `/api/vault/:id/decrypt` | — | `{ value }` — admin only, for terminal-paste integration |
+
+- POST rejects duplicate names (409).
+- List responses never include plaintext or masked hints — UI always shows `••••••••••`.
+- All routes behind `requireAuth` + CSRF (`csrfCheck` for mutating methods).
+
+### UI
+
+- Table: Name | Description | Value | Updated | actions
+- Value cell: always `••••••••••` (fixed, no first-4-last-4 mask — user said never display it again)
+- Add form: inline row above table — Name (required), Description (optional), Value (`type=password`, required)
+- Edit: inline form with name/description populated, value blank with placeholder "leave blank to keep existing value". Save does PUT.
+- Delete: `confirm()` dialog, then DELETE, row removed.
+- Add/edit/delete use the existing `api()` helper — CSRF handled automatically.
+
+### Security
+
+- Value encrypted at rest; DB leak alone does not reveal secrets without `VAULT_KEY`.
+- Value never travels back to the browser in list/read responses.
+- `/decrypt` is admin-only and intended for server-side paste flows, never for display.
+- If `VAULT_KEY` is lost, values are unrecoverable — nothing plaintext is ever stored.
+
+### Future Integration (not built now)
+
+- **Model setup terminal:** Vault list becomes a click-to-paste source when `openclaw models auth paste-api-key` waits for input. Uses `/decrypt` endpoint server-side → terminal stdin over WebSocket.
+- **Bot onboarding:** `--bot` / `--api-key` values pulled from Vault instead of `bot-prefixes.json`.
+- Anything else that needs a secret: just reference by name.
+
+### Files
+
+- `src/services/vault.js` — encrypt/decrypt + CRUD on SQLite
+- `src/client/src/pages/Vault.jsx` — the page
+- `src/services/db.js` — `vault_items` table in `migrate()`
+- `src/app.js` — vault API routes
 
 ## Onboard (`/onboard/:name`)
 

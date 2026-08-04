@@ -36,7 +36,8 @@ src/
 │   ├── db.js                 SQLite metadata store
 │   ├── workspace.js          Safe file operations with path traversal protection
 │   ├── vm-manager.js         Create/remove/reset PADs, generate compose files
-│   └── backup-manager.js     Backup/restore via docker exec
+│   ├── backup-manager.js     Backup/restore via docker exec
+│   └── vault.js              Encrypted key-value store (AES-256-GCM)
 ├── client/                   React SPA (see overview/react-migration.md)
 └── routes/
     └── agents.js             Legacy EJS routes (dead code, kept for reference)
@@ -87,6 +88,7 @@ src/
 | `SESSION_SECRET` | No | Auto-generated if not set |
 | `CONTAINER_PREFIX` | No | Default: `vm` |
 | `HOST_WORKSPACE_ROOT` | Yes | Real host path to project root |
+| `VAULT_KEY` | No | 32+ bytes for vault encryption (falls back to SESSION_SECRET) |
 | `WEBUI_PASSWORD` | No | Maps to AUTH_PASSWORD |
 
 ## Networking
