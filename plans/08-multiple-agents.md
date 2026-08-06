@@ -1,188 +1,283 @@
-# Coding-Agent Build Images + Docker Access Setting — Plan
+# Agent Build Images + Agent Driver Architecture — Plan
 
-## Status: Proposed (2026-08-02)
+## Status: Proposed (2026-08-06)
 
-## Goal
+The original "Settings page" part of this plan (the "allow docker in the
+container" checkbox) shipped as part of plan 09 (2026-08-04) — removed here.
+This plan now covers the **agent driver architecture** plus the new
+**build images** (opencode, codex, claude) added to the existing set.
 
-Two things, both small:
+## Goals (one per driver)
 
-1. **New agent build images** — OpenCode, Codex, Claude (Claude Code). Follow the
-   exact same rules as the existing OpenClaw / PicoClaw / Hermes builds.
-   **Nothing extra.** No MCP autoconfig, no harness page, no new magic.
-2. **Per-agent Settings page** with one checkbox — *"Allow docker in the
-   container"*. Toggling it stops the agent, edits the instance compose file to
-   add/remove the docker socket volume mapping, then restarts the container.
-   Docker MCP is set up from the existing MCP terminal and only needs the
-   `docker` command in it.
+Everything is a driver. Every agent type — openclaw, picoclaw, hermes,
+opencode, codex, claude — is an equal citizen, and each one is a separate goal.
+A type is not done until its driver exists and an agent of that type works end
+to end (create, terminal, versions, workspace, backup, settings toggle).
 
-## Part 1 — New build images
+1. **Driver framework + openclaw reference driver** — build
+   `src/services/drivers/` + `getDriver()`, switch all consumers over
+   (vm-manager, app.js, agent-registry, backup-manager, Commands API), and move
+   openclaw's current behavior in unchanged. Regression: everything that works
+   today keeps working.
+2. **picoclaw driver** — create a test agent, discover what actually works
+   inside the container, encode it in the driver. First time picoclaw is a
+   working type.
+3. **hermes driver** — same, on its own.
+4. **opencode driver + image** — Dockerfile + driver + CreateAgent option.
+5. **codex driver + image** — same, on its own.
+6. **claude driver + image** — same, on its own.
 
-Follow the OpenClaw pattern exactly. Each new type gets:
+Docker MCP (Part 3) is a separate follow-up, not part of any driver goal.
 
-- `src/vm-builds/<agent>/Dockerfile`
-- an entry in `AGENT_IMAGES` + `AGENT_BUILD_REL` in `src/services/vm-manager.js`
-- a `<option>` in the agent-type select on `CreateAgent.jsx`
-- `meta.env` → `AGENT=<agent>`
-- data dir `/root/.<agent>` — `containerDataDir()` already does this generically
-  for non-hermes types, so `/root/.codex`, `/root/.opencode`, `/root/.claude`
-  come free
+## Goal plans & progress tabs
 
-### The three images
+Every goal is big enough that it gets its own plan file and a progress tab we
+keep updated while we work. When a goal starts, its file moves from **Planned**
+to **In progress**, and we tick its Progress checklist as we go. A goal is done
+only when every item is ticked and verified.
 
-| Type | Base image | CLI install | Config dir |
-|------|-----------|-------------|------------|
-| `opencode` | `node:20-slim` | `npm i -g opencode-ai` | `/root/.opencode` |
-| `codex` | `node:20-slim` | `npm i -g @openai/codex` | `/root/.codex` |
-| `claude` | `node:20-slim` | `npm i -g @anthropic-ai/claude-code` | `/root/.claude` |
+| Goal | Plan file |
+|------|-----------|
+| 1. Driver framework + openclaw | `12-goal-1-driver-framework.md` |
+| 2. picoclaw driver | `13-goal-2-picoclaw-driver.md` |
+| 3. hermes driver | `14-goal-3-hermes-driver.md` |
+| 4. opencode driver + image | `15-goal-4-opencode.md` |
+| 5. codex driver + image | `16-goal-5-codex.md` |
+| 6. claude driver + image | `17-goal-6-claude.md` |
+| 7. Docker MCP | `18-goal-7-docker-mcp.md` |
 
-Each Dockerfile mirrors the openclaw one: sshd + `ROOT_PASSWORD` handling, TZ,
-`mcporter`, `start.sh` (`sshd &` + keep-alive since these CLIs have **no gateway
-daemon** — the terminal tab is the interface), `WORKDIR /root`, `EXPOSE 22`.
-The agent CLI is run interactively from the terminal (`opencode` / `codex` /
-`claude`), config persists in the mounted data dir.
+Rule: never start a goal without its progress doc open. Progress lives in the
+goal's own file, not here.
 
-Also bake in the **docker CLI** (see Part 2 — the checkbox only toggles the
-socket mount, so the CLI must already exist in the image).
+## Part 1 — Agent driver architecture
 
-### createVm
+### Why
 
-No change needed: the `openclaw setup --baseline` + restart step is already
-guarded to `openclaw` / `picoclaw` only. New types skip it automatically.
+Agent-specific knowledge is scattered and hardcoded today — and every feature
+shipped so far was built and tested against openclaw only:
 
-### Discovery
+- `readOpenClawVersion()` runs `openclaw --version` (vm-manager.js:78-91)
+- `AGENT_IMAGES` / `AGENT_BUILD_REL` / `AGENT_BASE_IMAGES` maps
+  (vm-manager.js:12-24, 59-64)
+- `containerDataDir()` special-cases hermes (vm-manager.js:26-28)
+- `createVm()` setup guard hardcodes openclaw/picoclaw (vm-manager.js:345-368)
+- Settings version/update routes assume an OpenClaw base image (app.js:771-808)
+- CommandsPane.jsx hardcodes the `openclaw ...` command groups in the frontend
+  bundle — the "buttons" on the Commands page are locked to OpenClaw
+- Workspace paths are derived with an `openclaw` fallback hardcoded
+  (`getWorkspaceRoot`/`getConfigRoot`, agent-registry.js:75-84) and the
+  frontend workspace tab hardcodes the container root `/root/.openclaw`
+  (AgentDetail.jsx:294-295)
+- Backup runs `openclaw backup create` inside the container
+  (backup-manager.js) — openclaw-only
+- Picoclaw's setup/version/commands and hermes' version/commands have never
+  been validated — the `openclaw` assumptions break them (e.g. hermes has no
+  `openclaw` binary)
 
-`agent-registry.js` already keys off `meta.AGENT` and finds the data dir
-`instances/<name>/<agent>` — new types show up on the dashboard with the right
-`agent_type` out of the box.
+### Driver interface
 
-## Part 2 — Settings page: "Allow docker in the container"
+`src/services/drivers/<type>.js` — one module per agent type, uniform shape:
 
-### UI
+| Field | openclaw | codex (example) |
+|-------|----------|-----------------|
+| `type` / `label` | `openclaw` / `OpenClaw` | `codex` / `Codex` |
+| `buildImage` | `paddock-vm-openclaw:latest` | `paddock-vm-codex:latest` |
+| `buildRel` | `../../src/vm-builds/openclaw` | `../../src/vm-builds/codex` |
+| `baseImage` | `ghcr.io/openclaw/openclaw:latest` | `node:20-slim` |
+| `dataDir` | `/root/.openclaw` | `/root/.codex` |
+| `workspaceDir` | `/root/.openclaw/workspace` | `/root/.codex/workspace` |
+| `setupSteps` | `[{ cmd: 'openclaw', args: ['setup', '--baseline'] }]` | `[]` |
+| `backupSteps` | `[{ cmd: 'openclaw', args: ['backup', 'create', '--output', '/tmp/{name}_{ts}.tar.gz'] }]` | `[]` (no backup support) |
+| `installDockerBuildArg` | `INSTALL_DOCKER=1` | `INSTALL_DOCKER=1` |
+| `currentVersion(name)` | runs `openclaw --version` | runs `codex --version` |
+| `availableVersion()` | reads base image version label | `''` (no label) |
+| `commands` | Commands page groups | codex-specific groups |
 
-A **Settings mode** on the agent page (new tab in the terminal-first layout,
-next to Commands / Workspace / Config / Logs / Sessions / Activity). One
-checkbox:
+`src/services/drivers/index.js` exports `getDriver(type)` — returns the module,
+falls back to the openclaw driver when a type has none. The driver is the single
+source of truth for how the dashboard, terminal, and routes treat an agent.
 
-> **Allow docker in the container** — lets this agent run `docker` commands
-> (docker CLI + host socket).
+### Workspace layout
 
-When the user toggles it **on**, show a confirm popup:
+The driver owns where the agent's workspace lives, container side and host side:
 
-> "This will stop and restart `<name>` to apply the change. Continue?"
+- **Host**: `instances/<name>/<agent>/workspace`
+- **Container**: `driver.workspaceDir` (e.g. `/root/.openclaw/workspace`,
+  `/root/.codex/workspace`)
 
-Same confirm when toggling off.
+The mount stays `instances/<name>/<agent>` → `dataDir`, so `workspaceDir` being
+inside `dataDir` needs no extra mount — the existing bind covers it. For every
+agent the terminal's working directory is `workspaceDir` (opencode/codex/claude
+run their CLI from there), not the config dir.
 
-### Flow (backend)
+### Consumers
 
-`POST /api/agents/:name/settings` `{ allowDocker: boolean }`:
+- **vm-manager.js** — replace the maps + version helpers with driver calls.
+  `containerDataDir()` becomes `getDriver(agent).dataDir`. The createVm setup
+  guard becomes "run `setupSteps` if non-empty".
+- **app.js** — settings + update-info routes call
+  `getDriver(type).currentVersion(name)` / `.availableVersion()` instead of the
+  OpenClaw-only helpers.
+- **Commands page** — new `GET /api/agent-types/:type/commands` returns
+  `driver.commands`; CommandsPane.jsx fetches + renders instead of hardcoding
+  the groups. This is the "buttons live in the driver" part.
+- **CreateAgent.jsx** — type options + setup steps from the driver registry so
+  new types appear without editing the form.
+- **SettingsTab.jsx** — version row via `driver.currentVersion()`; drivers
+  without a base-image label report no update available, which is expected.
+- **agent-registry.js** — `getWorkspaceRoot()` / `getConfigRoot()` /
+  `buildAgent()` derive paths from `driver.workspaceDir` / `driver.dataDir`
+  instead of defaulting to `openclaw`.
+- **AgentDetail.jsx** — the workspace tab's container root becomes
+  `driver.workspaceDir` instead of the hardcoded `/root/.openclaw`.
+- **backup-manager.js** — backup/restore runs `driver.backupSteps`; types
+  without backup support show "not supported" instead of a broken
+  `openclaw backup` call.
 
-1. `docker stop <name>` (no-op if already stopped)
-2. Edit the instance compose file — add/remove the volume mapping
-   `/var/run/docker.sock:/var/run/docker.sock`
-3. `docker start <name>`
-4. Record activity, return the new state
+## Part 2 — New build images
 
-Implementation: add `allowDocker` to `generateInstanceCompose()` /
-`writeInstanceCompose()`. The settings route reads `meta.env` (agent, password,
-port), regenerates the compose with the flag, then restarts. Compose files are
-machine-generated here, so regenerating is the source of truth, not a fragile
-string edit.
+Each new type = one driver + one Dockerfile, nothing else.
 
-`GET /api/agents/:name/settings` returns `{ allowDocker }` — derived from
-whether the current compose file has the socket mount (or from a stored flag in
-meta.env, e.g. `DOCKER=1`). Storing it in meta.env is more robust than parsing
-YAML.
+| Type | Base image | CLI install | Config dir | version cmd |
+|------|-----------|-------------|------------|-------------|
+| `opencode` | `node:20-slim` | `npm i -g opencode-ai` | `/root/.opencode` | `opencode --version` |
+| `codex` | `node:20-slim` | `npm i -g @openai/codex` | `/root/.codex` | `codex --version` |
+| `claude` | `node:20-slim` | `npm i -g @anthropic-ai/claude-code` | `/root/.claude` | `claude --version` |
 
-### Guard rails
+Dockerfile = the openclaw one minus the OpenClaw bits:
 
-- Socket = host docker = root-equivalent. The confirm popup should say this.
-- If the image has no docker CLI, the toggle errors with a hint ("image has no
-  docker CLI — rebuild the image") instead of silently succeeding.
-- Restart kills the running session — that's why the popup warns first.
-- The checkbox lives on every agent type (openclaw PADs can use it too), but
-  the docker CLI must exist in the image for it to mean anything. Only the new
-  coding images get the CLI baked in for now.
+- `ARG INSTALL_DOCKER=0` + conditional `docker.io` install — **same pattern as
+  openclaw, do NOT bake the CLI in**. The shipped settings flow auto-rebuilds
+  with `INSTALL_DOCKER=1` when the image lacks the CLI (app.js:861-890), so no
+  settings-route change is needed.
+- **No `mcporter`** — it is OpenClaw's MCP runner; nothing to do with these CLIs.
+- `start.sh` = `sshd &` + keep-alive (`tail -f /dev/null`) — these CLIs have no
+  gateway daemon; the terminal tab is the interface.
+- sshd + `ROOT_PASSWORD` handling, TZ, `WORKDIR /root`, `EXPOSE 22`.
 
-## Part 3 — Docker MCP (from the MCP terminal)
+`containerDataDir()` already maps non-hermes types to `/root/.<agent>` — the
+config dirs come free. `createVm()` already skips `setup --baseline` for
+non-openclaw/picoclaw — free, and after Part 1 it reads `driver.setupSteps`
+instead of the hardcoded guard.
 
-No autoconfig. The user adds it manually through the existing MCP flow
-(`openclaw mcp add` from the MCP commands in the terminal). The docker MCP only
-needs the `docker` command in it:
+### Cleanup
 
-- `openclaw mcp add docker -- npx -y mcp-server-docker`
+- `nanobot` is half-wired today: `AGENT_IMAGES` + `AGENT_BUILD_REL` entries
+  exist but there is no `src/vm-builds/nanobot/` and no CreateAgent option.
+  Give it a driver stub (or drop the map entries) while migrating to drivers.
+- `src/vm-builds/monitor` is dead — no map entries, nothing references it.
+  Delete the folder while touching the build area.
 
-(Verify the exact command against the current docs — docs.openclaw.ai.)
+## Part 3 — Docker MCP (openclaw only)
 
-The MCP alone is useless without Part 2: no socket mount → no docker access.
-So the settings checkbox is the real capability gate; the MCP is just how the
-agent drives it.
+`openclaw mcp add docker` applies to openclaw/picoclaw agents only. opencode /
+codex / claude configure MCP through their own CLIs (opencode config, codex
+`config.toml`, `.mcp.json` for claude) — out of scope here; the driver docs can
+carry a per-type note later.
+
+Verify the exact command and package against the current docs before
+documenting it in the MCP commands group (`docker-mcp` vs `mcp-server-docker`).
 
 ## Files
 
-- **New** `src/vm-builds/opencode/Dockerfile`
-- **New** `src/vm-builds/codex/Dockerfile`
-- **New** `src/vm-builds/claude/Dockerfile`
-- **Modified** `src/services/vm-manager.js` — `AGENT_IMAGES`, `AGENT_BUILD_REL`,
-  `generateInstanceCompose()` `allowDocker` option
-- **Modified** `src/app.js` — `GET/POST /api/agents/:name/settings`
-- **Modified** `src/client/src/pages/CreateAgent.jsx` — new type options
-- **Modified** `src/client/src/pages/AgentDetail.jsx` — Settings mode + checkbox
-  + confirm popup
+- **New** `src/services/drivers/index.js` — registry + `getDriver()`
+- **New** `src/services/drivers/{openclaw,picoclaw,nanobot,hermes}.js` — migrate
+  existing per-type behavior
+- **New** `src/services/drivers/{opencode,codex,claude}.js` — new-type drivers
+- **New** `src/vm-builds/{opencode,codex,claude}/Dockerfile`
+- **Modified** `src/services/vm-manager.js` — maps/version/setup guards → driver
+  calls
+- **Modified** `src/services/agent-registry.js` — workspace/config root
+  derivation → driver paths
+- **Modified** `src/services/backup-manager.js` — backup/restore via
+  `driver.backupSteps`
+- **Modified** `src/app.js` — settings/update-info version via driver;
+  `GET /api/agent-types/:type/commands`
+- **Modified** `src/client/src/pages/agent/CommandsPane.jsx` — fetch + render
+  command groups from the driver
+- **Modified** `src/client/src/pages/CreateAgent.jsx` — type options + setup
+  steps from the driver registry
+- **Modified** `src/client/src/pages/agent/SettingsTab.jsx` — version row via
+  driver
+- **Modified** `src/client/src/pages/AgentDetail.jsx` — workspace tab container
+  root via driver
 
-## Phases
+## Phases (one per goal, worked through one at a time)
 
-### Phase 1 — Build images
-- Dockerfiles + maps + create-agent select options.
-- Create one agent of each type; terminal drops into shell; `opencode --version`
-  / `codex --version` / `claude --version` work; data dir persists across
-  restart.
+### Phase 1 — Driver framework + openclaw reference driver
+- Build `src/services/drivers/` + `getDriver()`.
+- Switch consumers (vm-manager, app.js, agent-registry, backup-manager,
+  Commands API) through the driver interface.
+- Move openclaw behavior (maps, versions, data dir, setupSteps, backupSteps,
+  commands) into the reference driver.
+- Regression against a live openclaw PAD: create, terminal, versions, update
+  card must behave exactly as before.
 
-### Phase 2 — Settings checkbox
-- `settings` endpoints + compose regeneration + stop/edit/start flow.
-- Toggle on a test agent; verify socket mount and `docker ps` from inside;
-  toggle off; verify mount gone.
+### Phase 2 — picoclaw driver
+- Create a test picoclaw agent; discover the real behavior inside the
+  container — does `openclaw setup --baseline` run? what version/CLI commands
+  exist? what's its config dir?
+- Encode the answers in the driver. Verify create, terminal, versions,
+  workspace, backup, settings toggle before moving on.
 
-### Phase 3 — Docker MCP
-- Manual `openclaw mcp add` for docker on a coding agent with the checkbox on;
-  confirm the tool works. Document the command in the MCP commands group.
+### Phase 3 — hermes driver
+- Same as Phase 2, on its own. Create a test hermes agent, discover the real
+  behavior (version binary, config dir, commands), encode it, verify end to end.
+
+### Phase 4 — opencode driver + image
+- Dockerfile + driver + CreateAgent option.
+- Create a test agent; terminal drops into shell; `opencode --version` works;
+  data dir persists across restart; terminal `pwd` = `driver.workspaceDir`;
+  files written there show up in the workspace tab.
+
+### Phase 5 — codex driver + image
+- Same as Phase 4, on its own (`codex --version`).
+
+### Phase 6 — claude driver + image
+- Same as Phase 4, on its own (`claude --version`).
+
+### Phase 7 — Docker MCP (openclaw)
+- Manual `openclaw mcp add` on a PAD with the checkbox on; confirm the tool
+  works. Document the command in the MCP commands group.
 
 ## Verification
 
 ```bash
 # build types
-sudo bash add-vm.sh mycodex --agent codex       # or via web UI
-docker exec mycodex opencode --version          # or codex / claude
+docker exec mycodex codex --version   # or opencode / claude
 
-# settings toggle on
-curl -X POST http://localhost:5051/api/agents/mycodex/settings \
-  -H "Authorization: ..." -d '{"allowDocker": true}'
-docker inspect mycodex --format '{{range .Mounts}}{{.Source}} {{.Destination}}{{"\n"}}{{end}}'
-# → /var/run/docker.sock /var/run/docker.sock
-docker exec mycodex docker ps                    # works
+# commands endpoint
+curl http://10.69.1.164:6789/api/agent-types/codex/commands   # codex groups
 
-# settings toggle off → mount gone, docker ps inside fails
-
-# MCP: openclaw mcp add docker ... → tools/list shows docker tool
+# settings toggle (already shipped via plan 09 — no re-test needed)
+# docker inspect → socket mount present/absent, docker ps from inside works/not
 ```
 
 ## Security & edge cases
 
 | Case | Handling |
 |------|----------|
-| docker socket = host root | Prominent warning in the confirm popup |
-| Image without docker CLI | Settings toggle errors with rebuild hint |
-| Container already stopped | Skip stop, still edit + start |
-| Restart kills session | Popup warns before toggling |
-| Compose file hand-edited | Regeneration overwrites it — documented as machine-generated |
+| docker socket = host root | Warning in the Settings confirm popup (shipped, plan 09) |
+| Image without docker CLI | Settings toggle auto-rebuilds with `INSTALL_DOCKER=1` (shipped) |
+| No driver for a type | `getDriver()` falls back to openclaw — never crashes |
+| Driver with no base-image version label | Update card shows "no update available" — expected |
+| Agent image with no setup steps | `setupSteps: []` → createVm skips baseline |
+| Untested agent type (picoclaw/hermes today) | Its driver phase creates a test agent and encodes the real behavior in the driver |
+| Compose file hand-edited | Regeneration overwrites it — machine-generated |
 
 ## Open questions
 
-- **"Cloud" = Claude?** Naming the third type `claude` (`@anthropic-ai/claude-code`). Say the word if it meant something else.
-- Bake docker CLI into the **openclaw** image too, or only the new coding images for now?
-- Keep the settings state in `meta.env` (`DOCKER=1`) vs parsing the compose file?
+- **"Cloud" = Claude?** Naming the third type `claude`
+  (`@anthropic-ai/claude-code`). Say the word if it meant something else.
+- **Drivers backend-only vs mirrored in the frontend?** Recommendation:
+  backend-only, with command groups served over the API.
+- Commands endpoint shape: `GET /api/agent-types/:type/commands` vs bundled
+  into `/api/config`.
 
 ## Related
 
-- `10-terminal.md` — the agent page modes this Settings mode slots into
-- Existing builds: `src/vm-builds/{openclaw,picoclaw,hermes}/Dockerfile`
-- `06-paddock-own-mcp.md` — unrelated to this; the harness idea was dropped
+- `10-terminal.md` — the agent page modes; Commands is the home mode
+- `09-settings-page.md` — shipped the settings page this plan originally
+  proposed (2026-08-04)
+- Existing builds: `src/vm-builds/{openclaw,picoclaw,hermes,monitor}`
+- `06-paddock-own-mcp.md` — unrelated; the harness idea was dropped

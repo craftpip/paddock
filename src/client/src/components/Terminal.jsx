@@ -44,6 +44,7 @@ import { useConfirm } from '../lib/confirm'
  *  | `reconnect()`    | —        | Confirms, then tears down and starts a fresh shell session. |
  *  | `focus()`        | —        | Focuses the terminal.                        |
  *  | `isConnected()`  | boolean  | True when the WebSocket is OPEN.             |
+ *  | `isBusy()`       | boolean  | True when a command appears to be running (prompt heuristic + tracked injected commands). |
  *  | `setLocked(v)`   | —        | Lock/unlock input imperatively (independent of the `disabled` prop). |
  *  | `lock()`         | —        | Shorthand for `setLocked(true)`.             |
  *  | `unlock()`       | —        | Shorthand for `setLocked(false)`.            |
@@ -166,6 +167,9 @@ const Terminal = forwardRef(function Terminal(
   const takeoverRef = useRef(false) // 4001 superseded → reconnect is manual-only
   const initInFlightRef = useRef(false) // an async initTerminal() is mid-flight
   const cmdRunningRef = useRef(false) // an injected command is in flight
+  const shellBusyRef = useRef(false) // prompt-based: the shell is occupied by a command
+  const shellBusyShowRef = useRef(false) // what the Running badge actually shows (delayed)
+  const busySinceRef = useRef(null) // timestamp when the shell first looked busy
   const pendingMarkersRef = useRef(new Set()) // sentinels awaiting their echo
   const markerCmdRef = useRef(new Map()) // sentinel → command text
   const lastDoneCmdRef = useRef(null) // cmd of the last resolved sentinel
@@ -177,6 +181,7 @@ const Terminal = forwardRef(function Terminal(
   const [fontSize, setFontSize] = useState(14)
   const [initError, setInitError] = useState('')
   const [cmdRunning, setCmdRunning] = useState(false)
+  const [shellBusy, setShellBusy] = useState(false)
   const [uiLocked, setUiLocked] = useState(false)
   const [fullscreen, setFullscreen] = useState(false)
 
@@ -224,6 +229,50 @@ const Terminal = forwardRef(function Terminal(
       return true
     }
     return false
+  }, [])
+
+  /** Matches a fresh bash prompt at the start of a line: `user@host:~/dir$ `,
+   *  `root# `, `~$ ` … Anything ending in `$`/`#` right after the prompt text.
+   *  (Also catches `user@host:~/dir#` for root shells.) */
+  const PROMPT_RE = /^[\w.-]+(@[\w.-]+)?(:\S*)?[$#]\s?/
+
+  /** Heuristic: the shell is idle only when the cursor sits on a fresh prompt
+   *  line. While a command runs the cursor is on the echoed command, its
+   *  output, or a TUI — none of which look like a prompt. This is read from
+   *  the live xterm buffer, so it needs no backend round-trip. Only updates
+   *  the raw ref; `syncBusy` decides when the badge actually shows. */
+  const checkShellBusy = useCallback(() => {
+    const term = termRef.current
+    if (!term) return
+    try {
+      const b = term.buffer.active
+      // cursorY is viewport-relative (0 = the row at baseY); the cursor's
+      // absolute buffer line is baseY + cursorY.
+      const line = b.getLine(b.baseY + b.cursorY)
+      if (!line) return
+      shellBusyRef.current = !PROMPT_RE.test(line.translateToString(true))
+    } catch {}
+  }, [])
+
+  /** Debounce the Stop Command button: a command must hold the shell for ~0.4s
+   *  before the button shows (quick commands never flash), and it hides
+   *  immediately the moment the shell goes idle. Driven by a 250ms poll. */
+  const syncBusy = useCallback(() => {
+    const raw = shellBusyRef.current || cmdRunningRef.current
+    const now = Date.now()
+    if (raw) {
+      if (busySinceRef.current === null) busySinceRef.current = now
+      if (!shellBusyShowRef.current && now - busySinceRef.current >= 400) {
+        shellBusyShowRef.current = true
+        setStateSafe(setShellBusy, true)
+      }
+    } else {
+      busySinceRef.current = null
+      if (shellBusyShowRef.current) {
+        shellBusyShowRef.current = false
+        setStateSafe(setShellBusy, false)
+      }
+    }
   }, [])
 
   /** Tell the backend the PTY size has changed. Sent as a NUL-NUL-prefixed
@@ -340,6 +389,7 @@ const Terminal = forwardRef(function Terminal(
     ws.onmessage = (evt) => {
       if (gen !== genRef.current) return
       writeTerm(evt.data)
+      checkShellBusy()
 
       // Look for pending completion sentinels in the output.
       const pending = pendingMarkersRef.current
@@ -466,6 +516,10 @@ const Terminal = forwardRef(function Terminal(
       }
     }
     setStateSafe(setConnState, 'disconnected')
+    shellBusyRef.current = false
+    busySinceRef.current = null
+    shellBusyShowRef.current = false
+    setStateSafe(setShellBusy, false)
   }
 
   /** Retry connecting after an unexpected close, with a backoff that doubles
@@ -578,6 +632,24 @@ const Terminal = forwardRef(function Terminal(
     } catch {}
   }, [fontSize, pushResize])
 
+  // Poll the prompt heuristic + drive the Running-badge debounce while
+  // connected. The interval is the sole driver of the badge state; quick
+  // commands go busy→idle between ticks and never show it.
+  useEffect(() => {
+    if (connState !== 'connected') {
+      shellBusyRef.current = false
+      busySinceRef.current = null
+      shellBusyShowRef.current = false
+      setStateSafe(setShellBusy, false)
+      return
+    }
+    const iv = setInterval(() => {
+      checkShellBusy()
+      syncBusy()
+    }, 250)
+    return () => clearInterval(iv)
+  }, [connState, checkShellBusy, syncBusy])
+
   // When locked, stop the cursor blinking so it reads as "read-only".
   useEffect(() => {
     const term = termRef.current
@@ -629,8 +701,9 @@ const Terminal = forwardRef(function Terminal(
   }
 
   /** Switch to a session: persist choice, tear down, reconnect (backend
-   *  auto-creates the tmux session on attach if it does not exist yet). The
-   *  self-healing reconcile effect re-attaches after the teardown. */
+   *  auto-creates the tmux session on attach if it does not exist yet). Like
+   *  reconnect(), we init directly after teardown — the reconcile effect can't
+   *  be relied on when the state is already "disconnected". */
   const switchSession = useCallback(
     (id) => {
       if (!id || id === sessionIdRef.current) return
@@ -638,6 +711,7 @@ const Terminal = forwardRef(function Terminal(
       setSessionId(id)
       try { localStorage.setItem(`pad-term-session-${name}`, id) } catch {}
       teardown()
+      initTerminal().catch(() => {})
     },
     [name]
   )
@@ -722,11 +796,15 @@ const Terminal = forwardRef(function Terminal(
       confirmText: 'Reconnect',
     })
     if (!ok) return
-    // Clear the takeover flag (explicit user intent to retake the session),
-    // then teardown drops the connection state to "disconnected"; the
-    // self-healing reconcile effect re-attaches immediately.
+    // Clear the takeover flag (explicit user intent to retake the session).
+    // Teardown drops the connection state to "disconnected", then we connect
+    // directly. We CANNOT rely on the self-healing reconcile effect here: after
+    // a 4001 takeover the state is ALREADY "disconnected", so setting it again
+    // bails out of React's render (same value → no effect run) and the terminal
+    // would stay stuck on "Terminal Disconnected" forever.
     takeoverRef.current = false
     teardown()
+    initTerminal().catch(() => {})
   }
 
   /** Inject `text` as a tracked command (sentinel + completion callbacks). */
@@ -763,6 +841,7 @@ const Terminal = forwardRef(function Terminal(
       reconnect,
       focus: () => termRef.current?.focus(),
       isConnected: () => wsRef.current?.readyState === WebSocket.OPEN,
+      isBusy: () => shellBusyRef.current || cmdRunningRef.current,
       setLocked: (v) => {
         manualLockRef.current = !!v
         refreshLockUI()
@@ -801,6 +880,15 @@ const Terminal = forwardRef(function Terminal(
           )}
           <span className="w-px h-4 bg-slate-700" />
           <span className="text-xs text-slate-300 font-mono">{title || name}</span>
+          {shellBusy && (
+            <button
+              onClick={() => ref.current?.close()}
+              title="Send Ctrl+C to interrupt the running command"
+              className="px-2 py-1 text-xs text-red-400 hover:text-white hover:bg-red-900/40 rounded transition-colors"
+            >
+              Stop Command
+            </button>
+          )}
         </div>
         <div className="relative flex items-center gap-1.5">
           <div ref={sessionMenuRef} className="relative">
@@ -873,7 +961,6 @@ const Terminal = forwardRef(function Terminal(
           <button onClick={() => setFontSize((s) => Math.min(24, s + 1))} className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">A+</button>
           <span className="w-px h-4 bg-slate-700" />
           <button onClick={() => ref.current?.clear()} className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">Clear</button>
-          <button onClick={() => ref.current?.close()} className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">Close</button>
           <button onClick={reconnect} className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">Reconnect</button>
 
           {onToggleCollapse && showCollapse && !fullscreen && (

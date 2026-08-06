@@ -1021,15 +1021,17 @@ app.get('/api/agents/:name', (req, res) => {
   res.json(agent);
 });
 
-app.get('/api/agents/:name/workspace', (req, res) => {
+app.get('/api/agents/:name/workspace', async (req, res) => {
   const agent = registry.getAgent(req.params.name);
   if (!agent) return res.status(404).json({ error: 'Agent not found' });
   const relativePath = req.query.path || '/';
+  const scope = req.query.scope || 'host';
   try {
-    const listing = require('./services/workspace').listDir(agent.name, relativePath);
+    const listing = await require('./services/workspace').listDir(agent.name, relativePath, scope);
     res.json(listing);
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    const status = err.message === 'Container is not running' ? 503 : 400;
+    res.status(status).json({ error: err.message });
   }
 });
 
@@ -1073,25 +1075,25 @@ app.get('/api/agents/:name/workspace/parent/download', (req, res) => {
   }
 });
 
-app.get('/api/agents/:name/workspace/file', (req, res) => {
+app.get('/api/agents/:name/workspace/file', async (req, res) => {
   const agent = registry.getAgent(req.params.name);
   if (!agent) return res.status(404).json({ error: 'Agent not found' });
   if (!req.query.path) return res.status(400).json({ error: 'path required' });
   try {
-    const file = require('./services/workspace').readFile(agent.name, req.query.path);
+    const file = await require('./services/workspace').readFile(agent.name, req.query.path, req.query.scope || 'host');
     res.json(file);
   } catch (err) {
     res.status(404).json({ error: err.message });
   }
 });
 
-app.post('/api/agents/:name/workspace/save', (req, res) => {
+app.post('/api/agents/:name/workspace/save', async (req, res) => {
   const agent = registry.getAgent(req.params.name);
   if (!agent) return res.status(404).json({ error: 'Agent not found' });
   const { path: filePath, content } = req.body;
   if (!filePath) return res.status(400).json({ error: 'path required' });
   try {
-    const result = require('./services/workspace').writeFile(agent.name, filePath, content || '');
+    const result = await require('./services/workspace').writeFile(agent.name, filePath, content || '', req.body.scope || 'host');
     res.json({ ok: true, ...result });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1111,36 +1113,48 @@ app.post('/api/agents/:name/workspace/parent/save', (req, res) => {
   }
 });
 
-app.post('/api/agents/:name/workspace/folder', (req, res) => {
+app.post('/api/agents/:name/workspace/folder', async (req, res) => {
   const agent = registry.getAgent(req.params.name);
   if (!agent) return res.status(404).json({ error: 'Agent not found' });
   const { path: parentPath, name: folderName } = req.body;
   try {
-    require('./services/workspace').createFolder(agent.name, parentPath, folderName);
+    await require('./services/workspace').createFolder(agent.name, parentPath, folderName, req.body.scope || 'host');
     res.json({ ok: true });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
 });
 
-app.post('/api/agents/:name/workspace/rename', (req, res) => {
+app.post('/api/agents/:name/workspace/rename', async (req, res) => {
   const agent = registry.getAgent(req.params.name);
   if (!agent) return res.status(404).json({ error: 'Agent not found' });
   const { path: entryPath, new_name } = req.body;
   try {
-    require('./services/workspace').renameEntry(agent.name, entryPath, new_name);
+    await require('./services/workspace').renameEntry(agent.name, entryPath, new_name, req.body.scope || 'host');
     res.json({ ok: true });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
 });
 
-app.post('/api/agents/:name/workspace/delete', (req, res) => {
+app.post('/api/agents/:name/workspace/delete', async (req, res) => {
   const agent = registry.getAgent(req.params.name);
   if (!agent) return res.status(404).json({ error: 'Agent not found' });
   const { path: entryPath } = req.body;
   try {
-    require('./services/workspace').deleteEntry(agent.name, entryPath);
+    await require('./services/workspace').deleteEntry(agent.name, entryPath, req.body.scope || 'host');
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/agents/:name/workspace/move', async (req, res) => {
+  const agent = registry.getAgent(req.params.name);
+  if (!agent) return res.status(404).json({ error: 'Agent not found' });
+  const { path: fromPath, to } = req.body;
+  try {
+    await require('./services/workspace').moveEntry(agent.name, fromPath, to, req.body.scope || 'host');
     res.json({ ok: true });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -1152,23 +1166,21 @@ app.post('/api/agents/:name/workspace/upload', (req, res) => {
   if (!agent) return res.status(404).json({ error: 'Agent not found' });
   const multer = require('multer');
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
-  upload.single('file')(req, res, (err) => {
+  upload.single('file')(req, res, async (err) => {
     if (err) return res.status(400).json({ error: err.message });
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
     const targetDir = req.body.path || '/';
+    const scope = req.body.scope || 'host';
     try {
-      const destDir = require('./services/workspace').resolveSafePath(agent.workspace_root, targetDir);
-      const safeName = path.basename(req.file.originalname);
-      if (!safeName || safeName.startsWith('.')) return res.status(400).json({ error: 'Invalid filename' });
-      fs.writeFileSync(path.join(destDir, safeName), req.file.buffer);
-      res.json({ ok: true, name: safeName });
-    } catch (err) {
-      res.status(500).json({ error: err.message });
+      await require('./services/workspace').writeFileB64(agent.name, targetDir, req.file.originalname, req.file.buffer, scope);
+      res.json({ ok: true, name: path.basename(req.file.originalname) });
+    } catch (e2) {
+      res.status(500).json({ error: e2.message });
     }
   });
 });
 
-app.post('/api/agents/:name/workspace/create-file', (req, res) => {
+app.post('/api/agents/:name/workspace/create-file', async (req, res) => {
   const agent = registry.getAgent(req.params.name);
   if (!agent) return res.status(404).json({ error: 'Agent not found' });
   const { path: relativePath, name: fileName } = req.body;
@@ -1176,25 +1188,25 @@ app.post('/api/agents/:name/workspace/create-file', (req, res) => {
   try {
     const dir = relativePath || '/';
     const filePath = dir === '/' ? '/' + fileName : dir + '/' + fileName;
-    require('./services/workspace').writeFile(agent.name, filePath, '');
+    await require('./services/workspace').writeFile(agent.name, filePath, '', req.body.scope || 'host');
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/api/agents/:name/workspace/download', (req, res) => {
+app.get('/api/agents/:name/workspace/download', async (req, res) => {
   const agent = registry.getAgent(req.params.name);
   if (!agent) return res.status(404).json({ error: 'Agent not found' });
   const relativePath = req.query.path;
   if (!relativePath) return res.status(400).send('path required');
   try {
-    const absPath = require('./services/workspace').resolveSafePath(agent.workspace_root, relativePath);
-    if (!fs.existsSync(absPath)) return res.status(404).send('Not found');
-    const stat = fs.statSync(absPath);
-    if (stat.isDirectory()) return res.status(400).send('Cannot download directory');
-    if (stat.size > 50 * 1024 * 1024) return res.status(413).send('File too large');
-    res.download(absPath);
+    const file = await require('./services/workspace').readFileB64(agent.name, relativePath, req.query.scope || 'host');
+    if (file.error) return res.status(404).send(file.error);
+    if (file.size > 50 * 1024 * 1024) return res.status(413).send('File too large');
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(file.name || 'download')}"`);
+    res.send(Buffer.from(file.content, 'base64'));
   } catch (err) {
     res.status(400).send(err.message);
   }

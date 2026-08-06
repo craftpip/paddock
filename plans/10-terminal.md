@@ -2,7 +2,9 @@
 
 All terminal-related work in one place: UI design, component, sessions, review, and migration.
 
-> **Last updated:** 2026-08-05. The old per-topic plans (`terminal-component.md`,
+> **Last updated:** 2026-08-06. **All planned work is implemented.** The terminal is fully absorbed into docs: `src/docs/terminal.md` (canonical write-up) + `src/docs/architecture.md` §13 (condensed contract). This file stays as the design + review record. Only two optional items remain open (see Open Questions / Migration Checklist).
+>
+> **2026-08-05 note:** The old per-topic plans (`terminal-component.md`,
 > `terminal-sessions.md`, `terminal-first-ui.md`, `terminal-first-ui-WIP.md`,
 > `terminal-component-review.md`) were deleted and folded into this one file.
 

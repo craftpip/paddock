@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useCallback } from 'react'
+import { useEffect, useState, useRef, useCallback, useLayoutEffect } from 'react'
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom'
 import { useAgents } from '../stores/agents'
 import { api } from '../lib/api'
@@ -6,6 +6,7 @@ import { useConfirm } from '../lib/confirm'
 import Terminal from '../components/Terminal'
 import CommandsPane from './agent/CommandsPane'
 import SettingsTab from './agent/SettingsTab'
+import PromptModal from '../components/PromptModal'
 
 const MODES = [
   { id: 'commands', label: 'Commands' },
@@ -277,6 +278,7 @@ export default function AgentDetail() {
 // ─── Workspace ───────────────────────────────────────────────
 
 function WorkspaceTab({ agent }) {
+  const confirm = useConfirm()
   const storageKey = `workspace-state-${agent.name}`
   function restoreState() {
     const raw = sessionStorage.getItem(storageKey)
@@ -290,63 +292,119 @@ function WorkspaceTab({ agent }) {
     const clean = String(p).replace(/\/+/g, '/').replace(/\/+$/, '')
     return clean || '/'
   }
-  const [path, setPath] = useState(normalizePath(saved.path && saved.path.startsWith('/') ? saved.path : (agent.workspace_root || '/')))
+  const containerAvailable = agent.status === 'running'
+  const hostRoot = normalizePath(agent.workspace_root || `/workspace/instances/${agent.name}/openclaw`)
+  const containerRoot = '/root/.openclaw'
+  const initialScope = saved.scope === 'container' || saved.scope === 'host' ? saved.scope : 'container'
+  const [scope, setScope] = useState(containerAvailable ? initialScope : 'host')
+  const initialRoot = scope === 'container' ? containerRoot : hostRoot
+  const [path, setPath] = useState(normalizePath(saved.scope === scope && saved.path ? saved.path : initialRoot))
   const [pathDraft, setPathDraft] = useState('')
   const [listing, setListing] = useState(null)
   const [error, setError] = useState('')
   const [uploading, setUploading] = useState(false)
   const [uploadPct, setUploadPct] = useState(0)
   const [fileModal, setFileModal] = useState(null)
+  const [moveTarget, setMoveTarget] = useState(null)
   const [newFileName, setNewFileName] = useState('')
   const [newFolderName, setNewFolderName] = useState('')
   const [loading, setLoading] = useState(false)
   const fileInputRef = useRef(null)
+  const pathInputRef = useRef(null)
+  const navScrollRef = useRef(false)
+  const pathDraftRef = useRef('')
 
-  const load = useCallback((p) => {
+  const homePath = scope === 'container' ? `${containerRoot}/workspace` : `${hostRoot}/workspace`
+  const isNavRoot = scope === 'container' ? path === '/' : path === hostRoot
+
+  const load = useCallback((p, sc) => {
     setError('')
     setLoading(true)
-    api(`/api/agents/${agent.name}/workspace?path=${encodeURIComponent(p)}`).then((d) => {
-      if (d.entries) setListing(d)
+    api(`/api/agents/${agent.name}/workspace?path=${encodeURIComponent(p)}&scope=${sc}`).then((d) => {
+      if (d.entries) {
+        setListing(d)
+        if (d.path && normalizePath(d.path) !== normalizePath(p)) setPath(normalizePath(d.path))
+      }
       else if (d.error) setError(d.error)
     }).catch(() => setError('Failed to load workspace'))
     .finally(() => setLoading(false))
   }, [agent.name])
 
-  useEffect(() => { load(path) }, [path, load])
-  useEffect(() => { sessionStorage.setItem(storageKey, JSON.stringify({ path })) }, [path, storageKey])
-  useEffect(() => { setPathDraft(path) }, [path])
+  useEffect(() => { load(path, scope) }, [path, scope, load])
+  useEffect(() => { sessionStorage.setItem(storageKey, JSON.stringify({ path, scope })) }, [path, scope, storageKey])
+  useEffect(() => {
+    pathDraftRef.current = pathDraft
+  }, [pathDraft])
 
-  const parts = path.split('/').filter(Boolean)
-  const breadcrumbs = [{ name: '/', path: '/' }, ...parts.map((p, i) => ({ name: p, path: '/' + parts.slice(0, i + 1).join('/') }))]
+  useEffect(() => {
+    if (pathDraftRef.current === path) {
+      const el = pathInputRef.current
+      if (el) el.scrollLeft = el.scrollWidth + 100
+      return
+    }
+    setPathDraft(path)
+    navScrollRef.current = true
+  }, [path])
 
+  useLayoutEffect(() => {
+    if (!navScrollRef.current) return
+    navScrollRef.current = false
+    const el = pathInputRef.current
+    if (el) el.scrollLeft = el.scrollWidth + 100
+  }, [pathDraft])
+
+  const rel = scope === 'container'
+    ? path.replace(/^\/+/, '')
+    : (path === hostRoot ? '' : (path.startsWith(hostRoot + '/') ? path.slice(hostRoot.length + 1) : ''))
+  const parts = rel.split('/').filter(Boolean)
+  const breadcrumbs = scope === 'container'
+    ? [{ name: '/', path: '/' }, ...parts.map((p, i) => ({ name: p, path: '/' + parts.slice(0, i + 1).join('/') }))]
+    : [{ name: agent.name, path: hostRoot }, ...parts.map((p, i) => ({ name: p, path: hostRoot + '/' + parts.slice(0, i + 1).join('/') }))]
+
+  function switchScope(next) {
+    if (next === scope) return
+    setScope(next)
+    setPath(next === 'container' ? containerRoot : hostRoot)
+  }
   function goToDir(p) { setPath(normalizePath(p)) }
   function goUp() {
-    if (path === '/') return
+    if (isNavRoot) return
     setPath(normalizePath(path.split('/').slice(0, -1).join('/')))
   }
   function goTo(p) {
-    const target = (p || '/').trim() || '/'
-    setPath(normalizePath(target.startsWith('/') ? target : '/' + target))
+    const target = normalizePath((p || '/').trim() || '/')
+    if (scope === 'host' && target !== hostRoot && !target.startsWith(hostRoot + '/')) {
+      setPath(hostRoot)
+      setPathDraft(hostRoot)
+      return
+    }
+    setPath(target)
+  }
+
+  function toMsg(err) {
+    const e = err?.error || err?.message || err
+    if (typeof e === 'string') return e
+    try { return JSON.stringify(e) } catch { return String(e) }
   }
 
   async function createFile(e) {
     e.preventDefault()
     if (!newFileName) return
     try {
-      await api(`/api/agents/${agent.name}/workspace/create-file`, { method: 'POST', body: { path, name: newFileName } })
+      await api(`/api/agents/${agent.name}/workspace/create-file`, { method: 'POST', body: { path, name: newFileName, scope } })
       setNewFileName('')
-      load(path)
-    } catch (err) { setError(err.error || err.message) }
+      load(path, scope)
+    } catch (err) { setError(toMsg(err)) }
   }
 
   async function createFolder(e) {
     e.preventDefault()
     if (!newFolderName) return
     try {
-      await api(`/api/agents/${agent.name}/workspace/folder`, { method: 'POST', body: { path, name: newFolderName } })
+      await api(`/api/agents/${agent.name}/workspace/folder`, { method: 'POST', body: { path, name: newFolderName, scope } })
       setNewFolderName('')
-      load(path)
-    } catch (err) { setError(err.error || err.message) }
+      load(path, scope)
+    } catch (err) { setError(toMsg(err)) }
   }
 
   async function handleUpload(evt) {
@@ -357,6 +415,7 @@ function WorkspaceTab({ agent }) {
     const fd = new FormData()
     fd.append('file', file)
     fd.append('path', path)
+    fd.append('scope', scope)
     try {
       const xhr = new XMLHttpRequest()
       xhr.upload.addEventListener('progress', (e) => {
@@ -369,7 +428,7 @@ function WorkspaceTab({ agent }) {
         xhr.send(fd)
       })
       setUploading(false)
-      load(path)
+      load(path, scope)
     } catch (err) {
       setError(err.message || 'Upload failed')
       setUploading(false)
@@ -378,14 +437,19 @@ function WorkspaceTab({ agent }) {
   }
 
   async function renameEntry(entryPath) {
-    const currentName = entryPath.split('/').pop()
-    const newName = prompt('Rename "' + currentName + '" to:', currentName)
-    if (newName && newName !== currentName) {
-      try {
-        await api(`/api/agents/${agent.name}/workspace/rename`, { method: 'POST', body: { path: entryPath, new_name: newName } })
-        load(path)
-      } catch (err) { setError(err.error || err.message) }
-    }
+    setMoveTarget({ path: entryPath })
+  }
+
+  async function doMove(newPath) {
+    if (!moveTarget) return
+    const src = moveTarget.path
+    const dst = normalizePath(newPath)
+    if (!dst || dst === src) { setMoveTarget(null); return }
+    try {
+      await api(`/api/agents/${agent.name}/workspace/move`, { method: 'POST', body: { path: src, to: dst, scope } })
+      setMoveTarget(null)
+      load(path, scope)
+    } catch (err) { setError(toMsg(err)) }
   }
 
   async function deleteEntry(entryPath, entryName) {
@@ -397,16 +461,16 @@ function WorkspaceTab({ agent }) {
     })
     if (!ok) return
     try {
-      await api(`/api/agents/${agent.name}/workspace/delete`, { method: 'POST', body: { path: entryPath } })
-      load(path)
-    } catch (err) { setError(err.error || err.message) }
+      await api(`/api/agents/${agent.name}/workspace/delete`, { method: 'POST', body: { path: entryPath, scope } })
+      load(path, scope)
+    } catch (err) { setError(toMsg(err)) }
   }
 
   async function openFile(entryPath) {
     try {
-      const d = await api(`/api/agents/${agent.name}/workspace/file?path=` + encodeURIComponent(entryPath))
+      const d = await api(`/api/agents/${agent.name}/workspace/file?path=` + encodeURIComponent(entryPath) + `&scope=${scope}`)
       if (d.error) { setError(d.error); return }
-      setFileModal(d)
+      setFileModal({ ...d, path: entryPath })
     } catch (err) { setError('Failed to load file') }
   }
 
@@ -433,12 +497,12 @@ function WorkspaceTab({ agent }) {
       catch (e) { setJsonError(getJsonLine(content, e)); return }
     }
     try {
-      await api(`/api/agents/${agent.name}/workspace/save`, { method: 'POST', body: { path: fileModal.path || fileModal.name, content } })
+      await api(`/api/agents/${agent.name}/workspace/save`, { method: 'POST', body: { path: fileModal.path || fileModal.name, content, scope } })
       setFileModal({ ...fileModal, content })
       setFileDirty(false)
       setFileSaved(true)
       setTimeout(() => setFileSaved(false), 2000)
-    } catch (err) { setError(err.error || err.message) }
+    } catch (err) { setError(toMsg(err)) }
   }
 
   async function closeFileModal() {
@@ -468,38 +532,71 @@ function WorkspaceTab({ agent }) {
 
   return (
     <div>
+      {/* Container down banner — pad not running, browsing from host */}
+      {agent.status !== 'running' && (
+        <div className="-mt-6 mb-4 flex items-center justify-between gap-3 px-4 py-3 rounded-xl border border-amber-700/50 bg-amber-900/20 text-amber-200">
+          <div>
+            <p className="font-medium">Container is down</p>
+            <p className="text-sm text-amber-300/70">The pad container is not running, so the workspace is being browsed from the host. You can still access your files here.</p>
+          </div>
+          <button disabled
+                  className="px-3 py-1.5 bg-slate-700 text-slate-400 rounded-lg text-sm font-medium opacity-50 cursor-not-allowed whitespace-nowrap" title="Container is not running">
+            Container
+          </button>
+        </div>
+      )}
+
       {/* Location bar — file-browser style */}
       <div className="flex items-center gap-2 mb-2">
-        <form onSubmit={(e) => { e.preventDefault(); goTo(pathDraft) }}
-              className="flex-1 flex items-center gap-2 min-w-0">
-          <span className="text-slate-500 shrink-0">📁</span>
-          <input
-            value={pathDraft}
-            onChange={(e) => setPathDraft(e.target.value)}
-            spellCheck={false}
-            placeholder="/"
-            className="flex-1 min-w-0 px-3 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white font-mono focus:border-cyan-500 focus:outline-none placeholder-slate-600"
-          />
-          <button type="submit"
-                  className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-sm font-medium transition-colors whitespace-nowrap">
-            Go
+        <div className="flex items-center rounded-lg bg-slate-800 p-1 w-full min-w-0" title="Browse inside the pad container (Container) or from the host (Host)">
+          <div className="flex items-center rounded-md bg-slate-950/60 p-0.5 shrink-0">
+            <button onClick={() => switchScope('container')} disabled={!containerAvailable}
+                    className={`px-3 py-1 rounded-md text-sm font-medium transition-colors whitespace-nowrap ${scope === 'container' ? 'bg-cyan-600 text-white' : 'text-slate-300 hover:text-white'} ${!containerAvailable ? 'opacity-40 cursor-not-allowed' : ''}`}>
+              Container
+            </button>
+            <button onClick={() => switchScope('host')}
+                    className={`px-3 py-1 rounded-md text-sm font-medium transition-colors whitespace-nowrap ${scope === 'host' ? 'bg-cyan-600 text-white' : 'text-slate-300 hover:text-white'}`}>
+              Host
+            </button>
+          </div>
+          <span className="w-px h-6 bg-slate-700 mx-1 shrink-0" />
+          <button onClick={goUp} disabled={isNavRoot}
+                  title="Go up one level"
+                  className="flex items-center justify-center w-7 h-7 rounded-md text-slate-400 hover:text-white hover:bg-slate-700 disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-not-allowed transition-colors shrink-0">
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M5 15l7-7 7 7" /></svg>
           </button>
-        </form>
-        <button onClick={goUp} disabled={path === '/'}
-                className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-white rounded-lg text-sm transition-colors whitespace-nowrap">
-          ↑ Up
-        </button>
-        <button onClick={() => goTo(agent.workspace_root || '/')}
-                className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm transition-colors whitespace-nowrap">
-          Home
-        </button>
+          <span className="w-px h-6 bg-slate-700 mx-1 shrink-0" />
+          <form onSubmit={(e) => { e.preventDefault(); goTo(pathDraft) }}
+                className="flex flex-1 items-center gap-1.5 min-w-0 px-1">
+            <svg className="w-4 h-4 text-slate-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>
+            <input
+              ref={pathInputRef}
+              value={pathDraft}
+              onChange={(e) => setPathDraft(e.target.value)}
+              spellCheck={false}
+              placeholder="/"
+              className="flex-1 min-w-0 bg-transparent text-sm text-white font-mono placeholder-slate-600 focus:outline-none"
+            />
+            <button type="submit"
+                    className="px-3 py-1 bg-cyan-600 hover:bg-cyan-500 text-white rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0">
+              Go
+            </button>
+          </form>
+          <span className="w-px h-6 bg-slate-700 mx-1 shrink-0" />
+          <button onClick={() => setPath(homePath)}
+                  title="Go to the workspace folder"
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-sm text-slate-300 hover:text-white hover:bg-slate-700 transition-colors whitespace-nowrap">
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>
+            Workspace folder
+          </button>
+        </div>
       </div>
 
       {/* Breadcrumbs */}
       <div className="flex items-center gap-1 text-sm text-slate-500 mb-4 overflow-x-auto flex-wrap">
         {breadcrumbs.map((b, i) => (
           <span key={b.path} className="flex items-center gap-1 whitespace-nowrap">
-            {i > 1 && <span className="text-slate-600">/</span>}
+            {i > (scope === 'container' ? 1 : 0) && <span className="text-slate-600">/</span>}
             {i < breadcrumbs.length - 1 ? (
               <button onClick={() => goToDir(b.path)} className="hover:text-slate-300 transition-colors">{b.name}</button>
             ) : (
@@ -569,7 +666,7 @@ function WorkspaceTab({ agent }) {
                 </tr>
               </thead>
               <tbody>
-                {path !== '/' && (
+                {!isNavRoot && (
                   <tr className="border-b border-slate-800/50 hover:bg-slate-800/30 cursor-pointer" onClick={goUp}>
                     <td className="px-4 py-2 text-cyan-400" colSpan={4}>&larr; Up</td>
                   </tr>
@@ -586,7 +683,7 @@ function WorkspaceTab({ agent }) {
                         {entry.type === 'directory' ? (
                           <span className="text-cyan-400">
                             <span className="mr-1.5 text-slate-500">📁</span>{entry.name}
-                            {entry.name === 'workspace' && <span className="ml-2 inline-block px-1.5 py-0.5 rounded text-[10px] font-medium bg-cyan-900/50 text-cyan-300 border border-cyan-800/50 align-middle">workspace</span>}
+                            {scope === 'container' && entry.name === 'workspace' && <span className="ml-2 inline-block px-1.5 py-0.5 rounded text-[10px] font-medium bg-cyan-900/50 text-cyan-300 border border-cyan-800/50 align-middle">workspace</span>}
                           </span>
                         ) : (
                           <span className="text-slate-200">
@@ -599,11 +696,11 @@ function WorkspaceTab({ agent }) {
                       <td className="px-4 py-2">
                         <div className="flex items-center gap-1 opacity-50 group-hover:opacity-100 transition-opacity">
                           {entry.type === 'file' && (
-                            <a href={`/api/agents/${agent.name}/workspace/download?path=${encodeURIComponent(entryPath)}`}
+                            <a href={`/api/agents/${agent.name}/workspace/download?path=${encodeURIComponent(entryPath)}&scope=${scope}`}
                                className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors" title="Download" download>DL</a>
                           )}
                           <button onClick={() => renameEntry(entryPath)}
-                                  className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors" title="Rename">MV</button>
+                                  className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors" title="Move">MV</button>
                           <button onClick={() => deleteEntry(entryPath, entry.name)}
                                   className="px-2 py-1 text-xs text-red-400 hover:text-red-300 hover:bg-slate-700 rounded transition-colors" title="Delete">RM</button>
                         </div>
@@ -643,7 +740,7 @@ function WorkspaceTab({ agent }) {
               </div>
               <div className="flex items-center gap-2">
                 {editable && <button onClick={saveFile} className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded text-sm transition-colors">Save</button>}
-                <a href={`/api/agents/${agent.name}/workspace/download?path=${encodeURIComponent(fileModal.path || fileModal.name)}`}
+                <a href={`/api/agents/${agent.name}/workspace/download?path=${encodeURIComponent(fileModal.path || fileModal.name)}&scope=${scope}`}
                    className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded text-sm transition-colors" download>Download</a>
                 <button onClick={closeFileModal} className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded text-sm transition-colors">Close</button>
               </div>
@@ -660,6 +757,17 @@ function WorkspaceTab({ agent }) {
             </div>
           </div>
         </div>
+      )}
+
+      {moveTarget && (
+        <PromptModal
+          title="Move"
+          message={`Current location:\n${moveTarget.path}`}
+          initialValue={moveTarget.path}
+          confirmText="Move"
+          onCancel={() => setMoveTarget(null)}
+          onSubmit={(value) => doMove(value)}
+        />
       )}
     </div>
   )

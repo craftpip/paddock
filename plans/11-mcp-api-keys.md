@@ -1,6 +1,7 @@
 # MCP API Keys — Plan
 
-## Status: Proposed (2026-08-04)
+**Status: Implemented (2026-08-04).** All three phases shipped — keys backend, Profile UI, and `/mcp` bearer auth with per-user ownership scoping.
+**Absorbed into docs:** `docs/architecture.md` — section 15.6 (API Keys / `src/services/api-keys.js`), the route map (`/api/profile/keys*`), and section 25 (MCP server auth). This file stays as the design record.
 
 ## Goal
 
@@ -149,19 +150,19 @@ Claude Code:
 
 ## Phases
 
-### Phase 1 — Keys backend
+### Phase 1 — Keys backend — ✅ done
 - `api_keys` migration + `src/services/api-keys.js` (generate, hash, CRUD).
 - `GET/POST/DELETE /api/profile/keys*` routes with session + CSRF + owner-scoping.
-- Verify with curl: create → returns raw key once; list → no raw key; delete → gone.
+- Verified with curl: create → returns raw key once; list → no raw key; delete → gone.
 
-### Phase 2 — Profile UI
+### Phase 2 — Profile UI — ✅ done
 - API Keys card in `Profile.jsx`: list + create + one-time reveal modal with Copy + revoke.
-- Tested against the real endpoints in the browser (per AGENTS.md: always test before delivering).
+- Tested against the real endpoints in the browser.
 
-### Phase 3 — Wire `/mcp` auth
-- When `06-paddock-own-mcp.md` ships, `/mcp` uses `api-keys.authenticate()`.
-- Tools map identity to permissions: admin → all agents, user → owned agents.
-- Verify from opencode/Claude Code: valid key works, missing/revoked key → 401, non-admin key can't touch another user's agent.
+### Phase 3 — Wire `/mcp` auth — ✅ done
+- `/mcp` (see `plans/06-paddock-own-mcp.md` / `src/mcp.js`) uses `api-keys.authenticate()`.
+- Tools map identity to permissions: admin → all agents, user → owned agents (`mcpContext` + `currentUser()`, owner check per tool handler).
+- Verified: valid key works, missing/revoked key → 401, non-admin key can't touch another user's agent.
 
 ## Verification
 

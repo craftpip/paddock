@@ -265,6 +265,9 @@ When an HTMX request is detected (`req.headers['hx-request']`), the middleware a
 | GET | `/onboard/:name` | Direct | Onboard form |
 | POST | `/onboard/:name/run` | Direct | Execute onboard |
 | GET | `/api/vms\|backups\|user-ids\|api-keys` | Direct | JSON APIs |
+| GET | `/api/profile/keys` | Direct | List own MCP API keys (prefix only, no raw key) |
+| POST | `/api/profile/keys` | Direct | Create an MCP API key (raw key returned once) |
+| DELETE | `/api/profile/keys/:id` | Direct | Revoke own MCP API key |
 | POST | `/api/providers/add` | Direct | Add model provider |
 | POST | `/api/config/backup\|restore/:agent` | Direct | Config save/restore |
 | POST | `/mcp` | `mcp.js` | MCP tools call (Streamable HTTP, API-key auth) |
@@ -1149,6 +1152,27 @@ The full raw config (including secrets) is only sent to the Config and Messaging
 - `safeBackupPath()` — restricts backup file access to `backups/` directory
 - Multer file filter — blocks dangerous extensions
 
+### 15.6 API Keys (MCP bearer tokens) — `src/services/api-keys.js`
+
+Per-user API keys for the `/mcp` endpoint (external MCP clients don't do cookies). MCP auth is covered in section 25; this is the key store behind it.
+
+- **Format:** `pk_live_<base64url-24-random-bytes>` (192 bits of entropy). Non-`pk_live_`-shaped tokens are rejected immediately.
+- **Storage:** only `sha256(key)` (hex) + a display `prefix` are stored in the `api_keys` table — the raw key is shown **once** at creation and never again. A leaked DB leaks no usable keys.
+- **Ownership:** every key belongs to a user and inherits their role — **admin → full fleet**, **user → owned agents only** (same `agents.owner_id` rule as the REST API). List/delete are scoped to `req.session.userId` — you can only see/revoke your own keys.
+- **Scopes:** `scopes` column (`default`/`read`/`control`, comma-joined). `default` = inherit user role; reserved for future narrowed scopes.
+- **`last_used_at`:** touched at most once per minute per key (throttled, not per-request).
+- **Revocation:** delete the row → the sha256 lookup fails → the key stops working instantly.
+
+Endpoints (session + CSRF protected):
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/profile/keys` | List own keys (prefix, name, created, last used) — no hashes, no raw keys |
+| POST | `/api/profile/keys` | Create a key `{ name, scopes? }` → returns `{ key: 'pk_live_…', … }`, the only time the raw key is visible |
+| DELETE | `/api/profile/keys/:id` | Revoke (delete) an own key; 404 for unknown/foreign ids |
+
+Created 2026-08-04, plan `plans/11-mcp-api-keys.md`.
+
 ---
 
 ## 16. Onboarding Flow (New Agent)
@@ -1449,7 +1473,7 @@ Today MCP also goes the other way: each PAD connects **out** to third-party MCP 
 
 ### Auth
 
-- Bearer API key (`Authorization: Bearer pk_live_…`), `X-Api-Key` header, or `?token=` query param, validated by `services/api-keys.authenticate()` (see section 10 and `plans/11-mcp-api-keys.md`). Only the sha256 hash of the key is stored; the raw key is shown once at creation.
+- Bearer API key (`Authorization: Bearer pk_live_…`), `X-Api-Key` header, or `?token=` query param, validated by `services/api-keys.authenticate()` (see section 15.6). Only the sha256 hash of the key is stored; the raw key is shown once at creation.
 - Keys inherit the creator's webui role: **admin → full fleet**; **user → owned agents only** (same owner rule as `requireAgentAccess`). Ownership is checked inside every tool handler via the `agents.owner_id` column; admins bypass.
 - The authenticated user is carried per-request via `AsyncLocalStorage` (`mcpContext`) and read in handlers with `currentUser()`. The SDK v1.30 does not forward `req.auth` into tool handlers, which is why the context store is needed.
 - No new env var and no static `MCP_TOKEN` — one auth path, so "who used which key" is never a mystery.
