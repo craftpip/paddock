@@ -285,7 +285,13 @@ function WorkspaceTab({ agent }) {
     return {}
   }
   const saved = restoreState()
-  const [path, setPath] = useState(saved.path || '/workspace')
+  const normalizePath = (p) => {
+    if (!p) return '/'
+    const clean = String(p).replace(/\/+/g, '/').replace(/\/+$/, '')
+    return clean || '/'
+  }
+  const [path, setPath] = useState(normalizePath(saved.path && saved.path.startsWith('/') ? saved.path : (agent.workspace_root || '/')))
+  const [pathDraft, setPathDraft] = useState('')
   const [listing, setListing] = useState(null)
   const [error, setError] = useState('')
   const [uploading, setUploading] = useState(false)
@@ -308,14 +314,19 @@ function WorkspaceTab({ agent }) {
 
   useEffect(() => { load(path) }, [path, load])
   useEffect(() => { sessionStorage.setItem(storageKey, JSON.stringify({ path })) }, [path, storageKey])
+  useEffect(() => { setPathDraft(path) }, [path])
 
   const parts = path.split('/').filter(Boolean)
-  const breadcrumbs = [{ name: 'openclaw', path: '/' }, ...parts.map((p, i) => ({ name: p, path: '/' + parts.slice(0, i + 1).join('/') }))]
+  const breadcrumbs = [{ name: '/', path: '/' }, ...parts.map((p, i) => ({ name: p, path: '/' + parts.slice(0, i + 1).join('/') }))]
 
-  function goToDir(p) { setPath(p) }
+  function goToDir(p) { setPath(normalizePath(p)) }
   function goUp() {
     if (path === '/') return
-    setPath(path.split('/').slice(0, -1).join('/') || '/')
+    setPath(normalizePath(path.split('/').slice(0, -1).join('/')))
+  }
+  function goTo(p) {
+    const target = (p || '/').trim() || '/'
+    setPath(normalizePath(target.startsWith('/') ? target : '/' + target))
   }
 
   async function createFile(e) {
@@ -457,11 +468,38 @@ function WorkspaceTab({ agent }) {
 
   return (
     <div>
+      {/* Location bar — file-browser style */}
+      <div className="flex items-center gap-2 mb-2">
+        <form onSubmit={(e) => { e.preventDefault(); goTo(pathDraft) }}
+              className="flex-1 flex items-center gap-2 min-w-0">
+          <span className="text-slate-500 shrink-0">📁</span>
+          <input
+            value={pathDraft}
+            onChange={(e) => setPathDraft(e.target.value)}
+            spellCheck={false}
+            placeholder="/"
+            className="flex-1 min-w-0 px-3 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white font-mono focus:border-cyan-500 focus:outline-none placeholder-slate-600"
+          />
+          <button type="submit"
+                  className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-sm font-medium transition-colors whitespace-nowrap">
+            Go
+          </button>
+        </form>
+        <button onClick={goUp} disabled={path === '/'}
+                className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-white rounded-lg text-sm transition-colors whitespace-nowrap">
+          ↑ Up
+        </button>
+        <button onClick={() => goTo(agent.workspace_root || '/')}
+                className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm transition-colors whitespace-nowrap">
+          Home
+        </button>
+      </div>
+
       {/* Breadcrumbs */}
       <div className="flex items-center gap-1 text-sm text-slate-500 mb-4 overflow-x-auto flex-wrap">
         {breadcrumbs.map((b, i) => (
           <span key={b.path} className="flex items-center gap-1 whitespace-nowrap">
-            {i > 0 && <span className="text-slate-600">/</span>}
+            {i > 1 && <span className="text-slate-600">/</span>}
             {i < breadcrumbs.length - 1 ? (
               <button onClick={() => goToDir(b.path)} className="hover:text-slate-300 transition-colors">{b.name}</button>
             ) : (

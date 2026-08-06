@@ -201,7 +201,18 @@ async function updateAgent(name, { onLog = () => {}, onStep = () => {}, buildArg
   const composePath = instanceComposePath(name);
   const args = ['compose', '-f', composePath, 'build'];
   if (pull) args.push('--pull');
-  for (const ba of buildArgs) args.push('--build-arg', ba);
+  // The built image is SHARED across all PADs of an agent type. The docker CLI
+  // is baked into that image, so every rebuild must keep installing it —
+  // otherwise an Update (or any other-pad rebuild) silently strips docker from
+  // every PAD that enabled it. The socket mount stays per-PAD in the compose
+  // file, so the CLI alone grants no access.
+  const meta = readMeta(path.join(INSTANCES_DIR, name));
+  const agent = meta.AGENT || 'openclaw';
+  const bargs = [...buildArgs];
+  if (AGENT_BUILD_REL[agent] && !bargs.some((a) => a.startsWith('INSTALL_DOCKER='))) {
+    bargs.push('INSTALL_DOCKER=1');
+  }
+  for (const ba of bargs) args.push('--build-arg', ba);
   args.push(name);
   onStep('build', 'start');
   try {

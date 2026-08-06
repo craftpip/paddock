@@ -5,8 +5,18 @@ const { getAgent } = require('./agent-registry');
 const MAX_UPLOAD_SIZE = 100 * 1024 * 1024; // 100MB
 
 function resolveSafePath(workspaceRoot, relativePath) {
-  if (!relativePath || relativePath === '/') return workspaceRoot;
-  const cleaned = path.normalize(relativePath).replace(/^\/+/, '');
+  const raw = (relativePath || '/').trim();
+  // Absolute paths (the file-browser mode) resolve anywhere on the host the
+  // webui sees, including the root. They are normalized so `..` can never
+  // climb above `/`.
+  if (raw.startsWith('/')) {
+    const normalized = path.normalize(raw);
+    if (!normalized.startsWith('/')) throw new Error('Invalid path');
+    if (normalized.includes('\0')) throw new Error('Invalid path');
+    return normalized;
+  }
+  // Legacy relative paths still resolve under the workspace root.
+  const cleaned = path.normalize(raw).replace(/^\/+/, '');
   const resolved = path.resolve(workspaceRoot, cleaned);
   if (!resolved.startsWith(workspaceRoot + path.sep) && resolved !== workspaceRoot) {
     throw new Error('Path traversal rejected');
@@ -20,7 +30,7 @@ function listDir(agentId, relativePath) {
   const absPath = resolveSafePath(agent.workspace_root, relativePath || '');
 
   if (!fs.existsSync(absPath)) {
-    return { path: relativePath || '/', entries: [] };
+    return { path: absPath, entries: [] };
   }
 
   const stat = fs.statSync(absPath);
@@ -52,7 +62,7 @@ function listDir(agentId, relativePath) {
     });
 
   return {
-    path: relativePath || '/',
+    path: absPath,
     entries,
   };
 }

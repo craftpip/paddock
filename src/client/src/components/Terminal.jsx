@@ -759,6 +759,7 @@ const Terminal = forwardRef(function Terminal(
       },
       write: sendToShell,
       clear: () => sendToShell('clear\n'),
+      close: () => sendToShell('\x03'),
       reconnect,
       focus: () => termRef.current?.focus(),
       isConnected: () => wsRef.current?.readyState === WebSocket.OPEN,
@@ -872,6 +873,7 @@ const Terminal = forwardRef(function Terminal(
           <button onClick={() => setFontSize((s) => Math.min(24, s + 1))} className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">A+</button>
           <span className="w-px h-4 bg-slate-700" />
           <button onClick={() => ref.current?.clear()} className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">Clear</button>
+          <button onClick={() => ref.current?.close()} className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">Close</button>
           <button onClick={reconnect} className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">Reconnect</button>
 
           {onToggleCollapse && showCollapse && !fullscreen && (
