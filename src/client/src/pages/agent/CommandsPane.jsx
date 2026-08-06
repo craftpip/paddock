@@ -564,6 +564,11 @@ export default function CommandsPane({ agent, termRef, run, connected }) {
   const [tuiCommand, setTuiCommand] = useState('openclaw')
   const prompt = usePrompt()
 
+  // The Messaging/Models/MCP/Skills flows below are openclaw-only (their
+  // commands and backing APIs are openclaw's). Other agent types render only
+  // their driver-provided groups.
+  const isOpenclaw = agent?.agent_type === 'openclaw'
+
   // The command groups ("buttons") live in the agent driver, served over the
   // API — not hardcoded here.
   useEffect(() => {
@@ -603,10 +608,10 @@ export default function CommandsPane({ agent, termRef, run, connected }) {
 
       {/* Everything flows in one wrapped line, float-left, no cards */}
       <div className="flex flex-wrap items-center gap-1.5">
-        <MessagingFlow query={query} run={run} connected={connected} />
-        <ModelsFlow agent={agent} query={query} run={run} prompt={prompt} connected={connected} />
-        <McpFlow agent={agent} query={query} run={run} prompt={prompt} connected={connected} />
-        <SkillsFlow agent={agent} query={query} run={run} prompt={prompt} connected={connected} />
+        {isOpenclaw && <MessagingFlow query={query} run={run} connected={connected} />}
+        {isOpenclaw && <ModelsFlow agent={agent} query={query} run={run} prompt={prompt} connected={connected} />}
+        {isOpenclaw && <McpFlow agent={agent} query={query} run={run} prompt={prompt} connected={connected} />}
+        {isOpenclaw && <SkillsFlow agent={agent} query={query} run={run} prompt={prompt} connected={connected} />}
         {driverGroups.map((g) => (
           <FlowGroup key={g.title} group={g} query={query} run={run} connected={connected} />
         ))}

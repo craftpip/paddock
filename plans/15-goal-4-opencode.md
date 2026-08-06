@@ -1,6 +1,6 @@
 # Goal 4 — opencode Driver + Image
 
-## Status: Done (2026-08-06)
+## Status: Done (2026-08-06, commands gated)
 
 ## Goal
 
@@ -94,6 +94,20 @@ interactively, config and workspace persist in the mounted data dir.
   the Model/Other groups + `tuiCommand`.
 - Cleanup: all test artifacts removed. The user created their own `pad-opencode-asda`
   during the session (untouched).
+
+## Commands page gating (follow-up, same day)
+
+The Commands tab still rendered the hardcoded openclaw flows (MESSAGING / MODELS /
+MCP / SKILLS) on opencode agents. Fixed:
+
+- `CommandsPane.jsx` now gates those four flows behind `agent_type === 'openclaw'`.
+  Other types render only their driver-provided groups (+ Vault, which is project-level).
+- `opencode.js` driver commands fleshed out from `opencode --help` (1.18.14): MODEL
+  (providers list/login/logout, models), SESSION (list, stats, export), MCP (list/add/auth),
+  AGENT (list/create), OTHER (version, debug info, debug config, upgrade).
+- Verified in browser: opencode agent shows only opencode groups; openclaw agent still
+  shows MESSAGING/MODELS/MCP/SKILLS + driver groups; clicking a pill injects the command
+  into the docked terminal.
 
 ## Verification
 

@@ -36,15 +36,42 @@ const OPENCODE = {
     {
       title: 'Model', color: 'teal',
       commands: [
-        { cmd: 'opencode models', label: 'List models', desc: 'Available model providers' },
-        { cmd: 'opencode login', label: 'Login', desc: 'Authenticate a provider' },
+        { cmd: 'opencode providers list', label: 'List providers', desc: 'Providers + saved credentials' },
+        { cmd: 'opencode providers login', label: 'Login', desc: 'Log in to a provider (interactive)' },
+        { cmd: 'opencode providers logout', label: 'Logout', desc: 'Log out a configured provider' },
+        { cmd: 'opencode models', label: 'Available models', desc: 'List available models' },
+      ],
+    },
+    {
+      title: 'Session', color: 'blue',
+      commands: [
+        { cmd: 'opencode session list', label: 'List sessions', desc: 'Recent sessions' },
+        { cmd: 'opencode stats', label: 'Token usage', desc: 'Usage + cost statistics' },
+        { cmd: 'opencode export', label: 'Export session', desc: 'Export session data as JSON' },
+      ],
+    },
+    {
+      title: 'MCP', color: 'emerald',
+      commands: [
+        { cmd: 'opencode mcp list', label: 'List servers', desc: 'MCP servers + status' },
+        { cmd: 'opencode mcp add', label: 'Add server', desc: 'Add an MCP server (interactive)' },
+        { cmd: 'opencode mcp auth', label: 'Auth server', desc: 'OAuth login for an MCP server' },
+      ],
+    },
+    {
+      title: 'Agent', color: 'violet',
+      commands: [
+        { cmd: 'opencode agent list', label: 'List agents', desc: 'Available agents' },
+        { cmd: 'opencode agent create', label: 'Create agent', desc: 'Create a new agent (interactive)' },
       ],
     },
     {
       title: 'Other', color: 'slate',
       commands: [
         { cmd: 'opencode --version', label: 'Version', desc: 'opencode version' },
-        { cmd: 'opencode doctor', label: 'Doctor', desc: 'Diagnose issues' },
+        { cmd: 'opencode debug info', label: 'Debug info', desc: 'opencode + system info' },
+        { cmd: 'opencode debug config', label: 'Config', desc: 'Show resolved configuration' },
+        { cmd: 'opencode upgrade', label: 'Upgrade', desc: 'Upgrade opencode to latest', confirm: true },
       ],
     },
   ],
