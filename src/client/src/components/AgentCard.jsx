@@ -50,14 +50,6 @@ export default function AgentCard({ agent }) {
           <span>Type</span>
           <span className="text-slate-300">{agent.agent_type}</span>
         </div>
-        {agent.default_model && (
-          <div className="flex justify-between">
-            <span>Model</span>
-            <span className="text-slate-300 truncate ml-4 max-w-[180px]" title={agent.default_model}>
-              {agent.default_model}
-            </span>
-          </div>
-        )}
       </div>
       <div className="flex items-center justify-between pt-3 border-t border-slate-800">
         <Link
