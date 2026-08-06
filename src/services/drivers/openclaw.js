@@ -29,6 +29,7 @@ const OPENCLAW = {
   dataDir: '/root/.openclaw',
   workspaceDir: '/root/.openclaw/workspace',
   installDockerBuildArg: 'INSTALL_DOCKER=1',
+  tuiCommand: 'openclaw',
   backupTypeMarker: '_openclaw-backup-cli_',
 
   /** Steps run (docker exec) after the container comes up at create time. */

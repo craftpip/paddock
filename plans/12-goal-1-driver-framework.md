@@ -8,6 +8,39 @@ rebuild on the live pad); its changed bits — image lookup and the
 `INSTALL_DOCKER=1` build arg — are behavior-identical to the pre-driver code
 and were confirmed via diff + live `GET /api/agents/:name/settings`.
 
+## Retest after create-flow fixes (2026-08-06)
+
+Post-Goal-1 regression on a fresh agent found the create flow was broken; two
+frontend fixes landed (uncommitted, pending commit):
+
+1. **CreateAgent.jsx** — `/agents/create` and `/agents/create/:name` render the
+   same component, so React reused the instance and the `phase`/`jobName`
+   initializers never re-ran on navigation. Added a `useEffect` on `urlName`
+   that flips to `creating` + syncs the name, plus `setPhase('creating')`
+   before `navigate(...)` in `handleSubmit`.
+2. **Terminal.jsx** — never `fit()` a hidden/zero-size container (FitAddon
+   clamps to 2x1 instead of bailing), so collapsed terminals no longer shred
+   the buffer or look busy forever. Live `collapsedRef` + guards in the
+   ResizeObserver, font-size effect, and busy polling.
+
+Full retest on `pad-openclaw-goal1-regression` (deleted after testing):
+- Create (fresh) via UI: SSE stream, build → up → `openclaw setup --baseline`
+  → restart, "done" phase + "Go to" button — all working.
+- Terminal connects; `openclaw --version` → `OpenClaw 2026.7.1`; a driver
+  command (`openclaw status`) runs through the docked terminal.
+- Settings shows Version 2026.7.1 (driver `currentVersion`).
+- `/api/agents/:name/update-info` → current/available both 2026.7.1.
+- Update flow: confirm dialog shows driver version, SSE modal streams
+  `compose build --pull` (build output shows `INSTALL_DOCKER=1` applied), then
+  recreate, container back up, version intact.
+- Workspace tab browses `/root/.openclaw` (driver `dataDir`), paths map to the
+  instance bind mount.
+- Config / Logs / Sessions / Activity tabs render.
+- Backup creates an archive; type detection via `backupTypeMarker`.
+- Stop → Start → Restart all work.
+- Delete removes container + compose network + instance dir + DB rows.
+- Dashboard back to the 2 kept PADs (test, work-pls).
+
 ## Goal
 
 Build the driver framework and move openclaw's existing behavior into the

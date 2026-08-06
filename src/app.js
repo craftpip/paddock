@@ -1024,10 +1024,11 @@ app.get('/api/agent-types', (req, res) => {
 });
 
 /** Command groups for one agent type — the "buttons" on the Commands tab
- *  live in the driver, not in the frontend bundle. */
+ *  live in the driver, not in the frontend bundle. tuiCommand is the command
+ *  that launches the agent's interactive TUI (openclaw / opencode / …). */
 app.get('/api/agent-types/:type/commands', (req, res) => {
   const driver = drivers.getDriver(req.params.type);
-  res.json({ type: driver.type, commands: driver.commands });
+  res.json({ type: driver.type, commands: driver.commands, tuiCommand: driver.tuiCommand || 'openclaw' });
 });
 
 app.get('/api/backups', (req, res) => {

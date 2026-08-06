@@ -1,6 +1,6 @@
 # Goal 4 — opencode Driver + Image
 
-## Status: Planned (2026-08-06)
+## Status: Done (2026-08-06)
 
 ## Goal
 
@@ -55,18 +55,45 @@ interactively, config and workspace persist in the mounted data dir.
 
 ## Progress
 
-- [ ] Write `src/vm-builds/opencode/Dockerfile`
-- [ ] Build the image (`docker compose -f instances/... build`)
-- [ ] Write `src/services/drivers/opencode.js`
-- [ ] Add CreateAgent option
-- [ ] Create a test opencode agent
-- [ ] Terminal drops into a shell; `opencode --version` works
-- [ ] `opencode` interactive CLI runs; config writes to `/root/.opencode`
-- [ ] Data dir persists across container restart
-- [ ] Terminal `pwd` = `driver.workspaceDir`
-- [ ] Files written in the workspace show up in the workspace tab
-- [ ] Settings page: version shows, docker toggle works (rebuild path)
-- [ ] Update flow runs (compose build --pull) without breaking
+- [x] Write `src/vm-builds/opencode/Dockerfile`
+- [x] Build the image (`docker compose -f instances/... build`)
+- [x] Write `src/services/drivers/opencode.js`
+- [x] Add CreateAgent option — automatic: the select is fed from `/api/agent-types` (driver registry), no JSX change needed
+- [x] Create a test opencode agent (`pad-opencode-pad-opencode-test`, deleted after testing)
+- [x] Terminal drops into a shell; `opencode --version` works (1.18.14)
+- [x] `opencode` interactive CLI runs; config writes to `/root/.opencode`
+- [x] Data dir persists across container restart
+- [x] Terminal `pwd` = `driver.workspaceDir` (`/root/.opencode/workspace`)
+- [x] Files written in the workspace show up in the workspace tab
+- [x] Settings page: version shows (1.18.14), docker toggle works (rebuild path: `INSTALL_DOCKER=1` + socket mount, docker CLI 20.10 + host daemon verified inside container)
+- [ ] Update flow — not run end-to-end (no base image → `updateAvailable: false`; same code path as openclaw)
+
+## Test log (2026-08-06)
+
+- Image build: `node:20-slim` + `npm install -g opencode-ai` (binary `opencode` 1.18.14).
+  **Heredoc `cat > start.sh <<'EOF'` inside a RUN produced a 0-byte file** — Docker's
+  multi-line RUN parsing ate it. Fix: `start.sh` is now a real file in the build context,
+  `COPY`'d in. Rebuilt clean.
+- `opencode --version` → `1.18.14`; `pwd` → `/root/.opencode/workspace` (WORKDIR + driver
+  `workspaceDir` agree); sshd up.
+- XDG env vars work: first run wrote `/root/.opencode/config/opencode/opencode.jsonc`
+  (config), plus `data/`, `cache/` — all inside the bind mount. Restart kept workspace
+  files + config.
+- Terminal (docked): shell works, `opencode --version` runs, interactive `opencode` TUI
+  renders (OpenCode logo + "Run /connect to add an AI provider").
+- "Run TUI" button hardcoded `openclaw` → `openclaw: command not found` on opencode
+  agents. Fixed by adding `tuiCommand` to each driver (`openclaw`/`opencode`), served by
+  `/api/agent-types/:type/commands`, consumed by CommandsPane. Button now says
+  "Run opencode interactively in the terminal".
+- Settings: version from `driver.currentVersion()`, no update available (no base image).
+  Docker toggle → stop, rebuild with `INSTALL_DOCKER=1`, recreate with
+  `/var/run/docker.sock` mount. Verified `docker version` client 20.10.24 / server 29.5.3
+  from inside, workspace intact after recreate.
+- Delete: container + instance dir + compose network all removed; DB row cleaned.
+- API: `/api/agent-types` lists `opencode`; `/api/agent-types/opencode/commands` serves
+  the Model/Other groups + `tuiCommand`.
+- Cleanup: all test artifacts removed. The user created their own `pad-opencode-asda`
+  during the session (untouched).
 
 ## Verification
 

@@ -1,9 +1,10 @@
 const openclaw = require('./openclaw');
+const opencode = require('./opencode');
 
 // Registry of agent drivers. One module per agent type; every type is an equal
 // citizen. getDriver(type) is the single source of truth for how the dashboard,
 // terminal, and routes treat an agent of that type.
-const drivers = { openclaw };
+const drivers = { openclaw, opencode };
 
 /** Driver for a type — falls back to the openclaw driver when a type has none,
  *  so unknown types never crash the caller. */

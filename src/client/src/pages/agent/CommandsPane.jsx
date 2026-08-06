@@ -561,6 +561,7 @@ function VaultDropdown({ termRef, connected }) {
 export default function CommandsPane({ agent, termRef, run, connected }) {
   const [query, setQuery] = useState('')
   const [driverGroups, setDriverGroups] = useState([])
+  const [tuiCommand, setTuiCommand] = useState('openclaw')
   const prompt = usePrompt()
 
   // The command groups ("buttons") live in the agent driver, served over the
@@ -568,13 +569,16 @@ export default function CommandsPane({ agent, termRef, run, connected }) {
   useEffect(() => {
     if (!agent?.agent_type) return
     api(`/api/agent-types/${agent.agent_type}/commands`)
-      .then((d) => setDriverGroups(d.commands || []))
+      .then((d) => {
+        setDriverGroups(d.commands || [])
+        setTuiCommand(d.tuiCommand || 'openclaw')
+      })
       .catch(() => setDriverGroups([]))
   }, [agent?.agent_type])
 
-  /** Launch the openclaw interactive TUI directly in the terminal. */
+  /** Launch the agent's interactive TUI (openclaw / opencode / …) in the terminal. */
   function runTool() {
-    run('openclaw')
+    run(tuiCommand)
   }
 
   return (
@@ -584,7 +588,7 @@ export default function CommandsPane({ agent, termRef, run, connected }) {
         <button
           onClick={runTool}
           disabled={!connected}
-          title={connected ? 'Run openclaw interactively in the terminal' : 'Waiting for the terminal to connect'}
+          title={connected ? `Run ${tuiCommand} interactively in the terminal` : 'Waiting for the terminal to connect'}
           className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-sm font-medium transition-colors whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed"
         >
           <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

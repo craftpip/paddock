@@ -161,6 +161,7 @@ const Terminal = forwardRef(function Terminal(
   const wasConnectedRef = useRef(false) // only announce the first close after a connected state
 
   const disabledRef = useRef(!!disabled) // external lock (the `disabled` prop)
+  const collapsedRef = useRef(!!collapsed) // collapse state for async closures (ResizeObserver, effects)
   const manualLockRef = useRef(false) // imperative lock()/unlock()/Lock toggle
   const runningRef = useRef(!!running) // the agent is running → auto-reconnect allowed
   const wasRunningRef = useRef(!!running) // previous `running` value, for edge detection
@@ -464,6 +465,14 @@ const Terminal = forwardRef(function Terminal(
 
     const ro = new ResizeObserver(() => {
       try {
+        // Never fit a hidden/zero-size container. FitAddon clamps to a 2x1
+        // minimum instead of bailing, so collapsing the terminal (display:none
+        // -> 0x0) would otherwise shred the buffer to a couple of columns and
+        // resize the container PTY to match. The wrapped prompt then looks like
+        // a busy shell forever. The observer re-fires with a real size once the
+        // terminal becomes visible again.
+        const el = containerRef.current
+        if (collapsedRef.current || !el || !el.clientWidth || !el.clientHeight) return
         fitAddon.fit()
         if (gen === genRef.current) pushResize(term.cols, term.rows)
       } catch {}
@@ -563,6 +572,12 @@ const Terminal = forwardRef(function Terminal(
     sessionIdRef.current = sessionId
   }, [sessionId])
 
+  // Keep the collapse ref in sync (the ResizeObserver closure captures the
+  // init-time value, so it must read the live ref to skip fit() while hidden).
+  useEffect(() => {
+    collapsedRef.current = !!collapsed
+  }, [collapsed])
+
   // Tell the parent when the terminal becomes ready/not-ready so command
   // buttons can be disabled until writes can actually reach the shell.
   useEffect(() => {
@@ -621,11 +636,14 @@ const Terminal = forwardRef(function Terminal(
   }, [name])
 
   // Font size changes need a re-fit + backend resize (pane dims are unchanged,
-  // so the ResizeObserver alone will not fire).
+  // so the ResizeObserver alone will not fire). When collapsed the buffer must
+  // NOT be re-fit (same 2x1-clamp hazard as the ResizeObserver) — the observer
+  // re-fits it once the terminal is visible again.
   useEffect(() => {
     const term = termRef.current
     if (!term) return
     term.options.fontSize = fontSize
+    if (collapsedRef.current) return
     try {
       fitAddonRef.current?.fit()
       pushResize(term.cols, term.rows)
@@ -634,9 +652,11 @@ const Terminal = forwardRef(function Terminal(
 
   // Poll the prompt heuristic + drive the Running-badge debounce while
   // connected. The interval is the sole driver of the badge state; quick
-  // commands go busy→idle between ticks and never show it.
+  // commands go busy→idle between ticks and never show it. While collapsed the
+  // heuristic is meaningless (the buffer may be mid-reflow) and the badge would
+  // be invisible anyway — force it off and skip polling.
   useEffect(() => {
-    if (connState !== 'connected') {
+    if (connState !== 'connected' || collapsed) {
       shellBusyRef.current = false
       busySinceRef.current = null
       shellBusyShowRef.current = false
@@ -648,7 +668,7 @@ const Terminal = forwardRef(function Terminal(
       syncBusy()
     }, 250)
     return () => clearInterval(iv)
-  }, [connState, checkShellBusy, syncBusy])
+  }, [connState, collapsed, checkShellBusy, syncBusy])
 
   // When locked, stop the cursor blinking so it reads as "read-only".
   useEffect(() => {
@@ -880,7 +900,7 @@ const Terminal = forwardRef(function Terminal(
           )}
           <span className="w-px h-4 bg-slate-700" />
           <span className="text-xs text-slate-300 font-mono">{title || name}</span>
-          {shellBusy && (
+          {shellBusy && !collapsed && (
             <button
               onClick={() => ref.current?.close()}
               title="Send Ctrl+C to interrupt the running command"

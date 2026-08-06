@@ -53,6 +53,18 @@ export default function CreateAgent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // /agents/create and /agents/create/:name render the same component, so
+  // React reuses the instance and the `phase`/`jobName` initializers never
+  // re-run on navigation. Flip to 'creating' + sync the name whenever a
+  // progress URL appears.
+  useEffect(() => {
+    if (urlName) {
+      setPhase('creating')
+      setJobName(urlName)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlName])
+
   // Progress URL (/agents/create/:name): resume the create job stream on
   // refresh — the job events live server-side, so reconnect and replay.
   useEffect(() => {
@@ -160,6 +172,7 @@ export default function CreateAgent() {
           backup_file: backupFile || '',
         },
       })
+      setPhase('creating')
       navigate('/agents/create/' + result.job, { replace: true })
     } catch (err) {
       setError(err.error || err.message || 'Failed to create agent')
