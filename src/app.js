@@ -344,6 +344,31 @@ async function containerHasTmux(vmName) {
   return r.code === 0;
 }
 
+const sqliteReady = new Set(); // PAD names where sqlite3 is confirmed present
+
+async function containerHasSqlite(vmName) {
+  const r = await runCmd('docker', ['exec', vmName, 'sh', '-lc', 'command -v sqlite3'], { timeout: 15000, check: false });
+  return r.code === 0;
+}
+
+/** Lazy-install sqlite3 once per PAD (images that predate the Dockerfile
+ *  change). Needed to read opencode's session DB for the terminal title. */
+async function ensureSqlite3(vmName) {
+  if (sqliteReady.has(vmName)) return;
+  if (await containerHasSqlite(vmName)) {
+    sqliteReady.add(vmName);
+    return;
+  }
+  const inst = await runCmd(
+    'docker',
+    ['exec', vmName, 'sh', '-lc', 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y --no-install-recommends sqlite3'],
+    { timeout: 240000, check: false }
+  );
+  if (inst.code !== 0) throw new Error(`sqlite3 install failed: ${String(inst.stderr || inst.stdout || '').trim()}`);
+  if (!(await containerHasSqlite(vmName))) throw new Error('sqlite3 still missing after install');
+  sqliteReady.add(vmName);
+}
+
 /** Lazy-install tmux once per PAD (images that predate the Dockerfile change). */
 async function ensureTmux(vmName) {
   if (tmuxReady.has(vmName)) return;
@@ -391,6 +416,10 @@ async function ensureTmuxSession(vmName, session, cols, rows) {
   }
   // Keep enough history that a fresh attach has something real to replay.
   await runCmd('docker', ['exec', vmName, 'sh', '-lc', `tmux set-option -g history-limit ${TMUX_HISTORY} 2>/dev/null || true`], { timeout: 15000, check: false });
+  // The webui draws its own session chrome — a tmux status bar in the pane
+  // would only duplicate it (the green `[main] 0:bash` line). Kill it globally
+  // so the pane shows pure app output. Idempotent: no-op on later connects.
+  await runCmd('docker', ['exec', vmName, 'sh', '-lc', 'tmux set-option -g status off 2>/dev/null || true'], { timeout: 15000, check: false });
   await runCmd(
     'docker',
     ['exec', vmName, 'sh', '-lc',
@@ -419,6 +448,23 @@ async function killTmuxSession(vmName, session) {
   if (r.code !== 0 && !/can't find|no such|no server/i.test(String(r.stderr))) {
     throw new Error(String(r.stderr || 'tmux kill-session failed').trim());
   }
+}
+
+/** Title of the opencode session the TUI is showing, e.g. `Casual greeting`.
+ *  Read straight from opencode's SQLite store (cheap, works while the TUI
+ *  runs — the `opencode session list` CLI re-bootstraps the whole instance
+ *  and blocks behind the TUI's lock). The webui mirrors the TUI's prompt
+ *  `OC | <title>` in the terminal header. Empty string when there's no
+ *  session yet (or this isn't an opencode agent). */
+async function opencodeSessionTitle(vmName) {
+  const r = await runCmd(
+    'docker',
+    ['exec', vmName, 'sh', '-lc',
+      'sqlite3 /root/.opencode/data/opencode/opencode.db "SELECT title FROM session WHERE time_archived IS NULL ORDER BY time_updated DESC LIMIT 1" 2>/dev/null'],
+    { timeout: 10000, check: false }
+  );
+  if (r.code !== 0) return '';
+  return String(r.stdout || '').trim();
 }
 
 
@@ -1993,6 +2039,8 @@ wss.on('connection', async (ws, req) => {
     let dockerExec = null;
     let dockerStream = null;
     let closed = false;
+    let titleIv = null; // polls the tmux window title for the terminal header
+    let lastTitle = ''; // last title frame sent to this client
     const connId = Math.random().toString(36).slice(2, 6);
 
     const cleanup = (reason) => {
@@ -2015,6 +2063,7 @@ wss.on('connection', async (ws, req) => {
         sweepStaleAttaches(vmName, session);
       }
       if (activeTerminals.get(termKey)?.cleanup === cleanup) activeTerminals.delete(termKey);
+      if (titleIv) { clearInterval(titleIv); titleIv = null; }
     };
 
     const entry = { ws, cleanup, connId, replaced: false };
@@ -2117,6 +2166,37 @@ wss.on('connection', async (ws, req) => {
         if (ws.readyState === ws.OPEN) ws.send(decoder.write(data));
       });
     }
+
+    // Feed a live title to the client as NUL-NUL-prefixed JSON control frames
+    // (the same framing the client uses for resize), so the terminal header
+    // can show what the agent is actually running instead of the static
+    // display name. For opencode agents that's the TUI session name, e.g.
+    // `OC | Casual greeting`. Other agent types send nothing and keep the
+    // display name. Polled (a cheap exec) rather than parsing escape
+    // sequences out of the byte stream.
+    let agentType = 'openclaw';
+    try {
+      const ag = registry.getAgent(vmName);
+      if (ag && ag.agent_type) agentType = ag.agent_type;
+    } catch {}
+    if (agentType === 'opencode') {
+      // Make sqlite3 available for the title query (no-op on modern images).
+      try { await ensureSqlite3(vmName); } catch {}
+    }
+    const sendTitle = async () => {
+      if (closed || ws.readyState !== ws.OPEN) return;
+      let t = '';
+      if (agentType === 'opencode') {
+        try { t = await opencodeSessionTitle(vmName); } catch {}
+        if (t) t = 'OC | ' + t;
+      }
+      if (t && t !== lastTitle && ws.readyState === ws.OPEN) {
+        lastTitle = t;
+        ws.send('\x00\x00' + JSON.stringify({ type: 'title', title: t }));
+      }
+    };
+    sendTitle();
+    titleIv = setInterval(sendTitle, 3000);
 
     dockerStream.on('end', () => {
       console.log(`[wss/terminal] stream end ${connId} ${session}`);

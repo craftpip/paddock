@@ -18,7 +18,9 @@ RUN apt-get update && \
     git \
     curl \
     ca-certificates \
-    tzdata && \
+    tzdata \
+    tmux \
+    sqlite3 && \
     rm -rf /var/lib/apt/lists/*
 
 RUN if [ "$INSTALL_DOCKER" = "1" ]; then \

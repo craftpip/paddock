@@ -185,6 +185,7 @@ const Terminal = forwardRef(function Terminal(
   const [shellBusy, setShellBusy] = useState(false)
   const [uiLocked, setUiLocked] = useState(false)
   const [fullscreen, setFullscreen] = useState(false)
+  const [dynTitle, setDynTitle] = useState('') // tmux window title pushed by the server
 
   // ── Sessions (persistent tmux shells per PAD) ────────────────────────────
   const SAFE_SESSION_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/
@@ -351,6 +352,7 @@ const Terminal = forwardRef(function Terminal(
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     setStateSafe(setConnState, 'connecting')
+    setStateSafe(setDynTitle, '') // a new session has its own title
     const ws = new WebSocket(
       `${protocol}//${window.location.host}/ws/terminal/${name}?session=${encodeURIComponent(sessionIdRef.current || 'main')}&cols=${term.cols}&rows=${term.rows}`
     )
@@ -389,6 +391,17 @@ const Terminal = forwardRef(function Terminal(
 
     ws.onmessage = (evt) => {
       if (gen !== genRef.current) return
+      const data = String(evt.data)
+      // Server → client control frames are NUL-NUL-prefixed JSON (mirrors the
+      // client→server resize frames). The tmux window title arrives this way;
+      // anything else is terminal bytes and goes straight to xterm.
+      if (data.charCodeAt(0) === 0 && data.charCodeAt(1) === 0) {
+        try {
+          const parsed = JSON.parse(data.slice(2))
+          if (parsed.type === 'title' && parsed.title) setStateSafe(setDynTitle, parsed.title)
+        } catch {}
+        return
+      }
       writeTerm(evt.data)
       checkShellBusy()
 
@@ -899,7 +912,7 @@ const Terminal = forwardRef(function Terminal(
             </span>
           )}
           <span className="w-px h-4 bg-slate-700" />
-          <span className="text-xs text-slate-300 font-mono">{title || name}</span>
+          <span className="text-xs text-slate-300 font-mono">{dynTitle || title || name}</span>
           {shellBusy && !collapsed && (
             <button
               onClick={() => ref.current?.close()}
