@@ -24,6 +24,7 @@ const OPENCODE = {
   baseImage: '',
   dataDir: '/root/.opencode',
   workspaceDir: '/root/.opencode/workspace',
+  configFile: 'opencode.json',
   installDockerBuildArg: 'INSTALL_DOCKER=1',
   tuiCommand: 'opencode',
   backupTypeMarker: '',

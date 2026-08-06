@@ -45,6 +45,26 @@ function safeBackupPath(fileParam) {
   return resolved;
 }
 
+/** Recursively replace secret-looking values with '[REDACTED]' in a config
+ *  object. Driver-agnostic: covers openclaw/picoclaw/opencode key styles. */
+function redactSecrets(obj, depth = 0) {
+  if (depth > 8) return obj;
+  if (Array.isArray(obj)) return obj.map((v) => redactSecrets(v, depth + 1));
+  if (obj && typeof obj === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(obj)) {
+      if (typeof v === 'string' && v &&
+          /^(api[_-]?key|token|bot[_-]?token|secret|client[_-]?secret|app[_-]?secret|private[_-]?key|access[_-]?token)$/i.test(k)) {
+        out[k] = '[REDACTED]';
+      } else {
+        out[k] = redactSecrets(v, depth + 1);
+      }
+    }
+    return out;
+  }
+  return obj;
+}
+
 const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
@@ -769,14 +789,15 @@ app.post('/api/agents/:name/start', async (req, res) => {
 });
 
 app.post('/api/agents/:name/stop', async (req, res) => {
-  await runCmd('docker', ['stop', req.params.name], { timeout: 30000, check: false });
+  // -t 30: give the container 30s to stop gracefully before docker SIGKILLs it.
+  await runCmd('docker', ['stop', '-t', '30', req.params.name], { timeout: 60000, check: false });
   registry.dockerPsList(true);
   const agent = registry.getAgent(req.params.name);
   res.json({ ok: true, status: agent ? agent.status : 'exited' });
 });
 
 app.post('/api/agents/:name/restart', async (req, res) => {
-  await runCmd('docker', ['restart', req.params.name], { timeout: 30000, check: false });
+  await runCmd('docker', ['restart', '-t', '30', req.params.name], { timeout: 60000, check: false });
   registry.dockerPsList(true);
   const agent = registry.getAgent(req.params.name);
   res.json({ ok: true, status: agent ? agent.status : 'running' });
@@ -924,7 +945,7 @@ app.post('/api/agents/:name/settings', async (req, res) => {
       try {
         if (wasRunning) {
           step('stop', 'start');
-          await runCmd('docker', ['stop', name], { timeout: 30000 });
+          await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 });
           step('stop', 'end');
         }
 
@@ -950,7 +971,7 @@ app.post('/api/agents/:name/settings', async (req, res) => {
         }
 
         if (!wasRunning) {
-          try { await runCmd('docker', ['stop', name], { timeout: 30000 }); } catch {}
+          try { await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 }); } catch {}
         }
 
         registry.dockerPsList(true);
@@ -1315,19 +1336,13 @@ app.get('/api/agents/:name/logs', async (req, res) => {
 app.get('/api/agents/:name/config', (req, res) => {
   const agent = registry.getAgent(req.params.name);
   if (!agent) return res.status(404).json({ error: 'Agent not found' });
-  const configPath = path.join(agent.config_root, 'openclaw.json');
+  const driver = drivers.getDriver(agent.agent_type);
+  const configPath = path.join(agent.config_root, driver.configFile || 'openclaw.json');
   if (!fs.existsSync(configPath)) return res.json({ config: null });
   try {
     const raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    const redacted = JSON.parse(JSON.stringify(raw));
-    if (redacted.api_keys) redacted.api_keys = '[REDACTED]';
-    if (redacted.channels?.telegram?.botToken) redacted.channels.telegram.botToken = '[REDACTED]';
-    if (redacted.plugins) {
-      for (const key of Object.keys(redacted.plugins)) {
-        if (redacted.plugins[key]?.key) redacted.plugins[key].key = '[REDACTED]';
-      }
-    }
-    res.json({ config: redacted, configRaw: JSON.stringify(raw, null, 2) });
+    const redacted = redactSecrets(JSON.parse(JSON.stringify(raw)));
+    res.json({ config: redacted, configRaw: JSON.stringify(raw, null, 2), configFile: driver.configFile || 'openclaw.json' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1340,7 +1355,8 @@ app.post('/api/agents/:name/config', (req, res) => {
   if (!configStr) return res.status(400).json({ error: 'config required' });
   try {
     const newConfig = JSON.parse(configStr);
-    const configPath = path.join(agent.config_root, 'openclaw.json');
+    const driver = drivers.getDriver(agent.agent_type);
+    const configPath = path.join(agent.config_root, driver.configFile || 'openclaw.json');
     fs.writeFileSync(configPath, JSON.stringify(newConfig, null, 2) + '\n');
     res.json({ ok: true });
   } catch (err) {

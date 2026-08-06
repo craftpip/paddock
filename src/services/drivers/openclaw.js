@@ -28,6 +28,7 @@ const OPENCLAW = {
   baseImage: 'ghcr.io/openclaw/openclaw:latest',
   dataDir: '/root/.openclaw',
   workspaceDir: '/root/.openclaw/workspace',
+  configFile: 'openclaw.json',
   installDockerBuildArg: 'INSTALL_DOCKER=1',
   tuiCommand: 'openclaw',
   backupTypeMarker: '_openclaw-backup-cli_',

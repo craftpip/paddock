@@ -298,10 +298,29 @@ function WorkspaceTab({ agent }) {
   // workspace_dir = the workspace inside it).
   const containerRoot = normalizePath(agent.data_dir || '/root/.openclaw')
   const workspaceDir = normalizePath(agent.workspace_dir || `${containerRoot}/workspace`)
-  const initialScope = saved.scope === 'container' || saved.scope === 'host' ? saved.scope : 'container'
-  const [scope, setScope] = useState(containerAvailable ? initialScope : 'host')
-  const initialRoot = scope === 'container' ? containerRoot : hostRoot
-  const [path, setPath] = useState(normalizePath(saved.scope === scope && saved.path ? saved.path : initialRoot))
+  // The host instance dir and the container data dir are the same folder (bind
+  // mount), so a host path maps 1:1 onto a container path and back again.
+  const hostToContainer = (p) => {
+    if (!p || p === hostRoot) return containerRoot
+    if (p.startsWith(hostRoot + '/')) return normalizePath(containerRoot + p.slice(hostRoot.length))
+    return containerRoot
+  }
+  const containerToHost = (p) => {
+    if (!p || p === containerRoot) return hostRoot
+    if (p.startsWith(containerRoot + '/')) return normalizePath(hostRoot + p.slice(containerRoot.length))
+    return hostRoot
+  }
+  const savedScope = saved.scope === 'container' || saved.scope === 'host' ? saved.scope : 'container'
+  // If we last browsed the host scope while the container was down and it is
+  // up now, jump straight into the container at the same relative folder.
+  let initScope = containerAvailable ? savedScope : 'host'
+  let initPath = null
+  if (containerAvailable && savedScope === 'host' && saved.wasDown && saved.path) {
+    initScope = 'container'
+    initPath = hostToContainer(saved.path)
+  }
+  const [scope, setScope] = useState(initScope)
+  const [path, setPath] = useState(initPath || normalizePath(saved.scope === initScope && saved.path ? saved.path : (initScope === 'container' ? containerRoot : hostRoot)))
   const [pathDraft, setPathDraft] = useState('')
   const [listing, setListing] = useState(null)
   const [error, setError] = useState('')
@@ -334,7 +353,24 @@ function WorkspaceTab({ agent }) {
   }, [agent.name])
 
   useEffect(() => { load(path, scope) }, [path, scope, load])
-  useEffect(() => { sessionStorage.setItem(storageKey, JSON.stringify({ path, scope })) }, [path, scope, storageKey])
+  useEffect(() => { sessionStorage.setItem(storageKey, JSON.stringify({ path, scope, wasDown: !containerAvailable })) }, [path, scope, storageKey, containerAvailable])
+
+  // When the container comes online, auto-switch from host to container mode
+  // and land on the same folder the user was browsing. Mirror it when the
+  // container drops, so we never leave a dead container listing on screen.
+  const prevAvailableRef = useRef(containerAvailable)
+  useEffect(() => {
+    const prev = prevAvailableRef.current
+    prevAvailableRef.current = containerAvailable
+    if (prev === containerAvailable) return
+    if (containerAvailable && scope === 'host') {
+      setScope('container')
+      setPath(hostToContainer(path))
+    } else if (!containerAvailable && scope === 'container') {
+      setScope('host')
+      setPath(containerToHost(path))
+    }
+  }, [containerAvailable, scope, path])
   useEffect(() => {
     pathDraftRef.current = pathDraft
   }, [pathDraft])
@@ -905,9 +941,11 @@ function ConfigTab({ agent }) {
   const [raw, setRaw] = useState('')
   const [saved, setSaved] = useState(true)
   const [msg, setMsg] = useState('')
+  const [configFile, setConfigFile] = useState('config.json')
 
   useEffect(() => {
     api(`/api/agents/${agent.name}/config`).then((d) => {
+      if (d.configFile) setConfigFile(d.configFile)
       if (d.configRaw) { setRaw(d.configRaw); setSaved(true) }
     }).catch(() => {})
   }, [agent.name])
@@ -928,7 +966,7 @@ function ConfigTab({ agent }) {
       <div className="flex items-center justify-between mb-4">
         <div>
           <h3 className="text-sm font-medium text-slate-300">Agent Configuration</h3>
-          <p className="text-xs text-slate-500">openclaw.json</p>
+          <p className="text-xs text-slate-500">{configFile}</p>
         </div>
         <div className="flex items-center gap-2">
           <span className={`text-xs ${saved ? 'text-slate-500' : 'text-amber-400'}`}>{saved ? 'Saved' : 'Unsaved changes'}</span>

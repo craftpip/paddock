@@ -9,6 +9,8 @@ RUN apk add --no-cache \
     openssh \
     shadow \
     tzdata \
+    tmux \
+    sqlite \
     nodejs \
     npm
 
@@ -23,24 +25,7 @@ RUN mkdir -p /var/run/sshd && \
 
 RUN npm config set fund false && npm config set audit false && npm install -g mcporter
 
-RUN cat > /usr/local/bin/start.sh <<'EOF'
-#!/bin/bash
-if [ -n "$ROOT_PASSWORD" ]; then
-    echo "root:$ROOT_PASSWORD" | chpasswd
-fi
-if [ -n "$TZ" ]; then
-    ln -sf /usr/share/zoneinfo/$TZ /etc/localtime
-    echo $TZ > /etc/timezone
-fi
-export PICOCLAW_GATEWAY_HOST=0.0.0.0
-/usr/sbin/sshd &
-if [ ! -f /root/.picoclaw/config.json ]; then
-    echo "picoclaw config missing at /root/.picoclaw/config.json"
-    echo "container is in setup mode; configure then restart"
-    tail -f /dev/null
-fi
-picoclaw gateway -E || tail -f /dev/null
-EOF
+COPY start.sh /usr/local/bin/start.sh
 RUN chmod +x /usr/local/bin/start.sh
 
 WORKDIR /root

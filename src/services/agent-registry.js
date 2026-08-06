@@ -146,15 +146,23 @@ function buildAgent(vmName, dockerState) {
 
   let defaultModel = null;
   let defaultProvider = null;
-  const configPath = path.join(configRoot, 'openclaw.json');
+  const configPath = path.join(configRoot, driver.configFile || 'openclaw.json');
   if (fs.existsSync(configPath)) {
     try {
       const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-      const model = config?.agents?.defaults?.model;
-      if (model?.primary) {
-        const parts = model.primary.split('/');
-        defaultProvider = parts[0] || null;
-        defaultModel = parts.slice(1).join('/') || model.primary;
+      if (agentType === 'picoclaw') {
+        // picoclaw stores the model as provider + model_name (no primary/fallback).
+        if (config?.agents?.defaults?.model_name) {
+          defaultProvider = config.agents.defaults.provider || null;
+          defaultModel = config.agents.defaults.model_name;
+        }
+      } else {
+        const model = config?.agents?.defaults?.model;
+        if (model?.primary) {
+          const parts = model.primary.split('/');
+          defaultProvider = parts[0] || null;
+          defaultModel = parts.slice(1).join('/') || model.primary;
+        }
       }
     } catch {}
   }
