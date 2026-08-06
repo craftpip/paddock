@@ -294,7 +294,10 @@ function WorkspaceTab({ agent }) {
   }
   const containerAvailable = agent.status === 'running'
   const hostRoot = normalizePath(agent.workspace_root || `/workspace/instances/${agent.name}/openclaw`)
-  const containerRoot = '/root/.openclaw'
+  // Container-side roots come from the agent driver (data_dir = data dir,
+  // workspace_dir = the workspace inside it).
+  const containerRoot = normalizePath(agent.data_dir || '/root/.openclaw')
+  const workspaceDir = normalizePath(agent.workspace_dir || `${containerRoot}/workspace`)
   const initialScope = saved.scope === 'container' || saved.scope === 'host' ? saved.scope : 'container'
   const [scope, setScope] = useState(containerAvailable ? initialScope : 'host')
   const initialRoot = scope === 'container' ? containerRoot : hostRoot
@@ -314,7 +317,7 @@ function WorkspaceTab({ agent }) {
   const navScrollRef = useRef(false)
   const pathDraftRef = useRef('')
 
-  const homePath = scope === 'container' ? `${containerRoot}/workspace` : `${hostRoot}/workspace`
+  const homePath = scope === 'container' ? workspaceDir : `${hostRoot}/workspace`
   const isNavRoot = scope === 'container' ? path === '/' : path === hostRoot
 
   const load = useCallback((p, sc) => {

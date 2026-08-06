@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { getDb } = require('./db');
+const { getDriver } = require('./drivers');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const INSTANCES_DIR = path.join(WORKSPACE, 'instances');
@@ -72,15 +73,19 @@ function findAgentDir(vmDir, agentType) {
   return candidate;
 }
 
+function getAgentType(vmName) {
+  return readMeta(path.join(INSTANCES_DIR, vmName)).AGENT || 'openclaw';
+}
+
 function getWorkspaceRoot(vmName) {
-  const agentDir = findAgentDir(path.join(INSTANCES_DIR, vmName), 'openclaw');
+  const agentDir = findAgentDir(path.join(INSTANCES_DIR, vmName), getAgentType(vmName));
   const ws = path.join(agentDir, 'workspace');
   if (fs.existsSync(ws)) return ws;
   return agentDir;
 }
 
 function getConfigRoot(vmName) {
-  return findAgentDir(path.join(INSTANCES_DIR, vmName), 'openclaw');
+  return findAgentDir(path.join(INSTANCES_DIR, vmName), getAgentType(vmName));
 }
 
 function syncAgentToDb(agent) {
@@ -127,6 +132,7 @@ function buildAgent(vmName, dockerState) {
   const agentDir = findAgentDir(vmDir, agentType);
   const workspaceRoot = path.join(agentDir, 'workspace');
   const configRoot = agentDir;
+  const driver = getDriver(agentType);
   let status = dockerState[vmName] || 'missing';
   if (_restarting[vmName] && status !== 'running') status = 'restarting';
 
@@ -163,6 +169,8 @@ function buildAgent(vmName, dockerState) {
     status,
     workspace_root: agentDir,
     config_root: configRoot,
+    data_dir: driver.dataDir,
+    workspace_dir: driver.workspaceDir,
     default_model: defaultModel,
     default_provider: defaultProvider,
     tags: [],

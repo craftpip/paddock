@@ -2,30 +2,13 @@ const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
 const { runCmdStream } = require('./cmd');
+const { getDriver } = require('./drivers');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const HOST_WORKSPACE = process.env.HOST_WORKSPACE_ROOT || WORKSPACE;
 const INSTANCES_DIR = path.join(WORKSPACE, 'instances');
 const PREFIX = process.env.CONTAINER_PREFIX || 'vm';
 const PREFIX_RE = new RegExp('^' + PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-');
-
-const AGENT_IMAGES = {
-  openclaw: 'paddock-vm-openclaw:latest',
-  picoclaw: 'paddock-vm-picoclaw:latest',
-  nanobot: 'paddock-vm-nanobot:latest',
-  hermes: 'paddock-vm-hermes:latest',
-};
-
-const AGENT_BUILD_REL = {
-  openclaw: '../../src/vm-builds/openclaw',
-  picoclaw: '../../src/vm-builds/picoclaw',
-  nanobot: '../../src/vm-builds/nanobot',
-  hermes: '../../src/vm-builds/hermes',
-};
-
-function containerDataDir(agent) {
-  return agent === 'hermes' ? '/opt/data' : `/root/.${agent}`;
-}
 
 function runCmd(cmd, args, options = {}) {
   const { timeout = 120000 } = options;
@@ -56,78 +39,12 @@ function instanceComposePath(name) {
   return path.join(INSTANCES_DIR, name, 'docker-compose.yml');
 }
 
-const AGENT_BASE_IMAGES = {
-  openclaw: 'ghcr.io/openclaw/openclaw:latest',
-  picoclaw: 'sipeed/picoclaw:v0.2.5-launcher',
-  hermes: 'nousresearch/hermes-agent:latest',
-  nanobot: '',
-};
-
-let _baseVersionCache = { key: '', ts: 0, value: '' };
-const BASE_VERSION_CACHE_TTL = 5 * 60 * 1000;
-
-function parseOpenClawVersion(output) {
-  const m = /OpenClaw\s+([\w.+-]+)/i.exec(output || '');
-  const v = m ? m[1] : ((output || '').trim());
-  // Strip a packaging build suffix (label is "2026.7.1-1", CLI says "2026.7.1")
-  return v ? v.replace(/-\d+$/, '') : '';
-}
-
-/** Current OpenClaw version in a running container; falls back to reading it
- *  from the built image if the container is down. Returns '' when unknown. */
-async function readOpenClawVersion(name, image) {
-  try {
-    const r = await runCmd('docker', ['exec', name, 'openclaw', '--version'], { timeout: 15000 });
-    const v = parseOpenClawVersion(r.stdout);
-    if (v) return v;
-  } catch {}
-  if (image) {
-    try {
-      const r = await runCmd('docker', ['run', '--rm', '--entrypoint', 'openclaw', image, '--version'], { timeout: 60000 });
-      return parseOpenClawVersion(r.stdout);
-    } catch {}
-  }
-  return '';
-}
-
-/** Version available in the latest base image for an agent type. Pulls the
- *  base tag (fast when unchanged) and reads its version label. Cached 5 min. */
-async function readBaseImageVersion(agentType) {
-  const base = AGENT_BASE_IMAGES[agentType];
-  if (!base) return '';
-  const now = Date.now();
-  const key = 'base:' + base;
-  if (_baseVersionCache.key === key && now - _baseVersionCache.ts < BASE_VERSION_CACHE_TTL) {
-    return _baseVersionCache.value;
-  }
-  try { await runCmd('docker', ['pull', base], { timeout: 600000 }); } catch {}
-  try {
-    const r = await runCmd('docker', ['inspect', '--format', '{{index .Config.Labels "org.opencontainers.image.version"}}', base], { timeout: 15000 });
-    const v = parseOpenClawVersion(r.stdout);
-    _baseVersionCache = { key, ts: now, value: v };
-    return v;
-  } catch {
-    _baseVersionCache = { key, ts: now, value: '' };
-    return '';
-  }
-}
-
-/** { currentVersion, availableVersion, updateAvailable } for the update confirm. */
-async function getUpdateInfo(name, agentType) {
-  const meta = readMeta(path.join(INSTANCES_DIR, name));
-  const agent = agentType || meta.AGENT || 'openclaw';
-  const image = AGENT_IMAGES[agent] || AGENT_IMAGES.openclaw;
-  const current = (await readOpenClawVersion(name, image)) || meta.OPENCLAW_VERSION || '';
-  const available = await readBaseImageVersion(agent);
-  const updateAvailable = !!(current && available && current !== available);
-  return { currentVersion: current, availableVersion: available, updateAvailable };
-}
-
 function generateInstanceCompose(name, agent, password, port, opts = {}) {
   const { allowDocker = false, network = '' } = opts;
-  const image = AGENT_IMAGES[agent] || AGENT_IMAGES.openclaw;
-  const build = AGENT_BUILD_REL[agent] || AGENT_BUILD_REL.openclaw;
-  const dataDir = containerDataDir(agent);
+  const driver = getDriver(agent);
+  const image = driver.buildImage;
+  const build = driver.buildRel;
+  const dataDir = driver.dataDir;
 
   let yaml = 'services:\n';
   yaml += `  ${name}:\n`;
@@ -188,7 +105,7 @@ function applySettings(name, opts = {}) {
   return {
     allowDocker,
     network,
-    image: AGENT_IMAGES[agent] || AGENT_IMAGES.openclaw,
+    image: getDriver(agent).buildImage,
     agent,
   };
 }
@@ -208,9 +125,10 @@ async function updateAgent(name, { onLog = () => {}, onStep = () => {}, buildArg
   // file, so the CLI alone grants no access.
   const meta = readMeta(path.join(INSTANCES_DIR, name));
   const agent = meta.AGENT || 'openclaw';
+  const dockerArg = getDriver(agent).installDockerBuildArg;
   const bargs = [...buildArgs];
-  if (AGENT_BUILD_REL[agent] && !bargs.some((a) => a.startsWith('INSTALL_DOCKER='))) {
-    bargs.push('INSTALL_DOCKER=1');
+  if (dockerArg && !bargs.some((a) => a.startsWith(dockerArg.split('=')[0] + '='))) {
+    bargs.push(dockerArg);
   }
   for (const ba of bargs) args.push('--build-arg', ba);
   args.push(name);
@@ -342,28 +260,34 @@ async function createVm(name, options = {}) {
   }
   onStep('up', 'end');
 
-  if ((agent === 'openclaw' || agent === 'picoclaw') && !skipSetup) {
+  const driver = getDriver(agent);
+  const setupSteps = driver.setupSteps || [];
+  if (setupSteps.length && !skipSetup) {
     onStep('setup', 'start');
-    let ready = false;
-    for (let i = 0; i < 15; i++) {
-      try {
-        await runCmdStream('docker', ['exec', name, 'openclaw', 'setup', '--baseline'], { onLog, timeout: 60000 });
-        ready = true;
-        break;
-      } catch {
-        if (i === 14) break;
-        onLog('system', `Container not ready yet (attempt ${i + 1}/15), waiting…`);
-        await new Promise(r => setTimeout(r, 1000));
+    let allReady = true;
+    for (const step of setupSteps) {
+      let ready = false;
+      for (let i = 0; i < 15; i++) {
+        try {
+          await runCmdStream('docker', ['exec', name, step.cmd, ...(step.args || [])], { onLog, timeout: 60000 });
+          ready = true;
+          break;
+        } catch {
+          if (i === 14) break;
+          onLog('system', `Container not ready yet (attempt ${i + 1}/15), waiting…`);
+          await new Promise(r => setTimeout(r, 1000));
+        }
       }
+      if (!ready) { allReady = false; break; }
     }
-    if (!ready) {
+    if (!allReady) {
       onStep('setup', 'error');
-      throw new Error(`Container '${name}' did not become ready for openclaw setup --baseline`);
+      throw new Error(`Container '${name}' did not become ready for setup`);
     }
     onStep('setup', 'end');
   }
 
-  if ((agent === 'openclaw' || agent === 'picoclaw') && !skipSetup) {
+  if (setupSteps.length && !skipSetup) {
     await runCmdStream('docker', ['restart', name], { onLog, timeout: 30000 });
   }
 
@@ -416,7 +340,5 @@ module.exports = {
   applySettings, updateAgent, setMetaFlag,
   instanceComposePath, getComposePath,
   existingServices, startAgent,
-  AGENT_IMAGES, AGENT_BUILD_REL,
-  getUpdateInfo, readOpenClawVersion, readBaseImageVersion,
   INSTANCES_DIR, PREFIX, PREFIX_RE,
 };

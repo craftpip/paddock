@@ -16,6 +16,7 @@ const vault = require('./services/vault');
 const registry = require('./services/agent-registry');
 const vm = require('./services/vm-manager');
 const backup = require('./services/backup-manager');
+const drivers = require('./services/drivers');
 const jobLog = require('./services/job-log');
 const apiKeys = require('./services/api-keys');
 const { getDb } = require('./services/db');
@@ -775,10 +776,11 @@ app.get('/api/agents/:name/settings', async (req, res) => {
     const meta = readMeta(name);
     if (!meta.AGENT && !meta.ROOT_PASSWORD) return res.status(404).json({ error: 'Agent not found' });
     const agentType = meta.AGENT || 'openclaw';
-    const image = vm.AGENT_IMAGES[agentType] || '';
+    const driver = drivers.getDriver(agentType);
+    const image = driver.buildImage;
     let version = meta.OPENCLAW_VERSION || '';
     try {
-      version = (await vm.readOpenClawVersion(name, image)) || version;
+      version = (await driver.currentVersion(name)) || version;
     } catch {}
     res.json({
       allowDocker: meta.DOCKER === '1',
@@ -800,8 +802,11 @@ app.get('/api/agents/:name/update-info', async (req, res) => {
   try {
     const meta = readMeta(name);
     if (!meta.AGENT && !meta.ROOT_PASSWORD) return res.status(404).json({ error: 'Agent not found' });
-    const info = await vm.getUpdateInfo(name, meta.AGENT || 'openclaw');
-    res.json(info);
+    const driver = drivers.getDriver(meta.AGENT || 'openclaw');
+    const current = (await driver.currentVersion(name)) || meta.OPENCLAW_VERSION || '';
+    const available = await driver.availableVersion();
+    const updateAvailable = !!(current && available && current !== available);
+    res.json({ currentVersion: current, availableVersion: available, updateAvailable });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -847,7 +852,7 @@ app.post('/api/agents/:name/settings', async (req, res) => {
     }
 
     const agentType = meta.AGENT || 'openclaw';
-    const image = vm.AGENT_IMAGES[agentType] || vm.AGENT_IMAGES.openclaw;
+    const image = drivers.getDriver(agentType).buildImage;
     const dockerChanged = newAllow !== oldAllow;
     const networkChanged = newNetwork !== oldNetwork;
     if (!dockerChanged && !networkChanged) {
@@ -887,7 +892,7 @@ app.post('/api/agents/:name/settings', async (req, res) => {
 
         if (needRebuild) {
           log('system', 'Image has no docker CLI — rebuilding it with the docker CLI, then recreating…');
-          await vm.updateAgent(name, { buildArgs: ['INSTALL_DOCKER=1'], pull: false, onLog: log, onStep: step });
+          await vm.updateAgent(name, { pull: false, onLog: log, onStep: step });
         } else {
           // `docker start` reuses the old container config, and network_mode +
           // volume mounts are create-time settings — a plain start would
@@ -964,7 +969,7 @@ app.post('/api/agents/:name/update', async (req, res) => {
       registry.discoverAgents();
       try {
         const meta = readMeta(name);
-        const v = await vm.readOpenClawVersion(name, vm.AGENT_IMAGES[meta.AGENT || 'openclaw'] || '');
+        const v = await drivers.getDriver(meta.AGENT || 'openclaw').currentVersion(name);
         if (v) vm.setMetaFlag(name, 'OPENCLAW_VERSION', v);
       } catch {}
       jobLog.line(job, 'system', 'Done — container recreated');
@@ -1007,6 +1012,22 @@ app.get('/api/agents/:name/update-log', (req, res) => {
 
 app.get('/api/config', (req, res) => {
   res.json({ containerPrefix: PREFIX });
+});
+
+// ─── Agent type registry (drivers) ─────────────────────────────
+
+/** All known agent types — feeds the CreateAgent select and anything that
+ *  needs a per-type list. Includes each type's setup steps so the create
+ *  console can show the real command instead of a hardcoded one. */
+app.get('/api/agent-types', (req, res) => {
+  res.json({ types: drivers.listDrivers() });
+});
+
+/** Command groups for one agent type — the "buttons" on the Commands tab
+ *  live in the driver, not in the frontend bundle. */
+app.get('/api/agent-types/:type/commands', (req, res) => {
+  const driver = drivers.getDriver(req.params.type);
+  res.json({ type: driver.type, commands: driver.commands });
 });
 
 app.get('/api/backups', (req, res) => {

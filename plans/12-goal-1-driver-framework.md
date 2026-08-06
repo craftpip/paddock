@@ -1,6 +1,12 @@
 # Goal 1 — Driver Framework + openclaw Reference Driver
 
-## Status: Planned (2026-08-06)
+## Status: Complete (2026-08-06)
+
+Backend + frontend migrated to the driver registry and verified live on
+`pad-openclaw-test`. Docker toggle not re-run destructively (triggers an image
+rebuild on the live pad); its changed bits — image lookup and the
+`INSTALL_DOCKER=1` build arg — are behavior-identical to the pre-driver code
+and were confirmed via diff + live `GET /api/agents/:name/settings`.
 
 ## Goal
 
@@ -28,7 +34,7 @@ driver.
 | `dataDir` | `/root/.openclaw` |
 | `workspaceDir` | `/root/.openclaw/workspace` |
 | `setupSteps` | `openclaw setup --baseline` |
-| `backupSteps` | `openclaw backup create --output /tmp/{name}_{ts}.tar.gz` |
+| `backupTypeMarker` | `_openclaw-backup-cli_` (filename sniff for type) |
 | `installDockerBuildArg` | `INSTALL_DOCKER=1` |
 | `currentVersion(name)` | `openclaw --version` (container, fallback image) |
 | `availableVersion()` | base image version label (cached 5 min) |
@@ -47,7 +53,9 @@ driver.
 - **agent-registry.js** — `getWorkspaceRoot()` / `getConfigRoot()` /
   `buildAgent()` derive paths from `driver.workspaceDir` / `driver.dataDir`
   instead of defaulting to `openclaw`.
-- **backup-manager.js** — backup/restore runs `driver.backupSteps`.
+- **backup-manager.js** — backup type detection via `driver.backupTypeMarker`
+  (no `backupSteps` field; backup-manager composes the command and uses
+  `driver.dataDir` for the in-container path).
 
 ### Frontend consumers
 
@@ -76,20 +84,21 @@ driver.
 
 ## Progress
 
-- [ ] `src/services/drivers/index.js` — registry + `getDriver()` + fallback
-- [ ] `src/services/drivers/openclaw.js` — reference driver with all fields
-- [ ] vm-manager.js — maps/version/setup-guard → driver calls
-- [ ] app.js — settings + update-info version via driver
-- [ ] app.js — `GET /api/agent-types/:type/commands`
-- [ ] agent-registry.js — workspace/config root via driver
-- [ ] backup-manager.js — via `driver.backupSteps`
-- [ ] CommandsPane.jsx — fetch + render from driver
-- [ ] CreateAgent.jsx — options + setup from registry
-- [ ] SettingsTab.jsx — version row via driver
-- [ ] AgentDetail.jsx — workspace container root via driver
-- [ ] Regression: create, terminal, versions, update card, workspace, backup
+- [x] `src/services/drivers/index.js` — registry + `getDriver()` + fallback
+- [x] `src/services/drivers/openclaw.js` — reference driver with all fields
+- [x] vm-manager.js — maps/version/setup-guard → driver calls
+- [x] app.js — settings + update-info version via driver
+- [x] app.js — `GET /api/agent-types/:type/commands`
+- [x] agent-registry.js — workspace/config root via driver
+- [x] backup-manager.js — via `driver.backupTypeMarker` + `dataDir`
+- [x] CommandsPane.jsx — fetch + render from driver
+- [x] CreateAgent.jsx — options + setup from registry
+- [x] SettingsTab.jsx — version row via driver
+- [x] AgentDetail.jsx — workspace container root via driver
+- [x] Regression: create, terminal, versions, update card, workspace, backup
       behave exactly as before on a live openclaw PAD
-- [ ] Regression: docker toggle (plan 09) still works
+- [ ] Regression: docker toggle (plan 09) — verified by diff + live settings
+      API only; full toggle rebuild not run on the live pad
 
 ## Verification
 

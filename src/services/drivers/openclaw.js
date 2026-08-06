@@ -1,0 +1,131 @@
+const { execFile } = require('child_process');
+
+function runCmd(cmd, args, options = {}) {
+  const { timeout = 120000 } = options;
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args || [], { timeout }, (err, stdout, stderr) => {
+      if (err) reject(err);
+      else resolve({ stdout: stdout || '', stderr: stderr || '', code: 0 });
+    });
+  });
+}
+
+function parseVersion(output) {
+  const m = /OpenClaw\s+([\w.+-]+)/i.exec(output || '');
+  const v = m ? m[1] : ((output || '').trim());
+  // Strip a packaging build suffix (label is "2026.7.1-1", CLI says "2026.7.1")
+  return v ? v.replace(/-\d+$/, '') : '';
+}
+
+let _baseVersionCache = { key: '', ts: 0, value: '' };
+const BASE_VERSION_CACHE_TTL = 5 * 60 * 1000;
+
+const OPENCLAW = {
+  type: 'openclaw',
+  label: 'OpenClaw',
+  buildImage: 'paddock-vm-openclaw:latest',
+  buildRel: '../../src/vm-builds/openclaw',
+  baseImage: 'ghcr.io/openclaw/openclaw:latest',
+  dataDir: '/root/.openclaw',
+  workspaceDir: '/root/.openclaw/workspace',
+  installDockerBuildArg: 'INSTALL_DOCKER=1',
+  backupTypeMarker: '_openclaw-backup-cli_',
+
+  /** Steps run (docker exec) after the container comes up at create time. */
+  setupSteps: [
+    { cmd: 'openclaw', args: ['setup', '--baseline'] },
+  ],
+
+  /** Command groups served to the Commands tab (`/api/agent-types/openclaw/commands`). */
+  commands: [
+    {
+      title: 'Memory', color: 'violet',
+      commands: [
+        { cmd: 'openclaw memory status', label: 'Status', desc: 'Index health' },
+        { cmd: 'openclaw memory promote --apply', label: 'Promote', desc: 'Short-term → MEMORY.md', confirm: true },
+      ],
+    },
+    {
+      title: 'Config', color: 'teal',
+      commands: [
+        { cmd: 'openclaw config validate', label: 'Validate', desc: 'Check config against schema' },
+        { cmd: 'openclaw config file', label: 'File path', desc: 'Show active config path' },
+        { cmd: 'openclaw config get agents.defaults.model --json', label: 'Model config', desc: 'Primary + fallback models' },
+        { cmd: 'openclaw config schema', label: 'Schema', desc: 'Dump JSON schema' },
+      ],
+    },
+    {
+      title: 'Other', color: 'slate',
+      commands: [
+        { cmd: 'openclaw backup create', label: 'Backup', desc: 'Create a backup archive', confirm: true },
+        { cmd: 'openclaw update status', label: 'Check updates', desc: 'Update channel + availability' },
+        { cmd: 'openclaw mcp doctor', label: 'MCP Doctor', desc: 'Check MCP servers' },
+      ],
+    },
+    {
+      title: 'Security', color: 'rose',
+      commands: [
+        { cmd: 'openclaw security audit', label: 'Audit', desc: 'Cold security audit' },
+        { cmd: 'openclaw security audit --deep', label: 'Audit (deep)', desc: 'Live probes' },
+        { cmd: 'openclaw security audit --fix', label: 'Audit & Fix', desc: 'Auto-fix issues', confirm: true },
+      ],
+    },
+    {
+      title: 'Doctor', color: 'amber',
+      commands: [
+        { cmd: 'openclaw doctor', label: 'Doctor', desc: 'Diagnose issues' },
+        { cmd: 'openclaw doctor --fix', label: 'Fix', desc: 'Auto-repair issues', confirm: true },
+        { cmd: 'openclaw doctor --lint', label: 'Lint', desc: 'Read-only CI-style checks' },
+        { cmd: 'openclaw doctor --deep', label: 'Deep', desc: 'Scan for extra gateways' },
+        { cmd: 'openclaw doctor --state-sqlite compact', label: 'SQLite Compact', desc: 'Compact SQLite state (stop first)', confirm: true, danger: true },
+      ],
+    },
+    {
+      title: 'Diagnostics', color: 'cyan',
+      commands: [
+        { cmd: 'openclaw status', label: 'Status', desc: 'Overview + gateway state' },
+        { cmd: 'openclaw gateway status', label: 'Gateway status', desc: 'Bind, port + connectivity' },
+      ],
+    },
+  ],
+
+  /** Current version in a running container; falls back to reading it from the
+   *  built image if the container is down. Returns '' when unknown. */
+  async currentVersion(name) {
+    try {
+      const r = await runCmd('docker', ['exec', name, 'openclaw', '--version'], { timeout: 15000 });
+      const v = parseVersion(r.stdout);
+      if (v) return v;
+    } catch {}
+    try {
+      const r = await runCmd('docker', ['run', '--rm', '--entrypoint', 'openclaw', OPENCLAW.buildImage, '--version'], { timeout: 60000 });
+      return parseVersion(r.stdout);
+    } catch {}
+    return '';
+  },
+
+  /** Version available in the latest base image. Pulls the base tag (fast when
+   *  unchanged) and reads its version label. Cached 5 min. Returns '' for
+   *  drivers whose base image has no version label. */
+  async availableVersion() {
+    const base = OPENCLAW.baseImage;
+    if (!base) return '';
+    const now = Date.now();
+    const key = 'base:' + base;
+    if (_baseVersionCache.key === key && now - _baseVersionCache.ts < BASE_VERSION_CACHE_TTL) {
+      return _baseVersionCache.value;
+    }
+    try { await runCmd('docker', ['pull', base], { timeout: 600000 }); } catch {}
+    try {
+      const r = await runCmd('docker', ['inspect', '--format', '{{index .Config.Labels "org.opencontainers.image.version"}}', base], { timeout: 15000 });
+      const v = parseVersion(r.stdout);
+      _baseVersionCache = { key, ts: now, value: v };
+      return v;
+    } catch {
+      _baseVersionCache = { key, ts: now, value: '' };
+      return '';
+    }
+  },
+};
+
+module.exports = OPENCLAW;

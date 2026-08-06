@@ -203,7 +203,7 @@ export default function SettingsTab({ agent }) {
             ['Runtime', agent.runtime_type || 'docker'],
             ['Status', agent.status || '—'],
             ['Image', settings?.image || '—'],
-            ['OpenClaw version', settings?.version || '—'],
+            ['Version', settings?.version || '—'],
           ].map(([k, v]) => (
             <div key={k}>
               <dt className="text-xs text-slate-500">{k}</dt>

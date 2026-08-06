@@ -10,6 +10,11 @@ const STEP_COMMANDS = {
   setup: (name) => `docker exec ${name} openclaw setup --baseline`,
 }
 
+function setupCmdFor(type, name) {
+  if (!type || !type.setupSteps || type.setupSteps.length === 0) return ''
+  return `docker exec ${name} ${type.setupSteps.map((s) => [s.cmd, ...(s.args || [])].join(' ')).join(' && ')}`
+}
+
 function fmtTime(ts) {
   try {
     return new Date(ts).toLocaleTimeString()
@@ -23,6 +28,7 @@ export default function CreateAgent() {
   const { name: urlName } = useParams()
   const [name, setName] = useState('')
   const [agentType, setAgentType] = useState('openclaw')
+  const [agentTypes, setAgentTypes] = useState([])
   const [backupFile, setBackupFile] = useState('')
   const [backups, setBackups] = useState([])
   const [prefix, setPrefix] = useState('vm')
@@ -40,6 +46,9 @@ export default function CreateAgent() {
       if (cfg.containerPrefix) setPrefix(cfg.containerPrefix)
     }).catch(() => {})
     api('/api/backups').then(setBackups).catch(() => {})
+    api('/api/agent-types').then(d => {
+      if (d.types?.length) setAgentTypes(d.types)
+    }).catch(() => {})
     return () => closeStream()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -60,6 +69,9 @@ export default function CreateAgent() {
     return b.agentType === agentType
   })
 
+  const currentType = agentTypes.find((t) => t.type === agentType)
+  const hasSetup = !!currentType && currentType.setupSteps.length > 0
+
   const fullName = `${prefix}-${agentType}-${name || '...'}`
   const isClone = !!backupFile
 
@@ -79,7 +91,14 @@ export default function CreateAgent() {
       try {
         const data = JSON.parse(e.data)
         if (data.state === 'start') {
-          const cmd = STEP_COMMANDS[data.step] ? STEP_COMMANDS[data.step](job) : data.step
+          let cmd
+          if (data.step === 'setup') {
+            // The real setup command lives in the agent driver; fall back to
+            // the openclaw default only if the registry hasn't loaded yet.
+            cmd = setupCmdFor(currentType, job) || STEP_COMMANDS.setup(job)
+          } else {
+            cmd = STEP_COMMANDS[data.step] ? STEP_COMMANDS[data.step](job) : data.step
+          }
           setLines(prev => [...prev, { type: 'cmd', cmd, ts: fmtTime(data.ts) }])
           setRunningCmd(cmd)
         } else if (data.state === 'end' || data.state === 'error') {
@@ -174,9 +193,9 @@ export default function CreateAgent() {
               <span className="text-sm font-medium text-slate-400">{prefix}-</span>
               <select value={agentType} onChange={(e) => setAgentType(e.target.value)}
                       className="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-500 w-36">
-                <option value="openclaw">openclaw</option>
-                <option value="picoclaw">picoclaw</option>
-                <option value="hermes">hermes</option>
+                {agentTypes.length > 0
+                  ? agentTypes.map((t) => <option key={t.type} value={t.type}>{t.type}</option>)
+                  : <option value="openclaw">openclaw</option>}
               </select>
               <span className="text-sm text-slate-500">-</span>
               <input type="text" value={name} onChange={(e) => setName(e.target.value)} required
@@ -198,7 +217,9 @@ export default function CreateAgent() {
             </select>
             {!isClone && (
               <p className="text-xs text-slate-500 mt-2">
-                Fresh installs run <code className="text-slate-400">openclaw setup --baseline</code> as part of creation.
+                {hasSetup
+                  ? <>Fresh installs run <code className="text-slate-400">{currentType.setupSteps.map((s) => s.cmd).join(', ')}</code> as part of creation.</>
+                  : 'Fresh installs skip any setup step — the container just boots.'}
               </p>
             )}
           </div>

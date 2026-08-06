@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
 const { runCmdStream } = require('./cmd');
+const { getDriver, listDrivers } = require('./drivers');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const INSTANCES_DIR = path.join(WORKSPACE, 'instances');
@@ -45,14 +46,14 @@ function readMeta(agentName) {
 }
 
 function getBackupType(filename) {
-  if (filename.includes('_openclaw-backup-cli_')) return 'cli';
+  if (listDrivers().some((d) => d.backupTypeMarker && filename.includes(d.backupTypeMarker))) return 'cli';
   return 'legacy';
 }
 
 async function backupAgent(agentName) {
   const meta = readMeta(agentName);
   const agent = meta.AGENT || 'openclaw';
-  const dataDir = agent === 'hermes' ? '/opt/data' : `/root/.${agent}`;
+  const dataDir = getDriver(agent).dataDir;
   const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const archive = `${agentName}_${ts}.tar.gz`;
 
@@ -75,7 +76,7 @@ async function restoreAgent(agentName, archiveFile, onLog = () => {}) {
   const instDir = path.join(INSTANCES_DIR, agentName);
   const meta = readMeta(agentName);
   const agent = meta.AGENT || 'openclaw';
-  const dataDir = agent === 'hermes' ? '/opt/data' : `/root/.${agent}`;
+  const dataDir = getDriver(agent).dataDir;
   const archivePath = path.join(BACKUPS_DIR, archiveFile);
 
   if (!fs.existsSync(archivePath)) throw new Error(`Backup file not found: ${archiveFile}`);

@@ -26,58 +26,6 @@ const COLORS = {
   slate:   { dot: 'bg-slate-500',   pill: 'border-slate-700/50 text-slate-400 bg-slate-800/50 hover:bg-slate-700 hover:text-slate-200' },
 }
 
-const SIMPLE_GROUPS = [
-  {
-    title: 'Memory', color: 'violet',
-    commands: [
-      { cmd: 'openclaw memory status', label: 'Status', desc: 'Index health' },
-      { cmd: 'openclaw memory promote --apply', label: 'Promote', desc: 'Short-term → MEMORY.md', confirm: true },
-    ],
-  },
-  {
-    title: 'Config', color: 'teal',
-    commands: [
-      { cmd: 'openclaw config validate', label: 'Validate', desc: 'Check config against schema' },
-      { cmd: 'openclaw config file', label: 'File path', desc: 'Show active config path' },
-      { cmd: 'openclaw config get agents.defaults.model --json', label: 'Model config', desc: 'Primary + fallback models' },
-      { cmd: 'openclaw config schema', label: 'Schema', desc: 'Dump JSON schema' },
-    ],
-  },
-  {
-    title: 'Other', color: 'slate',
-    commands: [
-      { cmd: 'openclaw backup create', label: 'Backup', desc: 'Create a backup archive', confirm: true },
-      { cmd: 'openclaw update status', label: 'Check updates', desc: 'Update channel + availability' },
-      { cmd: 'openclaw mcp doctor', label: 'MCP Doctor', desc: 'Check MCP servers' },
-    ],
-  },
-  {
-    title: 'Security', color: 'rose',
-    commands: [
-      { cmd: 'openclaw security audit', label: 'Audit', desc: 'Cold security audit' },
-      { cmd: 'openclaw security audit --deep', label: 'Audit (deep)', desc: 'Live probes' },
-      { cmd: 'openclaw security audit --fix', label: 'Audit & Fix', desc: 'Auto-fix issues', confirm: true },
-    ],
-  },
-  {
-    title: 'Doctor', color: 'amber',
-    commands: [
-      { cmd: 'openclaw doctor', label: 'Doctor', desc: 'Diagnose issues' },
-      { cmd: 'openclaw doctor --fix', label: 'Fix', desc: 'Auto-repair issues', confirm: true },
-      { cmd: 'openclaw doctor --lint', label: 'Lint', desc: 'Read-only CI-style checks' },
-      { cmd: 'openclaw doctor --deep', label: 'Deep', desc: 'Scan for extra gateways' },
-      { cmd: 'openclaw doctor --state-sqlite compact', label: 'SQLite Compact', desc: 'Compact SQLite state (stop first)', confirm: true, danger: true },
-    ],
-  },
-  {
-    title: 'Diagnostics', color: 'cyan',
-    commands: [
-      { cmd: 'openclaw status', label: 'Status', desc: 'Overview + gateway state' },
-      { cmd: 'openclaw gateway status', label: 'Gateway status', desc: 'Bind, port + connectivity' },
-    ],
-  },
-]
-
 function matches(q, ...fields) {
   if (!q) return true
   const needle = q.toLowerCase()
@@ -612,7 +560,17 @@ function VaultDropdown({ termRef, connected }) {
 
 export default function CommandsPane({ agent, termRef, run, connected }) {
   const [query, setQuery] = useState('')
+  const [driverGroups, setDriverGroups] = useState([])
   const prompt = usePrompt()
+
+  // The command groups ("buttons") live in the agent driver, served over the
+  // API — not hardcoded here.
+  useEffect(() => {
+    if (!agent?.agent_type) return
+    api(`/api/agent-types/${agent.agent_type}/commands`)
+      .then((d) => setDriverGroups(d.commands || []))
+      .catch(() => setDriverGroups([]))
+  }, [agent?.agent_type])
 
   /** Launch the openclaw interactive TUI directly in the terminal. */
   function runTool() {
@@ -645,7 +603,7 @@ export default function CommandsPane({ agent, termRef, run, connected }) {
         <ModelsFlow agent={agent} query={query} run={run} prompt={prompt} connected={connected} />
         <McpFlow agent={agent} query={query} run={run} prompt={prompt} connected={connected} />
         <SkillsFlow agent={agent} query={query} run={run} prompt={prompt} connected={connected} />
-        {SIMPLE_GROUPS.map((g) => (
+        {driverGroups.map((g) => (
           <FlowGroup key={g.title} group={g} query={query} run={run} connected={connected} />
         ))}
         <VaultDropdown termRef={termRef} connected={connected} />
