@@ -43,6 +43,28 @@ export default function SettingsTab({ agent }) {
 
   async function handleUpdate() {
     setSaving(true)
+    let info = null
+    try {
+      info = await api(`/api/agents/${agent.name}/update-info`)
+    } catch {
+      info = null
+    }
+    const current = info?.currentVersion || settings?.version || 'unknown'
+    const available = info?.availableVersion || 'unknown'
+    const hasUpdate = info?.updateAvailable
+    const ok = await confirm({
+      title: 'Update container',
+      message: hasUpdate
+        ? `An update is available for ${agent.name}.\n\nCurrent version: ${current}\nAvailable: ${available}\n\nThis will redownload the image, rebuild it, and recreate the container. The container restarts automatically when it's done.`
+        : `No update available — ${agent.name} is already on the latest version (${current}).\n\nRunning update anyway will redownload the image, rebuild it, and recreate the container.`,
+      danger: false,
+      confirmText: 'Update',
+      cancelText: 'Cancel',
+    })
+    if (!ok) {
+      setSaving(false)
+      return
+    }
     if (agent.status === 'running') updateAgentStatus(agent.name, 'restarting')
     try {
       await api(`/api/agents/${agent.name}/update`, { method: 'POST' })
@@ -181,6 +203,7 @@ export default function SettingsTab({ agent }) {
             ['Runtime', agent.runtime_type || 'docker'],
             ['Status', agent.status || '—'],
             ['Image', settings?.image || '—'],
+            ['OpenClaw version', settings?.version || '—'],
           ].map(([k, v]) => (
             <div key={k}>
               <dt className="text-xs text-slate-500">{k}</dt>

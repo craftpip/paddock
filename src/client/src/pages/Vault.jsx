@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { api } from '../lib/api'
 import { useToast } from '../lib/toast'
+import { useConfirm } from '../lib/confirm'
 
 const MASK = '••••••••••'
 
@@ -8,6 +9,7 @@ const inputCls = 'w-full bg-slate-950/60 border border-slate-600 rounded-lg px-2
 
 export default function Vault() {
   const toast = useToast()
+  const confirm = useConfirm()
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(true)
   const [mode, setMode] = useState(null)
@@ -64,7 +66,13 @@ export default function Vault() {
   }
 
   async function handleDelete(item) {
-    if (!confirm(`Delete vault item '${item.name}'? This cannot be undone.`)) return
+    const ok = await confirm({
+      title: 'Delete vault item',
+      message: `Delete vault item '${item.name}'? This cannot be undone.`,
+      danger: true,
+      confirmText: 'Delete',
+    })
+    if (!ok) return
     try {
       await api(`/api/vault/${item.id}`, { method: 'DELETE' })
       toast.success('Vault item deleted')

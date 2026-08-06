@@ -1,12 +1,14 @@
 import { useState, useEffect } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { api } from '../lib/api'
+import { useConfirm } from '../lib/confirm'
 
 export default function GlobalBackups() {
   const [backups, setBackups] = useState([])
   const [agents, setAgents] = useState([])
   const [msg, setMsg] = useState('')
   const navigate = useNavigate()
+  const confirm = useConfirm()
 
   function load() {
     api('/api/backups').then((d) => {
@@ -30,7 +32,13 @@ export default function GlobalBackups() {
   }
 
   async function deleteBackup(file) {
-    if (!confirm(`Delete ${file} permanently?`)) return
+    const ok = await confirm({
+      title: 'Delete backup',
+      message: `Delete ${file} permanently?`,
+      danger: true,
+      confirmText: 'Delete',
+    })
+    if (!ok) return
     try {
       await api('/api/agents/_/backups/delete', { method: 'POST', body: { file } })
       setMsg('Backup deleted')

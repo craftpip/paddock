@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react'
 import { api } from '../lib/api'
 import { useAuth } from '../stores/auth'
+import { useConfirm } from '../lib/confirm'
+import { useAlert } from '../lib/alert'
 
 const SCOPES = ['default', 'read', 'control']
 const USERNAME_RE = /^[A-Za-z0-9]{3,32}$/
@@ -55,6 +57,8 @@ function ErrorBanner({ children }) {
 export default function Profile() {
   const username = useAuth((s) => s.username)
   const role = useAuth((s) => s.role)
+  const confirm = useConfirm()
+  const alert = useAlert()
   const [tab, setTab] = useState(() => {
     const p = new URLSearchParams(window.location.search).get('tab')
     if (p === 'users' && role !== 'admin') return 'general'
@@ -166,7 +170,13 @@ export default function Profile() {
   }
 
   async function revokeKey(id, n) {
-    if (!confirm(`Revoke API key '${n}'?`)) return
+    const ok = await confirm({
+      title: 'Revoke API key',
+      message: `Revoke API key '${n}'?`,
+      danger: true,
+      confirmText: 'Revoke',
+    })
+    if (!ok) return
     try { await api(`/api/profile/keys/${id}`, { method: 'DELETE' }); loadKeys() }
     catch (err) { setKeyMsg(err?.error || 'Failed to revoke key') }
   }
@@ -203,11 +213,17 @@ export default function Profile() {
   }
 
   async function deleteUser(id) {
-    if (!confirm('Delete this user? Their agents will become unowned.')) return
+    const ok = await confirm({
+      title: 'Delete user',
+      message: 'Delete this user? Their agents will become unowned.',
+      danger: true,
+      confirmText: 'Delete',
+    })
+    if (!ok) return
     try {
       await api(`/api/users/${id}`, { method: 'DELETE' })
       loadUsers()
-    } catch (err) { alert(err?.error || 'Failed to delete user') }
+    } catch (err) { alert({ title: 'Failed to delete user', message: err?.error || 'Failed to delete user', danger: true }) }
   }
 
   async function copy(text) {

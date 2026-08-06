@@ -775,11 +775,33 @@ app.get('/api/agents/:name/settings', async (req, res) => {
     const meta = readMeta(name);
     if (!meta.AGENT && !meta.ROOT_PASSWORD) return res.status(404).json({ error: 'Agent not found' });
     const agentType = meta.AGENT || 'openclaw';
+    const image = vm.AGENT_IMAGES[agentType] || '';
+    let version = meta.OPENCLAW_VERSION || '';
+    try {
+      version = (await vm.readOpenClawVersion(name, image)) || version;
+    } catch {}
     res.json({
       allowDocker: meta.DOCKER === '1',
       network: meta.NETWORK || '',
-      image: vm.AGENT_IMAGES[agentType] || '',
+      image,
+      version,
     });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** Version info for the Update confirm dialog: current vs available (latest
+ *  base image). Lets the user judge whether an update actually exists before
+ *  committing to a rebuild. */
+app.get('/api/agents/:name/update-info', async (req, res) => {
+  const name = safeVmName(req.params.name);
+  if (!name) return res.status(400).json({ error: 'Invalid agent name' });
+  try {
+    const meta = readMeta(name);
+    if (!meta.AGENT && !meta.ROOT_PASSWORD) return res.status(404).json({ error: 'Agent not found' });
+    const info = await vm.getUpdateInfo(name, meta.AGENT || 'openclaw');
+    res.json(info);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -940,6 +962,11 @@ app.post('/api/agents/:name/update', async (req, res) => {
       });
       registry.dockerPsList(true);
       registry.discoverAgents();
+      try {
+        const meta = readMeta(name);
+        const v = await vm.readOpenClawVersion(name, vm.AGENT_IMAGES[meta.AGENT || 'openclaw'] || '');
+        if (v) vm.setMetaFlag(name, 'OPENCLAW_VERSION', v);
+      } catch {}
       jobLog.line(job, 'system', 'Done — container recreated');
       jobLog.finish(job, true);
       try {
@@ -1911,7 +1938,9 @@ wss.on('connection', async (ws, req) => {
   const containers = await dockerPsList(true);
 
   if ((containers[vmName]?.State || '').toLowerCase() !== 'running') {
-    ws.close();
+    // 4002 = the PAD is stopped/not running. The client stops auto-retrying on
+    // this code and instead waits for the agent to come back up.
+    ws.close(4002, 'agent not running');
     return;
   }
 

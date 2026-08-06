@@ -2,6 +2,7 @@ import { useEffect, useState, useRef, useCallback } from 'react'
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom'
 import { useAgents } from '../stores/agents'
 import { api } from '../lib/api'
+import { useConfirm } from '../lib/confirm'
 import Terminal from '../components/Terminal'
 import CommandsPane from './agent/CommandsPane'
 import SettingsTab from './agent/SettingsTab'
@@ -83,9 +84,8 @@ export default function AgentDetail() {
   const fetchAgents = useAgents((s) => s.fetchAgents)
   const syncAgent = useAgents((s) => s.syncAgent)
   const agentsLoading = useAgents((s) => s.loading)
+  const confirm = useConfirm()
   const termRef = useRef(null)
-  const [runningCmd, setRunningCmd] = useState(null)
-  const lastRunCmdRef = useRef('')
   const [termConnected, setTermConnected] = useState(false)
   const [termCollapsed, setTermCollapsed] = useState(false)
   const [termHeight, setTermHeight] = useState(null) // custom dock height (px); null = 50vh default
@@ -140,31 +140,37 @@ export default function AgentDetail() {
     window.addEventListener('pointerup', onUp)
   }
 
-  /** Run a command in the docked terminal, tracked. opts: {confirm, danger}.
-   *  No-op until the terminal is connected — buttons are disabled anyway. */
-  const run = useCallback((cmd, opts = {}) => {
+  /** Run a command in the docked terminal, fire-and-forget. opts: {confirm, danger}.
+   *  No completion tracking/detection — the terminal just runs it. The command
+   *  is recorded to the activity log immediately. No-op until the terminal is
+   *  connected — buttons are disabled anyway. */
+  const run = useCallback(async (cmd, opts = {}) => {
     if (!cmd) return
     if (!termConnected) return
-    if (opts.confirm && !window.confirm(`Run "${cmd}"?`)) return
-    if (opts.danger && !window.confirm(`⚠ DANGER: "${cmd}" — are you sure?`)) return
-    lastRunCmdRef.current = cmd
-    setRunningCmd(cmd)
-    const ok = termRef.current?.runCommand(cmd, { track: true })
-    if (!ok) setRunningCmd(null)
-  }, [termRef, termConnected])
-
-  /** Fired when a tracked command finishes in the terminal. */
-  const handleCmdDone = useCallback((cmd) => {
-    setRunningCmd(null)
-    const toLog = lastRunCmdRef.current || cmd
-    lastRunCmdRef.current = ''
-    if (toLog && agent?.name) {
-      api(`/api/agents/${agent.name}/command-log`, {
-        method: 'POST',
-        body: { cmd: toLog, status: 'ok', ts: new Date().toISOString() },
-      }).catch(() => {})
+    if (opts.confirm) {
+      const ok = await confirm({
+        title: 'Run command',
+        message: `Run "${cmd}"?`,
+        confirmText: 'Run',
+      })
+      if (!ok) return
     }
-  }, [agent?.name])
+    if (opts.danger) {
+      const ok = await confirm({
+        title: 'Danger zone',
+        message: `⚠ DANGER: "${cmd}" — are you sure?`,
+        danger: true,
+        confirmText: 'Run',
+      })
+      if (!ok) return
+    }
+    const sent = termRef.current?.runCommand(cmd)
+    if (!sent || !agent?.name) return
+    api(`/api/agents/${agent.name}/command-log`, {
+      method: 'POST',
+      body: { cmd, status: 'ok', ts: new Date().toISOString() },
+    }).catch(() => {})
+  }, [termRef, termConnected, confirm, agent?.name])
 
   if (!agent) {
     if (agentsLoading) {
@@ -216,7 +222,7 @@ export default function AgentDetail() {
         id="mode-content"
       >
         {mode === 'commands' && (
-          <CommandsPane agent={agent} termRef={termRef} run={run} runningCmd={runningCmd} connected={termConnected} />
+          <CommandsPane agent={agent} termRef={termRef} run={run} connected={termConnected} />
         )}
         {mode === 'workspace' && <WorkspaceTab agent={agent} />}
         {mode === 'config' && <ConfigTab agent={agent} />}
@@ -259,8 +265,8 @@ export default function AgentDetail() {
           className="h-full"
           collapsed={termCollapsed}
           showCollapse={mode !== 'commands'}
+          running={agent.status === 'running'}
           onToggleCollapse={() => setTermCollapsed((v) => !v)}
-          onCommandDone={handleCmdDone}
           onConnChange={setTermConnected}
         />
       </div>
@@ -372,7 +378,13 @@ function WorkspaceTab({ agent }) {
   }
 
   async function deleteEntry(entryPath, entryName) {
-    if (!confirm(`Delete "${entryName}"? This cannot be undone.`)) return
+    const ok = await confirm({
+      title: 'Delete file',
+      message: `Delete "${entryName}"? This cannot be undone.`,
+      danger: true,
+      confirmText: 'Delete',
+    })
+    if (!ok) return
     try {
       await api(`/api/agents/${agent.name}/workspace/delete`, { method: 'POST', body: { path: entryPath } })
       load(path)
@@ -418,8 +430,16 @@ function WorkspaceTab({ agent }) {
     } catch (err) { setError(err.error || err.message) }
   }
 
-  function closeFileModal() {
-    if (fileDirty && !confirm('You have unsaved changes. Discard?')) return
+  async function closeFileModal() {
+    if (fileDirty) {
+      const ok = await confirm({
+        title: 'Discard changes',
+        message: 'You have unsaved changes. Discard?',
+        danger: true,
+        confirmText: 'Discard',
+      })
+      if (!ok) return
+    }
     setFileModal(null)
     setFileDirty(false)
     setFileSaved(false)

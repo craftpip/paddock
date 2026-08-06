@@ -1,4 +1,5 @@
 import { useEffect, useRef, useImperativeHandle, forwardRef, useState, useCallback } from 'react'
+import { useConfirm } from '../lib/confirm'
 
 /**
  * ─────────────────────────────────────────────────────────────────────────────
@@ -25,6 +26,7 @@ import { useEffect, useRef, useImperativeHandle, forwardRef, useState, useCallba
  *  | `collapsed`      | boolean  | `false`  | Hide the terminal body; only the header bar shows. The session stays alive. |
  *  | `onToggleCollapse`| fn      | (none)   | Fired when the collapse/expand chevron is clicked. |
  *  | `showCollapse`   | boolean  | `true`   | Show the collapse/expand chevron (ignored without `onToggleCollapse`). |
+ *  | `running`        | boolean  | `true`   | Whether the agent is running. When false the terminal disconnects and stops auto-retrying (backend also closes with 4002); when it flips to true it reconnects automatically. |
  *  | `disabled`       | boolean  | `false`  | Lock the terminal: the user cannot type their own commands. Only `runCommand()`-injected commands run. During an injected command the user can type again; when it finishes, it auto-locks. |
  *  | `onCommandStart` | fn       | (none)   | Fired when a tracked/locked injected command starts. |
  *  | `onCommandDone`  | fn       | (none)   | Fired with the command string when a tracked/locked injected command finishes. |
@@ -116,6 +118,10 @@ import { useEffect, useRef, useImperativeHandle, forwardRef, useState, useCallba
  *  - Reconnect: confirms first; safe to call repeatedly; stale in-flight init
  *    is invalidated by a generation counter, so a reconnect during a slow
  *    import can never double-mount a terminal.
+ *  - Stopped agent: when the backend closes with code 4002 (agent not
+ *    running) — or the `running` prop turns false — auto-retry stops. When
+ *    `running` flips back to true the terminal reconnects automatically, so a
+ *    stopped PAD never produces an endless retry loop.
  *  - Resize: after `fit()` and after font-size changes a NUL-NUL-prefixed
  *    `{type:'resize'}` frame is sent so the container PTY matches the pane.
  *  - Wheel policy: the wheel only scrolls local scrollback. In alternate-screen
@@ -136,7 +142,7 @@ import { useEffect, useRef, useImperativeHandle, forwardRef, useState, useCallba
  *    hidden while fullscreen since collapsing a fullscreen pane is meaningless.
  */
 const Terminal = forwardRef(function Terminal(
-  { name, title, height = '70vh', minHeight = '480px', disabled = false, collapsed = false, showCollapse = true, onToggleCollapse, onCommandStart, onCommandDone, onConnChange, className = '' },
+  { name, title, height = '70vh', minHeight = '480px', disabled = false, collapsed = false, showCollapse = true, onToggleCollapse, onCommandStart, onCommandDone, onConnChange, className = '', running = true },
   ref
 ) {
   const containerRef = useRef(null)
@@ -155,12 +161,17 @@ const Terminal = forwardRef(function Terminal(
 
   const disabledRef = useRef(!!disabled) // external lock (the `disabled` prop)
   const manualLockRef = useRef(false) // imperative lock()/unlock()/Lock toggle
+  const runningRef = useRef(!!running) // the agent is running → auto-reconnect allowed
+  const wasRunningRef = useRef(!!running) // previous `running` value, for edge detection
+  const takeoverRef = useRef(false) // 4001 superseded → reconnect is manual-only
+  const initInFlightRef = useRef(false) // an async initTerminal() is mid-flight
   const cmdRunningRef = useRef(false) // an injected command is in flight
   const pendingMarkersRef = useRef(new Set()) // sentinels awaiting their echo
   const markerCmdRef = useRef(new Map()) // sentinel → command text
   const lastDoneCmdRef = useRef(null) // cmd of the last resolved sentinel
   const outputTailRef = useRef('') // rolling output tail for sentinel detection
   const markerSeqRef = useRef(0)
+  const confirm = useConfirm()
 
   const [connState, setConnState] = useState('connecting') // connecting | connected | disconnected
   const [fontSize, setFontSize] = useState(14)
@@ -250,9 +261,11 @@ const Terminal = forwardRef(function Terminal(
   async function initTerminal() {
     const gen = ++genRef.current
     const isCurrent = () => mountedRef.current && gen === genRef.current
+    initInFlightRef.current = true
 
     if (!name || typeof name !== 'string' || !name.trim()) {
       setStateSafe(setInitError, 'Terminal needs a valid "name" prop (the PAD/agent name).')
+      initInFlightRef.current = false
       return
     }
 
@@ -263,9 +276,13 @@ const Terminal = forwardRef(function Terminal(
       await import('@xterm/xterm/css/xterm.css')
     } catch (err) {
       if (isCurrent()) setStateSafe(setInitError, `Failed to load xterm: ${err.message}`)
+      initInFlightRef.current = false
       return
     }
-    if (!isCurrent()) return
+    if (!isCurrent()) {
+      initInFlightRef.current = false
+      return
+    }
 
     const fitAddon = new FitAddonCtor()
     const term = new TerminalCtor({
@@ -295,6 +312,10 @@ const Terminal = forwardRef(function Terminal(
       try { term.dispose() } catch {}
       if (wsRef.current === ws) wsRef.current = null
       if (termRef.current === term) termRef.current = null
+      initInFlightRef.current = false
+      // Leave the connection state as "disconnected" so the self-healing
+      // reconcile effect can retry once the state settles.
+      setStateSafe(setConnState, 'disconnected')
       return
     }
 
@@ -306,6 +327,8 @@ const Terminal = forwardRef(function Terminal(
 
     ws.onopen = () => {
       if (gen !== genRef.current) return // superseded session
+      initInFlightRef.current = false
+      takeoverRef.current = false // we hold the session again
       // Connection is healthy — cancel any pending auto-reconnect and reset the backoff.
       if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null }
       retryDelayRef.current = 2000
@@ -347,6 +370,7 @@ const Terminal = forwardRef(function Terminal(
     }
 
     ws.onclose = (evt) => {
+      initInFlightRef.current = false
       // A superseded session (explicit teardown / session switch) bumps the gen
       // counter, so its late close is ignored here and never schedules a retry.
       if (gen !== genRef.current) return
@@ -357,19 +381,34 @@ const Terminal = forwardRef(function Terminal(
       // Show the reason and let the user retake manually.
       if (evt.code === 4001) {
         wasConnectedRef.current = false
+        takeoverRef.current = true
         writeTerm('\r\n\x1b[33m[Terminal taken over by another connection — click Reconnect to retake.]\x1b[0m\r\n')
+        return
+      }
+      // 4002 = the PAD is stopped/not running. When the agent is truly stopped
+      // (`running` prop false) stop retrying entirely — the `running` prop
+      // triggers a fresh connect when it comes back up. But when the agent is
+      // marked running (e.g. still starting up), keep retrying with backoff.
+      if (evt.code === 4002) {
+        wasConnectedRef.current = false
+        if (!runningRef.current) {
+          writeTerm('\r\n\x1b[33m[Agent is stopped — the terminal will reconnect when it is running again.]\x1b[0m\r\n')
+          return
+        }
+        scheduleReconnect()
         return
       }
       // Announce only the first close after a healthy connection — repeated
       // failed retries (PAD stopped) must not spam the scrollback.
-      if (wasConnectedRef.current) {
+      if (runningRef.current && wasConnectedRef.current) {
         writeTerm('\r\n\x1b[31m[Connection closed — reconnecting…]\x1b[0m\r\n')
         wasConnectedRef.current = false
       }
-      scheduleReconnect()
+      if (runningRef.current) scheduleReconnect()
     }
 
     ws.onerror = () => {
+      initInFlightRef.current = false
       setStateSafe(setConnState, 'disconnected')
     }
 
@@ -411,6 +450,7 @@ const Terminal = forwardRef(function Terminal(
   /** Tear down the current session. Idempotent and safe mid-init. */
   function teardown() {
     genRef.current++ // invalidate any in-flight init
+    initInFlightRef.current = false
     if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null }
     if (wsRef.current) { try { wsRef.current.close() } catch {} ; wsRef.current = null }
     if (termRef.current) { try { termRef.current.dispose() } catch {} ; termRef.current = null }
@@ -430,8 +470,11 @@ const Terminal = forwardRef(function Terminal(
 
   /** Retry connecting after an unexpected close, with a backoff that doubles
    *  each attempt (capped at 30s) and resets on a successful open. Explicit
-   *  teardown/session-switch cancels any pending retry. */
+   *  teardown/session-switch cancels any pending retry. When the agent is not
+   *  running the retry never starts — a stopped PAD is closed by the backend
+   *  with 4002 and reconnection is driven by the `running` prop instead. */
   function scheduleReconnect() {
+    if (!runningRef.current) return
     if (reconnectTimerRef.current) return
     reconnectTimerRef.current = setTimeout(() => {
       reconnectTimerRef.current = null
@@ -479,6 +522,40 @@ const Terminal = forwardRef(function Terminal(
     refreshLockUI()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [disabled])
+
+  // Agent running state: when the agent stops, tear the terminal down and stop
+  // retrying; when it comes back up, reconnect automatically. The parent feeds
+  // `running={agent.status === 'running'}` (store updates are optimistic, then
+  // self-corrected by the parent's 5s poll).
+  useEffect(() => {
+    runningRef.current = !!running
+    const prev = wasRunningRef.current
+    wasRunningRef.current = !!running
+    if (!running && prev) {
+      if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null }
+      teardown()
+    } else if (running && !prev) {
+      retryDelayRef.current = 2000
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [running])
+
+  // Self-healing reconcile: whenever the agent is running but there is no live
+  // terminal connection, (re)create one. This covers the case where a reconnect
+  // init is cancelled mid-flight (e.g. a transient status wobble during startup
+  // re-tears-down before the WS is created) — the state settles on
+  // `running && disconnected` with no pending retry, and this effect brings it
+  // back. It defers to the backoff timer (4002/1006 retries) and to a 4001
+  // takeover (manual reconnect only).
+  useEffect(() => {
+    if (!runningRef.current) return
+    if (connState === 'connected' || connState === 'connecting') return
+    if (initInFlightRef.current) return
+    if (reconnectTimerRef.current) return
+    if (takeoverRef.current) return
+    initTerminal().catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [running, connState])
 
   // Persisted Lock toggle: restore the saved manual-lock state per agent.
   useEffect(() => {
@@ -552,7 +629,8 @@ const Terminal = forwardRef(function Terminal(
   }
 
   /** Switch to a session: persist choice, tear down, reconnect (backend
-   *  auto-creates the tmux session on attach if it does not exist yet). */
+   *  auto-creates the tmux session on attach if it does not exist yet). The
+   *  self-healing reconcile effect re-attaches after the teardown. */
   const switchSession = useCallback(
     (id) => {
       if (!id || id === sessionIdRef.current) return
@@ -560,7 +638,6 @@ const Terminal = forwardRef(function Terminal(
       setSessionId(id)
       try { localStorage.setItem(`pad-term-session-${name}`, id) } catch {}
       teardown()
-      initTerminal().catch(() => {})
     },
     [name]
   )
@@ -638,10 +715,18 @@ const Terminal = forwardRef(function Terminal(
     [name, sessions, switchSession, refreshSessions]
   )
 
-  function reconnect() {
-    if (!window.confirm('Reconnect to this terminal session? Scrollback is preserved.')) return
+  async function reconnect() {
+    const ok = await confirm({
+      title: 'Reconnect terminal',
+      message: 'Reconnect to this terminal session? Scrollback is preserved.',
+      confirmText: 'Reconnect',
+    })
+    if (!ok) return
+    // Clear the takeover flag (explicit user intent to retake the session),
+    // then teardown drops the connection state to "disconnected"; the
+    // self-healing reconcile effect re-attaches immediately.
+    takeoverRef.current = false
     teardown()
-    initTerminal().catch(() => {})
   }
 
   /** Inject `text` as a tracked command (sentinel + completion callbacks). */

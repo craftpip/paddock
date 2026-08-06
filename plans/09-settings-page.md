@@ -1,7 +1,7 @@
 # Settings Page — Plan
 
 **Date:** 2026-08-03
-**Status:** Implemented (Phases 1-3) — Phase 4 (Paddock MCP toggle) deferred by user decision 2026-08-04. **2026-08-04 +popup console:** Update, the docker toggle, and the network change all open a modal popup (`CommandModal.jsx`) that streams the job output live, instead of an inline pane.
+**Status:** Implemented (Phases 1-3) — Phase 4 (Paddock MCP toggle) deferred by user decision 2026-08-04. **2026-08-04 +popup console:** Update, the docker toggle, and the network change all open a modal popup (`CommandModal.jsx`) that streams the job output live, instead of an inline pane. **2026-08-04 +version check:** Container Info shows the current OpenClaw version; clicking Update first checks current vs available (latest base image) and shows a confirm dialog with both versions before starting.
 **Absorbed into docs:** `docs/tabs/settings.md` (+ `docs/tabs/overview.md`, `docs/backend/services.md`, `docs/operations/overview.md`). This file stays as the record of the deferred Phase 4 (MCP toggle) and the original design notes.
 **Sources:** `plans/08-multiple-agents.md` Part 2 (docker checkbox), `plans/06-paddock-own-mcp.md` (fleet MCP server), `docs/operations/overview.md` Create flow (SSE/job-log streaming the Update card reuses)
 
@@ -76,6 +76,15 @@ option + new Update). Six cards, top to bottom:
 
 - Sits right under Container Info — it's the "image" card: one **Update** button
   plus a short "what it does" note.
+- **Version check + confirm (2026-08-04):** clicking Update first calls
+  `GET /api/agents/:name/update-info` which reports the **current** OpenClaw
+  version (from the running container, or the built image when stopped) and the
+  **available** version (the latest base image, pulled + version label read,
+  cached 5 min). A confirm dialog then shows:
+  - `An update is available — current X, available Y` (versions differ)
+  - `No update available — already on the latest version (X)`, update still runs
+    if confirmed (rebuilds same version). This is how the user judges whether
+    the `:latest` tag moved: when the version stops changing, they're current.
 - Clicking it starts a background job (same shape as the create flow in `docs/operations/overview.md`):
   1. **Pull + build** — `docker compose -f <instance-compose> build --pull <name>`.
      `--pull` always redownloads the base image first, so a `:latest` tag gets a
@@ -258,12 +267,20 @@ Card look:
   running containers from `docker ps` (via the existing `dockerPsList()`,
   `app.js:112`, or dockerode) as `{ name, image, state }`; include the
   currently-set network target even if stopped, so it can be cleared.
-- `GET /api/agents/:name/settings` → `{ allowDocker, network, image }`
+- `GET /api/agents/:name/settings` → `{ allowDocker, network, image, version }`
   - `allowDocker` read from `meta.env` `DOCKER=1|0` (absent = `false`).
     More robust than parsing compose YAML.
   - `network` read from `meta.env` `NETWORK=<container>` (absent = `''`).
   - `image` from `AGENT_IMAGES[agent_type]` (export the map from
     `vm-manager.js` or move it to a shared constant).
+  - `version` — current OpenClaw version from `vm.readOpenClawVersion()`
+    (running container, or built image), falling back to `meta.env`
+    `OPENCLAW_VERSION` (written after each successful update).
+- `GET /api/agents/:name/update-info` → `{ currentVersion, availableVersion,
+  updateAvailable }` — powers the Update confirm dialog. Current from the
+  running container/built image; available from the latest base image
+  (`docker pull <base>` + read `org.opencontainers.image.version` label,
+  cached 5 min). `updateAvailable` is true when both are known and differ.
 - `POST /api/agents/:name/update` — `202` + background job (same job-log
   pattern as create-agent): `build --pull` then `up -d --no-deps
   --force-recreate` on the instance compose file. No body. The compose file is
@@ -302,6 +319,11 @@ Card look:
 - New helper `applySettings(name, { allowDocker, network })` — reads meta,
   regenerates compose, returns the yaml (the route does the MCP install +
   stop/start around it). Keep `app.js` thin.
+- Version helpers: `readOpenClawVersion(name, image)` (running container →
+  built image → `''`), `readBaseImageVersion(agentType)` (pull base + read
+  `org.opencontainers.image.version` label, normalized, 5-min cache),
+  `getUpdateInfo(name, agentType)` → `{ currentVersion, availableVersion,
+  updateAvailable }`. Base image per agent type in `AGENT_BASE_IMAGES`.
 - Export `AGENT_IMAGES` (or a `hasDockerCli(agent)` helper) for the
   image-no-CLI guard.
 - New helper `installPaddockMcp(name)` / `removePaddockMcp(name)` — wraps the
@@ -330,10 +352,12 @@ Card look:
 - `src/app.js` — `GET/POST /api/agents/:name/settings` + `GET /api/containers` +
   `POST /api/agents/:name/update` and `GET /api/agents/:name/update-log`
   (reuses `job-log.js`). (`installPaddockMcp`/`removePaddockMcp` helpers are
-  NOT added — deferred card 4.)
+  NOT added — deferred card 4.) `GET /api/agents/:name/update-info` — version
+  check for the Update confirm.
 - `src/services/vm-manager.js` — `allowDocker` + `network` options, an
-  `applySettings()` helper, `updateAgent()` (build --pull + force-recreate), and
-  export `AGENT_IMAGES`
+  `applySettings()` helper, `updateAgent()` (build --pull + force-recreate),
+  `AGENT_BASE_IMAGES` + `getUpdateInfo`/`readOpenClawVersion`/
+  `readBaseImageVersion` version helpers, and export `AGENT_IMAGES`
 - `src/services/agent-registry.js` — optional `allowDocker`/`network`/`image`
   on agent
 - `src/docs/architecture.md` + `docs/` tree — document the new settings tab
@@ -424,6 +448,12 @@ curl -X POST http://10.69.1.164:6789/api/agents/<pad>/update
   that streams `docker stop <name>` + `docker compose -f instances/<name>/… up
   -d --no-deps --force-recreate <name>` live, shows Running → Done, and closes
   with the agent back up.
+- **Version confirm (2026-08-04):** Container Info shows the current version;
+  clicking Update shows a confirm dialog with current vs available
+  (`GET /api/agents/:name/update-info`). When equal → "No update available —
+  already on the latest version (X)"; when different → "An update is available
+  (X → Y)". Cancel leaves the container untouched; confirm opens the popup
+  console.
 
 Phase 3:
 ```bash
