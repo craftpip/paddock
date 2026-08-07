@@ -1338,11 +1338,17 @@ app.get('/api/agents/:name/config', (req, res) => {
   if (!agent) return res.status(404).json({ error: 'Agent not found' });
   const driver = drivers.getDriver(agent.agent_type);
   const configPath = path.join(agent.config_root, driver.configFile || 'openclaw.json');
-  if (!fs.existsSync(configPath)) return res.json({ config: null });
+  if (!fs.existsSync(configPath)) return res.json({ config: null, configFormat: driver.configFormat || 'json', configFile: driver.configFile || 'openclaw.json' });
   try {
+    // YAML/text config files (hermes config.yaml) are served verbatim — the
+    // editor shows raw text; JSON-only parsing/redaction is skipped.
+    if ((driver.configFormat || 'json') !== 'json') {
+      const rawText = fs.readFileSync(configPath, 'utf8');
+      return res.json({ config: null, configRaw: rawText, configFormat: driver.configFormat, configFile: driver.configFile || 'openclaw.json' });
+    }
     const raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));
     const redacted = redactSecrets(JSON.parse(JSON.stringify(raw)));
-    res.json({ config: redacted, configRaw: JSON.stringify(raw, null, 2), configFile: driver.configFile || 'openclaw.json' });
+    res.json({ config: redacted, configRaw: JSON.stringify(raw, null, 2), configFormat: driver.configFormat || 'json', configFile: driver.configFile || 'openclaw.json' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1354,9 +1360,14 @@ app.post('/api/agents/:name/config', (req, res) => {
   const { config: configStr } = req.body;
   if (!configStr) return res.status(400).json({ error: 'config required' });
   try {
-    const newConfig = JSON.parse(configStr);
     const driver = drivers.getDriver(agent.agent_type);
     const configPath = path.join(agent.config_root, driver.configFile || 'openclaw.json');
+    if ((driver.configFormat || 'json') !== 'json') {
+      // YAML/text config: write verbatim, no JSON validation.
+      fs.writeFileSync(configPath, configStr.endsWith('\n') ? configStr : configStr + '\n');
+      return res.json({ ok: true });
+    }
+    const newConfig = JSON.parse(configStr);
     fs.writeFileSync(configPath, JSON.stringify(newConfig, null, 2) + '\n');
     res.json({ ok: true });
   } catch (err) {

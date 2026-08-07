@@ -942,17 +942,19 @@ function ConfigTab({ agent }) {
   const [saved, setSaved] = useState(true)
   const [msg, setMsg] = useState('')
   const [configFile, setConfigFile] = useState('config.json')
+  const [configFormat, setConfigFormat] = useState('json')
 
   useEffect(() => {
     api(`/api/agents/${agent.name}/config`).then((d) => {
       if (d.configFile) setConfigFile(d.configFile)
+      if (d.configFormat) setConfigFormat(d.configFormat)
       if (d.configRaw) { setRaw(d.configRaw); setSaved(true) }
     }).catch(() => {})
   }, [agent.name])
 
   async function handleSave() {
     try {
-      JSON.parse(raw)
+      if (configFormat === 'json') JSON.parse(raw)
       await api(`/api/agents/${agent.name}/config`, { method: 'POST', body: { config: raw } })
       setSaved(true)
       setMsg('Configuration saved. Restart the agent to apply.')
@@ -966,7 +968,7 @@ function ConfigTab({ agent }) {
       <div className="flex items-center justify-between mb-4">
         <div>
           <h3 className="text-sm font-medium text-slate-300">Agent Configuration</h3>
-          <p className="text-xs text-slate-500">{configFile}</p>
+          <p className="text-xs text-slate-500">{configFile}{configFormat !== 'json' ? ` (${configFormat})` : ''}</p>
         </div>
         <div className="flex items-center gap-2">
           <span className={`text-xs ${saved ? 'text-slate-500' : 'text-amber-400'}`}>{saved ? 'Saved' : 'Unsaved changes'}</span>

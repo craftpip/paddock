@@ -770,6 +770,42 @@ Terminal appeared small/constrained because xterm.js FitAddon calls `fit()` befo
 - `picoclaw gateway -E` (bind 0.0.0.0:18790) starts only when config.json
   exists; otherwise start.sh stays in setup mode (`tail -f /dev/null`).
 
+## Hermes Driver (Goal 3 — 2026-08-07)
+
+- hermes (Nous Research Hermes Agent) has its own CLI `hermes` — **no
+  `openclaw` binary**. Setup step is `hermes setup --non-interactive`
+  (no TTY needed; bootstraps `/opt/data` dirs but does NOT create config.yaml).
+- Config is **YAML** at `/opt/data/config.yaml` (env at `/opt/data/.env`).
+  Config managed via `hermes config set/get/unset`. Drivers now carry a
+  `configFormat` field; when it's not `'json'` the config GET/POST routes
+  serve/write the file verbatim (no JSON.parse, no secret redaction) and the
+  ConfigTab skips JSON validation. `configFormat: 'yaml'` is the first use.
+- Version: `hermes --version` → `Hermes Agent v0.20.0 (2026.8.3)` — parse with
+  a `\d+\.\d+\.\d+` regex.
+- Model config lives at `model.provider` + `model.default` in config.yaml
+  (no primary/fallback). Registry extracts via regex on the YAML text.
+- **The hermes gateway drops to the `hermes` user (uid 10000) even when started
+  as root** — a root-owned empty bind mount at `/opt/data` fails first boot with
+  `PermissionError: /opt/data/logs`. Fix: start.sh runs
+  `chown -R hermes:hermes /opt/data` before `hermes gateway run`
+  (mirrors the official s6 entrypoint's chown).
+- `hermes gateway run` keeps the container alive (cron + platforms); needs
+  `HERMES_ALLOW_ROOT_GATEWAY=1` in the Dockerfile. `hermes update` refuses to
+  run inside Docker → `availableVersion: ''`.
+- The base image already ships the docker CLI — the `INSTALL_DOCKER=1` rebuild
+  is a no-op and the settings flow correctly skips it (verified).
+- Workspace IS the data dir: `workspaceDir: '/opt/data'` (no `workspace/`
+  subdir). Host bind `instances/<pad>/hermes` → `/opt/data`.
+- Backups are generic tar-of-dataDir (`backupTypeMarker: ''`, tagged `legacy`).
+- Model extraction in agent-registry.js: hermes reads config.yaml with a
+  `model:` block regex (`provider` / `default`), picoclaw reads
+  `agents.defaults.model_name`, openclaw reads `agents.defaults.model.primary`.
+- `hermes model` is interactive-only (needs TTY). `doctor`, `cron list`,
+  `skills list`, `sessions list`, `mcp list`, `memory status` all work.
+- **Restart the webui after adding/editing a driver file** (Node caches
+  `require()` at startup — a stale process builds the wrong image via the
+  openclaw-driver fallback).
+
 ## Architecture Documentation
 
 - `docs/` — **Source of truth** for business logic, system architecture, page descriptions, routes, data model, security model, and all behavioral contracts. Split by area: `overview/` (architecture, business-logic, react-migration), `backend/` (services, middleware, user-management), `tabs/` (per-tab behavior), `pages/`, `components/`, `operations/`.
