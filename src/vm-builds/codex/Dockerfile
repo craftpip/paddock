@@ -13,7 +13,8 @@ RUN apt-get update && \
     ca-certificates \
     tzdata \
     tmux \
-    sqlite3 && \
+    sqlite3 \
+    tini && \
     rm -rf /var/lib/apt/lists/*
 
 RUN if [ "$INSTALL_DOCKER" = "1" ]; then \
@@ -37,4 +38,4 @@ WORKDIR /root/.codex/workspace
 
 EXPOSE 22
 
-ENTRYPOINT ["/usr/local/bin/start.sh"]
+ENTRYPOINT ["/usr/bin/tini", "-s", "--", "/usr/local/bin/start.sh"]

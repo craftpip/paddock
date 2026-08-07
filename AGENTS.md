@@ -223,6 +223,24 @@ if (!res.ok) {
 
 **Not hardcoded.** The prefix (`vm`, `vm2`, `pad`, etc.) comes from `CONTAINER_PREFIX` in `.env` and is passed to the container via `docker-compose.yml`. The frontend reads it via `/api/config`. Always use the dynamic prefix, never hardcode `vm-`.
 
+### Slow container stops: bare `bash`/`sleep` as PID 1 drops SIGTERM
+
+**Symptom:** `docker stop <pad>` hangs the full `-t 30` grace then SIGKILLs (exit 137). Affected: every `vm-builds/` image whose `ENTRYPOINT` is `start.sh` directly (picoclaw, codex, opencode, hermes). Only openclaw stopped fast.
+
+**Root cause:** The kernel does not deliver default-action signals to PID 1 unless it installed a handler. A script running `bash start.sh` as PID 1 neither handles SIGTERM nor forwards it to the app child (`picoclaw gateway`, `tail -f /dev/null`, `hermes gateway run`). Verified empirically: `kill -TERM 1` inside the container is silently ignored; killing the app child only makes bash's `||` restart it.
+
+**Fix (2026-08-07):** Wrap every `vm-builds/*/Dockerfile` entrypoint in tini (mirrors openclaw image, which already used `tini -s --`):
+- picoclaw (Alpine): `apk add tini` → `ENTRYPOINT ["/sbin/tini", "-s", "--", "/usr/local/bin/start.sh"]`
+- codex / opencode / hermes (Debian): `apt-get install -y tini` → `ENTRYPOINT ["/usr/bin/tini", "-s", "--", "/usr/local/bin/start.sh"]`
+
+tini forwards SIGTERM to its bash child, bash dies, tini exits → clean stop in ~0.1–0.3s with exit 143. No `start.sh` changes needed (openclaw keeps the `|| tail -f /dev/null` pattern and still stops fast).
+
+**Rebuild/verify notes:**
+- Rebuild tags the shared `paddock-vm-<type>:latest`, so **recreate** existing containers (`docker compose -f instances/<pad>/docker-compose.yml up -d --force-recreate`) to pick up the new entrypoint — `docker start` keeps the old image ID.
+- Preserve the docker toggle on rebuild: agents with the docker socket mount were built with `--build-arg INSTALL_DOCKER=1` (codex/opencode at the time of writing; picoclaw with default 0). Check the instance `docker-compose.yml` for the `docker.sock` mount before rebuilding.
+- Verify PID 1 is `tini` via `docker exec <pad> ps -o pid,ppid,comm`, then `time docker stop <pad>` should be well under a second.
+- `AGENT-*` legacy images (`sleep infinity` / `opencode web` as PID 1) have the same class of problem; not migrated.
+
 ## Backup & Restore (save_backups.sh)
 
 **Path:** `./manage_backups.sh`

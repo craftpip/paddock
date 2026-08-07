@@ -12,7 +12,8 @@ RUN apk add --no-cache \
     tmux \
     sqlite \
     nodejs \
-    npm
+    npm \
+    tini
 
 RUN if [ "$INSTALL_DOCKER" = "1" ]; then \
       apk add --no-cache docker-cli; \
@@ -32,4 +33,4 @@ WORKDIR /root
 
 EXPOSE 22
 
-ENTRYPOINT ["/usr/local/bin/start.sh"]
+ENTRYPOINT ["/sbin/tini", "-s", "--", "/usr/local/bin/start.sh"]

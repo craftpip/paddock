@@ -20,7 +20,8 @@ RUN apt-get update && \
     nodejs \
     npm \
     tmux \
-    sqlite3 && \
+    sqlite3 \
+    tini && \
     rm -rf /var/lib/apt/lists/*
 
 # The base image's /etc/profile resets PATH to base dirs for login shells,
@@ -52,4 +53,4 @@ WORKDIR /opt/data
 
 EXPOSE 22
 
-ENTRYPOINT ["/usr/local/bin/start.sh"]
+ENTRYPOINT ["/usr/bin/tini", "-s", "--", "/usr/local/bin/start.sh"]
