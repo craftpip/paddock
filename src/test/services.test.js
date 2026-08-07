@@ -199,3 +199,51 @@ describe('Auth - Rate Limiter', () => {
     assert.ok(typeof rateLimit === 'function');
   });
 });
+
+describe('vm-manager - Web door compose generation', () => {
+  process.env.WORKSPACE_ROOT = '/workspace';
+  process.env.HOST_WORKSPACE_ROOT = '/workspace';
+  const vm = require('../services/vm-manager');
+
+  it('emits a socat door service when the agent routes through a network peer', () => {
+    const yaml = vm.generateInstanceCompose('pad-test', 'opencode', 'pw', '22001', {
+      network: 'gluetun-global',
+      webService: { containerPort: 8080, hostPort: '43818' },
+      webPeerNetwork: 'gluetun_default',
+    });
+    const agentBlock = yaml.slice(yaml.indexOf('  pad-test:'), yaml.indexOf('  pad-test-web:'));
+    assert.ok(!agentBlock.includes('ports:'), 'agent has no ports block when peer-networked');
+    assert.ok(yaml.includes('pad-test-web:'), 'door service present');
+    assert.ok(yaml.includes('image: alpine/socat'));
+    assert.ok(yaml.includes('"43818:8080"'));
+    assert.ok(yaml.includes('TCP:gluetun-global:8080'));
+    assert.ok(yaml.includes('name: gluetun_default'));
+    assert.ok(yaml.includes('network_mode: container:gluetun-global'));
+  });
+
+  it('publishes ports directly when on the default network', () => {
+    const yaml = vm.generateInstanceCompose('pad-test', 'opencode', 'pw', '22001', {
+      webService: { containerPort: 8080, hostPort: '43818' },
+    });
+    assert.ok(yaml.includes('"43818:8080"'));
+    assert.ok(yaml.includes('"22001:22"'));
+    assert.ok(!yaml.includes('pad-test-web'), 'no door on the default network');
+  });
+
+  it('skips SSH port publish when peer-networked (docker constraint)', () => {
+    const yaml = vm.generateInstanceCompose('pad-test', 'opencode', 'pw', '22001', {
+      network: 'gluetun-global',
+    });
+    assert.ok(!/ports:/.test(yaml));
+  });
+
+  it('emits a host-network door when the peer has no docker network', () => {
+    const yaml = vm.generateInstanceCompose('pad-test', 'opencode', 'pw', '', {
+      network: 'host-peer',
+      webService: { containerPort: 8080, hostPort: '43818' },
+      webPeerNetwork: '',
+    });
+    assert.ok(yaml.includes('network_mode: host'));
+    assert.ok(yaml.includes('TCP:127.0.0.1:8080'));
+  });
+});

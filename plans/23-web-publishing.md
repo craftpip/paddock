@@ -349,6 +349,54 @@ recreate — Settings toggle, Update, network-fix recreate, host reboot.
   regenerates + `up -d --force-recreate` (which starts it).
 - **Apply while the app inside isn't serving yet**: binding is still created;
   the pill shows `down` until the agent starts the server.
+
+## Network peer (network_mode: container:) — the socat door (IMPLEMENTED 2026-08-07)
+
+Agents that route through a peer container (e.g. `network_mode: container:gluetun-global`)
+can NEVER publish host ports — Docker refuses (`conflicting options: port publishing and
+the container type network mode`). Worse, gluetun's own firewall drops inbound
+connections to its namespace from the host LAN, so even host-level forwarding to the
+peer's IP times out. BUT connections from other containers on the peer's docker bridge
+are allowed (gluetun auto-allows docker bridge subnets).
+
+**Solution: a socat "door" service in the instance compose.** The door is a second
+service in `instances/<name>/docker-compose.yml`:
+
+```yaml
+  <name>-web:
+    image: alpine/socat
+    container_name: <name>-web
+    restart: unless-stopped
+    networks:
+      - webbridge
+    ports:
+      - "<hostPort>:<containerPort>"
+    command: TCP-LISTEN:<containerPort>,fork,reuseaddr TCP:<peer>:<containerPort>
+networks:
+  webbridge:
+    external: true
+    name: <peerNetwork>
+```
+
+- The door joins the peer's docker network (`gluetun_default`), publishes the host
+  port on its own bridge, and forwards to the peer **by name**. The agent's web server
+  binds inside the peer's namespace → reachable at `<peer>:<containerPort>`.
+- Resolving by name per connection means the door survives peer recreates with **no
+  changes of its own** (DNS follows the new IP).
+- Peer recreated = the pad still needs its existing stale-peer recreate, but the door
+  itself is untouched. Verified live: pad restart → boot hook relaunches server → door
+  still serves 200.
+- gluetun and its other tenants are never touched, stopped, or edited.
+- Edge case: peer on `network_mode: host` (no docker network to join) → the door uses
+  `network_mode: host` and forwards to `127.0.0.1:<containerPort>`.
+- Discovery: `getPeerNetworkName(peer)` inspects the peer's `NetworkSettings.Networks`
+  for its bridge network. `applyWebServices()` is async now and resolves it.
+- `GET /api/agents/:name/web` inspects the DOOR container (not the agent) for
+  `actualPorts`, so the "● Live" pill reflects the real published port.
+- Unpublish/rollback: `docker rm -f <name>-web` after the compose is regenerated
+  without the door service.
+- `hostPortInUse()` already scans `"<n>:"` across instance compose files, so door
+  ports are covered by the same conflict check.
 - **Auth cleared**: empty auth field in the form = remove the config key
   (hermes can't run exposed without it — enforce when hostPort is set).
 - **Delete agent** removes the container + instance dir; `web.json` goes with

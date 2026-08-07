@@ -895,6 +895,54 @@ Terminal appeared small/constrained because xterm.js FitAddon calls `fit()` befo
   `require()` at startup — a stale process builds the wrong image via the
   openclaw-driver fallback).
 
+## Web Publishing + the socat Door (2026-08-07)
+
+Agents with a web app (opencode web, hermes web dashboard) get a **Web tab** that
+publishes a host port to their app via `POST /api/agents/:name/web`
+(`{ containerPort, hostPort, auth }`). Flow: write `web.json` in the instance dir,
+regenerate the instance compose (`vm.applyWebServices(name, webService)`), recreate
+the container, then `docker exec <name> bash <dataDir>/start-web.sh` (drivers have a
+`startWebCommand` + auto-start boot hook in `start.sh`). `GET /web` inspects the
+publishing container for `actualPorts`; the pill is `live` only when the published
+port matches. Delete/unpublish = regenerate compose without ports + remove container.
+
+**Network peer (network_mode: container:) case — the socat door.** Agents that route
+through a peer (e.g. `network_mode: container:gluetun-global`) can NEVER publish host
+ports (docker refuses: "conflicting options: port publishing and the container type
+network mode"), AND gluetun's firewall drops host-LAN inbound to its namespace. But
+containers on the peer's docker bridge ARE allowed through (gluetun auto-allows bridge
+subnets). Verified: a throwaway `alpine/socat` container on `gluetun_default` reached
+`gluetun-global:8080` → HTTP 200.
+
+Fix: emit a **door service** (`<name>-web`) in the instance compose:
+
+```yaml
+  <name>-web:
+    image: alpine/socat
+    container_name: <name>-web
+    restart: unless-stopped
+    networks:
+      webbridge:
+        external: true
+        name: <peerNetwork>   # e.g. gluetun_default
+    ports:
+      - "<hostPort>:<containerPort>"
+    command: TCP-LISTEN:<containerPort>,fork,reuseaddr TCP:<peer>:<containerPort>
+```
+
+- Door joins the peer's bridge, publishes the host port, forwards to the peer **by
+  name** per connection → survives peer recreates, never touches gluetun itself.
+- Peer recreated: pad still needs its stale-peer recreate; door is untouched.
+- Peer on `network_mode: host` (no bridge) → door uses `network_mode: host`,
+  forwards to `127.0.0.1:<containerPort>`.
+- `getPeerNetworkName(peer)` inspects the peer's `NetworkSettings.Networks`; the
+  agent gets NO `ports:` block in peer mode. `applyWebServices` is async.
+- `GET /web` inspects the **door** container for actualPorts (peer case). Unpublish/
+  rollback: `docker rm -f <name>-web` after compose regen.
+- Live-verified on pad-opencode-yo (gluetun-global): publish 43818 → door up, curl
+  200, pad still `container:gluetun-global`; restart pad → boot hook relaunches, door
+  still serves; unpublish → door gone, port 000.
+
 ## Architecture Documentation
 
 - `docs/` — **Source of truth** for business logic, system architecture, page descriptions, routes, data model, security model, and all behavioral contracts. Split by area: `overview/` (architecture, business-logic, react-migration), `backend/` (services, middleware, user-management), `tabs/` (per-tab behavior), `pages/`, `components/`, `operations/`.
