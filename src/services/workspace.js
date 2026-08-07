@@ -70,6 +70,7 @@ try{
     case 'save':{fs.writeFileSync(p,q.content||'','utf8');const stat=fs.statSync(p);
       out={ok:true,name:path.basename(p),size:Buffer.byteLength(q.content||'','utf8'),modified:new Date(stat.mtime).toISOString()};break;}
     case 'mkdir':fs.mkdirSync(path.join(p,q.name),{recursive:false});out={ok:true};break;
+    case 'mkdirp':fs.mkdirSync(p,{recursive:true});out={ok:true};break;
     case 'create':fs.writeFileSync(path.join(p,q.name),'');out={ok:true};break;
     case 'rename':{const t=path.join(path.dirname(p),q.name);if(st(t))throw new Error('Name already taken');fs.renameSync(p,t);out={ok:true};break;}
     case 'move':{const dp=st(path.dirname(q.to));if(st(q.to))throw new Error('Destination already exists');if(!dp||!dp.isDirectory())throw new Error('Destination directory not found');fs.renameSync(p,q.to);out={ok:true};break;}
@@ -211,6 +212,19 @@ function statFile(agentId, relativePath) {
     size: stat.size,
     modified: stat.mtime.toISOString(),
   };
+}
+
+// Recursively ensures a directory exists in the given scope (used by folder
+// uploads). Container scope goes through docker exec (mkdir -p), host scope
+// writes directly with path clamping.
+async function createDirectories(agentId, dirPath, scope) {
+  const agent = requireAgent(agentId);
+  if (scope === 'container') {
+    return containerExec(agent.name, { op: 'mkdirp', path: dirPath });
+  }
+  const absPath = resolveHostPath(agent.workspace_root, dirPath || '/');
+  fs.mkdirSync(absPath, { recursive: true });
+  return { ok: true };
 }
 
 async function createFolder(agentId, relativePath, folderName, scope) {
@@ -404,6 +418,7 @@ module.exports = {
   writeFileB64,
   statFile,
   createFolder,
+  createDirectories,
   renameEntry,
   deleteEntry,
   moveEntry,

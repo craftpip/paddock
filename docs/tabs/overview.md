@@ -138,8 +138,8 @@ Events tracked: start, stop, restart, create, delete, config updates, workspace 
 
 File: `src/client/src/pages/agent/SettingsTab.jsx`
 
-Container-level operations: image refresh, docker access, network routing, delete. See [settings.md](settings.md).
+Container-level operations: image refresh, health checkup, docker access, network routing, delete. See [settings.md](settings.md).
 
-**Cards:** Container Info, Update (SSE console, `build --pull` + force-recreate), Allow docker toggle (host socket + CLI), Network dropdown (`network_mode: container:<name>`), Danger Zone delete.
+**Cards:** Container Info, Update (SSE console, `build --pull` + force-recreate), Container Health Checkup (11 Docker-level checks, live SSE popup, status pill, stale network-peer banner), Allow docker toggle (host socket + CLI), Network dropdown (`network_mode: container:<name>`), Danger Zone delete.
 
-**API:** `GET /api/containers`, `GET/POST /api/agents/:name/settings`, `POST /api/agents/:name/update`, `GET /api/agents/:name/update-log` (SSE).
+**API:** `GET /api/containers`, `GET/POST /api/agents/:name/settings`, `POST /api/agents/:name/update`, `GET /api/agents/:name/update-log` (SSE), `GET /api/agents/:name/health`, `POST /api/agents/:name/health-check`, `GET /api/agents/:name/health-log` (SSE), `POST /api/agents/:name/recreate`.

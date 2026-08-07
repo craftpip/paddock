@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { useParams, useNavigate } from 'react-router-dom'
 import { api } from '../lib/api'
 import { useAuth } from '../stores/auth'
 import { useConfirm } from '../lib/confirm'
@@ -54,22 +55,47 @@ function ErrorBanner({ children }) {
   return <div className="bg-red-900/30 border border-red-700/60 text-red-200 px-4 py-3 rounded-lg text-sm mb-4">{children}</div>
 }
 
+function Snippet({ label, code }) {
+  const [copied, setCopied] = useState(false)
+  async function copyCode() {
+    try { await navigator.clipboard.writeText(code) }
+    catch {
+      const ta = document.createElement('textarea'); ta.value = code
+      document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta)
+    }
+    setCopied(true)
+    setTimeout(() => setCopied(false), 1500)
+  }
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1.5">
+        <p className="text-xs font-medium text-slate-300">{label}</p>
+        <button onClick={copyCode} className="text-xs text-slate-500 hover:text-cyan-400 transition-colors">{copied ? 'Copied' : 'Copy'}</button>
+      </div>
+      <pre className="bg-slate-950 border border-slate-800 rounded-lg p-3 text-[11px] text-slate-300 overflow-x-auto">{code}</pre>
+    </div>
+  )
+}
+
 export default function Profile() {
   const username = useAuth((s) => s.username)
   const role = useAuth((s) => s.role)
   const confirm = useConfirm()
   const alert = useAlert()
-  const [tab, setTab] = useState(() => {
-    const p = new URLSearchParams(window.location.search).get('tab')
-    if (p === 'users' && role !== 'admin') return 'general'
-    return ['general', 'keys', 'users'].includes(p) ? p : 'general'
-  })
+  const { tab: tabParam } = useParams()
+  const navigate = useNavigate()
+  let tab = tabParam === 'users' ? 'users' : tabParam === 'mcp-keys' ? 'keys' : 'general'
+  if (tab === 'users' && role !== 'admin') tab = 'general'
+
+  // Legacy ?tab=keys / ?tab=users links redirect to the slash routes.
+  useEffect(() => {
+    const q = new URLSearchParams(window.location.search).get('tab')
+    if (!q) return
+    navigate(q === 'users' ? '/profile/users' : q === 'keys' ? '/profile/mcp-keys' : '/profile', { replace: true })
+  }, [navigate])
 
   function selectTab(id) {
-    setTab(id)
-    const url = new URL(window.location.href)
-    url.searchParams.set('tab', id)
-    window.history.replaceState({}, '', url)
+    navigate(id === 'general' ? '/profile' : `/profile/${id === 'keys' ? 'mcp-keys' : id}`)
   }
 
   const [email, setEmail] = useState('')
@@ -92,6 +118,7 @@ export default function Profile() {
   const [keyNameNote, setKeyNameNote] = useState('')
   const [revealed, setRevealed] = useState(null)
   const [copied, setCopied] = useState(false)
+  const [showUrlNote, setShowUrlNote] = useState(false)
 
   const [users, setUsers] = useState([])
   const [usersLoading, setUsersLoading] = useState(true)
@@ -350,6 +377,7 @@ export default function Profile() {
         )}
 
         {tab === 'keys' && (
+          <>
           <div className={cardCls}>
             <div className="mb-4">
               <h2 className="text-sm font-semibold text-white">API Keys</h2>
@@ -426,6 +454,74 @@ export default function Profile() {
               </table>
             )}
           </div>
+
+          <div className="mt-6">
+            <div className="flex items-start justify-between gap-3 mb-4">
+              <div>
+                <h2 className="text-sm font-semibold text-white">Connect an MCP client</h2>
+                <p className="text-xs text-slate-500 mt-0.5">Paddock serves a Streamable HTTP MCP server. Coding agents can use it to control the fleet — list/start/stop PADs, read & write workspace files, manage backups, view configs and logs, and run in-container commands.</p>
+              </div>
+              <button
+                onClick={() => setShowUrlNote((v) => !v)}
+                title="Why does the URL change?"
+                className={`shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium transition-colors ${showUrlNote ? 'bg-cyan-900/40 text-cyan-300 border border-cyan-700' : 'bg-slate-800 text-slate-400 border border-slate-700 hover:text-slate-200'}`}
+              >
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="10" />
+                  <path d="M12 16v-4" />
+                  <path d="M12 8h.01" />
+                </svg>
+                Info
+              </button>
+            </div>
+            {showUrlNote && (
+              <div className="mb-5 border border-slate-700 bg-slate-900 rounded-lg p-3.5 text-xs text-slate-400 leading-relaxed">
+                <p className="font-medium text-slate-200 mb-1">About the server URL</p>
+                The URL in the snippets below always matches the address you are currently using to reach Paddock. If you opened it through <code className="text-slate-300">localhost</code>, the snippets will say <code className="text-slate-300">localhost</code> — that only works for clients running on this same machine. To let clients on other machines connect, open Paddock via its LAN address or hostname instead and the snippets update automatically.
+              </div>
+            )}
+            <ol className="text-sm text-slate-300 space-y-1.5 list-decimal list-inside mb-5">
+              <li>Create an API key with the form above — it is shown only once.</li>
+              <li>Add the server to your client config using the matching snippet below.</li>
+              <li>Every request authenticates with the key as a Bearer token.</li>
+            </ol>
+            <div className="space-y-4">
+              <Snippet
+                label="Generic MCP clients — Claude Code, Cursor, Cline, etc. (add to the mcpServers block)"
+                code={`{
+  "mcpServers": {
+    "paddock": {
+      "type": "http",
+      "url": "${window.location.origin}/mcp",
+      "headers": { "Authorization": "Bearer YOUR_API_KEY" }
+    }
+  }
+}`}
+              />
+              <Snippet
+                label="opencode (opencode.json)"
+                code={`{
+  "mcp": {
+    "paddock": {
+      "type": "remote",
+      "url": "${window.location.origin}/mcp",
+      "enabled": true,
+      "headers": { "Authorization": "Bearer YOUR_API_KEY" }
+    }
+  }
+}`}
+              />
+              <Snippet
+                label="Test the endpoint with curl (replace YOUR_API_KEY)"
+                code={`curl -X POST ${window.location.origin}/mcp \\
+  -H "Authorization: Bearer YOUR_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -H "Accept: application/json, text/event-stream" \\
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"curl","version":"1.0"}}}'`}
+              />
+            </div>
+          </div>
+          </>
         )}
 
         {tab === 'users' && (
@@ -512,7 +608,7 @@ export default function Profile() {
   "mcpServers": {
     "paddock": {
       "type": "http",
-      "url": "http://10.69.1.164:6789/mcp",
+      "url": "${window.location.origin}/mcp",
       "headers": { "Authorization": "Bearer ${revealed.key}" }
     }
   }

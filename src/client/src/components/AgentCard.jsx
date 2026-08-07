@@ -1,22 +1,9 @@
 import { Link } from 'react-router-dom'
 import { useAgents } from '../stores/agents'
-
-const STATUS_STYLES = {
-  running: 'bg-emerald-900/50 text-emerald-400 border border-emerald-800',
-  exited: 'bg-red-900/50 text-red-400 border border-red-800',
-  missing: 'bg-slate-800 text-slate-400 border border-slate-700',
-}
-
-const TRANSITION_STYLES = 'bg-cyan-900/50 text-cyan-400 border border-cyan-800'
-
-const STATUS_LABELS = {
-  running: 'running',
-  exited: 'stopped',
-  missing: 'missing',
-}
+import { statusMeta } from '../lib/status'
 
 export default function AgentCard({ agent }) {
-  const isTransition = ['starting', 'stopping', 'restarting'].includes(agent.status)
+  const st = statusMeta(agent.status)
   const start = useAgents((s) => s.startAgent)
   const stop = useAgents((s) => s.stopAgent)
   const restart = useAgents((s) => s.restartAgent)
@@ -39,10 +26,10 @@ export default function AgentCard({ agent }) {
           </div>
         </div>
         <span
-          className={`px-2 py-0.5 rounded-full text-xs font-medium flex-shrink-0 ml-3 flex items-center gap-1.5 ${isTransition ? TRANSITION_STYLES : STATUS_STYLES[agent.status] || STATUS_STYLES.missing}`}
+          className={`px-2 py-0.5 rounded-full text-xs font-medium flex-shrink-0 ml-3 flex items-center gap-1.5 ${st.pill}`}
         >
-          {isTransition && <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />}
-          {isTransition ? agent.status : STATUS_LABELS[agent.status] || agent.status}
+          <span className={`w-2 h-2 rounded-full ${st.dot} ${st.pulse ? 'animate-pulse' : ''}`} />
+          {st.label}
         </span>
       </div>
       <div className="text-xs text-slate-500 space-y-1 mb-4">

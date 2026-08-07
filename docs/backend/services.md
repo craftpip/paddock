@@ -55,6 +55,7 @@ Business logic: See `overview/business-logic.md` — Agent Lifecycle, Bind-Mount
 - `applySettings(name, { allowDocker, network })` — regenerates compose + writes `DOCKER=1|0` and `NETWORK=<name>` (or empty) to `meta.env`; returns `{ allowDocker, network, image, agent }`
 - `updateAgent(name, { onLog, onStep })` — streams `docker compose -f <compose> build --pull <name>` (900s) then `up -d --no-deps --force-recreate <name>` (300s); steps `build`/`recreate`
 - `setMetaFlag(name, key, value)` — writes/clears a `KEY=VALUE` line in `meta.env` preserving other lines
+- `getNetworkHealth(name)` — resolves the compose `network_mode: container:<peer>` against live docker state → `none` / `ok` / `stale` (peer recreated, recorded ID dead) / `peer-stopped`
 - `existingServices()` — scan instances/ for existing compose files
 - `instanceComposePath(name)`, `getComposePath(name)` — path helpers
 
@@ -98,13 +99,27 @@ resolution all derive paths from `driver.configFile` / `driver.workspaceDir` /
 - `runCmd(cmd, args, options)` — `execFile`-based, returns the full combined output string (no streaming)
 - `runCmdStream(cmd, args, { onLog, timeout })` — `spawn`-based; feeds every stdout/stderr chunk through `onLog(stream, text)` so long operations can stream live. Used by create (`build`/`up`/`setup`) and backup restore.
 
+## Container Health (container-health.js)
+
+Generic Docker-level container health checkup. **No agent/driver knowledge** — it diffs the *declared* compose settings (`docker compose -f instances/<name>/docker-compose.yml config --format json`) against the *actual* container (`docker inspect`) and reports what's out of line. Works on stopped containers (inspect + compose file both work while down) so it reports *why* a container stopped.
+
+Each check: `{ key, label, status: 'ok'|'warn'|'error', expected, actual, hint }`. No auto-fix — failing rows carry a hint (usually "Recreate to fix").
+
+**Functions:**
+- `checkContainerHealth(name, onCheck?)` — runs all checks. With `onCheck`, each check is streamed as produced (health-check job); without, the full report is returned at once. Returns `{ name, status, checks, counts }` via `summarize(name, checks)`.
+- `summarize(name, checks)` — tallies counts, derives `status` (`error` if any, else `warn` if any, else `ok`).
+
+**Checks (11):** compose file exists · container exists/status (with OOM-kill + exit-code reason) · Docker healthcheck probe (`healthy`/`starting` warn/otherwise error) · restart policy vs compose · image (declared vs actual; warn on mismatch) · network mode + `container:` peer existence/running state · volumes/bind mounts (incl. `/workspace` host-path split-brain detection) · docker socket mount · published ports · environment keys (secrets excluded via `/(password|token|key|secret)/i`).
+
+Driver-aware app-level checks are planned — see `plans/20-health-check-driver-aware.md`.
+
 ## Job Log (job-log.js)
 
 In-memory event store for long-running operations (create agent, …). Holds an ordered event list per job plus SSE subscriber response objects; lines are fanned out immediately, late/reconnecting subscribers get a replay via the `since` index. Jobs are cleaned up 5 minutes after finishing (only if no subscriber is attached).
 
-Events: `{ n, ts, type: 'step'|'line'|'done'|'error', step?, state?, stream?, text?, message?, ok?, name? }`.
+Events: `{ n, ts, type: 'step'|'line'|'check'|'done'|'error', step?, state?, stream?, text?, message?, ok?, name?, key?, label?, status?, expected?, actual?, hint? }`.
 
-**Functions:** `createJob`, `getJob`, `getOrCreateJob`, `append`, `setStep(job, step, state)`, `line(job, stream, text)`, `finish(job, ok)`, `fail(job, message)`, `subscribe(job, res, since)` (SSE fan-out + keep-alive), `getStatus(name)` (polling fallback).
+**Functions:** `createJob`, `getJob`, `getOrCreateJob`, `append`, `setStep(job, step, state)`, `line(job, stream, text)`, `check(job, item)` (streams a health-check result item — shape matches container-health checks), `finish(job, ok, extra)` (accepts `extra` like `{ status, counts }` for the health job), `fail(job, message)`, `subscribe(job, res, since)` (SSE fan-out + keep-alive), `getStatus(name)` (polling fallback).
 
 In-memory is fine for a single-user panel: a create in flight during a server restart is lost (frontend shows "connection lost" and returns to the form).
 

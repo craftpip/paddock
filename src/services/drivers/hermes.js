@@ -44,9 +44,9 @@ const HERMES = {
     {
       title: 'Status', color: 'cyan',
       commands: [
-        { cmd: 'hermes status', label: 'Status', desc: 'Environment, models, providers, gateway' },
+        { cmd: 'hermes status', label: 'Status', desc: 'Health check — environment, models, providers, gateway status' },
         { cmd: 'hermes version', label: 'Version', desc: 'Hermes version + install info' },
-        { cmd: 'hermes doctor', label: 'Doctor', desc: 'Diagnose config, MCP security, advisories' },
+        { cmd: 'hermes doctor', label: 'Doctor', desc: 'Health check — diagnose config, MCP security, advisories' },
         { cmd: 'hermes config check', label: 'Config check', desc: 'Missing or outdated config' },
       ],
     },
@@ -63,13 +63,13 @@ const HERMES = {
       commands: [
         { cmd: 'hermes login', label: 'Login', desc: 'Log in to an inference provider' },
         { cmd: 'hermes logout', label: 'Logout', desc: 'Clear provider credentials' },
-        { cmd: 'hermes auth', label: 'Auth status', desc: 'Pooled provider credentials' },
+        { cmd: 'hermes auth', label: 'Auth status', desc: 'Health check — pooled provider credentials status' },
       ],
     },
     {
       title: 'Gateway', color: 'amber',
       commands: [
-        { cmd: 'hermes gateway status', label: 'Gateway status', desc: 'Is the messaging gateway running?' },
+        { cmd: 'hermes gateway status', label: 'Gateway status', desc: 'Health check — is the messaging gateway running?' },
         { cmd: 'hermes gateway list', label: 'List profiles', desc: 'All profiles + gateway status' },
         { cmd: 'hermes gateway setup', label: 'Setup platforms', desc: 'Configure Telegram/Discord/WhatsApp (interactive)' },
         { cmd: 'hermes gateway restart', label: 'Restart gateway', desc: 'Restart the messaging gateway', confirm: true },
@@ -92,7 +92,7 @@ const HERMES = {
     {
       title: 'Memory', color: 'pink',
       commands: [
-        { cmd: 'hermes memory status', label: 'Memory status', desc: 'Memory store state' },
+        { cmd: 'hermes memory status', label: 'Memory status', desc: 'Health check — memory store state' },
         { cmd: 'hermes memory setup', label: 'Setup memory', desc: 'Configure the memory store' },
       ],
     },

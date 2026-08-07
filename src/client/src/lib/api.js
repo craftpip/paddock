@@ -4,6 +4,10 @@ export function setCsrfToken(token) {
   csrfToken = token
 }
 
+export function getCsrfToken() {
+  return csrfToken
+}
+
 export async function api(path, options = {}) {
   const { body, method = 'GET', headers = {} } = options
 

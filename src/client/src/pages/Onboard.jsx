@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { api } from '../lib/api'
+import { statusMeta } from '../lib/status'
 
 export default function Onboard() {
   const { agentId } = useParams()
@@ -47,10 +48,12 @@ export default function Onboard() {
 
   if (!agent) return <div className="text-slate-500 text-sm py-8">Loading...</div>
 
+  const st = statusMeta(agent.status)
+
   return (
     <div className="max-w-2xl mx-auto">
       <div className="flex items-center gap-3 mb-6">
-        <Link to={`/agents/${agent.name}#overview`} className="text-slate-400 hover:text-white">&larr; {agent.name}</Link>
+        <Link to={`/agents/${agent.name}/commands`} className="text-slate-400 hover:text-white">&larr; {agent.name}</Link>
         <h1 className="text-2xl font-bold">Onboard Bot</h1>
       </div>
 

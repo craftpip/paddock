@@ -87,6 +87,14 @@ function migrate(db) {
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS vault_meta (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      pin_set INTEGER NOT NULL DEFAULT 0,
+      pin_salt TEXT,
+      master_wrapped TEXT,
+      pin_set_at TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS api_keys (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,

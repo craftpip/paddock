@@ -19,6 +19,7 @@ const backup = require('./services/backup-manager');
 const drivers = require('./services/drivers');
 const jobLog = require('./services/job-log');
 const apiKeys = require('./services/api-keys');
+const containerHealth = require('./services/container-health');
 const { getDb } = require('./services/db');
 const { runCmdStream } = require('./services/cmd');
 const { setupSession, getSessionFromCookie, requireAuth, requireAdmin, csrfToken, csrfCheck, hashPassword, verifyPassword, checkNeedsSetup } = require('./middleware/auth');
@@ -432,7 +433,14 @@ async function ensureTmuxSession(vmName, session, cols, rows) {
   if (has.code !== 0) {
     const c = Math.max(40, Math.min(400, parseInt(cols, 10) || 120));
     const r = Math.max(12, Math.min(120, parseInt(rows, 10) || 32));
-    await runCmd('docker', ['exec', vmName, 'tmux', 'new-session', '-d', '-s', session, '-x', String(c), '-y', String(r)], { timeout: 20000, check: false });
+    // Prefer bash over the image's default shell: busybox ash (Alpine images,
+    // e.g. picoclaw) echoes `^C` with an extra newline on Ctrl+C, leaving a
+    // blank line before the next prompt. bash emits a clean single newline.
+    const bash = await runCmd('docker', ['exec', vmName, 'sh', '-lc', 'command -v bash'], { timeout: 15000, check: false });
+    const shellCmd = bash.code === 0 && bash.stdout.trim() ? bash.stdout.trim() : null;
+    const args = ['tmux', 'new-session', '-d', '-s', session, '-x', String(c), '-y', String(r)];
+    if (shellCmd) args.push(shellCmd);
+    await runCmd('docker', ['exec', vmName, ...args], { timeout: 20000, check: false });
   }
   // Keep enough history that a fresh attach has something real to replay.
   await runCmd('docker', ['exec', vmName, 'sh', '-lc', `tmux set-option -g history-limit ${TMUX_HISTORY} 2>/dev/null || true`], { timeout: 15000, check: false });
@@ -782,22 +790,47 @@ app.post('/api/agents/:name/assign', (req, res) => {
 });
 
 app.post('/api/agents/:name/start', async (req, res) => {
-  await runCmd('docker', ['start', req.params.name], { timeout: 30000, check: false });
+  const name = req.params.name;
+  registry.setLifecycle(name, 'starting');
+  try {
+    try {
+      await runCmd('docker', ['start', name], { timeout: 30000 });
+    } catch {
+      // Stale network peer (e.g. gluetun was rebuilt) — `docker start` can't
+      // rejoin the old `container:<id>` namespace. Recreate via compose so the
+      // peer re-resolves by name to the current container.
+      await runCmd('docker', ['compose', '-f', vm.instanceComposePath(name), 'up', '-d', '--no-deps', '--force-recreate', name], { timeout: 180000 });
+    }
+  } finally {
+    registry.setLifecycle(name, null);
+  }
   registry.dockerPsList(true);
   const agent = registry.getAgent(req.params.name);
   res.json({ ok: true, status: agent ? agent.status : 'running' });
 });
 
 app.post('/api/agents/:name/stop', async (req, res) => {
-  // -t 30: give the container 30s to stop gracefully before docker SIGKILLs it.
-  await runCmd('docker', ['stop', '-t', '30', req.params.name], { timeout: 60000, check: false });
+  const name = req.params.name;
+  registry.setLifecycle(name, 'stopping');
+  try {
+    // -t 30: give the container 30s to stop gracefully before docker SIGKILLs it.
+    await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000, check: false });
+  } finally {
+    registry.setLifecycle(name, null);
+  }
   registry.dockerPsList(true);
   const agent = registry.getAgent(req.params.name);
   res.json({ ok: true, status: agent ? agent.status : 'exited' });
 });
 
 app.post('/api/agents/:name/restart', async (req, res) => {
-  await runCmd('docker', ['restart', '-t', '30', req.params.name], { timeout: 60000, check: false });
+  const name = req.params.name;
+  registry.setLifecycle(name, 'restarting');
+  try {
+    await runCmd('docker', ['restart', '-t', '30', name], { timeout: 60000, check: false });
+  } finally {
+    registry.setLifecycle(name, null);
+  }
   registry.dockerPsList(true);
   const agent = registry.getAgent(req.params.name);
   res.json({ ok: true, status: agent ? agent.status : 'running' });
@@ -849,11 +882,16 @@ app.get('/api/agents/:name/settings', async (req, res) => {
     try {
       version = (await driver.currentVersion(name)) || version;
     } catch {}
+    let networkHealth = { state: 'ok' };
+    try {
+      networkHealth = await vm.getNetworkHealth(name);
+    } catch {}
     res.json({
       allowDocker: meta.DOCKER === '1',
       network: meta.NETWORK || '',
       image,
       version,
+      networkHealth,
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1005,6 +1043,61 @@ app.post('/api/agents/:name/settings', async (req, res) => {
   }
 });
 
+app.post('/api/agents/:name/recreate', async (req, res) => {
+  const name = safeVmName(req.params.name);
+  if (!name) return res.status(400).json({ error: 'Invalid agent name' });
+  try {
+    const meta = readMeta(name);
+    if (!meta.AGENT && !meta.ROOT_PASSWORD) return res.status(404).json({ error: 'Agent not found' });
+
+    const containers = await dockerPsList();
+    const current = containers[name];
+    const wasRunning = current && (current.State || '').toLowerCase() === 'running';
+
+    const jobKey = 'update:' + name;
+    const job = jobLog.getOrCreateJob(jobKey);
+    const log = (stream, text) => jobLog.line(job, stream, text);
+    const step = (stepName, state) => jobLog.setStep(job, stepName, state);
+
+    res.status(202).json({ ok: true, job: jobKey, streaming: true, reason: 'recreate' });
+
+    setImmediate(async () => {
+      registry.setRestarting(name, true);
+      try {
+        if (wasRunning) {
+          step('stop', 'start');
+          await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 });
+          step('stop', 'end');
+        }
+        log('system', 'Recreating container to re-resolve the network peer…');
+        step('recreate', 'start');
+        await runCmdStream('docker', ['compose', '-f', vm.instanceComposePath(name), 'up', '-d', '--no-deps', '--force-recreate', name], { onLog: log, timeout: 300000 });
+        step('recreate', 'end');
+        if (!wasRunning) {
+          try { await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 }); } catch {}
+        }
+        registry.dockerPsList(true);
+        registry.discoverAgents();
+        try {
+          registry.recordActivity(name, 'settings', 'recreate', 'ok', 'Container recreated (network peer re-resolved)');
+        } catch {}
+        log('system', 'Done — container recreated');
+        jobLog.finish(job, true);
+      } catch (e) {
+        console.error(`Recreate failed for ${name}:`, e.message);
+        try {
+          registry.recordActivity(name, 'settings', 'recreate', 'error', e.message);
+        } catch {}
+        jobLog.fail(job, e.message);
+      } finally {
+        registry.setRestarting(name, false);
+      }
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/api/agents/:name/update', async (req, res) => {
   const name = safeVmName(req.params.name);
   if (!name) return res.status(400).json({ error: 'Invalid agent name' });
@@ -1070,6 +1163,70 @@ app.get('/api/agents/:name/update-log', (req, res) => {
       'X-Accel-Buffering': 'no',
     });
     res.write(`event: error\ndata: ${JSON.stringify({ message: 'Update job not found (server may have restarted)' })}\n\n`);
+    res.end();
+    return;
+  }
+
+  jobLog.subscribe(job, res, since);
+});
+
+// ─── Container health checkup ──────────────────────────────
+
+/** Passive report (no job) — powers the health pill on the Settings tab. */
+app.get('/api/agents/:name/health', async (req, res) => {
+  const name = safeVmName(req.params.name);
+  if (!name) return res.status(400).json({ error: 'Invalid agent name' });
+  try {
+    const report = await containerHealth.checkContainerHealth(name);
+    res.json(report);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** Run the checkup as a job so each check streams live to the popup. */
+app.post('/api/agents/:name/health-check', async (req, res) => {
+  const name = safeVmName(req.params.name);
+  if (!name) return res.status(400).json({ error: 'Invalid agent name' });
+  try {
+    const meta = readMeta(name);
+    if (!meta.AGENT && !meta.ROOT_PASSWORD) return res.status(404).json({ error: 'Agent not found' });
+
+    const jobKey = 'health:' + name;
+    const job = jobLog.getOrCreateJob(jobKey);
+    const onCheck = (c) => jobLog.check(job, c);
+
+    res.status(202).json({ ok: true, job: jobKey, streaming: true });
+
+    setImmediate(async () => {
+      try {
+        const report = await containerHealth.checkContainerHealth(name, onCheck);
+        jobLog.finish(job, true, { status: report.status, counts: report.counts });
+      } catch (e) {
+        console.error(`Health check failed for ${name}:`, e.message);
+        jobLog.fail(job, e.message);
+      }
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** SSE stream for the health-check job (mirrors update-log). */
+app.get('/api/agents/:name/health-log', (req, res) => {
+  const name = safeVmName(req.params.name);
+  if (!name) return res.status(400).json({ error: 'Invalid agent name' });
+  const since = parseInt(req.headers['last-event-id'], 10) || Math.max(0, parseInt(req.query.since, 10) || 0);
+  const job = jobLog.getJob('health:' + name);
+
+  if (!job) {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    res.write(`event: error\ndata: ${JSON.stringify({ message: 'Health check job not found (run a health check first)' })}\n\n`);
     res.end();
     return;
   }
@@ -1263,6 +1420,41 @@ app.post('/api/agents/:name/workspace/upload', (req, res) => {
     try {
       await require('./services/workspace').writeFileB64(agent.name, targetDir, req.file.originalname, req.file.buffer, scope);
       res.json({ ok: true, name: path.basename(req.file.originalname) });
+    } catch (e2) {
+      res.status(500).json({ error: e2.message });
+    }
+  });
+});
+
+app.post('/api/agents/:name/workspace/upload-multiple', (req, res) => {
+  const agent = registry.getAgent(req.params.name);
+  if (!agent) return res.status(404).json({ error: 'Agent not found' });
+  const multer = require('multer');
+  const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: require('./services/workspace').MAX_UPLOAD_SIZE },
+  });
+  upload.array('files', 2000)(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    if (!req.files || req.files.length === 0) return res.status(400).json({ error: 'No files uploaded' });
+    const targetDir = req.body.path || '/';
+    const scope = req.body.scope || 'host';
+    const ws = require('./services/workspace');
+    const relPaths = Array.isArray(req.body.paths) ? req.body.paths : (req.body.paths ? [req.body.paths] : []);
+    try {
+      let uploaded = 0;
+      for (let i = 0; i < req.files.length; i++) {
+        const file = req.files[i];
+        const rel = String(relPaths[i] || file.originalname || '').replace(/\\/g, '/');
+        const safeName = path.posix.basename(rel);
+        if (!safeName || safeName.startsWith('.') || rel.split('/').includes('..')) continue;
+        const sub = path.posix.dirname(rel);
+        const destDir = sub === '.' ? targetDir : path.posix.join(targetDir, sub);
+        await ws.createDirectories(agent.name, destDir, scope);
+        await ws.writeFileB64(agent.name, destDir, safeName, file.buffer, scope);
+        uploaded++;
+      }
+      res.json({ ok: true, uploaded });
     } catch (e2) {
       res.status(500).json({ error: e2.message });
     }
@@ -1725,17 +1917,35 @@ app.post('/api/agents/:name/backups/delete', (req, res) => {
 
 app.get('/api/vault', (req, res) => {
   try {
-    res.json({ items: vault.list() });
+    res.json({ items: vault.list(), meta: vault.status() });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
+app.post('/api/vault/pin', csrfCheck, (req, res) => {
+  const { pin, reset, oldPin, password } = req.body;
+  try {
+    if (reset) {
+      if (!password) return res.status(400).json({ error: 'Your password is required to reset the PIN' });
+      const user = req.session.userId
+        ? getDb().prepare('SELECT * FROM users WHERE id = ?').get(req.session.userId)
+        : null;
+      if (!user || !verifyPassword(password, user.password_hash)) {
+        return res.status(401).json({ error: 'Password is incorrect' });
+      }
+    }
+    res.json({ ok: true, meta: vault.setPin(pin, { reset: !!reset, oldPin }) });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
 app.post('/api/vault', csrfCheck, (req, res) => {
-  const { name, description, value } = req.body;
+  const { name, description, value, pin } = req.body;
   if (!name || !value) return res.status(400).json({ error: 'Name and value are required' });
   try {
-    const item = vault.create(name.trim(), description, value);
+    const item = vault.create(name.trim(), description, value, pin);
     res.json({ ok: true, item });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -1743,9 +1953,9 @@ app.post('/api/vault', csrfCheck, (req, res) => {
 });
 
 app.put('/api/vault/:id', csrfCheck, (req, res) => {
-  const { name, description, value } = req.body;
+  const { name, description, value, pin } = req.body;
   try {
-    const item = vault.update(Number(req.params.id), { name, description, value });
+    const item = vault.update(Number(req.params.id), { name, description, value }, pin);
     res.json({ ok: true, item });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -1753,8 +1963,9 @@ app.put('/api/vault/:id', csrfCheck, (req, res) => {
 });
 
 app.delete('/api/vault/:id', csrfCheck, (req, res) => {
+  const { pin } = req.body;
   try {
-    vault.remove(Number(req.params.id));
+    vault.remove(Number(req.params.id), pin);
     res.json({ ok: true });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -1763,7 +1974,7 @@ app.delete('/api/vault/:id', csrfCheck, (req, res) => {
 
 app.get('/api/vault/:id/decrypt', requireAdmin, (req, res) => {
   try {
-    res.json({ value: vault.getValue(Number(req.params.id)) });
+    res.json({ value: vault.getValue(Number(req.params.id), req.query.pin || '') });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }

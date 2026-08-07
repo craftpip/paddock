@@ -11,14 +11,22 @@ const VM_NAME_RE = new RegExp('^' + PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'
 let _dockerCache = { data: null, ts: 0 };
 const DOCKER_CACHE_TTL = 3000;
 
-// Names currently being restarted by a settings change / update. While set,
-// a non-running docker state is reported as `restarting` instead of `stopped`
-// so a page load landing mid-restart doesn't flash a false "stopped".
-const _restarting = {};
+// Server-side lifecycle flags. `docker stop -t 30` keeps a container in
+// `running` until it finally exits, and `docker start`/`restart` move through
+// transient states the Docker API never exposes — so without this the UI keeps
+// showing the stale docker state, and a page refresh wipes any client-side
+// transition. While a start/stop/restart (or settings update/recreate)
+// command runs, the registry reports the matching transition status instead.
+const _lifecycle = {};
 
+function setLifecycle(name, status) {
+  if (status) _lifecycle[name] = status;
+  else delete _lifecycle[name];
+}
+
+/** Boolean in-flight marker used by the settings/update/recreate flows. */
 function setRestarting(name, val) {
-  if (val) _restarting[name] = true;
-  else delete _restarting[name];
+  setLifecycle(name, val ? 'restarting' : null);
 }
 
 function dockerPsList(force) {
@@ -134,7 +142,7 @@ function buildAgent(vmName, dockerState) {
   const configRoot = agentDir;
   const driver = getDriver(agentType);
   let status = dockerState[vmName] || 'missing';
-  if (_restarting[vmName] && status !== 'running') status = 'restarting';
+  if (_lifecycle[vmName]) status = _lifecycle[vmName];
 
   let displayName = vmName.replace(new RegExp('^' + PREFIX + '-'), '');
   // The container name embeds the agent type (e.g. pad-openclaw-work-pls).
@@ -300,6 +308,7 @@ module.exports = {
   syncAgentToDb,
   removeAgentFromDb,
   setRestarting,
+  setLifecycle,
   INSTANCES_DIR, PREFIX,
   VM_NAME_RE,
 };

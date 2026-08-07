@@ -718,6 +718,47 @@ Terminal appeared small/constrained because xterm.js FitAddon calls `fit()` befo
 - Host reachability for the webui: `http://10.69.1.164:6789` (localhost:6789 is
   refused from this shell's network context).
 
+## Container Health Checkup (2026-08-07)
+
+- **`src/services/container-health.js`** — generic Docker-level checkup, no
+  agent/driver knowledge. Diffs **declared** compose
+  (`docker compose -f instances/<name>/docker-compose.yml config --format json`)
+  against **actual** container (`docker inspect`). Works on stopped containers —
+  reports *why* it's down (OOM-kill, exit code, stale peer) instead of failing.
+- 11 checks: compose file · container exists/status · Docker `/healthz` probe ·
+  restart policy · image · network mode + `container:` peer existence/running
+  state · volumes/bind mounts (incl. `/workspace` split-brain) · docker socket ·
+  published ports · env keys (secrets excluded via
+  `/(password|token|key|secret)/i`).
+- Check shape: `{ key, label, status: 'ok'|'warn'|'error', expected, actual, hint }`.
+  `checkContainerHealth(name, onCheck?)` — with `onCheck` streams per-check
+  (health job), without returns the full report. `summarize()` derives status:
+  error if any, else warn if any, else ok.
+- **No auto-fix** — failing rows carry a hint (usually "Recreate to fix"). The
+  dashboard Start button already falls back to compose recreate when
+  `docker start` fails.
+- Routes: `GET /api/agents/:name/health` (passive pill),
+  `POST /api/agents/:name/health-check` (job `health:<name>`),
+  `GET /api/agents/:name/health-log` (SSE `check`/`done`/`error` events),
+  `POST /api/agents/:name/recreate` (job `recreate:<name>`, force-recreate SSE).
+- `job-log.js`: new `check(job, item)` event; `finish(job, ok, extra)` now
+  accepts `{ status, counts }` for the health summary.
+- `vm-manager.js`: `getNetworkHealth(name)` → `none|ok|stale|peer-stopped`;
+  settings GET returns it as `networkHealth`. `stale` = peer container recreated
+  (recorded ID dead, start fails "No such container"); `peer-stopped` = peer
+  exists but not running. Both trigger the amber banner + "Recreate to fix".
+- Frontend: `HealthCheckModal.jsx` (SSE checklist popup, ✓/✗/~ rows,
+  expected/found detail, hints, counts footer) + health section in
+  `SettingsTab.jsx` (Run button + status pill + stale-peer banner). Rows use
+  `items-center` so the icon centers against the label text.
+- **Driver-aware app checks planned but NOT implemented** — see
+  `plans/20-health-check-driver-aware.md` (driver `healthChecks` group:
+  openclaw cron/gateway/models, hermes config.yaml/model, picoclaw
+  gateway/config, codex login, generic config-file parse).
+- Tests: `services.test.js` passes; `mcp.test.js` only passes when run
+  individually (`timeout 60 docker exec paddock node --test test/mcp.test.js`)
+  — the combined `node --test test/` run hangs past the 120s tool timeout.
+
 ## Driver Framework (Goal 1 — 2026-08-06)
 
 - **`src/services/drivers/`** — one module per agent type (`openclaw.js`,
@@ -849,6 +890,27 @@ Terminal appeared small/constrained because xterm.js FitAddon calls `fit()` befo
 - Model provider plan: `/workspace/plans/model-provider-panel.md` — terminal + API key panel for model provider setup. Uses `openclaw models auth paste-api-key/login/list` commands.
 - Backups page plan: `/workspace/plans/backups-page.md` — global backup listing; add File Name column to the table.
 - Create agent page plan: `/workspace/plans/create-agent-fix.md` — fix layout-breaking HTMX and simplify the form.
+
+## Terminal: Ctrl+C Leaves a Blank Line on Alpine/busybox-ash Pads
+
+**Symptom:** Pressing Ctrl+C in the webui terminal on a busybox-ash pad (picoclaw/Alpine) shows an extra blank line after `^C`:
+
+```
+0e15261df60d:~# ^C
+
+0e15261df60d:~# ^C
+```
+
+**Root cause:** busybox ash v1.37.0 itself emits `^C\r\n\r\n` (TWO CRLFs) on Ctrl+C in a plain PTY — reproduced with no webui/tmux involved (python3 pty harness), with raw `tmux send-keys C-c`, and via the WS probe. bash emits a clean single newline. It's shell-level behavior, not the webui or tmux. (ash.c `preadfd()` writes `^C` then one `bb_putchar('\n')` + `goto retry`; lineedit.c VINTR path uses `break_out = -1`.)
+
+**Fix (2026-08-07):** `ensureTmuxSession()` in `src/app.js` now runs `tmux new-session ... bash` when `command -v bash` succeeds in the container, falling back to the default shell otherwise. bash is present in the picoclaw image (`/bin/bash`, musl build). The colored PS1 hook in `/root/.bashrc` was already bash-targeted.
+
+**Important:** the fix only affects sessions created AFTER the change. Existing sessions still run the old shell — kill the session (Sessions dropdown) and reconnect to pick up bash. Webui restart needed after editing `src/app.js` (`docker compose restart webui`).
+
+**Debug helpers:**
+- Plain-PTY repro (no webui): python3 pty harness doing `docker exec -it <pad> sh` and sending `\x03`.
+- WS probe: `docker cp /tmp/opencode/ctrl-c-probe*.js paddock:/app/` + `docker exec -i paddock node /app/ctrl-c-probe2.js <pad>`; webui WS is `ws://localhost:6789/ws/terminal/<pad>?session=main` (**6789, not 5050**).
+- busybox sources checked: `/tmp/opencode/ash.c`, `/tmp/opencode/lineedit.c`.
 
 ## OpenClaw Docs — Always Use Online Docs
 

@@ -54,7 +54,7 @@ const OPENCODE = {
     {
       title: 'MCP', color: 'emerald',
       commands: [
-        { cmd: 'opencode mcp list', label: 'List servers', desc: 'MCP servers + status' },
+        { cmd: 'opencode mcp list', label: 'List servers', desc: 'Health check — MCP servers + status' },
         { cmd: 'opencode mcp add', label: 'Add server', desc: 'Add an MCP server (interactive)' },
         { cmd: 'opencode mcp auth', label: 'Auth server', desc: 'OAuth login for an MCP server' },
       ],

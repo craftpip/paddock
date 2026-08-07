@@ -104,8 +104,14 @@ function line(job, stream, text) {
   return append(job, { type: 'line', stream, text });
 }
 
-function finish(job, ok = true) {
-  const n = append(job, { type: 'done', ok, name: job.name });
+/** Stream a health-check result item. Shape matches container-health checks:
+ *  { key, label, status: 'ok'|'warn'|'error', expected?, actual?, hint? } */
+function check(job, item) {
+  return append(job, { type: 'check', ...item });
+}
+
+function finish(job, ok = true, extra = {}) {
+  const n = append(job, { type: 'done', ok, name: job.name, ...extra });
   scheduleCleanup(job.name);
   return n;
 }
@@ -139,6 +145,7 @@ module.exports = {
   append,
   setStep,
   line,
+  check,
   finish,
   fail,
   subscribe,

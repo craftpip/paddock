@@ -60,10 +60,12 @@ export default function App() {
               <Route path="/agents/create" element={<AuthPage><CreateAgent /></AuthPage>} />
               <Route path="/agents/create/:name" element={<AuthPage><CreateAgent /></AuthPage>} />
               <Route path="/agents/:agentId/onboard" element={<AuthPage><Onboard /></AuthPage>} />
+              <Route path="/agents/:agentId/:tab" element={<AuthPage fullHeight><AgentDetail /></AuthPage>} />
               <Route path="/agents/:agentId" element={<AuthPage fullHeight><AgentDetail /></AuthPage>} />
               <Route path="/vault" element={<AuthPage><Vault /></AuthPage>} />
               <Route path="/backups" element={<AuthPage><GlobalBackups /></AuthPage>} />
               <Route path="/profile" element={<AuthPage><Profile /></AuthPage>} />
+              <Route path="/profile/:tab" element={<AuthPage><Profile /></AuthPage>} />
               <Route path="/credentials" element={<Navigate to="/vault" replace />} />
               <Route path="/" element={<Navigate to="/agents" replace />} />
               <Route path="*" element={<Navigate to="/agents" replace />} />

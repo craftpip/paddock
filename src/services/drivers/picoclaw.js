@@ -42,7 +42,7 @@ const PICOCLAW = {
     {
       title: 'Status', color: 'cyan',
       commands: [
-        { cmd: 'picoclaw status', label: 'Status', desc: 'Version, config + workspace' },
+        { cmd: 'picoclaw status', label: 'Status', desc: 'Health check — version, config + workspace status' },
         { cmd: 'picoclaw version', label: 'Version', desc: 'picoclaw version' },
         { cmd: 'picoclaw model', label: 'Default model', desc: 'Show current default model' },
       ],
@@ -50,7 +50,7 @@ const PICOCLAW = {
     {
       title: 'Auth', color: 'teal',
       commands: [
-        { cmd: 'picoclaw auth status', label: 'Auth status', desc: 'Current login state' },
+        { cmd: 'picoclaw auth status', label: 'Auth status', desc: 'Health check — current login state' },
         { cmd: 'picoclaw auth models', label: 'Available models', desc: 'Models for configured providers' },
         { cmd: 'picoclaw auth login', label: 'Login', desc: 'Login via OAuth or paste token (interactive)' },
         { cmd: 'picoclaw auth logout', label: 'Logout', desc: 'Remove stored credentials' },

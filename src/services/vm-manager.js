@@ -39,6 +39,48 @@ function instanceComposePath(name) {
   return path.join(INSTANCES_DIR, name, 'docker-compose.yml');
 }
 
+/** Health of an agent's network_mode. When an agent routes through another
+ *  container (e.g. gluetun) via `network_mode: container:<peer>`, Docker
+ *  records the peer as a container ID at create time. If that peer is later
+ *  recreated (gluetun rebuild/restart), the recorded ID dies and `docker
+ *  start` fails with "cannot join network namespace ... No such container".
+ *  Returns:
+ *    { state: 'none' }                 — container doesn't exist yet
+ *    { state: 'ok', networkMode }      — default network or live peer
+ *    { state: 'stale', ... }           — peer container is gone (needs recreate)
+ *    { state: 'peer-stopped', ... }    — peer exists but is not running
+ */
+async function getNetworkHealth(name) {
+  let mode = '';
+  try {
+    const r = await runCmd('docker', ['inspect', name, '--format', '{{.HostConfig.NetworkMode}}'], { timeout: 15000 });
+    mode = (r.stdout || '').trim();
+  } catch {
+    return { state: 'none', networkMode: '' };
+  }
+
+  if (!mode.startsWith('container:')) {
+    return { state: 'ok', networkMode: mode };
+  }
+
+  const peerId = mode.slice('container:'.length).trim();
+  let peerName = '';
+  let peerState = '';
+  try {
+    const r = await runCmd('docker', ['inspect', peerId, '--format', '{{.Name}}|{{.State.Status}}'], { timeout: 15000 });
+    const [n, s] = (r.stdout || '').split('|');
+    peerName = (n || '').replace(/^\//, '');
+    peerState = (s || '').trim().toLowerCase();
+  } catch {
+    return { state: 'stale', networkMode: mode, peerId, peerName: '', peerState: '' };
+  }
+
+  if (peerState !== 'running') {
+    return { state: 'peer-stopped', networkMode: mode, peerId, peerName, peerState };
+  }
+  return { state: 'ok', networkMode: mode, peerId, peerName, peerState };
+}
+
 function generateInstanceCompose(name, agent, password, port, opts = {}) {
   const { allowDocker = false, network = '' } = opts;
   const driver = getDriver(agent);
@@ -339,6 +381,7 @@ module.exports = {
   generateInstanceCompose, writeInstanceCompose,
   applySettings, updateAgent, setMetaFlag,
   instanceComposePath, getComposePath,
+  getNetworkHealth,
   existingServices, startAgent,
   INSTANCES_DIR, PREFIX, PREFIX_RE,
 };

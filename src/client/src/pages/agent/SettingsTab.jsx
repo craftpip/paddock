@@ -5,6 +5,7 @@ import { useAgents } from '../../stores/agents'
 import { useConfirm } from '../../lib/confirm'
 import { useToast } from '../../lib/toast'
 import CommandModal from '../../components/CommandModal'
+import HealthCheckModal from '../../components/HealthCheckModal'
 
 export default function SettingsTab({ agent }) {
   const navigate = useNavigate()
@@ -18,6 +19,11 @@ export default function SettingsTab({ agent }) {
   const [loadError, setLoadError] = useState('')
   const [saving, setSaving] = useState(false)
   const [modal, setModal] = useState(null)
+  const [healthModal, setHealthModal] = useState(null)
+  const [healthStatus, setHealthStatus] = useState(null)
+  const [healthCounts, setHealthCounts] = useState(null)
+  const [healthLoading, setHealthLoading] = useState(false)
+  const [healthError, setHealthError] = useState('')
 
   function refresh() {
     api(`/api/agents/${agent.name}/settings`)
@@ -25,8 +31,25 @@ export default function SettingsTab({ agent }) {
       .catch((err) => setLoadError(err.error || err.message || 'Failed to load settings'))
   }
 
+  function refreshHealth() {
+    setHealthLoading(true)
+    api(`/api/agents/${agent.name}/health`)
+      .then((h) => {
+        setHealthStatus(h.status || null)
+        setHealthCounts(h.counts || null)
+        setHealthError('')
+      })
+      .catch((err) => {
+        setHealthStatus(null)
+        setHealthCounts(null)
+        setHealthError(err.error || err.message || 'Failed to run health check')
+      })
+      .finally(() => setHealthLoading(false))
+  }
+
   useEffect(() => {
     refresh()
+    refreshHealth()
     api('/api/containers')
       .then((d) => setContainers(d.containers || []))
       .catch(() => {})
@@ -181,8 +204,57 @@ export default function SettingsTab({ agent }) {
     }
   }
 
+  // ── Stale network peer fix ────────────────────────────────
+
+  async function handleRecreateNetwork() {
+    const ok = await confirm({
+      title: 'Recreate container to fix network?',
+      message: `This agent routes through ${networkPeerLabel}, which has been recreated or stopped. The container can't start until it re-joins the current peer.\n\nRecreating will stop and recreate ${agent.name} so it rebinds to the current network peer. No settings change — the compose file already points at ${settings?.network || 'the peer'} by name.`,
+      confirmText: 'Recreate',
+      cancelText: 'Cancel',
+    })
+    if (!ok) return
+    setSaving(true)
+    if (agent.status === 'running') updateAgentStatus(agent.name, 'restarting')
+    try {
+      await api(`/api/agents/${agent.name}/recreate`, { method: 'POST' })
+      setModal({
+        key: `recreate-${Date.now()}`,
+        title: `Recreating ${agent.name}`,
+        onDone: () => {
+          refresh()
+          fetchAgents()
+          toast.success('Container recreated — network peer re-resolved')
+        },
+      })
+    } catch (err) {
+      toast.error(err.error || err.message || 'Failed to recreate container')
+      setSaving(false)
+    }
+  }
+
+  // ── Container health checkup ───────────────────────────────
+
+  async function runHealthCheck() {
+    try {
+      await api(`/api/agents/${agent.name}/health-check`, { method: 'POST' })
+      setHealthModal({ key: `health-${Date.now()}` })
+    } catch (err) {
+      toast.error(err.error || err.message || 'Failed to start health check')
+    }
+  }
+
+  function openHealthCheck() {
+    setHealthModal({ key: `health-${Date.now()}` })
+  }
+
   const toggleDocker = !!settings?.allowDocker
   const currentNetwork = settings?.network || ''
+  const networkHealth = settings?.networkHealth || {}
+  const networkStale = networkHealth.state === 'stale'
+  const networkPeerStopped = networkHealth.state === 'peer-stopped'
+  const networkBroken = networkStale || networkPeerStopped
+  const networkPeerLabel = networkHealth.peerName || networkHealth.peerId || currentNetwork || 'the network peer'
   const networkOptions = (containers.some((c) => c.name === currentNetwork) || !currentNetwork
     ? containers
     : [{ name: currentNetwork, image: '', state: 'missing' }, ...containers])
@@ -192,6 +264,29 @@ export default function SettingsTab({ agent }) {
   return (
     <div className="max-w-3xl space-y-6">
       {loadError && <p className="text-red-400 text-sm">{loadError}</p>}
+
+      {/* 0. Stale network peer warning */}
+      {networkBroken && (
+        <section className="bg-amber-900/20 border border-amber-700/70 rounded-xl p-5">
+          <h3 className="text-sm font-medium text-amber-300">
+            {networkStale ? 'Network peer is stale — container can\u2019t start' : 'Network peer is stopped'}
+          </h3>
+          <p className="text-xs text-amber-200/90 mt-1 max-w-lg">
+            {networkStale
+              ? `This agent routes through ${networkPeerLabel}, which has been recreated since this container was created. Docker still points at the old (now-deleted) container, so starting fails with "No such container". This is not a Paddock issue — the peer moved.`
+              : `This agent routes through ${networkPeerLabel}, which exists but is currently stopped. The agent can't start until the peer is running. Start ${networkPeerLabel} first, then recreate this agent.`}
+          </p>
+          {networkStale && (
+            <button
+              onClick={handleRecreateNetwork}
+              disabled={saving}
+              className="mt-3 px-3 py-1.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white rounded-lg text-xs font-medium transition-colors"
+            >
+              Recreate to fix
+            </button>
+          )}
+        </section>
+      )}
 
       {/* 1. Container Info */}
       <section className="bg-slate-800/60 border border-slate-700 rounded-xl p-5">
@@ -232,7 +327,50 @@ export default function SettingsTab({ agent }) {
         </div>
       </section>
 
-      {/* 3. Allow docker in the container */}
+      {/* 3. Container Health Checkup */}
+      <section className="bg-slate-800/60 border border-slate-700 rounded-xl p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-sm font-medium text-slate-300">Container Health Checkup</h3>
+            <p className="text-xs text-slate-500 mt-1 max-w-md">
+              Inspects the actual Docker container against the compose file — status, restart policy, network peer, mounts, ports, env. Each check streams live with a pass/fail.
+            </p>
+            {healthError && <p className="text-xs text-red-400 mt-1">{healthError}</p>}
+          </div>
+          <div className="flex items-center gap-3 shrink-0">
+            {healthLoading ? (
+              <span className="text-xs text-slate-500">Checking…</span>
+            ) : healthStatus ? (
+              <button
+                onClick={openHealthCheck}
+                title="Open full checkup report"
+                className={`text-xs font-medium px-2.5 py-1 rounded-full transition-colors ${
+                  healthStatus === 'ok'
+                    ? 'bg-emerald-900/60 text-emerald-300 hover:bg-emerald-800/60'
+                    : healthStatus === 'warn'
+                      ? 'bg-amber-900/60 text-amber-300 hover:bg-amber-800/60'
+                      : 'bg-red-900/60 text-red-300 hover:bg-red-800/60'
+                }`}
+              >
+                {healthStatus === 'ok'
+                  ? '✓ Healthy'
+                  : healthStatus === 'warn'
+                    ? `~ ${healthCounts?.warn || 0} issue${healthCounts?.warn === 1 ? '' : 's'}`
+                    : `✗ ${healthCounts?.error || 0} problem${healthCounts?.error === 1 ? '' : 's'}`}
+              </button>
+            ) : null}
+            <button
+              onClick={runHealthCheck}
+              disabled={saving}
+              className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white rounded-lg text-xs font-medium transition-colors whitespace-nowrap"
+            >
+              Run Health Check
+            </button>
+          </div>
+        </div>
+      </section>
+
+      {/* 4. Allow docker in the container */}
       <section className="bg-slate-800/60 border border-slate-700 rounded-xl p-5">
         <div className="flex items-start justify-between gap-4">
           <div>
@@ -258,7 +396,7 @@ export default function SettingsTab({ agent }) {
         )}
       </section>
 
-      {/* 4. Network */}
+      {/* 5. Network */}
       <section className="bg-slate-800/60 border border-slate-700 rounded-xl p-5">
         <h3 className="text-sm font-medium text-slate-300">Network</h3>
         <p className="text-xs text-slate-500 mt-1 max-w-md">
@@ -282,7 +420,7 @@ export default function SettingsTab({ agent }) {
         </p>
       </section>
 
-      {/* 5. Danger Zone */}
+      {/* 6. Danger Zone */}
       <section className="bg-red-950/20 border border-red-900/60 rounded-xl p-5">
         <h3 className="text-sm font-medium text-red-400">Danger Zone</h3>
         <p className="text-xs text-slate-500 mt-1 max-w-md">
@@ -304,6 +442,19 @@ export default function SettingsTab({ agent }) {
           title={modal.title}
           onDone={modal.onDone}
           onClose={closeModal}
+        />
+      )}
+
+      {healthModal && (
+        <HealthCheckModal
+          key={healthModal.key}
+          name={agent.name}
+          title={`Health check — ${agent.name}`}
+          onDone={() => {
+            refreshHealth()
+            fetchAgents()
+          }}
+          onClose={() => setHealthModal(null)}
         />
       )}
     </div>

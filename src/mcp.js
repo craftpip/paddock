@@ -311,7 +311,7 @@ function registerTools(server) {
     async ({ name }) => {
       requireAccess(currentUser(), name);
       requireAgent(name);
-      await runCmd('docker', ['stop', name], { timeout: 30000, check: false });
+      await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000, check: false });
       registry.dockerPsList(true);
       const agent = registry.getAgent(name);
       return textResult({ ok: true, name, status: agent ? agent.status : 'exited' });
@@ -328,7 +328,7 @@ function registerTools(server) {
     async ({ name }) => {
       requireAccess(currentUser(), name);
       requireAgent(name);
-      await runCmd('docker', ['restart', name], { timeout: 30000, check: false });
+      await runCmd('docker', ['restart', '-t', '30', name], { timeout: 60000, check: false });
       registry.dockerPsList(true);
       const agent = registry.getAgent(name);
       return textResult({ ok: true, name, status: agent ? agent.status : 'running' });

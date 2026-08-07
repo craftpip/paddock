@@ -28,18 +28,17 @@ const COLORS = {
 
 function matches(q, ...fields) {
   if (!q) return true
-  const needle = q.toLowerCase()
-  return fields.some((f) => (f || '').toLowerCase().includes(needle))
+  const text = fields.filter(Boolean).join(' ').toLowerCase()
+  return q.toLowerCase().split(/\s+/).filter(Boolean).every((w) => text.includes(w))
 }
 
-function Pill({ label, onClick, desc, color, disabled, danger }) {
+function Pill({ label, onClick, cmd, desc, color, disabled }) {
   return (
     <button
       onClick={onClick}
       disabled={disabled}
-      title={desc}
-      className={`px-2 py-1 rounded text-[11px] font-medium transition-colors whitespace-nowrap border shrink-0 disabled:opacity-40 disabled:cursor-not-allowed
-        ${danger ? 'bg-red-900/30 text-red-400 border-red-800/50 hover:bg-red-800/50 hover:text-red-300' : color}`}
+      title={cmd || desc}
+      className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap border shrink-0 disabled:opacity-40 disabled:cursor-not-allowed ${color}`}
     >
       {label}
     </button>
@@ -60,7 +59,7 @@ function GroupLabel({ color, title }) {
 /** Neutral chip for data items (servers, skills, backups) in the flow. */
 function DataChip({ children, className = '' }) {
   return (
-    <span className={`inline-flex items-center gap-1.5 px-2 py-1 rounded text-[11px] border border-slate-700/60 bg-slate-800/40 text-slate-300 shrink-0 ${className}`}>
+    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs border border-slate-700/60 bg-slate-800/40 text-slate-300 shrink-0 ${className}`}>
       {children}
     </span>
   )
@@ -70,7 +69,7 @@ function DataChip({ children, className = '' }) {
 function MiniBtn({ label, onClick, color = 'text-slate-400 hover:text-slate-200', disabled }) {
   return (
     <button onClick={onClick} disabled={disabled}
-            className={`px-1 rounded text-[10px] ${color} hover:bg-slate-700/60 transition-colors disabled:opacity-40`}>
+            className={`px-1.5 py-0.5 rounded-lg text-[10px] ${color} hover:bg-slate-700/60 transition-colors disabled:opacity-40`}>
       {label}
     </button>
   )
@@ -78,8 +77,9 @@ function MiniBtn({ label, onClick, color = 'text-slate-400 hover:text-slate-200'
 
 function FlowGroup({ group, query, run, connected }) {
   const c = COLORS[group.color] || COLORS.slate
-  const visible = group.commands.filter((x) => matches(query, x.label, x.cmd, x.desc))
-  if (query && visible.length === 0) return null
+  const groupHit = matches(query, group.title)
+  const visible = group.commands.filter((x) => groupHit || matches(query, x.label, x.cmd, x.desc))
+  if (query && !groupHit && visible.length === 0) return null
   return (
     <>
       <GroupLabel color={group.color} title={group.title} />
@@ -88,6 +88,7 @@ function FlowGroup({ group, query, run, connected }) {
           key={x.label}
           label={x.label}
           desc={x.desc}
+          cmd={x.cmd}
           color={c.pill}
           danger={x.danger}
           disabled={!connected}
@@ -102,21 +103,22 @@ function FlowGroup({ group, query, run, connected }) {
 
 function MessagingFlow({ query, run, connected }) {
   const pills = [
-    { cmd: 'openclaw configure --section channels', label: 'Configure channel', desc: 'Interactive wizard — add, update, login or remove channel accounts' },
-    { cmd: 'openclaw channels list --all', label: 'List channels', desc: 'Configured + available channels' },
-    { cmd: 'openclaw channels status --probe', label: 'Status probe', desc: 'Live transport + audit check per account' },
-    { cmd: 'openclaw channels capabilities', label: 'Capabilities', desc: 'What each channel supports (intents/scopes)' },
-    { cmd: 'openclaw channels logs --lines 100', label: 'Channel logs', desc: 'Recent channel runtime logs' },
-    { cmd: 'openclaw agents bindings', label: 'Routing', desc: 'Which agent owns which channel' },
+    { cmd: 'openclaw configure --section channels', label: 'Add/Remove channel', desc: 'Add, update, login or remove channel accounts (Telegram, WhatsApp, Signal, Discord, GChat)' },
+    { cmd: 'openclaw channels list --all', label: 'List added channels', desc: 'List configured + available channels' },
+    { cmd: 'openclaw channels status --probe', label: 'Check channel status', desc: 'Health check — live transport + audit check per account' },
+    { cmd: 'openclaw channels capabilities', label: 'Check channel capabilities', desc: 'What each channel supports (intents/scopes)' },
+    { cmd: 'openclaw channels logs --lines 100', label: 'View channel logs', desc: 'Recent channel runtime logs' },
+    { cmd: 'openclaw agents bindings', label: 'View channel routing', desc: 'Which agent owns which channel' },
   ]
-  const visible = pills.filter((x) => matches(query, x.label, x.cmd))
-  if (query && visible.length === 0) return null
+  const groupHit = matches(query, 'Messaging', 'channels')
+  const visible = pills.filter((x) => groupHit || matches(query, x.label, x.cmd, x.desc))
+  if (query && !groupHit && visible.length === 0) return null
 
   return (
     <>
       <GroupLabel color="cyan" title="Messaging" />
       {visible.map((x) => (
-        <Pill key={x.label} label={x.label} desc={x.desc} color={COLORS.cyan.pill} danger={x.danger}
+        <Pill key={x.label} label={x.label} desc={x.desc} cmd={x.cmd} color={COLORS.cyan.pill} danger={x.danger}
               disabled={!connected}
               onClick={() => (x.click ? x.click() : run(x.cmd, x))} />
       ))}
@@ -127,68 +129,51 @@ function MessagingFlow({ query, run, connected }) {
 // ─── Models ──────────────────────────────────────────────────────
 
 function ModelsFlow({ agent, query, run, prompt, connected }) {
-  const [config, setConfig] = useState(null)
-
-  function load() {
-    api(`/api/agents/${agent.name}/config`).then((d) => {
-      if (d.config) setConfig(d.config)
-    }).catch(() => {})
-  }
-  useEffect(load, [agent.name])
-
-  const primary = config?.agents?.defaults?.model?.primary || ''
-  const fallback = config?.agents?.defaults?.model?.fallback || ''
-
   const pills = [
-    { cmd: 'openclaw configure --section model', label: 'Configure models', desc: 'Interactive setup — API key, token or OAuth' },
-    { label: 'Logout profile', desc: 'Log out one saved auth profile', click: async () => {
+    { cmd: 'openclaw configure --section model', label: 'Add provider', desc: 'Add a provider — login, API key, token or OAuth (openrouter, ollama, openai, ...)' },
+    { cmd: 'openclaw models auth list', label: 'List added providers', desc: 'List saved auth profiles / added providers' },
+    { cmd: 'openclaw gateway call models.authLogout --params \'{"provider":"<id>"}\' --json', label: 'Remove provider', desc: 'Remove / delete a provider\'s saved auth profiles (logout)', danger: true, click: async () => {
       const v = await prompt({
-        title: 'Logout model provider',
-        message: 'Log out one auth profile. Run "Auth profiles" first to see the exact profile IDs.',
-        confirmText: 'Logout',
+        title: 'Remove provider',
+        message: 'Removes the saved auth profiles for a provider (authLogout RPC).',
+        confirmText: 'Remove provider',
         danger: true,
         fields: [{
-          key: 'profile', label: 'Profile ID', placeholder: 'e.g. openai:work',
-          hint: 'Found in "Auth profiles" — each row has an id like openai:manual or openai:work.',
+          key: 'provider', label: 'Provider id', placeholder: 'e.g. openrouter',
+          hint: 'Deletes the stored credentials for this provider (no way back unless you re-add).',
         }],
       })
-      if (!v?.profile) return
-      run(`openclaw models auth logout ${v.profile} --yes`, { confirm: true })
+      if (!v?.provider) return
+      run(`openclaw gateway call models.authLogout --params '{"provider":"${v.provider}"}' --json`)
     } },
-    { cmd: 'openclaw models auth list', label: 'Auth profiles', desc: 'List saved auth profiles' },
-    { cmd: 'openclaw models list', label: 'Available models', desc: 'Models you are logged in to (no --all)' },
-    { cmd: 'openclaw models status', label: 'Model status', desc: 'Auth + model status overview' },
-    { label: 'Set default model', desc: 'Pick the primary model by id', click: async () => {
+    { cmd: 'openclaw models list', label: 'Check available models', desc: 'Models you are logged in to (no --all)' },
+    { cmd: 'openclaw models status', label: 'Check model status', desc: 'Health check — auth + model status overview' },
+    { cmd: 'openclaw models set <model>', label: 'Set default model', desc: 'Set the primary model used by this agent', click: async () => {
       const v = await prompt({
         title: 'Set default model',
         message: 'Set the primary model used by this agent.',
         confirmText: 'Set model',
         fields: [{
           key: 'model', label: 'Model id', placeholder: 'e.g. openai/gpt-5.5',
-          hint: 'Format: provider/model. Pick from "Available models" or use any catalog id.',
+          hint: 'Format: provider/model. Pick from "Check available models" or use any catalog id.',
         }],
       })
       if (!v?.model) return
       run(`openclaw models set ${v.model}`)
     } },
   ]
-  const visible = pills.filter((x) => matches(query, x.label, x.cmd))
-  if (query && visible.length === 0 && !primary && !fallback) return null
+  const visible = pills.filter((x) => matches(query, x.label, x.cmd, x.desc))
+  const groupHit = matches(query, 'Models', 'provider', 'model')
+  if (query && !groupHit && visible.length === 0) return null
 
   return (
     <>
       <GroupLabel color="blue" title="Models" />
       {visible.map((x) => (
-        <Pill key={x.label} label={x.label} desc={x.desc} color={COLORS.blue.pill}
+        <Pill key={x.label} label={x.label} desc={x.desc} cmd={x.cmd} color={COLORS.blue.pill}
               disabled={!connected}
               onClick={() => (x.click ? x.click() : run(x.cmd, x))} />
       ))}
-      {primary && (
-        <DataChip className="border-cyan-800/40 text-cyan-300 bg-cyan-950/20 font-mono">★ {primary}</DataChip>
-      )}
-      {fallback && (
-        <DataChip className="border-amber-800/40 text-amber-300 bg-amber-950/20 font-mono">⤵ {fallback}</DataChip>
-      )}
     </>
   )
 }
@@ -211,12 +196,44 @@ function McpFlow({ agent, query, run, prompt, connected }) {
     : 'No servers configured — run "List" first.'
 
   const pills = [
-    { cmd: 'openclaw mcp list', label: 'List', desc: 'Configured MCP servers' },
-    { cmd: 'openclaw mcp status', label: 'Status', desc: 'Server status' },
-    { cmd: 'openclaw mcp doctor', label: 'Doctor', desc: 'Check server health' },
-    { cmd: 'openclaw mcp probe', label: 'Probe', desc: 'Probe all servers' },
-    { cmd: 'openclaw mcp reload', label: 'Reload', desc: 'Reload server config' },
-    { label: 'Tools', desc: 'List one server\'s available tools', click: async () => {
+    { cmd: 'openclaw mcp list', label: 'List servers', desc: 'List configured MCP servers' },
+    { label: 'Add server', desc: 'Add a new MCP server (stdio or HTTP)', click: async () => {
+      const v = await prompt({
+        title: 'Add MCP server',
+        message: 'Name the server and give its transport. HTTP servers use a URL; stdio servers use a command.',
+        confirmText: 'Add server',
+        fields: [
+          { key: 'name', label: 'Server name', placeholder: 'e.g. filesystem', hint: 'Name used in config and tools (mcp__<name>__*).' },
+          { key: 'transport', label: 'Transport', defaultValue: 'streamable-http', placeholder: 'streamable-http | stdio', hint: 'streamable-http (URL) or stdio (command).' },
+          { key: 'url', label: 'URL (HTTP only)', placeholder: 'https://mcp.example.com', hint: 'Leave blank for stdio servers.' },
+          { key: 'command', label: 'Command (stdio only)', placeholder: 'npx -y @modelcontextprotocol/server-filesystem /path', hint: 'Leave blank for HTTP servers.' },
+        ],
+      })
+      if (!v?.name) return
+      setMsg('Adding…')
+      try {
+        await api(`/api/agents/${agent.name}/mcp/add`, { method: 'POST', body: {
+          name: v.name, transport: v.transport, url: v.url || '', command: v.command || '',
+        }})
+        setMsg(`"${v.name}" added.`)
+        load()
+      } catch (e) { setMsg('Failed: ' + (e.error || e.message)) }
+    } },
+    { label: 'Remove server', desc: 'Remove an MCP server', click: async () => {
+      const v = await prompt({
+        title: 'Remove MCP server',
+        message: 'Which MCP server should we remove?',
+        confirmText: 'Remove server',
+        danger: true,
+        fields: [{ key: 'name', label: 'Server name', placeholder: 'e.g. filesystem', hint: serverHint }],
+      })
+      if (!v?.name) return
+      removeServer(v.name)
+    } },
+    { cmd: 'openclaw mcp doctor', label: 'Check server health', desc: 'Health check — diagnose MCP server setup' },
+    { cmd: 'openclaw mcp probe', label: 'Probe servers', desc: 'Health check — connect and list live capabilities' },
+    { cmd: 'openclaw mcp reload', label: 'Reload servers', desc: 'Refresh — reload server config' },
+    { label: 'List tools', desc: 'List one server\'s available tools', click: async () => {
       const v = await prompt({
         title: 'List MCP tools',
         message: 'Which MCP server should we connect to?',
@@ -230,9 +247,10 @@ function McpFlow({ agent, query, run, prompt, connected }) {
       run(`openclaw mcp probe ${v.name}`)
     } },
   ]
-  const visible = pills.filter((x) => matches(query, x.label, x.cmd))
-  const shown = servers.filter((s) => matches(query, s.name))
-  if (query && visible.length === 0 && shown.length === 0) return null
+  const groupHit = matches(query, 'MCP', 'mcp', 'server')
+  const visible = pills.filter((x) => groupHit || matches(query, x.label, x.cmd, x.desc))
+  const shown = servers.filter((s) => groupHit || matches(query, s.name))
+  if (query && !groupHit && visible.length === 0 && shown.length === 0) return null
 
   async function removeServer(name) {
     const ok = await confirm({
@@ -256,7 +274,7 @@ function McpFlow({ agent, query, run, prompt, connected }) {
       {msg && <span className="text-[11px] text-cyan-400">{msg}</span>}
       <GroupLabel color="emerald" title="MCP" />
       {visible.map((x) => (
-        <Pill key={x.label} label={x.label} desc={x.desc} color={COLORS.emerald.pill}
+        <Pill key={x.label} label={x.label} desc={x.desc} cmd={x.cmd} color={COLORS.emerald.pill}
               disabled={!connected}
               onClick={() => (x.click ? x.click() : run(x.cmd))} />
       ))}
@@ -282,7 +300,7 @@ function SkillsFlow({ agent, query, run, prompt, connected }) {
   const [installing, setInstalling] = useState(false)
 
   const pills = [
-    { label: 'Search', desc: 'Search the skill catalog', click: async () => {
+    { label: 'Search skills', desc: 'Search the skill catalog', click: async () => {
       const v = await prompt({
         title: 'Search skills',
         message: 'Find skills on the ClawHub catalog.',
@@ -295,11 +313,12 @@ function SkillsFlow({ agent, query, run, prompt, connected }) {
       if (!v?.query) return
       run(`openclaw skills search ${v.query}`)
     } },
-    { cmd: 'openclaw skills update --all', label: 'Update all', desc: 'Update every installed skill', confirm: true },
-    { label: 'Install', desc: 'Open the install box', click: () => setShowInstall(!showInstall) },
+    { cmd: 'openclaw skills update --all', label: 'Update all skills', desc: 'Update every installed skill', confirm: true },
+    { label: 'Install skill', desc: 'Open the install box', click: () => setShowInstall(!showInstall) },
   ]
-  const visible = pills.filter((x) => matches(query, x.label, x.cmd))
-  if (query && visible.length === 0) return null
+  const groupHit = matches(query, 'Skills', 'skill')
+  const visible = pills.filter((x) => groupHit || matches(query, x.label, x.cmd, x.desc))
+  if (query && !groupHit && visible.length === 0) return null
 
   async function doInstall(e) {
     e.preventDefault()
@@ -318,7 +337,7 @@ function SkillsFlow({ agent, query, run, prompt, connected }) {
       {msg && <span className="text-[11px] text-cyan-400">{msg}</span>}
       <GroupLabel color="violet" title="Skills" />
       {visible.map((x) => (
-        <Pill key={x.label} label={x.label} desc={x.desc} color={COLORS.violet.pill}
+        <Pill key={x.label} label={x.label} desc={x.desc} cmd={x.cmd} color={COLORS.violet.pill}
               disabled={!connected}
               onClick={() => (x.click ? x.click() : run(x.cmd, x))} />
       ))}
@@ -326,9 +345,9 @@ function SkillsFlow({ agent, query, run, prompt, connected }) {
         <form onSubmit={doInstall} className="inline-flex items-center gap-2">
           <input type="text" value={installRef} onChange={(e) => setInstallRef(e.target.value)}
                  placeholder="@owner/slug or owner/repo@ref"
-                 className="w-56 px-2 py-1 rounded text-[11px] bg-slate-950 border border-slate-700 text-white focus:border-cyan-500 focus:outline-none placeholder-slate-600" />
+                 className="w-56 px-2.5 py-1.5 rounded-lg text-xs bg-slate-950 border border-slate-700 text-white focus:border-cyan-500 focus:outline-none placeholder-slate-600" />
           <button type="submit" disabled={installing}
-                  className="px-2.5 py-1 rounded text-[11px] bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-700 text-white transition-colors">
+                  className="px-2.5 py-1.5 rounded-lg text-xs bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-700 text-white transition-colors">
             {installing ? '…' : 'Install'}
           </button>
         </form>
@@ -352,12 +371,18 @@ function VaultDropdown({ termRef, connected }) {
   const [open, setOpen] = useState(false)
   const [anchor, setAnchor] = useState(null)
   const [items, setItems] = useState([])
+  const [locked, setLocked] = useState(false)
   const [loading, setLoading] = useState(false)
   const [pastingId, setPastingId] = useState('')
   const [filter, setFilter] = useState('')
   const [name, setName] = useState('')
   const [value, setValue] = useState('')
   const [saving, setSaving] = useState(false)
+  // inline PIN gate — asked at the moment of use; the vault has no unlocked state
+  const [pinMode, setPinMode] = useState(null) // null | { type:'paste', item } | { type:'add' }
+  const [pastePin, setPastePin] = useState('')
+  const [pinErr, setPinErr] = useState('')
+  const [pinBusy, setPinBusy] = useState(false)
   const wrapRef = useRef(null)
   const btnRef = useRef(null)
   const filterRef = useRef(null)
@@ -367,6 +392,7 @@ function VaultDropdown({ termRef, connected }) {
     try {
       const d = await api('/api/vault')
       setItems(d?.items || [])
+      setLocked(!!d?.meta?.locked)
     } catch (err) {
       toast.error('Failed to load vault: ' + (err.error || err.message))
     } finally {
@@ -415,18 +441,28 @@ function VaultDropdown({ termRef, connected }) {
     if (open) filterRef.current?.focus()
   }, [open])
 
-  /** Fetch the decrypted value ONLY on click, then paste it into the terminal.
+  /** Fetch the decrypted value and paste it into the terminal.
    *  No trailing newline — the value sits in the shell input buffer and the
-   *  user presses Enter themselves. */
+   *  user presses Enter themselves. Requires the PIN when the vault is locked. */
   async function pasteItem(item) {
+    if (locked) {
+      setPinMode({ type: 'paste', item })
+      setPastePin('')
+      setPinErr('')
+      return
+    }
+    await doPaste(item)
+  }
+
+  async function doPaste(item, pin) {
     setPastingId(item.id)
     try {
-      const d = await api(`/api/vault/${item.id}/decrypt`)
+      const d = await api(`/api/vault/${item.id}/decrypt?pin=${encodeURIComponent(pin || '')}`)
       if (!d?.value) throw new Error('Empty vault value')
       termRef.current?.write(d.value)
       toast.success(`"${item.name}" pasted to terminal`)
     } catch (err) {
-      toast.error((err.error || err.message) || 'Failed to fetch vault value')
+      throw err
     } finally {
       setPastingId('')
     }
@@ -435,31 +471,61 @@ function VaultDropdown({ termRef, connected }) {
   async function addItem(e) {
     e.preventDefault()
     if (!name.trim() || !value.trim()) return
+    if (locked) {
+      setPinMode({ type: 'add' })
+      setPastePin('')
+      setPinErr('')
+      return
+    }
+    await doAdd(name.trim(), value.trim())
+  }
+
+  async function doAdd(addName, addValue, pin) {
     setSaving(true)
     try {
-      await api('/api/vault', { method: 'POST', body: { name: name.trim(), value: value.trim() } })
+      await api('/api/vault', { method: 'POST', body: { name: addName, value: addValue, pin } })
       setName('')
       setValue('')
       toast.success('Vault item added')
       load()
-    } catch (err) {
-      toast.error((err.error || err.message) || 'Failed to add vault item')
     } finally {
       setSaving(false)
     }
   }
 
+  async function submitPin(e) {
+    e.preventDefault()
+    if (!/^\d{4}$|^\d{6}$/.test(pastePin)) return setPinErr('PIN must be 4 or 6 digits')
+    setPinBusy(true)
+    setPinErr('')
+    try {
+      if (pinMode?.type === 'paste') {
+        await doPaste(pinMode.item, pastePin)
+        toast.success(`"${pinMode.item.name}" pasted to terminal`)
+      } else if (pinMode?.type === 'add') {
+        await doAdd(name.trim(), value.trim(), pastePin)
+      }
+      setPinMode(null)
+      setPastePin('')
+      load()
+    } catch (err) {
+      setPinErr(err.error || err.message || 'Wrong PIN')
+    } finally {
+      setPinBusy(false)
+    }
+  }
+
   return (
-    <div ref={wrapRef} className="relative ml-auto">
+    <div ref={wrapRef} className="relative shrink-0 ml-auto">
       <button
         ref={btnRef}
         onClick={toggle}
         disabled={!connected}
         title={connected ? 'Vault — paste a saved secret into the terminal' : 'Vault — waiting for the terminal to connect'}
-        className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium transition-colors whitespace-nowrap border shrink-0 disabled:opacity-40 disabled:cursor-not-allowed
+        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors whitespace-nowrap border shrink-0 disabled:opacity-40 disabled:cursor-not-allowed
           ${open ? 'border-amber-500/70 bg-amber-950/40 text-amber-200' : 'border-amber-800/40 text-amber-300 bg-amber-950/20 hover:bg-amber-900/30 hover:text-amber-200'}`}
       >
-        <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
           <path d="M7 11V7a5 5 0 0 1 10 0v4" />
         </svg>
@@ -505,6 +571,41 @@ function VaultDropdown({ termRef, connected }) {
             </div>
           </div>
 
+          {locked && (
+            <div className="px-3 py-2 text-[11px] text-amber-300/90 border-b border-slate-800 flex items-center gap-1.5">
+              <svg className="w-3.5 h-3.5 text-amber-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+              </svg>
+              <span className="font-medium">Vault is locked</span>
+              <span className="text-amber-500/70">— enter your PIN to use a value</span>
+            </div>
+          )}
+
+          {pinMode && (
+            <form onSubmit={submitPin} className="flex items-center gap-1.5 border-b border-slate-800 p-2">
+              <input
+                type="password"
+                inputMode="numeric"
+                value={pastePin}
+                onChange={(e) => { setPastePin(e.target.value.replace(/\D/g, '').slice(0, 6)); setPinErr('') }}
+                placeholder="••••••"
+                autoFocus
+                autoComplete="current-password"
+                className="flex-1 min-w-0 px-2 py-1 rounded text-[11px] bg-slate-950 border border-slate-700 text-white focus:border-amber-500 focus:outline-none placeholder-slate-600 text-center tracking-[0.25em] font-mono"
+              />
+              <button type="submit" disabled={pinBusy}
+                      className="px-2 py-1 rounded text-[11px] bg-amber-600 hover:bg-amber-500 disabled:bg-slate-700 text-white transition-colors whitespace-nowrap">
+                {pinBusy ? '…' : (pinMode.type === 'paste' ? 'Unlock & paste' : 'Unlock & add')}
+              </button>
+              <button type="button" onClick={() => { setPinMode(null); setPastePin(''); setPinErr('') }} disabled={pinBusy}
+                      className="px-1.5 py-1 rounded text-[11px] text-slate-400 hover:text-white hover:bg-slate-700 transition-colors whitespace-nowrap">
+                ✕
+              </button>
+              {pinErr && <span className="text-[10px] text-red-400">{pinErr}</span>}
+            </form>
+          )}
+
           <div className="max-h-56 overflow-y-auto py-1">
             {loading && items.length === 0 && (
               <div className="px-3 py-2 text-xs text-slate-500">Loading…</div>
@@ -520,7 +621,7 @@ function VaultDropdown({ termRef, connected }) {
                 onClick={() => pasteItem(item)}
                 disabled={!!pastingId || !connected}
                 className="w-full text-left px-3 py-1.5 flex items-center gap-2 text-xs hover:bg-slate-800 hover:text-cyan-300 transition-colors group disabled:opacity-40"
-                title="Fetch value and paste into terminal"
+                title={locked ? 'Enter your PIN to paste this value' : 'Fetch value and paste into terminal'}
               >
                 <svg className="w-3 h-3 text-amber-500/70 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" />
@@ -560,6 +661,7 @@ function VaultDropdown({ termRef, connected }) {
 
 export default function CommandsPane({ agent, termRef, run, connected }) {
   const [query, setQuery] = useState('')
+  const [showCommands, setShowCommands] = useState(true)
   const [driverGroups, setDriverGroups] = useState([])
   const [tuiCommand, setTuiCommand] = useState('openclaw')
   const prompt = usePrompt()
@@ -594,29 +696,47 @@ export default function CommandsPane({ agent, termRef, run, connected }) {
           onClick={runTool}
           disabled={!connected}
           title={connected ? `Run ${tuiCommand} interactively in the terminal` : 'Waiting for the terminal to connect'}
-          className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-sm font-medium transition-colors whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed"
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-sm font-medium transition-colors whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
         >
           <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <polygon points="5 3 19 12 5 21 5 3" />
           </svg>
           Run TUI
         </button>
-        <input type="text" value={query} onChange={(e) => setQuery(e.target.value)}
+        <input type="text" value={query}
+               onChange={(e) => { setQuery(e.target.value); if (e.target.value) setShowCommands(true) }}
                placeholder="Filter commands…"
                className="flex-1 max-w-md px-3 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white focus:border-cyan-500 focus:outline-none placeholder-slate-600" />
+        <button
+          onClick={() => setShowCommands((v) => !v)}
+          title={showCommands ? 'Hide command buttons' : 'Show command buttons'}
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors whitespace-nowrap border shrink-0 ${showCommands ? 'border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-700 hover:text-slate-200' : 'border-slate-700 bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-slate-200'}`}
+        >
+          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            {showCommands ? (
+              <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 10 8 10 8a18.5 18.5 0 0 1-2.16 3.19M6.61 6.61A18.5 18.5 0 0 0 2 12s3 8 10 8a9.12 9.12 0 0 0 4.1-.9" />
+            ) : (
+              <path d="M2 12s3-8 10-8 10 8 10 8-3 8-10 8-10-8-10-8Z" />
+            )}
+            {showCommands && <path d="m2 2 20 20" />}
+          </svg>
+          {showCommands ? 'Hide' : 'Show'}
+        </button>
+        <VaultDropdown termRef={termRef} connected={connected} />
       </div>
 
       {/* Everything flows in one wrapped line, float-left, no cards */}
-      <div className="flex flex-wrap items-center gap-1.5">
-        {isOpenclaw && <MessagingFlow query={query} run={run} connected={connected} />}
-        {isOpenclaw && <ModelsFlow agent={agent} query={query} run={run} prompt={prompt} connected={connected} />}
-        {isOpenclaw && <McpFlow agent={agent} query={query} run={run} prompt={prompt} connected={connected} />}
-        {isOpenclaw && <SkillsFlow agent={agent} query={query} run={run} prompt={prompt} connected={connected} />}
-        {driverGroups.map((g) => (
-          <FlowGroup key={g.title} group={g} query={query} run={run} connected={connected} />
-        ))}
-        <VaultDropdown termRef={termRef} connected={connected} />
-      </div>
+      {showCommands && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          {isOpenclaw && <MessagingFlow query={query} run={run} connected={connected} />}
+          {isOpenclaw && <ModelsFlow agent={agent} query={query} run={run} prompt={prompt} connected={connected} />}
+          {isOpenclaw && <McpFlow agent={agent} query={query} run={run} prompt={prompt} connected={connected} />}
+          {isOpenclaw && <SkillsFlow agent={agent} query={query} run={run} prompt={prompt} connected={connected} />}
+          {driverGroups.map((g) => (
+            <FlowGroup key={g.title} group={g} query={query} run={run} connected={connected} />
+          ))}
+        </div>
+      )}
     </div>
   )
 }

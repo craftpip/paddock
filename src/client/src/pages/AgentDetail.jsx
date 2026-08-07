@@ -1,11 +1,13 @@
 import { useEffect, useState, useRef, useCallback, useLayoutEffect } from 'react'
-import { useParams, useNavigate, useLocation, Link } from 'react-router-dom'
+import { useParams, useNavigate, Link, useSearchParams } from 'react-router-dom'
 import { useAgents } from '../stores/agents'
-import { api } from '../lib/api'
+import { api, getCsrfToken } from '../lib/api'
+import { statusMeta } from '../lib/status'
 import { useConfirm } from '../lib/confirm'
 import Terminal from '../components/Terminal'
 import CommandsPane from './agent/CommandsPane'
 import SettingsTab from './agent/SettingsTab'
+import WorkspaceToolbar from './agent/WorkspaceToolbar'
 import PromptModal from '../components/PromptModal'
 
 const MODES = [
@@ -35,6 +37,7 @@ function AgentHeader({ agent }) {
     return () => clearInterval(intervalRef.current)
   }, [agent.name, agent.status])
 
+  const st = statusMeta(agent.status)
   const isTransition = ['starting', 'stopping', 'restarting'].includes(agent.status)
   const cpuPct = stats ? parseFloat(stats.CPUPerc) || 0 : 0
   const memUsage = stats?.MemUsage ? stats.MemUsage.split('/')[0].trim() : ''
@@ -49,13 +52,18 @@ function AgentHeader({ agent }) {
         <h1 className="text-sm font-bold text-white truncate leading-tight">{agent.display_name || agent.name}</h1>
         <p className="text-xs text-slate-500 truncate leading-tight font-mono">{agent.name}</p>
       </div>
-      <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${agent.status === 'running' ? 'bg-emerald-900/50 text-emerald-400 border border-emerald-800' : agent.status === 'exited' ? 'bg-red-900/50 text-red-400 border border-red-800' : 'bg-slate-800 text-slate-400 border border-slate-700'}`}>
+      <span className={`px-2 py-0.5 rounded-full text-xs font-medium flex items-center gap-1.5 ${st.pill}`}>
         {isTransition ? (
           <span className="flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
-            {agent.status}
+            <span className={`w-2 h-2 rounded-full ${st.dot} animate-pulse`} />
+            {st.label}
           </span>
-        ) : agent.status}
+        ) : (
+          <>
+            <span className={`w-2 h-2 rounded-full ${st.dot}`} />
+            {st.label}
+          </>
+        )}
       </span>
       <span className="w-px h-5 bg-slate-700" />
       <div className="flex items-center gap-3 text-xs">
@@ -78,8 +86,7 @@ function AgentHeader({ agent }) {
 }
 
 export default function AgentDetail() {
-  const { agentId } = useParams()
-  const location = useLocation()
+  const { agentId, tab } = useParams()
   const navigate = useNavigate()
   const agents = useAgents((s) => s.agents)
   const fetchAgents = useAgents((s) => s.fetchAgents)
@@ -107,7 +114,7 @@ export default function AgentDetail() {
   }, [agentId, fetchAgents, syncAgent])
 
   const agent = agents.find((a) => a.name === agentId)
-  const currentMode = location.hash.replace('#', '') || 'commands'
+  const currentMode = tab || 'commands'
   const mode = MODES.find((m) => m.id === currentMode) ? currentMode : 'commands'
 
   // Leaving the commands page minimizes the terminal by default; coming back
@@ -201,7 +208,7 @@ export default function AgentDetail() {
         {MODES.map((m) => (
           <button
             key={m.id}
-            onClick={() => navigate(`/agents/${agent.name}#${m.id}`, { replace: true })}
+            onClick={() => navigate(`/agents/${agent.name}/${m.id}`, { replace: true })}
             className={`px-3 py-1.5 text-sm font-medium rounded-lg transition-colors whitespace-nowrap ${
               mode === m.id ? 'bg-slate-800' : 'hover:bg-slate-800/50'
             } ${
@@ -217,7 +224,7 @@ export default function AgentDetail() {
 
       {/* Mode content */}
       <div
-        className={`min-h-0 overflow-y-auto p-6 ${
+        className={`min-h-0 overflow-y-auto px-6 pt-6 pb-3 ${
           termCollapsed || mode !== 'commands' ? 'flex-1' : 'shrink-0 max-h-[45vh]'
         }`}
         id="mode-content"
@@ -279,14 +286,7 @@ export default function AgentDetail() {
 
 function WorkspaceTab({ agent }) {
   const confirm = useConfirm()
-  const storageKey = `workspace-state-${agent.name}`
-  function restoreState() {
-    const raw = sessionStorage.getItem(storageKey)
-    if (!raw) return {}
-    try { return JSON.parse(raw) } catch {}
-    return {}
-  }
-  const saved = restoreState()
+  const [searchParams, setSearchParams] = useSearchParams()
   const normalizePath = (p) => {
     if (!p) return '/'
     const clean = String(p).replace(/\/+/g, '/').replace(/\/+$/, '')
@@ -310,17 +310,28 @@ function WorkspaceTab({ agent }) {
     if (p.startsWith(containerRoot + '/')) return normalizePath(hostRoot + p.slice(containerRoot.length))
     return hostRoot
   }
-  const savedScope = saved.scope === 'container' || saved.scope === 'host' ? saved.scope : 'container'
-  // If we last browsed the host scope while the container was down and it is
-  // up now, jump straight into the container at the same relative folder.
-  let initScope = containerAvailable ? savedScope : 'host'
-  let initPath = null
-  if (containerAvailable && savedScope === 'host' && saved.wasDown && saved.path) {
-    initScope = 'container'
-    initPath = hostToContainer(saved.path)
+
+  // Scope and path live in the URL (?scope=container|host&path=...) so the
+  // browser back/forward buttons step through the workspace history and the
+  // current folder is shareable/restorable.
+  const urlScope = searchParams.get('scope')
+  const urlPath = searchParams.get('path')
+  let scope = urlScope === 'host' || urlScope === 'container' ? urlScope : null
+  let path = urlPath ? normalizePath(urlPath) : null
+  if (!containerAvailable) {
+    // Container is down: force host scope and mirror the container folder to
+    // the matching host folder so we never leave a dead container listing up.
+    if (scope === 'container') path = containerToHost(path)
+    scope = 'host'
   }
-  const [scope, setScope] = useState(initScope)
-  const [path, setPath] = useState(initPath || normalizePath(saved.scope === initScope && saved.path ? saved.path : (initScope === 'container' ? containerRoot : hostRoot)))
+  if (!scope) scope = containerAvailable ? 'container' : 'host'
+  if (!path) path = scope === 'container' ? containerRoot : hostRoot
+  if (scope === 'container' && !path.startsWith('/')) path = containerRoot
+  if (scope === 'host' && path !== hostRoot && !path.startsWith(hostRoot + '/')) path = hostRoot
+
+  const navigateWorkspace = useCallback((sc, p, { replace = false } = {}) => {
+    setSearchParams({ scope: sc, path: p }, { replace })
+  }, [setSearchParams])
   const [pathDraft, setPathDraft] = useState('')
   const [listing, setListing] = useState(null)
   const [error, setError] = useState('')
@@ -328,10 +339,7 @@ function WorkspaceTab({ agent }) {
   const [uploadPct, setUploadPct] = useState(0)
   const [fileModal, setFileModal] = useState(null)
   const [moveTarget, setMoveTarget] = useState(null)
-  const [newFileName, setNewFileName] = useState('')
-  const [newFolderName, setNewFolderName] = useState('')
   const [loading, setLoading] = useState(false)
-  const fileInputRef = useRef(null)
   const pathInputRef = useRef(null)
   const navScrollRef = useRef(false)
   const pathDraftRef = useRef('')
@@ -345,32 +353,25 @@ function WorkspaceTab({ agent }) {
     api(`/api/agents/${agent.name}/workspace?path=${encodeURIComponent(p)}&scope=${sc}`).then((d) => {
       if (d.entries) {
         setListing(d)
-        if (d.path && normalizePath(d.path) !== normalizePath(p)) setPath(normalizePath(d.path))
+        if (d.path && normalizePath(d.path) !== normalizePath(p)) navigateWorkspace(sc, d.path, { replace: true })
       }
       else if (d.error) setError(d.error)
     }).catch(() => setError('Failed to load workspace'))
     .finally(() => setLoading(false))
-  }, [agent.name])
+  }, [agent.name, navigateWorkspace])
 
   useEffect(() => { load(path, scope) }, [path, scope, load])
-  useEffect(() => { sessionStorage.setItem(storageKey, JSON.stringify({ path, scope, wasDown: !containerAvailable })) }, [path, scope, storageKey, containerAvailable])
 
-  // When the container comes online, auto-switch from host to container mode
-  // and land on the same folder the user was browsing. Mirror it when the
-  // container drops, so we never leave a dead container listing on screen.
+  // When the container drops, rewrite the URL to host scope at the mirrored
+  // folder so the browser never shows a dead container listing (and the URL
+  // always reflects what is on screen). Coming back online keeps the URL as-is.
   const prevAvailableRef = useRef(containerAvailable)
   useEffect(() => {
     const prev = prevAvailableRef.current
     prevAvailableRef.current = containerAvailable
     if (prev === containerAvailable) return
-    if (containerAvailable && scope === 'host') {
-      setScope('container')
-      setPath(hostToContainer(path))
-    } else if (!containerAvailable && scope === 'container') {
-      setScope('host')
-      setPath(containerToHost(path))
-    }
-  }, [containerAvailable, scope, path])
+    if (!containerAvailable) navigateWorkspace('host', containerToHost(path), { replace: true })
+  }, [containerAvailable, navigateWorkspace, path])
   useEffect(() => {
     pathDraftRef.current = pathDraft
   }, [pathDraft])
@@ -392,32 +393,22 @@ function WorkspaceTab({ agent }) {
     if (el) el.scrollLeft = el.scrollWidth + 100
   }, [pathDraft])
 
-  const rel = scope === 'container'
-    ? path.replace(/^\/+/, '')
-    : (path === hostRoot ? '' : (path.startsWith(hostRoot + '/') ? path.slice(hostRoot.length + 1) : ''))
-  const parts = rel.split('/').filter(Boolean)
-  const breadcrumbs = scope === 'container'
-    ? [{ name: '/', path: '/' }, ...parts.map((p, i) => ({ name: p, path: '/' + parts.slice(0, i + 1).join('/') }))]
-    : [{ name: agent.name, path: hostRoot }, ...parts.map((p, i) => ({ name: p, path: hostRoot + '/' + parts.slice(0, i + 1).join('/') }))]
-
   function switchScope(next) {
     if (next === scope) return
-    setScope(next)
-    setPath(next === 'container' ? containerRoot : hostRoot)
+    navigateWorkspace(next, next === 'container' ? hostToContainer(path) : containerToHost(path))
   }
-  function goToDir(p) { setPath(normalizePath(p)) }
+  function goToDir(p) { navigateWorkspace(scope, normalizePath(p)) }
   function goUp() {
     if (isNavRoot) return
-    setPath(normalizePath(path.split('/').slice(0, -1).join('/')))
+    navigateWorkspace(scope, normalizePath(path.split('/').slice(0, -1).join('/')))
   }
   function goTo(p) {
     const target = normalizePath((p || '/').trim() || '/')
     if (scope === 'host' && target !== hostRoot && !target.startsWith(hostRoot + '/')) {
-      setPath(hostRoot)
-      setPathDraft(hostRoot)
+      navigateWorkspace('host', hostRoot)
       return
     }
-    setPath(target)
+    navigateWorkspace(scope, target)
   }
 
   function toMsg(err) {
@@ -426,44 +417,53 @@ function WorkspaceTab({ agent }) {
     try { return JSON.stringify(e) } catch { return String(e) }
   }
 
-  async function createFile(e) {
-    e.preventDefault()
-    if (!newFileName) return
+  async function createEntry(name) {
+    const n = (name || '').trim()
+    if (!n) return
+    // Dot in the name (e.g. "notes.md") → file, otherwise → folder.
+    const isFile = n.indexOf('.') > 0
     try {
-      await api(`/api/agents/${agent.name}/workspace/create-file`, { method: 'POST', body: { path, name: newFileName, scope } })
-      setNewFileName('')
+      const url = isFile
+        ? `/api/agents/${agent.name}/workspace/create-file`
+        : `/api/agents/${agent.name}/workspace/folder`
+      await api(url, { method: 'POST', body: { path, name: n, scope } })
       load(path, scope)
     } catch (err) { setError(toMsg(err)) }
   }
 
-  async function createFolder(e) {
-    e.preventDefault()
-    if (!newFolderName) return
-    try {
-      await api(`/api/agents/${agent.name}/workspace/folder`, { method: 'POST', body: { path, name: newFolderName, scope } })
-      setNewFolderName('')
-      load(path, scope)
-    } catch (err) { setError(toMsg(err)) }
-  }
-
-  async function handleUpload(evt) {
-    const file = evt.target.files?.[0] || evt.dataTransfer?.files?.[0]
-    if (!file) return
-    setUploading(true)
-    setUploadPct(0)
+  /** Upload any number of files/folders. items = [{ file, relPath }] where
+   *  relPath is relative to the selected folder root (folder uploads keep
+   *  their directory structure). Single upload with progress bar. */
+  async function uploadItems(items) {
+    if (!items.length) return
     const fd = new FormData()
-    fd.append('file', file)
     fd.append('path', path)
     fd.append('scope', scope)
+    for (const it of items) {
+      fd.append('files', it.file, it.relPath)
+      fd.append('paths', it.relPath)
+    }
+    setUploading(true)
+    setUploadPct(0)
+    setError('')
     try {
       const xhr = new XMLHttpRequest()
       xhr.upload.addEventListener('progress', (e) => {
         if (e.lengthComputable) setUploadPct(Math.round((e.loaded / e.total) * 100))
       })
-      await new Promise((resolve, reject) => {
-        xhr.onload = () => xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error('Upload failed'))
+      const result = await new Promise((resolve, reject) => {
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try { resolve(JSON.parse(xhr.responseText)) } catch { resolve({}) }
+          } else {
+            let msg = 'Upload failed'
+            try { const d = JSON.parse(xhr.responseText); if (d.error) msg = d.error } catch {}
+            reject(new Error(msg))
+          }
+        }
         xhr.onerror = () => reject(new Error('Upload failed'))
-        xhr.open('POST', `/api/agents/${agent.name}/workspace/upload`)
+        xhr.open('POST', `/api/agents/${agent.name}/workspace/upload-multiple`)
+        xhr.setRequestHeader('X-CSRF-Token', getCsrfToken() || '')
         xhr.send(fd)
       })
       setUploading(false)
@@ -472,7 +472,6 @@ function WorkspaceTab({ agent }) {
       setError(err.message || 'Upload failed')
       setUploading(false)
     }
-    if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
   async function renameEntry(entryPath) {
@@ -573,111 +572,28 @@ function WorkspaceTab({ agent }) {
     <div>
       {/* Container down banner — pad not running, browsing from host */}
       {agent.status !== 'running' && (
-        <div className="-mt-6 mb-4 flex items-center justify-between gap-3 px-4 py-3 rounded-xl border border-amber-700/50 bg-amber-900/20 text-amber-200">
-          <div>
-            <p className="font-medium">Container is down</p>
-            <p className="text-sm text-amber-300/70">The pad container is not running, so the workspace is being browsed from the host. You can still access your files here.</p>
-          </div>
-          <button disabled
-                  className="px-3 py-1.5 bg-slate-700 text-slate-400 rounded-lg text-sm font-medium opacity-50 cursor-not-allowed whitespace-nowrap" title="Container is not running">
-            Container
-          </button>
-        </div>
+        <p className="-mt-2 mb-4 text-sm text-slate-400 leading-relaxed">The pad container is not running, so the workspace is being browsed from the host. You can still access your files here.</p>
       )}
 
-      {/* Location bar — file-browser style */}
-      <div className="flex items-center gap-2 mb-2">
-        <div className="flex items-center rounded-lg bg-slate-800 p-1 w-full min-w-0" title="Browse inside the pad container (Container) or from the host (Host)">
-          <div className="flex items-center rounded-md bg-slate-950/60 p-0.5 shrink-0">
-            <button onClick={() => switchScope('container')} disabled={!containerAvailable}
-                    className={`px-3 py-1 rounded-md text-sm font-medium transition-colors whitespace-nowrap ${scope === 'container' ? 'bg-cyan-600 text-white' : 'text-slate-300 hover:text-white'} ${!containerAvailable ? 'opacity-40 cursor-not-allowed' : ''}`}>
-              Container
-            </button>
-            <button onClick={() => switchScope('host')}
-                    className={`px-3 py-1 rounded-md text-sm font-medium transition-colors whitespace-nowrap ${scope === 'host' ? 'bg-cyan-600 text-white' : 'text-slate-300 hover:text-white'}`}>
-              Host
-            </button>
-          </div>
-          <span className="w-px h-6 bg-slate-700 mx-1 shrink-0" />
-          <button onClick={goUp} disabled={isNavRoot}
-                  title="Go up one level"
-                  className="flex items-center justify-center w-7 h-7 rounded-md text-slate-400 hover:text-white hover:bg-slate-700 disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-not-allowed transition-colors shrink-0">
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M5 15l7-7 7 7" /></svg>
-          </button>
-          <span className="w-px h-6 bg-slate-700 mx-1 shrink-0" />
-          <form onSubmit={(e) => { e.preventDefault(); goTo(pathDraft) }}
-                className="flex flex-1 items-center gap-1.5 min-w-0 px-1">
-            <svg className="w-4 h-4 text-slate-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>
-            <input
-              ref={pathInputRef}
-              value={pathDraft}
-              onChange={(e) => setPathDraft(e.target.value)}
-              spellCheck={false}
-              placeholder="/"
-              className="flex-1 min-w-0 bg-transparent text-sm text-white font-mono placeholder-slate-600 focus:outline-none"
-            />
-            <button type="submit"
-                    className="px-3 py-1 bg-cyan-600 hover:bg-cyan-500 text-white rounded-md text-sm font-medium transition-colors whitespace-nowrap shrink-0">
-              Go
-            </button>
-          </form>
-          <span className="w-px h-6 bg-slate-700 mx-1 shrink-0" />
-          <button onClick={() => setPath(homePath)}
-                  title="Go to the workspace folder"
-                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-sm text-slate-300 hover:text-white hover:bg-slate-700 transition-colors whitespace-nowrap">
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>
-            Workspace folder
-          </button>
-        </div>
-      </div>
-
-      {/* Breadcrumbs */}
-      <div className="flex items-center gap-1 text-sm text-slate-500 mb-4 overflow-x-auto flex-wrap">
-        {breadcrumbs.map((b, i) => (
-          <span key={b.path} className="flex items-center gap-1 whitespace-nowrap">
-            {i > (scope === 'container' ? 1 : 0) && <span className="text-slate-600">/</span>}
-            {i < breadcrumbs.length - 1 ? (
-              <button onClick={() => goToDir(b.path)} className="hover:text-slate-300 transition-colors">{b.name}</button>
-            ) : (
-              <span className="text-white">{b.name}</span>
-            )}
-          </span>
-        ))}
-      </div>
-
-      {/* Actions Bar */}
-      <div className="flex flex-wrap items-center gap-2 mb-4">
-        <form onSubmit={createFile} className="flex items-center gap-2">
-          <input type="text" value={newFileName} onChange={(e) => setNewFileName(e.target.value)} placeholder="new-file.md"
-                 className="px-2 py-1.5 bg-slate-950 border border-slate-700 rounded text-sm text-white w-36 focus:border-cyan-500 focus:outline-none" />
-          <button type="submit" className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded text-sm transition-colors whitespace-nowrap">+ File</button>
-        </form>
-        <form onSubmit={createFolder} className="flex items-center gap-2">
-          <input type="text" value={newFolderName} onChange={(e) => setNewFolderName(e.target.value)} placeholder="new-folder"
-                 className="px-2 py-1.5 bg-slate-950 border border-slate-700 rounded text-sm text-white w-36 focus:border-cyan-500 focus:outline-none" />
-          <button type="submit" className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded text-sm transition-colors whitespace-nowrap">+ Folder</button>
-        </form>
-        <span className="w-px h-5 bg-slate-700" />
-        <div
-          className="flex items-center gap-2 px-3 py-1.5 border border-dashed border-slate-600 rounded-lg hover:border-cyan-500 hover:bg-slate-800/50 transition-colors cursor-pointer"
-          onClick={() => fileInputRef.current?.click()}
-          onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add('border-cyan-400', 'bg-slate-800/50') }}
-          onDragLeave={(e) => { e.currentTarget.classList.remove('border-cyan-400', 'bg-slate-800/50') }}
-          onDrop={(e) => { e.preventDefault(); e.currentTarget.classList.remove('border-cyan-400', 'bg-slate-800/50'); handleUpload(e) }}
-        >
-          <svg className="w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
-          <span className="text-sm text-slate-400">Upload</span>
-          <input ref={fileInputRef} type="file" className="hidden" onChange={handleUpload} />
-        </div>
-        {uploading && (
-          <div className="flex items-center gap-2">
-            <div className="w-32 h-1.5 bg-slate-700 rounded-full overflow-hidden">
-              <div className="h-full bg-cyan-500 rounded-full transition-all" style={{ width: uploadPct + '%' }} />
-            </div>
-            <span className="text-xs text-slate-400">{uploadPct}%</span>
-          </div>
-        )}
-      </div>
+      {/* Toolbar — single navigation row; "+" popup handles create/upload */}
+      <WorkspaceToolbar
+        agentName={agent.name}
+        scope={scope}
+        path={path}
+        pathDraft={pathDraft}
+        setPathDraft={setPathDraft}
+        pathInputRef={pathInputRef}
+        containerAvailable={containerAvailable}
+        isNavRoot={isNavRoot}
+        onSwitchScope={switchScope}
+        onGoUp={goUp}
+        onGo={goTo}
+        onHome={() => navigateWorkspace(scope, homePath)}
+        onCreate={createEntry}
+        onUpload={uploadItems}
+        uploading={uploading}
+        uploadPct={uploadPct}
+      />
 
       {error && <p className="text-red-400 text-sm mb-4">{error}</p>}
 

@@ -43,50 +43,50 @@ const OPENCLAW = {
     {
       title: 'Memory', color: 'violet',
       commands: [
-        { cmd: 'openclaw memory status', label: 'Status', desc: 'Index health' },
-        { cmd: 'openclaw memory promote --apply', label: 'Promote', desc: 'Short-term → MEMORY.md', confirm: true },
+        { cmd: 'openclaw memory status', label: 'Check index health', desc: 'Health check — memory index status' },
+        { cmd: 'openclaw memory promote --apply', label: 'Promote memories', desc: 'Short-term → MEMORY.md', confirm: true },
       ],
     },
     {
       title: 'Config', color: 'teal',
       commands: [
-        { cmd: 'openclaw config validate', label: 'Validate', desc: 'Check config against schema' },
-        { cmd: 'openclaw config file', label: 'File path', desc: 'Show active config path' },
-        { cmd: 'openclaw config get agents.defaults.model --json', label: 'Model config', desc: 'Primary + fallback models' },
-        { cmd: 'openclaw config schema', label: 'Schema', desc: 'Dump JSON schema' },
+        { cmd: 'openclaw config validate', label: 'Validate config', desc: 'Check config against schema' },
+        { cmd: 'openclaw config file', label: 'Show config path', desc: 'Show active config path' },
+        { cmd: 'openclaw config get agents.defaults.model --json', label: 'View model config', desc: 'Primary + fallback models' },
+        { cmd: 'openclaw config schema', label: 'Show config schema', desc: 'Dump JSON schema' },
       ],
     },
     {
       title: 'Other', color: 'slate',
       commands: [
-        { cmd: 'openclaw backup create', label: 'Backup', desc: 'Create a backup archive', confirm: true },
+        { cmd: 'openclaw backup create', label: 'Create backup', desc: 'Create a backup archive', confirm: true },
         { cmd: 'openclaw update status', label: 'Check updates', desc: 'Update channel + availability' },
-        { cmd: 'openclaw mcp doctor', label: 'MCP Doctor', desc: 'Check MCP servers' },
+        { cmd: 'openclaw mcp doctor', label: 'Check MCP health', desc: 'Health check — MCP servers status' },
       ],
     },
     {
       title: 'Security', color: 'rose',
       commands: [
-        { cmd: 'openclaw security audit', label: 'Audit', desc: 'Cold security audit' },
-        { cmd: 'openclaw security audit --deep', label: 'Audit (deep)', desc: 'Live probes' },
-        { cmd: 'openclaw security audit --fix', label: 'Audit & Fix', desc: 'Auto-fix issues', confirm: true },
+        { cmd: 'openclaw security audit', label: 'Run audit', desc: 'Cold security audit' },
+        { cmd: 'openclaw security audit --deep', label: 'Run deep audit', desc: 'Live probes' },
+        { cmd: 'openclaw security audit --fix', label: 'Audit & fix', desc: 'Auto-fix issues', confirm: true },
       ],
     },
     {
       title: 'Doctor', color: 'amber',
       commands: [
-        { cmd: 'openclaw doctor', label: 'Doctor', desc: 'Diagnose issues' },
-        { cmd: 'openclaw doctor --fix', label: 'Fix', desc: 'Auto-repair issues', confirm: true },
-        { cmd: 'openclaw doctor --lint', label: 'Lint', desc: 'Read-only CI-style checks' },
-        { cmd: 'openclaw doctor --deep', label: 'Deep', desc: 'Scan for extra gateways' },
-        { cmd: 'openclaw doctor --state-sqlite compact', label: 'SQLite Compact', desc: 'Compact SQLite state (stop first)', confirm: true, danger: true },
+        { cmd: 'openclaw doctor', label: 'Run doctor', desc: 'Health check — diagnose system status' },
+        { cmd: 'openclaw doctor --fix', label: 'Auto-fix issues', desc: 'Auto-repair issues', confirm: true },
+        { cmd: 'openclaw doctor --lint', label: 'Run lint checks', desc: 'Read-only CI-style checks' },
+        { cmd: 'openclaw doctor --deep', label: 'Run deep scan', desc: 'Scan for extra gateways' },
+        { cmd: 'openclaw doctor --state-sqlite compact', label: 'Compact SQLite', desc: 'Compact SQLite state (stop first)', confirm: true, danger: true },
       ],
     },
     {
       title: 'Diagnostics', color: 'cyan',
       commands: [
-        { cmd: 'openclaw status', label: 'Status', desc: 'Overview + gateway state' },
-        { cmd: 'openclaw gateway status', label: 'Gateway status', desc: 'Bind, port + connectivity' },
+        { cmd: 'openclaw status', label: 'Check agent status', desc: 'Health check — agent overview + gateway state' },
+        { cmd: 'openclaw gateway status', label: 'Check gateway status', desc: 'Health check — bind, port + connectivity' },
       ],
     },
   ],
