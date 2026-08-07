@@ -7,6 +7,7 @@ import { useConfirm } from '../lib/confirm'
 import Terminal from '../components/Terminal'
 import CommandsPane from './agent/CommandsPane'
 import SettingsTab from './agent/SettingsTab'
+import WebTab from './agent/WebTab'
 import WorkspaceToolbar from './agent/WorkspaceToolbar'
 import PromptModal from '../components/PromptModal'
 
@@ -14,6 +15,7 @@ const MODES = [
   { id: 'commands', label: 'Commands' },
   { id: 'workspace', label: 'Workspace' },
   { id: 'config', label: 'Config' },
+  { id: 'web', label: 'Web' },
   { id: 'logs', label: 'Logs' },
   { id: 'sessions', label: 'Sessions' },
   { id: 'activity', label: 'Activity' },
@@ -234,6 +236,7 @@ export default function AgentDetail() {
         )}
         {mode === 'workspace' && <WorkspaceTab agent={agent} />}
         {mode === 'config' && <ConfigTab agent={agent} />}
+        {mode === 'web' && <WebTab agent={agent} />}
         {mode === 'logs' && <LogsTab agent={agent} />}
         {mode === 'sessions' && <SessionsTab agent={agent} />}
         {mode === 'activity' && <ActivityTab agent={agent} />}

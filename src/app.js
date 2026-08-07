@@ -632,13 +632,21 @@ app.post('/api/users', requireAdmin, (req, res) => {
 });
 
 app.post('/api/users/:id/reset-password', requireAdmin, (req, res) => {
-  const { password } = req.body;
+  const { password, current_password } = req.body;
   if (!password || password.length < 4) return res.status(400).json({ error: 'Password must be at least 4 characters' });
 
   try {
     const db = getDb();
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
+
+    // Resetting your own password requires the current password, like the
+    // profile change-password flow. Admins resetting another user's password
+    // do not need it.
+    if (user.id === req.session.userId) {
+      if (!current_password) return res.status(400).json({ error: 'Current password required' });
+      if (!verifyPassword(current_password, user.password_hash)) return res.status(401).json({ error: 'Current password is incorrect' });
+    }
 
     const passwordHash = hashPassword(password);
     db.prepare('UPDATE users SET password_hash = ?, updated_at = datetime(\'now\') WHERE id = ?').run(passwordHash, req.params.id);
@@ -1030,6 +1038,290 @@ app.post('/api/agents/:name/settings', async (req, res) => {
         } catch {}
         try {
           registry.recordActivity(name, 'settings', 'update', 'error', e.message);
+        } catch {}
+        jobLog.fail(job, e.message);
+      } finally {
+        registry.setRestarting(name, false);
+      }
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── Web publishing (built-in web app) ─────────────────────
+
+/** Shell content of the per-instance web start hook (start-web.sh). The hook
+ *  is written into the agent's data-dir bind mount and sourced by start.sh on
+ *  boot, so the published server survives recreates. It is re-runnable: a
+ *  pidfile guard skips the launch when an instance is already listening. */
+function buildWebHook(driver, agent, webService, password) {
+  const dataDir = driver.dataDir;
+  const pidFile = `${dataDir}/web.pid`;
+  const logFile = `${dataDir}/web.log`;
+  const startCmd = driver.webApp.startCommand({ password, containerPort: webService.containerPort });
+  return `#!/bin/bash
+# Paddock web publishing — start the published web server on boot.
+# Re-runnable: skips when something is already listening on the port (a plain
+# pidfile can go stale across container recreates since the data dir persists).
+if exec 3<>/dev/tcp/127.0.0.1/${webService.containerPort} 2>/dev/null; then
+  exec 3>&- 2>/dev/null
+  exit 0
+fi
+${startCmd} >>${logFile} 2>&1 &
+echo $! > "${pidFile}"
+`;
+}
+
+function readHookPassword(hookPath) {
+  if (!fs.existsSync(hookPath)) return '';
+  const content = fs.readFileSync(hookPath, 'utf8');
+  const m = /OPENCODE_SERVER_PASSWORD='([^']*)'/.exec(content);
+  return m ? m[1] : '';
+}
+
+/** True when the given host port is published by any OTHER agent — either a
+ *  declared compose port (other instances) or a live docker published port. */
+async function hostPortInUse(hostPort, excludeName) {
+  const h = String(hostPort);
+  if (fs.existsSync(vm.INSTANCES_DIR)) {
+    for (const entry of fs.readdirSync(vm.INSTANCES_DIR, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name === excludeName) continue;
+      const cf = path.join(vm.INSTANCES_DIR, entry.name, 'docker-compose.yml');
+      if (fs.existsSync(cf)) {
+        for (const m of fs.readFileSync(cf, 'utf8').matchAll(/"(\d+):\d+"/g)) {
+          if (m[1] === h) return true;
+        }
+      }
+    }
+  }
+  try {
+    const r = await runCmd('docker', ['ps', '--format', '{{.Names}}\t{{.Ports}}'], { timeout: 15000 });
+    for (const line of r.stdout.split('\n')) {
+      const [cn, ports] = line.split('\t');
+      if (!ports || cn === excludeName) continue;
+      if (new RegExp(`(^|[,:])${h}->`).test(ports)) return true;
+    }
+  } catch {}
+  return false;
+}
+
+/** Can the container reach its own published web port? Used to verify the web
+ *  server actually came up after activation (bash /dev/tcp, no extra tools). */
+async function webPortReachable(name, port) {
+  try {
+    const r = await runCmd('docker', ['exec', name, 'bash', '-lc', `exec 3<>/dev/tcp/127.0.0.1/${port} && echo UP || echo DOWN`], { timeout: 10000 });
+    return (r.stdout || '').includes('UP');
+  } catch {
+    return false;
+  }
+}
+
+/** Effective network peer name of an agent — meta.NETWORK, falling back to the
+ *  compose file (legacy agents predate the meta flag). Empty = default network. */
+function currentNetworkPeer(name) {
+  const meta = readMeta(name);
+  if (meta.NETWORK) return meta.NETWORK;
+  try {
+    const cf = path.join(INSTANCES_DIR, name, 'docker-compose.yml');
+    const m = /network_mode:\s*container:(\S+)/.exec(fs.readFileSync(cf, 'utf8'));
+    return m ? m[1] : '';
+  } catch {
+    return '';
+  }
+}
+
+app.get('/api/agents/:name/web', async (req, res) => {
+  const name = safeVmName(req.params.name);
+  if (!name) return res.status(400).json({ error: 'Invalid agent name' });
+  try {
+    const meta = readMeta(name);
+    if (!meta.AGENT && !meta.ROOT_PASSWORD) return res.status(404).json({ error: 'Agent not found' });
+    const agentType = meta.AGENT || 'openclaw';
+    const driver = drivers.getDriver(agentType);
+    if (!driver.webApp) return res.json({ webApp: null });
+
+    const webService = vm.readWebService(name);
+    const active = !!webService;
+    let password = '';
+    if (active) {
+      password = readHookPassword(vm.webHookPath(name, agentType));
+    }
+
+    // The published port lives on the agent itself on the default network, but
+    // on the socat door container when the agent routes through a network peer
+    // (the agent can't publish ports in that mode).
+    const netPeer = currentNetworkPeer(name);
+    const portContainer = netPeer ? vm.webDoorName(name) : name;
+    let actualPorts = [];
+    try {
+      const p = await runCmd('docker', ['inspect', portContainer, '--format', '{{json .NetworkSettings.Ports}}'], { timeout: 15000 });
+      const ports = JSON.parse(p.stdout || '{}');
+      actualPorts = Object.keys(ports).map((k) => {
+        const pub = ports[k] && ports[k][0];
+        return { container: k, host: pub ? pub.HostPort : null };
+      });
+    } catch {}
+
+    res.json({
+      webApp: {
+        label: driver.webApp.label,
+        docs: driver.webApp.docs || '',
+        containerPort: driver.webApp.containerPort,
+        auth: driver.webApp.auth
+          ? { label: driver.webApp.auth.label, hint: driver.webApp.auth.hint || '' }
+          : null,
+      },
+      active,
+      networkMode: netPeer,
+      webService: active ? webService : null,
+      passwordConfigured: active && !!password,
+      startCommand: active ? driver.webApp.startCommand({ password, containerPort: webService.containerPort }) : '',
+      actualPorts,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/agents/:name/web', async (req, res) => {
+  const name = safeVmName(req.params.name);
+  if (!name) return res.status(400).json({ error: 'Invalid agent name' });
+  const { active, hostPort, containerPort, password } = req.body || {};
+  try {
+    const meta = readMeta(name);
+    if (!meta.AGENT && !meta.ROOT_PASSWORD) return res.status(404).json({ error: 'Agent not found' });
+    const agentType = meta.AGENT || 'openclaw';
+    const driver = drivers.getDriver(agentType);
+    if (!driver.webApp) return res.status(400).json({ error: 'This agent type has no web app to publish' });
+
+    const oldWeb = vm.readWebService(name);
+    const turningOn = !!active;
+
+    if (turningOn) {
+      const cPort = containerPort || driver.webApp.containerPort;
+      const hPort = String(hostPort || '').trim();
+      if (!/^\d+$/.test(hPort) || +hPort < 1 || +hPort > 65535) {
+        return res.status(400).json({ error: 'Host port must be a number between 1 and 65535' });
+      }
+      if (+cPort < 1 || +cPort > 65535) {
+        return res.status(400).json({ error: 'Container port must be a number between 1 and 65535' });
+      }
+      if (meta.PORT && hPort === meta.PORT) {
+        return res.status(400).json({ error: `Host port ${hPort} is already the SSH port of this agent` });
+      }
+      if (await hostPortInUse(hPort, name)) {
+        return res.status(400).json({ error: `Host port ${hPort} is already in use by another agent` });
+      }
+    }
+
+    const newWeb = turningOn
+      ? { containerPort: +containerPort || driver.webApp.containerPort, hostPort: String(hostPort).trim() }
+      : null;
+    const newPassword = typeof password === 'string' ? password : '';
+
+    const containers = await dockerPsList();
+    const current = containers[name];
+    const wasRunning = current && (current.State || '').toLowerCase() === 'running';
+
+    const jobKey = 'update:' + name;
+    const job = jobLog.getOrCreateJob(jobKey);
+    const log = (stream, text) => jobLog.line(job, stream, text);
+    const step = (stepName, state) => jobLog.setStep(job, stepName, state);
+
+    res.status(202).json({ ok: true, job: jobKey, streaming: true, action: turningOn ? 'activate' : 'deactivate' });
+
+    setImmediate(async () => {
+      registry.setRestarting(name, true);
+      try {
+        await logStore.capture(name);
+        if (wasRunning) {
+          step('stop', 'start');
+          await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 });
+          step('stop', 'end');
+        }
+
+        log('system', turningOn
+          ? `Publishing web app on host port ${newWeb.hostPort} → container port ${newWeb.containerPort}`
+          : 'Removing published web app');
+
+        if (turningOn) {
+          step('web-hook', 'start');
+          vm.writeWebStartHook(name, agentType, buildWebHook(driver, agentType, newWeb, newPassword));
+          step('web-hook', 'end');
+        } else {
+          step('web-hook', 'start');
+          vm.removeWebStartHook(name, agentType);
+          step('web-hook', 'end');
+        }
+
+        step('web-compose', 'start');
+        await vm.applyWebServices(name, newWeb);
+        registry.dockerPsList(true);
+        step('web-compose', 'end');
+
+        step('recreate', 'start');
+        // Peer-networked agents expose the web app through a socat door service
+        // in the same compose file — bring it up alongside the agent. Its image
+        // (alpine/socat) is auto-pulled by compose on first use.
+        const upServices = [name];
+        if (turningOn && currentNetworkPeer(name)) upServices.push(vm.webDoorName(name));
+        await runCmdStream('docker', ['compose', '-f', vm.instanceComposePath(name), 'up', '-d', '--no-deps', '--force-recreate', ...upServices], { onLog: log, timeout: 300000 });
+        step('recreate', 'end');
+
+        if (!turningOn) {
+          // The door service is gone from the regenerated compose — drop any
+          // leftover door container.
+          await runCmd('docker', ['rm', '-f', vm.webDoorName(name)], { timeout: 30000 }).catch(() => {});
+        }
+
+        if (!wasRunning) {
+          try { await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 }); } catch {}
+        } else if (turningOn) {
+          // The container is up; start.sh's boot hook should have launched the
+          // server already, but on a first rollout (image not rebuilt yet) the
+          // hook may be missing from the image. Exec the hook to guarantee the
+          // server is up, then verify it actually listens.
+          step('web-start', 'start');
+          // Container-side path: the hook lives in the agent's data dir bind
+          // mount, NOT under /workspace (that's the webui's view of the host).
+          const hookPath = `${driver.dataDir}/start-web.sh`;
+          const execRes = await runCmd('docker', ['exec', name, 'bash', hookPath], { timeout: 20000 });
+          if (execRes.code !== 0) {
+            throw new Error(`Failed to start web server: ${(execRes.stderr || execRes.stdout || '').trim() || `exec returned ${execRes.code}`}`);
+          }
+          let up = false;
+          for (let i = 0; i < 20 && !up; i++) {
+            if (await webPortReachable(name, newWeb.containerPort)) up = true;
+            else await new Promise((r) => setTimeout(r, 1000));
+          }
+          if (!up) throw new Error(`Web server did not come up on port ${newWeb.containerPort} (see container web.log)`);
+          step('web-start', 'end');
+        }
+
+        registry.dockerPsList(true);
+        registry.discoverAgents();
+        try {
+          registry.recordActivity(name, 'web', turningOn ? 'publish' : 'unpublish', 'ok',
+            turningOn ? `Web app published on host port ${newWeb.hostPort}` : 'Web app unpublished');
+        } catch {}
+        log('system', turningOn ? `Done — web app live at http://10.69.1.164:${newWeb.hostPort}` : 'Done — web app removed');
+        jobLog.finish(job, true);
+      } catch (e) {
+        console.error(`Web change failed for ${name}:`, e.message);
+        try {
+          if (turningOn) vm.removeWebStartHook(name, agentType);
+          else if (oldWeb) vm.writeWebStartHook(name, agentType, buildWebHook(driver, agentType, oldWeb, readHookPassword(vm.webHookPath(name, agentType)) || ''));
+          await vm.applyWebServices(name, oldWeb);
+          await runCmd('docker', ['rm', '-f', vm.webDoorName(name)], { timeout: 30000 }).catch(() => {});
+          if (wasRunning) {
+            await runCmd('docker', ['compose', '-f', vm.instanceComposePath(name), 'up', '-d', '--no-deps', '--force-recreate', name], { timeout: 180000 });
+          }
+          registry.dockerPsList(true);
+        } catch {}
+        try {
+          registry.recordActivity(name, 'web', turningOn ? 'publish' : 'unpublish', 'error', e.message);
         } catch {}
         jobLog.fail(job, e.message);
       } finally {

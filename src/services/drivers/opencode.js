@@ -32,6 +32,26 @@ const OPENCODE = {
   /** No gateway/onboard flow — opencode config is created on first run. */
   setupSteps: [],
 
+  /** Built-in web app the PAD can publish (Web tab). null/absent = no web
+   *  app (e.g. codex, claude). `startCommand(opts)` builds the shell command
+   *  from { containerPort, hostPort, password }; it is used both for the
+   *  on-boot hook (start-web.sh) and the terminal "Start" button. */
+  webApp: {
+    label: 'OpenCode Web',
+    docs: 'https://opencode.ai/docs/web/',
+    containerPort: 8080,
+    auth: {
+      label: 'Server password',
+      hint: 'Optional — protects the web UI with a password. The username is always "opencode".',
+      target: 'env',
+      envKey: 'OPENCODE_SERVER_PASSWORD',
+    },
+    startCommand({ password = '', containerPort }) {
+      const pass = password ? `${this.auth.envKey}='${password}' ` : '';
+      return `${pass}opencode web --hostname 0.0.0.0 --port ${containerPort}`;
+    },
+  },
+
   /** Command groups served to the Commands tab. */
   commands: [
     {

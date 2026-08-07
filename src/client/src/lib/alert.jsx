@@ -84,8 +84,8 @@ export function AlertProvider({ children }) {
               )}
               <button
                 onClick={handleOk}
-                className={`px-4 py-2 text-sm font-medium text-ink rounded-lg transition-colors ${
-                  state.danger ? 'bg-danger hover:bg-danger' : 'bg-accent hover:bg-accent-hover'
+                className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
+                  state.danger ? 'bg-danger hover:bg-danger text-danger-ink' : 'bg-accent hover:bg-accent-hover text-accent-ink'
                 }`}
               >
                 {state.okText || 'OK'}

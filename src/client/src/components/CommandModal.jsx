@@ -5,6 +5,9 @@ const STEP_COMMANDS = {
   stop: (name) => `docker stop ${name}`,
   build: (name) => `docker compose -f instances/${name}/docker-compose.yml build --pull`,
   recreate: (name) => `docker compose -f instances/${name}/docker-compose.yml up -d --no-deps --force-recreate`,
+  'web-hook': (name) => `write start-web.sh boot hook`,
+  'web-compose': (name) => `update docker-compose.yml (publish port)`,
+  'web-start': (name) => `start web server inside the container`,
 }
 
 function fmtTime(ts) {

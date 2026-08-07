@@ -82,7 +82,7 @@ async function getNetworkHealth(name) {
 }
 
 function generateInstanceCompose(name, agent, password, port, opts = {}) {
-  const { allowDocker = false, network = '' } = opts;
+  const { allowDocker = false, network = '', webService = null, webPeerNetwork = '' } = opts;
   const driver = getDriver(agent);
   const image = driver.buildImage;
   const build = driver.buildRel;
@@ -97,13 +97,50 @@ function generateInstanceCompose(name, agent, password, port, opts = {}) {
   yaml += `    image: ${image}\n`;
   yaml += `    container_name: ${name}\n`;
   yaml += `    restart: unless-stopped\n`;
-  if (port) yaml += `    ports:\n      - "${port}:22"\n`;
+  // Published ports: SSH (hostPort:22) + optional published web app. Docker
+  // CANNOT publish ports while the container shares another container's network
+  // stack (network_mode: container:) — in that case the agent gets no ports:
+  // block and any web app is exposed via the socat "door" service below.
+  const portLines = [];
+  const peerMode = !!network;
+  if (!peerMode) {
+    if (port) portLines.push(`      - "${port}:22"`);
+    if (webService && webService.hostPort) {
+      portLines.push(`      - "${webService.hostPort}:${webService.containerPort}"`);
+    }
+  }
+  if (portLines.length) yaml += `    ports:\n${portLines.join('\n')}\n`;
   // Volume sources are resolved by the Docker DAEMON → use HOST_WORKSPACE
   // (the daemon's host view, e.g. /www2/paddock).
   yaml += `    volumes:\n      - ${HOST_WORKSPACE}/instances/${name}/${agent}:${dataDir}\n`;
   if (allowDocker) yaml += `      - /var/run/docker.sock:/var/run/docker.sock\n`;
   if (network) yaml += `    network_mode: container:${network}\n`;
   yaml += `    environment:\n      TZ: Asia/Kolkata\n      ROOT_PASSWORD: ${password || ''}\n`;
+
+  // Web door: when the agent shares a peer's network stack, published ports are
+  // impossible on the agent itself. A tiny socat "door" container joins the
+  // peer's docker network, publishes the host port, and forwards to the peer by
+  // name — the agent's web server binds inside the peer's namespace, so it's
+  // reachable at <peer>:<containerPort>. Resolving by name per connection means
+  // the door survives peer recreates without any change of its own.
+  if (peerMode && webService && webService.hostPort) {
+    const door = webDoorName(name);
+    yaml += `  ${door}:\n`;
+    yaml += `    image: alpine/socat\n`;
+    yaml += `    container_name: ${door}\n`;
+    yaml += `    restart: unless-stopped\n`;
+    if (webPeerNetwork) {
+      yaml += `    networks:\n      - webbridge\n`;
+      yaml += `    ports:\n      - "${webService.hostPort}:${webService.containerPort}"\n`;
+      yaml += `    command: TCP-LISTEN:${webService.containerPort},fork,reuseaddr TCP:${network}:${webService.containerPort}\n`;
+      yaml += `networks:\n  webbridge:\n    external: true\n    name: ${webPeerNetwork}\n`;
+    } else {
+      // Peer shares the host network (no docker network to join) → the door
+      // runs on the host network and forwards to localhost instead.
+      yaml += `    network_mode: host\n`;
+      yaml += `    command: TCP-LISTEN:${webService.hostPort},fork,reuseaddr TCP:127.0.0.1:${webService.containerPort}\n`;
+    }
+  }
   return yaml;
 }
 
@@ -150,6 +187,93 @@ function applySettings(name, opts = {}) {
     image: getDriver(agent).buildImage,
     agent,
   };
+}
+
+// ─── Web publishing (published built-in web app) ─────────────
+
+function webServicePath(name) {
+  return path.join(INSTANCES_DIR, name, 'web.json');
+}
+
+/** Read the single web binding for an agent, or null when not published.
+ *  Shape: { containerPort, hostPort } */
+function readWebService(name) {
+  const p = webServicePath(name);
+  if (!fs.existsSync(p)) return null;
+  try {
+    const d = JSON.parse(fs.readFileSync(p, 'utf8'));
+    if (!d || !d.hostPort) return null;
+    return { containerPort: d.containerPort || 8080, hostPort: String(d.hostPort) };
+  } catch {
+    return null;
+  }
+}
+
+/** Set (webService truthy) or clear (null/undefined) the published web app.
+ *  Persists the binding in web.json and regenerates the compose file (the
+ *  machine-generated compose remains the source of truth for the ports block,
+ *  which also carries the SSH port). When the agent routes through a network
+ *  peer, the compose gains the socat door service on the peer's network. */
+async function applyWebServices(name, webService) {
+  const instDir = path.join(INSTANCES_DIR, name);
+  const meta = readMeta(instDir);
+  const agent = meta.AGENT || 'openclaw';
+  const pw = meta.ROOT_PASSWORD || name.replace(PREFIX_RE, '');
+  const port = meta.PORT || '';
+  const allowDocker = meta.DOCKER === '1';
+  const network = meta.NETWORK || '';
+
+  const p = webServicePath(name);
+  if (webService) {
+    fs.writeFileSync(p, JSON.stringify({ containerPort: webService.containerPort, hostPort: webService.hostPort }, null, 2));
+  } else if (fs.existsSync(p)) {
+    fs.rmSync(p);
+  }
+
+  let webPeerNetwork = '';
+  if (webService && network) {
+    webPeerNetwork = await getPeerNetworkName(network);
+  }
+
+  writeInstanceCompose(name, agent, pw, port, { allowDocker, network, webService, webPeerNetwork });
+  return { agent, webService: webService || null };
+}
+
+/** Container name of the socat "door" that publishes a peer-networked agent's
+ *  web app on a host port. */
+function webDoorName(name) {
+  return `${name}-web`;
+}
+
+/** Name of the docker network a peer container lives on (the door joins it so
+ *  it can reach the peer by name). Empty when the peer is host-networked. */
+async function getPeerNetworkName(peer) {
+  try {
+    const r = await runCmd('docker', ['inspect', peer, '--format', '{{json .NetworkSettings.Networks}}'], { timeout: 15000 });
+    const nets = JSON.parse(r.stdout || '{}');
+    return Object.keys(nets).find((k) => k !== 'host' && k !== 'none') || '';
+  } catch {
+    return '';
+  }
+}
+
+/** Host path of the per-instance web start hook. It lives inside the agent's
+ *  data dir bind mount (instances/<name>/<agent>/), so the container sees it
+ *  at <dataDir>/start-web.sh — start.sh sources it on boot when present. */
+function webHookPath(name, agent) {
+  return path.join(INSTANCES_DIR, name, agent, 'start-web.sh');
+}
+
+/** Write (or remove) the web start hook for an agent. */
+function writeWebStartHook(name, agent, content) {
+  const p = webHookPath(name, agent);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, content, { mode: 0o755 });
+}
+
+function removeWebStartHook(name, agent) {
+  const p = webHookPath(name, agent);
+  if (fs.existsSync(p)) fs.rmSync(p);
 }
 
 /** Rebuild the image (--pull to redownload the base) and recreate the
@@ -383,5 +507,7 @@ module.exports = {
   instanceComposePath, getComposePath,
   getNetworkHealth,
   existingServices, startAgent,
+  readWebService, applyWebServices, webHookPath,
+  writeWebStartHook, removeWebStartHook, webDoorName,
   INSTANCES_DIR, PREFIX, PREFIX_RE,
 };

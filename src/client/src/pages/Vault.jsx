@@ -465,8 +465,8 @@ function PinModal({ mode, form, setForm, error, busy, digitsOnly, onCancel, onSu
             <button
               type="submit"
               disabled={busy}
-              className={`px-4 py-2 text-sm font-medium text-ink rounded-lg transition-colors disabled:opacity-50 ${
-                isReset ? 'bg-danger hover:bg-danger' : 'bg-accent hover:bg-accent-hover'
+              className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors disabled:opacity-50 ${
+                isReset ? 'bg-danger hover:bg-danger text-danger-ink' : 'bg-accent hover:bg-accent-hover text-accent-ink'
               }`}
             >
               {busy ? (isReset ? 'Resetting…' : 'Setting…') : (isReset ? 'Erase & reset' : 'Set PIN')}

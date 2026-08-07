@@ -80,6 +80,7 @@ function Snippet({ label, code }) {
 export default function Profile() {
   const username = useAuth((s) => s.username)
   const role = useAuth((s) => s.role)
+  const userId = useAuth((s) => s.userId)
   const confirm = useConfirm()
   const alert = useAlert()
   const { tab: tabParam } = useParams()
@@ -127,6 +128,7 @@ export default function Profile() {
   const [usernameNote, setUsernameNote] = useState('')
   const [resetPwUser, setResetPwUser] = useState(null)
   const [resetPassword, setResetPassword] = useState('')
+  const [resetCurrentPassword, setResetCurrentPassword] = useState('')
   const [usersError, setUsersError] = useState('')
 
   useEffect(() => {
@@ -232,10 +234,13 @@ export default function Profile() {
   async function resetUserPassword() {
     setUsersError('')
     if (!resetPassword || resetPassword.length < 4) { setUsersError('Password must be at least 4 characters'); return }
+    const isSelf = resetPwUser && resetPwUser.id === userId
+    if (isSelf && !resetCurrentPassword) { setUsersError('Current password is required'); return }
     try {
-      await api(`/api/users/${resetPwUser.id}/reset-password`, { method: 'POST', body: { password: resetPassword } })
+      await api(`/api/users/${resetPwUser.id}/reset-password`, { method: 'POST', body: { password: resetPassword, current_password: isSelf ? resetCurrentPassword : undefined } })
       setResetPwUser(null)
       setResetPassword('')
+      setResetCurrentPassword('')
     } catch (err) { setUsersError(err?.error || 'Failed to reset password') }
   }
 
@@ -575,7 +580,7 @@ export default function Profile() {
                         <td className="py-3">
                           <div className="flex gap-2 justify-end">
                             <button
-                              onClick={() => { setUsersError(''); setResetPassword(''); setResetPwUser(u) }}
+                              onClick={() => { setUsersError(''); setResetPassword(''); setResetCurrentPassword(''); setResetPwUser(u) }}
                               className="px-3 py-1 bg-panel hover:bg-raised text-ink-muted rounded-lg text-xs transition-colors"
                             >
                               Reset PW
@@ -673,24 +678,37 @@ export default function Profile() {
       {resetPwUser && (
         <Modal
           title="Reset Password"
-          description={`Set a new password for ${resetPwUser.username}.`}
-          onClose={() => { setResetPwUser(null); setResetPassword(''); setUsersError('') }}
+          description={resetPwUser.id === userId ? `Set a new password for your account.` : `Set a new password for ${resetPwUser.username}.`}
+          onClose={() => { setResetPwUser(null); setResetPassword(''); setResetCurrentPassword(''); setUsersError('') }}
         >
           {usersError && <ErrorBanner>{usersError}</ErrorBanner>}
           <form onSubmit={(e) => { e.preventDefault(); resetUserPassword() }} className="space-y-4">
+            {resetPwUser.id === userId && (
+              <Field label="Current password" hint="Confirm your current password to change your own password.">
+                <input
+                  type="password"
+                  value={resetCurrentPassword}
+                  onChange={(e) => { setUsersError(''); setResetCurrentPassword(e.target.value) }}
+                  placeholder="Current password"
+                  autoFocus
+                  autoComplete="current-password"
+                  className={inputCls}
+                />
+              </Field>
+            )}
             <Field label="New password" hint="At least 4 characters.">
               <input
                 type="password"
                 value={resetPassword}
                 onChange={(e) => { setUsersError(''); setResetPassword(e.target.value) }}
                 placeholder="New password"
-                autoFocus
+                autoFocus={resetPwUser.id !== userId}
                 autoComplete="new-password"
                 className={inputCls}
               />
             </Field>
             <div className="flex gap-2 pt-4">
-              <button type="button" onClick={() => { setResetPwUser(null); setResetPassword(''); setUsersError('') }} className={`${btnGhost} flex-1`}>Cancel</button>
+              <button type="button" onClick={() => { setResetPwUser(null); setResetPassword(''); setResetCurrentPassword(''); setUsersError('') }} className={`${btnGhost} flex-1`}>Cancel</button>
               <button type="submit" className={`${btnCls} flex-1`}>Reset</button>
             </div>
           </form>

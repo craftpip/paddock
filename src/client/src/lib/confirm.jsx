@@ -81,10 +81,10 @@ export function ConfirmProvider({ children }) {
               </button>
               <button
                 onClick={handleConfirm}
-                className={`px-4 py-2 text-sm font-medium text-ink rounded-lg transition-colors ${
+                className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
                   state.danger
-                    ? 'bg-danger hover:bg-danger'
-                    : 'bg-accent hover:bg-accent-hover'
+                    ? 'bg-danger hover:bg-danger text-danger-ink'
+                    : 'bg-accent hover:bg-accent-hover text-accent-ink'
                 }`}
               >
                 {state.confirmText || 'Confirm'}
