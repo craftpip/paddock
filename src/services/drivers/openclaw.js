@@ -41,27 +41,10 @@ const OPENCLAW = {
   /** Command groups served to the Commands tab (`/api/agent-types/openclaw/commands`). */
   commands: [
     {
-      title: 'Memory', color: 'brand',
-      commands: [
-        { cmd: 'openclaw memory status', label: 'Check index health', desc: 'Health check — memory index status' },
-        { cmd: 'openclaw memory promote --apply', label: 'Promote memories', desc: 'Short-term → MEMORY.md', confirm: true },
-      ],
-    },
-    {
       title: 'Config', color: 'info',
       commands: [
         { cmd: 'openclaw config validate', label: 'Validate config', desc: 'Check config against schema' },
         { cmd: 'openclaw config file', label: 'Show config path', desc: 'Show active config path' },
-        { cmd: 'openclaw config get agents.defaults.model --json', label: 'View model config', desc: 'Primary + fallback models' },
-        { cmd: 'openclaw config schema', label: 'Show config schema', desc: 'Dump JSON schema' },
-      ],
-    },
-    {
-      title: 'Other', color: 'slate',
-      commands: [
-        { cmd: 'openclaw backup create', label: 'Create backup', desc: 'Create a backup archive', confirm: true },
-        { cmd: 'openclaw update status', label: 'Check updates', desc: 'Update channel + availability' },
-        { cmd: 'openclaw mcp doctor', label: 'Check MCP health', desc: 'Health check — MCP servers status' },
       ],
     },
     {
@@ -70,6 +53,8 @@ const OPENCLAW = {
         { cmd: 'openclaw security audit', label: 'Run audit', desc: 'Cold security audit' },
         { cmd: 'openclaw security audit --deep', label: 'Run deep audit', desc: 'Live probes' },
         { cmd: 'openclaw security audit --fix', label: 'Audit & fix', desc: 'Auto-fix issues', confirm: true },
+        { cmd: 'openclaw doctor --lint', label: 'Run lint checks', desc: 'Read-only health checks & report findings' },
+        { cmd: 'openclaw doctor --deep', label: 'Run deep scan', desc: 'Scan system services for extra gateway installs' },
       ],
     },
     {

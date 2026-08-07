@@ -97,20 +97,50 @@ function PromptModal({ title, message, fields, confirmText, danger, onSubmit, on
             )}
           </div>
           <div className="px-6 pb-4 space-y-4">
-            {(fields || []).map((f) => (
-              <div key={f.key}>
-                <label className="block text-xs font-medium text-ink-muted mb-1.5">{f.label}</label>
-                <input
-                  ref={f.key === fields[0].key ? firstRef : null}
-                  type={f.type || 'text'}
-                  value={values[f.key] || ''}
-                  onChange={(e) => set(f.key, e.target.value)}
-                  placeholder={f.placeholder}
-                  className="w-full px-3 py-2 text-sm bg-sunken border border-line rounded-lg text-ink focus:border-accent-line focus:outline-none placeholder-ink-dim"
-                />
-                {f.hint && <p className="mt-1.5 text-xs text-ink-dim leading-relaxed">{f.hint}</p>}
-              </div>
-            ))}
+            {(fields || []).map((f) => {
+              if (typeof f.when === 'function' && !f.when(values)) return null
+              const opts = Array.isArray(f.options)
+                ? f.options.map((o) => (typeof o === 'string' ? { value: o, label: o } : o))
+                : []
+              return (
+                <div key={f.key}>
+                  <label className="block text-xs font-medium text-ink-muted mb-1.5">{f.label}</label>
+                  {f.type === 'select' ? (
+                    <select
+                      ref={f.key === fields[0].key ? firstRef : null}
+                      value={values[f.key] || ''}
+                      onChange={(e) => set(f.key, e.target.value)}
+                      className="w-full px-3 py-2 text-sm bg-sunken border border-line rounded-lg text-ink focus:border-accent-line focus:outline-none"
+                    >
+                      {opts.map((o) => (
+                        <option key={o.value} value={o.value}>{o.label}</option>
+                      ))}
+                    </select>
+                  ) : f.type === 'checkbox' ? (
+                    <label className="flex items-center gap-2 select-none">
+                      <input
+                        ref={f.key === fields[0].key ? firstRef : null}
+                        type="checkbox"
+                        checked={!!values[f.key]}
+                        onChange={(e) => set(f.key, e.target.checked)}
+                        className="w-4 h-4 accent-accent bg-sunken border border-line rounded"
+                      />
+                      {f.checkLabel && <span className="text-sm text-ink">{f.checkLabel}</span>}
+                    </label>
+                  ) : (
+                    <input
+                      ref={f.key === fields[0].key ? firstRef : null}
+                      type={f.type || 'text'}
+                      value={values[f.key] || ''}
+                      onChange={(e) => set(f.key, e.target.value)}
+                      placeholder={f.placeholder}
+                      className="w-full px-3 py-2 text-sm bg-sunken border border-line rounded-lg text-ink focus:border-accent-line focus:outline-none placeholder-ink-dim"
+                    />
+                  )}
+                  {f.hint && <p className="mt-1.5 text-xs text-ink-dim leading-relaxed">{f.hint}</p>}
+                </div>
+              )
+            })}
           </div>
           <div className="flex items-center justify-end gap-3 px-6 pb-5 pt-2">
             <button

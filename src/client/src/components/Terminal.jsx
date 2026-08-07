@@ -171,6 +171,8 @@ const Terminal = forwardRef(function Terminal(
   const shellBusyRef = useRef(false) // prompt-based: the shell is occupied by a command
   const shellBusyShowRef = useRef(false) // what the Running badge actually shows (delayed)
   const busySinceRef = useRef(null) // timestamp when the shell first looked busy
+  const pendingCmdsRef = useRef([]) // commands queued while the shell was busy
+  const lastSendRef = useRef(0) // timestamp of the last command sent to the shell
   const pendingMarkersRef = useRef(new Set()) // sentinels awaiting their echo
   const markerCmdRef = useRef(new Map()) // sentinel → command text
   const lastDoneCmdRef = useRef(null) // cmd of the last resolved sentinel
@@ -276,6 +278,57 @@ const Terminal = forwardRef(function Terminal(
       }
     }
   }, [])
+
+  // Commands are only sent when the shell sits on a fresh prompt. Sending
+  // while the previous command is still running (or a TUI owns the terminal)
+  // makes the shell echo the bytes onto whatever line it draws next — the
+  // prompt and the command end up on separate, misaligned lines. So we queue
+  // the payload and the poll loop flushes it once the shell goes idle.
+  const COOLDOWN_MS = 400 // minimum gap between two injected commands
+  const MAX_WAIT_MS = 10000 // safety: never hold a queued command forever
+  const queueOrSend = useCallback((payload) => {
+    checkShellBusy()
+    const ws = wsRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false
+    const now = Date.now()
+    const recent = now - lastSendRef.current < COOLDOWN_MS
+    if (shellBusyRef.current || recent) {
+      pendingCmdsRef.current.push({ payload, at: now })
+      return true
+    }
+    lastSendRef.current = now
+    ws.send(payload)
+    return true
+  }, [checkShellBusy])
+
+  /** Called from the poll loop: send queued commands once the shell is idle. */
+  const flushPending = useCallback(() => {
+    const pending = pendingCmdsRef.current
+    if (pending.length === 0) return
+    checkShellBusy()
+    const ws = wsRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      pendingCmdsRef.current = []
+      return
+    }
+    const now = Date.now()
+    const head = pending[0]
+    // Send as soon as the shell is idle and the cooldown elapsed — but never
+    // hold a command past MAX_WAIT_MS (guards against prompt-regex false
+    // positives permanently stalling the queue).
+    if (shellBusyRef.current) {
+      if (now - head.at > MAX_WAIT_MS) {
+        pending.shift()
+        lastSendRef.current = now
+        ws.send(head.payload)
+      }
+      return
+    }
+    if (now - lastSendRef.current < COOLDOWN_MS) return
+    pending.shift()
+    lastSendRef.current = now
+    ws.send(head.payload)
+  }, [checkShellBusy])
 
   /** Tell the backend the PTY size has changed. Sent as a NUL-NUL-prefixed
    *  JSON control frame (`\x00\x00{"type":"resize",...}`) so it can never be
@@ -678,9 +731,10 @@ const Terminal = forwardRef(function Terminal(
     const iv = setInterval(() => {
       checkShellBusy()
       syncBusy()
+      flushPending()
     }, 250)
     return () => clearInterval(iv)
-  }, [connState, collapsed, checkShellBusy, syncBusy])
+  }, [connState, collapsed, checkShellBusy, syncBusy, flushPending])
 
   // When locked, stop the cursor blinking so it reads as "read-only".
   useEffect(() => {
@@ -865,7 +919,7 @@ const Terminal = forwardRef(function Terminal(
           // tracked mode input stays whatever it was.
           return injectTracked(text)
         }
-        return sendToShell(text + '\n')
+        return queueOrSend(text + '\n')
       },
       write: sendToShell,
       clear: () => sendToShell('clear\n'),
@@ -888,7 +942,7 @@ const Terminal = forwardRef(function Terminal(
       },
       isLocked: () => isInputLocked(),
     }),
-    [sendToShell, isInputLocked, nextMarker, injectTracked, onCommandStart, onCommandDone, refreshLockUI]
+    [sendToShell, isInputLocked, nextMarker, injectTracked, queueOrSend, onCommandStart, onCommandDone, refreshLockUI]
   )
 
   return (

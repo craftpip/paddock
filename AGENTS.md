@@ -990,7 +990,37 @@ find /workspace/instances/<pad>/openclaw/ -type f | wc -l
 - The textarea needed a `setFileModal({ ...fileModal, content: e.target.value })` onChange to keep the state in sync.
 - Close button and backdrop click both call `closeFileModal()` which warns if dirty: `if (fileDirty && !confirm('You have unsaved changes. Discard?')) return`.
 
-## Do Not Do
+## CommandsPane Buttons Paste Commands, Not APIs (2026-08-07)
+
+**Rule:** Every action button in the agent Commands pane (`CommandsPane.jsx` + openclaw
+flows) must paste an `openclaw ...` command into the docked terminal via `run(cmd)`.
+It must NOT call a backend action API. The terminal is the interface; the API routes
+that wrap `docker exec openclaw ...` are a trap that bypasses the visible terminal.
+
+- **MCP "Add server"** no longer POSTs `/api/agents/:name/mcp/add`. It collects
+  name + transport + url/command via the prompt modal, builds
+  `openclaw mcp add <name> [--no-probe] --url <u> --transport <t>` (HTTP) or
+  `openclaw mcp add <name> --command <cmd>` (stdio) and `run(cmd)`s it.
+- **MCP "Remove server"** and the chip `×` run `openclaw mcp unset <name>`
+  (was `/mcp/remove`).
+- **Skills "Install skill"** runs `openclaw skills install <ref>` (was
+  `/skills/install`). Search/List-tools already pasted commands.
+- Dropped `--no-probe` from the backend-built command (it only existed because the
+  API ran headless with a 30s timeout). Now the add form has a **"Test MCP
+  connection"** checkbox (default checked = probe runs; unchecked appends
+  `--no-probe`).
+- Read-only GETs are still fine (`/mcp` server chips, `/agent-types/:type/commands`
+  button groups). Only actions go through the terminal.
+- The Vault dropdown is the exception on purpose — decrypt/add hit `/api/vault*`
+  because secrets are stored server-side (that's the feature, not a command flow).
+
+### Prompt modal field types (prompt.jsx)
+
+Supports beyond plain text inputs: `type: 'select'` (with `options` as strings or
+`{value,label}`), `type: 'checkbox'` (with `defaultValue`, `checkLabel` next to the
+box, `hint` below), and conditional visibility via `when(values)` (a function —
+used to show URL only for HTTP transports and command only for stdio).
+
 
 - **Never touch containers outside our project.** Containers not defined in this project's `docker-compose.yml` are not ours. Do not start, stop, exec, inspect, or interact with them in any way. Our project only owns containers it creates.
 - **Never create random containers for testing.** Spin up test containers only through the project's own tools (add-vm scripts, docker-compose services, or the web UI). Running `docker run` with external images is outside our scope.
