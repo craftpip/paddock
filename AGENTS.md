@@ -718,11 +718,62 @@ Terminal appeared small/constrained because xterm.js FitAddon calls `fit()` befo
 - Host reachability for the webui: `http://10.69.1.164:6789` (localhost:6789 is
   refused from this shell's network context).
 
+## Driver Framework (Goal 1 — 2026-08-06)
+
+- **`src/services/drivers/`** — one module per agent type (`openclaw.js`,
+  `opencode.js`, `picoclaw.js`), registered in `index.js` as `drivers = { openclaw, opencode, picoclaw }`.
+- `getDriver(type)` is the single source of truth for how routes/terminal/dashboard
+  treat an agent type; **falls back to the openclaw driver** when a type has none
+  (never crashes). `listDrivers()` feeds the CreateAgent type select
+  (`[{ type, label, setupSteps }]`).
+- Driver fields (implemented by every driver):
+  `type`, `label`, `buildImage`, `buildRel`, `baseImage`, `dataDir`,
+  `workspaceDir`, `configFile`, `setupSteps`, `backupTypeMarker`,
+  `installDockerBuildArg`, `currentVersion(name)`, `availableVersion()`,
+  `commands` (Status/Auth/Cron/Skills/Other groups for the CommandsPane).
+- **vm-manager.js no longer exports `AGENT_IMAGES`/`AGENT_BUILD_REL`/`AGENT_BASE_IMAGES`.**
+  Image/tag/version lookups all go through `getDriver(agent)`. The create-flow
+  setup guard is "run `setupSteps` if non-empty".
+- Config paths derive from `driver.configFile` (openclaw.json / opencode.json /
+  config.json) — nothing is hardcoded to openclaw in the config GET/POST routes,
+  agent-registry model extraction, or workspace/config root resolution.
+- Frontend: CommandsPane fetches `/api/agent-types/<type>/commands`;
+  CreateAgent type options + setup step come from `/api/agent-types`;
+  SettingsTab version via `driver.currentVersion()`; workspace tab root via
+  `driver.workspaceDir`.
+- **After adding/editing a driver file, restart the webui** — Node caches
+  `require()` at startup (see also Picoclaw section below).
+
+## Picoclaw Driver (Goal 2 — 2026-08-06)
+
+- picoclaw's CLI is a single Go binary `picoclaw` — **no `openclaw` binary**.
+  Setup step is `picoclaw onboard` (non-interactive; writes
+  `/root/.picoclaw/config.json` + workspace/AGENT.md… + `.security.yml`).
+- Config file is `/root/.picoclaw/config.json` (NOT openclaw.json). Drivers now
+  carry a `configFile` field; the config GET/POST routes + ConfigTab read it.
+- Version: `picoclaw version` → `🦞 picoclaw 0.2.5 (git: …)` — heavy ANSI banner,
+  parse with a `\d+\.\d+\.\d+` regex.
+- Model config lives at `agents.defaults.provider` + `agents.defaults.model_name`
+  (no primary/fallback like openclaw).
+- **Alpine agent images must bake `tmux` + `sqlite`** — the terminal's lazy
+  tmux install runs `apt-get`, which does not exist on Alpine. The picoclaw
+  Dockerfile got them baked; keep this in mind for any future Alpine-based image.
+- **Restart the webui after adding/editing a driver file.** Node caches
+  `require()` at startup; a running process silently falls back to the openclaw
+  driver and builds the wrong image (`getDriver` fallback).
+- Backups are generic (tar of `driver.dataDir`) — they work for picoclaw without
+  an `openclaw backup` command. `backupTypeMarker: ''` tags them `legacy`.
+  Restore is tar-overlay + container restart; files created after the backup
+  survive.
+- Docker toggle: `INSTALL_DOCKER=1` build arg works on the Alpine image
+  (`apk add docker-cli`); settings route auto-rebuilds when the CLI is missing.
+- `picoclaw gateway -E` (bind 0.0.0.0:18790) starts only when config.json
+  exists; otherwise start.sh stays in setup mode (`tail -f /dev/null`).
+
 ## Architecture Documentation
 
-- docs/architecture.md — **Source of truth** for business logic, system architecture, page descriptions, routes, data model, security model, and all behavioral contracts.
-- task_create_docs.md — Tracks progress of doc-writing tasks.
-- Rule: If code and docs/architecture.md disagree, fix the code.
+- `docs/` — **Source of truth** for business logic, system architecture, page descriptions, routes, data model, security model, and all behavioral contracts. Split by area: `overview/` (architecture, business-logic, react-migration), `backend/` (services, middleware, user-management), `tabs/` (per-tab behavior), `pages/`, `components/`, `operations/`.
+- Rule: If code and docs disagree, fix the code.
 - AGENTS.md remains the place for operational learnings, bug fixes, commands, and PAD session context.
 
 ## User Preferences

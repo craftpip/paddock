@@ -141,7 +141,7 @@ Tabs are all defined inline in AgentDetail.jsx:
 | terminal | TerminalTab | xterm.js terminal |
 | logs | LogsTab | Container logs viewer |
 | sessions | SessionsTab | Chat session list |
-| config | ConfigTab | openclaw.json editor |
+| config | ConfigTab | editor for the driver's config file (openclaw.json / opencode.json / config.json) |
 | mcp | McpTab | MCP server management |
 | skills | SkillsTab | Skill list, install, manage |
 | models | ModelsTab | Provider + model config |

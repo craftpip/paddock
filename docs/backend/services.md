@@ -57,15 +57,41 @@ Business logic: See `overview/business-logic.md` — Agent Lifecycle, Bind-Mount
 - `setMetaFlag(name, key, value)` — writes/clears a `KEY=VALUE` line in `meta.env` preserving other lines
 - `existingServices()` — scan instances/ for existing compose files
 - `instanceComposePath(name)`, `getComposePath(name)` — path helpers
-- Exports `AGENT_IMAGES` and `AGENT_BUILD_REL` maps
 
-**Agent images:**
-| Agent | Image tag | Data dir inside container |
-|-------|-----------|--------------------------|
-| openclaw | paddock-vm-openclaw:latest | /root/.openclaw |
-| picoclaw | paddock-vm-picoclaw:latest | /root/.picoclaw |
-| nanobot | paddock-vm-nanobot:latest | /root/.nanobot |
-| hermes | paddock-vm-hermes:latest | /opt/data |
+Image/tag/version lookups no longer live here — they go through
+`getDriver(agent)` from `services/drivers/` (see below).
+
+## Driver Registry (services/drivers/)
+
+One module per agent type (`openclaw.js`, `opencode.js`, `picoclaw.js`),
+registered in `index.js`. Every type is an equal citizen.
+
+**Functions:**
+- `getDriver(type)` — returns the driver for a type, **falls back to the
+  openclaw driver** when a type has none (never crashes callers)
+- `listDrivers()` — `[{ type, label, setupSteps }]` for the CreateAgent select
+- `drivers` — the raw registry object
+
+**Driver fields:**
+| Field | Purpose |
+|-------|---------|
+| `type` / `label` | agent type id + human label |
+| `buildImage` | `paddock-vm-<type>:latest` |
+| `buildRel` | path to the per-type Dockerfile (`../../src/vm-builds/<type>`) |
+| `baseImage` | upstream image the Dockerfile starts from |
+| `dataDir` | in-container data directory (`/root/.openclaw`, `/root/.picoclaw`, …) |
+| `workspaceDir` | workspace root inside the container |
+| `configFile` | config filename in `dataDir` (openclaw.json / opencode.json / config.json) |
+| `setupSteps` | commands run right after `compose up` during create |
+| `backupTypeMarker` | filename sniff used by backup-manager for cli vs legacy type |
+| `installDockerBuildArg` | build arg that installs docker CLI (`INSTALL_DOCKER=1`) |
+| `currentVersion(name)` | live version inside the container (regex-parsed; picoclaw prints a heavy ANSI banner) |
+| `availableVersion()` | upstream available version (cached 5 min) |
+| `commands` | Command groups (Status/Auth/Cron/Skills/Other) for the CommandsPane |
+
+Config GET/POST, agent-registry model extraction, and workspace/config root
+resolution all derive paths from `driver.configFile` / `driver.workspaceDir` /
+`driver.dataDir` — nothing is hardcoded to openclaw anymore.
 
 ## Command Runner (cmd.js)
 

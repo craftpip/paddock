@@ -12,7 +12,7 @@
    - `status` (running/exited/missing)
    - `agent_type` from `meta.env` (openclaw/picoclaw/hermes)
    - `workspace_root` / `config_root` — resolved by probing the `instances/<name>/` directory
-   - `default_model` / `default_provider` — parsed from `openclaw.json` if it exists
+   - `default_model` / `default_provider` — parsed from the driver's `configFile` (e.g. `openclaw.json`) if it exists
 5. **SQLite sync**: Each discovered agent is upserted into the `agents` table for metadata tracking
 
 **Docker cache**: `docker ps -a` results are cached for 3 seconds. Calling `dockerPsList(true)` forces a refresh.
@@ -24,12 +24,12 @@
 ```
 instances/<name>/
   ├── meta.env
-  └── openclaw/        ← agent type directory
-       ├── openclaw.json
+  └── openclaw/        ← agent type directory (name comes from agent_type)
+       ├── openclaw.json   ← or the driver's configFile (opencode.json, config.json)
        └── workspace/
 ```
 
-`findAgentDir()` first checks for a directory matching `agent_type` (e.g. `openclaw`). If not found, scans all subdirectories for one containing `openclaw.json`. The workspace root is set to `agentDir` (the openclaw directory, not the workspace subfolder — the frontend navigates into `workspace/` by default).
+`findAgentDir()` first checks for a directory matching `agent_type` (e.g. `openclaw`). If not found, scans all subdirectories for one containing the driver's `configFile`. The workspace root is set to `agentDir` (the agent-type directory, not the workspace subfolder — the frontend navigates into `workspace/` by default).
 
 ### meta.env Format
 
@@ -232,7 +232,7 @@ When the xterm.js terminal is resized (via ResizeObserver), the frontend sends `
 
 ### List Flow
 
-1. Read agent's `openclaw.json` config
+1. Read the agent's config file (`driver.configFile` — e.g. `openclaw.json`)
 2. Extract `mcp.servers` block
 3. For each server, map to enhanced object with name, enabled, transport, command/args/url, status, issues
 4. Return to frontend
@@ -297,7 +297,7 @@ The Health tab uses Server-Sent Events (EventSource) to stream command output:
 
 ### Read
 
-1. Read `instances/<name>/<agent>/openclaw.json` from disk
+1. Read `instances/<name>/<agent>/<driver.configFile>` from disk (e.g. `openclaw.json`)
 2. Deep-clone the config object
 3. Redact sensitive fields:
    - `api_keys` → `[REDACTED]`

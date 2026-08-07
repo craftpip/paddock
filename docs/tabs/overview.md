@@ -73,7 +73,7 @@ Empty state: "No sessions recorded yet."
 
 File: `AgentDetail.jsx` — `ConfigTab` function (lines 1256-1297)
 
-Raw JSON editor for `openclaw.json`.
+Raw JSON editor for the agent's config file — the driver's `configFile` (`openclaw.json` for openclaw, `opencode.json`, `config.json` for picoclaw). The filename comes from `GET /api/agents/:name/config` (`configFile` field).
 
 **Features:**
 - Full config in textarea
