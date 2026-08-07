@@ -943,6 +943,29 @@ Fix: emit a **door service** (`<name>-web`) in the instance compose:
   200, pad still `container:gluetun-global`; restart pad → boot hook relaunches, door
   still serves; unpublish → door gone, port 000.
 
+### Network switch must keep a published web app live
+
+Switching networks in the Settings tab while a web app is published silently broke
+the binding (old `applySettings` regenerated the compose WITHOUT `webService`, so the
+ports/door vanished even though `web.json` still said active — the Web pill showed
+"active" but nothing was published). Fixes (2026-08-07):
+
+- `vm.applySettings()` is now **async** and reads the active `web.json` binding itself,
+  regenerating the compose with `webService` + the resolved `webPeerNetwork` for the
+  NEW network. `applySettings` never drops the web binding anymore (covers docker
+  toggle too, not just network changes).
+- The settings route (`POST /api/agents/:name/settings`) re-applies the web binding
+  after the change: force-recreates the door on a network change (plain `up` on a
+  docker-only toggle), drops the door when leaving peer mode, re-execs the
+  `start-web.sh` hook, and re-verifies the server (same poll as the publish flow).
+- **Door must be removed BEFORE the agent recreate when leaving peer mode** — the
+  door still holds the host port, so the agent's new `ports:` bind fails with
+  "Bind for 0.0.0.0:PORT failed: port is already allocated". Same ordering rule in the
+  settings rollback path.
+- **Restart the webui after editing vm-manager.js / app.js** — `require()` is cached;
+  the running process silently keeps the old (buggy) code. A user-reported "doesn't
+  work" on a code change that was never restarted is the classic symptom.
+
 ## Architecture Documentation
 
 - `docs/` — **Source of truth** for business logic, system architecture, page descriptions, routes, data model, security model, and all behavioral contracts. Split by area: `overview/` (architecture, business-logic, react-migration), `backend/` (services, middleware, user-management), `tabs/` (per-tab behavior), `pages/`, `components/`, `operations/`.

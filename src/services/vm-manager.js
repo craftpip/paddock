@@ -167,8 +167,12 @@ function setMetaFlag(name, key, value) {
 
 /** Apply settings (docker socket mount, network join) to an instance's compose
  *  file + meta.env. Compose files are machine-generated here, so regeneration
- *  is the source of truth. The route handles stop/start + validation around it. */
-function applySettings(name, opts = {}) {
+ *  is the source of truth. The route handles stop/start + validation around it.
+ *  An active web binding (web.json) is carried through the regeneration, so
+ *  switching networks (or toggling docker) never silently drops the published
+ *  web app — the compose picks up the door/ports for the NEW network and the
+ *  settings route re-verifies the server afterwards. */
+async function applySettings(name, opts = {}) {
   const instDir = path.join(INSTANCES_DIR, name);
   const meta = readMeta(instDir);
   const agent = meta.AGENT || 'openclaw';
@@ -176,8 +180,14 @@ function applySettings(name, opts = {}) {
   const port = meta.PORT || '';
   const allowDocker = !!opts.allowDocker;
   const network = opts.network || '';
+  const webService = readWebService(name);
 
-  writeInstanceCompose(name, agent, pw, port, { allowDocker, network });
+  let webPeerNetwork = '';
+  if (webService && network) {
+    webPeerNetwork = await getPeerNetworkName(network);
+  }
+
+  writeInstanceCompose(name, agent, pw, port, { allowDocker, network, webService, webPeerNetwork });
   setMetaFlag(name, 'DOCKER', allowDocker ? '1' : '0');
   setMetaFlag(name, 'NETWORK', network);
 

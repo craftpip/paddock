@@ -985,6 +985,10 @@ app.post('/api/agents/:name/settings', async (req, res) => {
 
     setImmediate(async () => {
       registry.setRestarting(name, true);
+      // Read the active web binding BEFORE the regen so it can be re-applied
+      // for the new network below — a published web app must survive a network
+      // switch, not silently break (web.json is only touched by applyWebServices).
+      const webService = vm.readWebService(name);
       try {
         await logStore.capture(name);
         if (wasRunning) {
@@ -997,9 +1001,20 @@ app.post('/api/agents/:name/settings', async (req, res) => {
         if (dockerChanged) summary.push(`allowDocker=${newAllow}`);
         if (networkChanged) summary.push(`network=${newNetwork || 'default'}`);
         log('system', `Applying settings: ${summary.join(', ')}`);
+        if (webService) {
+          log('system', `Web app is published (host port ${webService.hostPort}) — keeping it live across the change`);
+        }
 
-        vm.applySettings(name, { allowDocker: newAllow, network: newNetwork });
+        await vm.applySettings(name, { allowDocker: newAllow, network: newNetwork });
         registry.dockerPsList(true);
+
+        // Leaving peer mode: the socat door is orphaned and still holds the host
+        // port the agent is about to publish — it must go BEFORE the recreate,
+        // or the agent's port bind fails ("port is already allocated").
+        if (webService && !newNetwork) {
+          log('system', `Network is default — removing the ${vm.webDoorName(name)} forwarding door`);
+          await runCmd('docker', ['rm', '-f', vm.webDoorName(name)], { timeout: 30000 }).catch(() => {});
+        }
 
         if (needRebuild) {
           log('system', 'Image has no docker CLI — rebuilding it with the docker CLI, then recreating…');
@@ -1012,6 +1027,40 @@ app.post('/api/agents/:name/settings', async (req, res) => {
           step('recreate', 'start');
           await runCmdStream('docker', ['compose', '-f', vm.instanceComposePath(name), 'up', '-d', '--no-deps', '--force-recreate', name], { onLog: log, timeout: 300000 });
           step('recreate', 'end');
+        }
+
+        // A published web app rides the settings change: applySettings kept
+        // web.json in the regenerated compose, so the door/ports now target the
+        // NEW network. Reconcile the socat door (force-recreate on a network
+        // change so it picks up the new peer, plain up otherwise, drop it when
+        // leaving peer mode) and re-verify the server — the boot hook in start.sh
+        // restarts it inside the new namespace.
+        if (webService) {
+          if (newNetwork) {
+            const doorArgs = ['compose', '-f', vm.instanceComposePath(name), 'up', '-d', '--no-deps'];
+            if (networkChanged) doorArgs.push('--force-recreate');
+            doorArgs.push(vm.webDoorName(name));
+            await runCmdStream('docker', doorArgs, { onLog: log, timeout: 180000 });
+          } else {
+            await runCmd('docker', ['rm', '-f', vm.webDoorName(name)], { timeout: 30000 }).catch(() => {});
+          }
+          if (wasRunning) {
+            step('web-verify', 'start');
+            try {
+              const hookPath = `${drivers.getDriver(agentType).dataDir}/start-web.sh`;
+              await runCmd('docker', ['exec', name, 'bash', hookPath], { timeout: 20000 }).catch(() => {});
+              let up = false;
+              for (let i = 0; i < 20 && !up; i++) {
+                if (await webPortReachable(name, webService.containerPort)) up = true;
+                else await new Promise((r) => setTimeout(r, 1000));
+              }
+              if (up) log('system', `Web app re-verified live at http://10.69.1.164:${webService.hostPort}`);
+              else log('system', `WARNING: web app not up on port ${webService.containerPort} after the change — re-publish from the Web tab if needed`);
+            } catch {
+              log('system', 'WARNING: could not re-verify web app — check the Web tab');
+            }
+            step('web-verify', 'end');
+          }
         }
 
         if (!wasRunning) {
@@ -1030,9 +1079,17 @@ app.post('/api/agents/:name/settings', async (req, res) => {
         // Roll settings back so the agent stays usable, then bring it back up
         // if it was running.
         try {
-          vm.applySettings(name, { allowDocker: oldAllow, network: oldNetwork });
+          await vm.applySettings(name, { allowDocker: oldAllow, network: oldNetwork });
+          // Same ordering rule as the happy path: the door must be gone before
+          // the agent recreate when rolling back to the default network, or the
+          // agent's port bind collides with the still-running door.
+          if (webService && !oldNetwork) {
+            await runCmd('docker', ['rm', '-f', vm.webDoorName(name)], { timeout: 30000 }).catch(() => {});
+          }
           if (wasRunning) {
-            await runCmd('docker', ['compose', '-f', vm.instanceComposePath(name), 'up', '-d', '--no-deps', '--force-recreate', name], { timeout: 180000 });
+            const rollbackSvc = [name];
+            if (webService && oldNetwork) rollbackSvc.push(vm.webDoorName(name));
+            await runCmdStream('docker', ['compose', '-f', vm.instanceComposePath(name), 'up', '-d', '--no-deps', '--force-recreate', ...rollbackSvc], { onLog: log, timeout: 180000 });
           }
           registry.dockerPsList(true);
         } catch {}

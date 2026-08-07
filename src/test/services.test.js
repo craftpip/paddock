@@ -247,3 +247,43 @@ describe('vm-manager - Web door compose generation', () => {
     assert.ok(yaml.includes('TCP:127.0.0.1:8080'));
   });
 });
+
+describe('vm-manager - applySettings keeps a published web app alive', () => {
+  const TMP = '/tmp/vmtest-' + Date.now();
+  process.env.WORKSPACE_ROOT = TMP;
+  process.env.HOST_WORKSPACE_ROOT = TMP;
+  delete require.cache[require.resolve('../services/vm-manager')];
+  const vm = require('../services/vm-manager');
+
+  it('re-applies the web binding for the new network on a network switch', async () => {
+    const instDir = path.join(TMP, 'instances', 'pad-x');
+    fs.mkdirSync(instDir, { recursive: true });
+    fs.writeFileSync(path.join(instDir, 'meta.env'), 'AGENT=opencode\nPORT=22001\nROOT_PASSWORD=pass\n');
+    fs.writeFileSync(path.join(instDir, 'web.json'), JSON.stringify({ containerPort: 8080, hostPort: '43818' }));
+
+    // Default network → the web port is published directly on the agent.
+    await vm.applySettings('pad-x', { allowDocker: false, network: '' });
+    let yaml = fs.readFileSync(path.join(instDir, 'docker-compose.yml'), 'utf8');
+    assert.ok(yaml.includes('"43818:8080"'), 'web port published on default network');
+    assert.ok(!yaml.includes('pad-x-web'), 'no door on default network');
+
+    // Switch to a network peer → the ports block leaves the agent and the
+    // socat door takes over (in the sandbox getPeerNetworkName fails → the
+    // host-mode door render, which is still a valid door).
+    await vm.applySettings('pad-x', { allowDocker: false, network: 'gluetun-global' });
+    yaml = fs.readFileSync(path.join(instDir, 'docker-compose.yml'), 'utf8');
+    const agentBlock = yaml.slice(yaml.indexOf('  pad-x:'), yaml.indexOf('  pad-x-web:'));
+    assert.ok(!agentBlock.includes('ports:'), 'no ports block in peer mode');
+    assert.ok(yaml.includes('pad-x-web:'), 'door present in peer mode');
+    assert.ok(/command: TCP-LISTEN:8080,.* TCP:/.test(yaml), 'door forwards to a TCP target');
+  });
+
+  it('regen without an active binding stays doorless', async () => {
+    const instDir = path.join(TMP, 'instances', 'pad-x');
+    fs.rmSync(path.join(instDir, 'web.json'));
+    await vm.applySettings('pad-x', { allowDocker: false, network: 'gluetun-global' });
+    const yaml = fs.readFileSync(path.join(instDir, 'docker-compose.yml'), 'utf8');
+    assert.ok(!yaml.includes('pad-x-web'), 'no door without a web binding');
+    fs.rmSync(TMP, { recursive: true, force: true });
+  });
+});
