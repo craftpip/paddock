@@ -792,6 +792,13 @@ Terminal appeared small/constrained because xterm.js FitAddon calls `fit()` befo
 - `hermes gateway run` keeps the container alive (cron + platforms); needs
   `HERMES_ALLOW_ROOT_GATEWAY=1` in the Dockerfile. `hermes update` refuses to
   run inside Docker → `availableVersion: ''`.
+- **The base image's `/etc/profile` resets PATH to base dirs for login shells**
+  — `docker exec` works (image `ENV PATH` includes `/opt/hermes/bin`), but the
+  webui terminal/tmux spawn login shells (`/bin/bash`) and could NOT find
+  `hermes`. Fix: Dockerfile writes `/etc/profile.d/hermes-path.sh` that
+  re-appends `/opt/hermes/bin:/opt/hermes/.venv/bin:/opt/data/.local/bin` to
+  PATH for login shells. Always verify commands from a login shell
+  (`bash -lc`) and through the actual terminal WS, not just `docker exec`.
 - The base image already ships the docker CLI — the `INSTALL_DOCKER=1` rebuild
   is a no-op and the settings flow correctly skips it (verified).
 - Workspace IS the data dir: `workspaceDir: '/opt/data'` (no `workspace/`
@@ -802,6 +809,29 @@ Terminal appeared small/constrained because xterm.js FitAddon calls `fit()` befo
   `agents.defaults.model_name`, openclaw reads `agents.defaults.model.primary`.
 - `hermes model` is interactive-only (needs TTY). `doctor`, `cron list`,
   `skills list`, `sessions list`, `mcp list`, `memory status` all work.
+- **Restart the webui after adding/editing a driver file** (Node caches
+  `require()` at startup — a stale process builds the wrong image via the
+  openclaw-driver fallback).
+
+## Codex Driver (Goal 5 — 2026-08-07)
+
+- codex (OpenAI Codex CLI) has its own CLI `codex` — **no `openclaw` binary**.
+  The npm package `@openai/codex` is a thin wrapper that spawns a native Rust
+  binary from `@openai/codex-linux-x64` (auto-installed optional dep). No
+  gateway daemon — container keeps alive via `tail -f /dev/null`.
+- Version: `codex --version` → `codex-cli 0.147.0` — parse with a
+  `\d+\.\d+\.\d+` regex. `availableVersion: ''` (no base label).
+- Config is **TOML** at `/root/.codex/config.toml` (driver `configFile:
+  'config.toml'`, `configFormat: 'toml'`). Any non-`'json'` configFormat makes
+  the config GET/POST routes serve/write the file verbatim (same path as
+  hermes' yaml) and the ConfigTab skips JSON validation.
+- Workspace: `workspaceDir: '/root/.codex/workspace'`. Terminal `pwd` lands
+  there; host bind `instances/<pad>/codex` → `/root/.codex`.
+- Docker toggle: `INSTALL_DOCKER=1` build arg installs `docker.io`; the
+  settings route auto-rebuilds when the CLI is missing (verified — detected,
+  rebuilt, recreated, docker works from inside).
+- `codex exec` (non-interactive) works for scripts; `codex` interactively is
+  the TUI in the terminal tab.
 - **Restart the webui after adding/editing a driver file** (Node caches
   `require()` at startup — a stale process builds the wrong image via the
   openclaw-driver fallback).

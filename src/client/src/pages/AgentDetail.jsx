@@ -560,7 +560,7 @@ function WorkspaceTab({ agent }) {
   }
 
   const ext = fileModal ? '.' + (fileModal.name || '').split('.').pop()?.toLowerCase() : ''
-  const editable = ['.txt', '.md', '.json', '.js', '.ts', '.jsx', '.tsx', '.py', '.rb', '.go', '.rs', '.java', '.c', '.cpp', '.css', '.html', '.xml', '.yaml', '.yml', '.toml', '.ini', '.conf', '.sh', '.bash', '.env', '.log', '.csv', '.sql', '.ejs', '.vue', '.svelte', '.gitignore'].includes(ext)
+  const editable = !!fileModal && !/[\u0000]/.test((fileModal.content || '').slice(0, 4096))
 
   useEffect(() => {
     if (!fileModal) return
@@ -775,6 +775,9 @@ function WorkspaceTab({ agent }) {
                   <span className={`text-xs ml-2 ${jsonError ? 'text-red-400' : fileSaved ? 'text-emerald-400' : fileDirty ? 'text-amber-400' : 'text-slate-600'}`}>
                     {jsonError || (fileSaved ? 'Saved' : fileDirty ? 'Unsaved' : '')}
                   </span>
+                )}
+                {!editable && (
+                  <span className="text-xs text-slate-500 ml-2">Binary file — read-only</span>
                 )}
               </div>
               <div className="flex items-center gap-2">

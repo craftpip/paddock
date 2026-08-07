@@ -23,6 +23,16 @@ RUN apt-get update && \
     sqlite3 && \
     rm -rf /var/lib/apt/lists/*
 
+# The base image's /etc/profile resets PATH to base dirs for login shells,
+# dropping the hermes bin dirs that only live in the image's ENV PATH. The
+# webui terminal and tmux spawn login shells (/bin/bash), so `hermes` would
+# not be found there. Re-append the hermes dirs from profile.d.
+RUN printf '%s\n' \
+    'if [ -n "${HERMES_HOME:-}" ] || [ -d /opt/hermes/bin ]; then' \
+    '  export PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/opt/data/.local/bin:$PATH"' \
+    'fi' > /etc/profile.d/hermes-path.sh && \
+    chmod +x /etc/profile.d/hermes-path.sh
+
 RUN if [ "$INSTALL_DOCKER" = "1" ]; then \
       apt-get update && \
       apt-get install -y --no-install-recommends docker.io && \
