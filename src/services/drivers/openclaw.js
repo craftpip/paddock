@@ -41,14 +41,14 @@ const OPENCLAW = {
   /** Command groups served to the Commands tab (`/api/agent-types/openclaw/commands`). */
   commands: [
     {
-      title: 'Memory', color: 'violet',
+      title: 'Memory', color: 'brand',
       commands: [
         { cmd: 'openclaw memory status', label: 'Check index health', desc: 'Health check — memory index status' },
         { cmd: 'openclaw memory promote --apply', label: 'Promote memories', desc: 'Short-term → MEMORY.md', confirm: true },
       ],
     },
     {
-      title: 'Config', color: 'teal',
+      title: 'Config', color: 'info',
       commands: [
         { cmd: 'openclaw config validate', label: 'Validate config', desc: 'Check config against schema' },
         { cmd: 'openclaw config file', label: 'Show config path', desc: 'Show active config path' },
@@ -65,7 +65,7 @@ const OPENCLAW = {
       ],
     },
     {
-      title: 'Security', color: 'rose',
+      title: 'Security', color: 'danger',
       commands: [
         { cmd: 'openclaw security audit', label: 'Run audit', desc: 'Cold security audit' },
         { cmd: 'openclaw security audit --deep', label: 'Run deep audit', desc: 'Live probes' },
@@ -73,7 +73,7 @@ const OPENCLAW = {
       ],
     },
     {
-      title: 'Doctor', color: 'amber',
+      title: 'Doctor', color: 'warning',
       commands: [
         { cmd: 'openclaw doctor', label: 'Run doctor', desc: 'Health check — diagnose system status' },
         { cmd: 'openclaw doctor --fix', label: 'Auto-fix issues', desc: 'Auto-repair issues', confirm: true },
@@ -83,7 +83,7 @@ const OPENCLAW = {
       ],
     },
     {
-      title: 'Diagnostics', color: 'cyan',
+      title: 'Diagnostics', color: 'accent',
       commands: [
         { cmd: 'openclaw status', label: 'Check agent status', desc: 'Health check — agent overview + gateway state' },
         { cmd: 'openclaw gateway status', label: 'Check gateway status', desc: 'Health check — bind, port + connectivity' },

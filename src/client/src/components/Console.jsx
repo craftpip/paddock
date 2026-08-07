@@ -34,36 +34,36 @@ export default function Console({
   }, [lines, autoScroll])
 
   return (
-    <div className={`flex flex-col border border-slate-800 rounded-lg overflow-hidden ${className}`}>
+    <div className={`flex flex-col border border-line-faint rounded-lg overflow-hidden ${className}`}>
       {(headerRight || onClear || label) && (
-        <div className="flex items-center justify-between px-3 py-1.5 border-b border-slate-800 bg-slate-900/50">
-          <span className="text-[10px] text-slate-500 font-medium">
+        <div className="flex items-center justify-between px-3 py-1.5 border-b border-line-faint bg-canvas/50">
+          <span className="text-[10px] text-ink-dim font-medium">
             {label}
-            {runningCmd && <span className="text-cyan-400 ml-2">⏳ {runningCmd}</span>}
+            {runningCmd && <span className="text-accent-text ml-2">⏳ {runningCmd}</span>}
           </span>
           <div className="flex items-center gap-2">
             {headerRight}
             {onClear && (
-              <button onClick={onClear} className="text-[10px] text-slate-500 hover:text-slate-300 transition-colors">Clear</button>
+              <button onClick={onClear} className="text-[10px] text-ink-dim hover:text-ink-muted transition-colors">Clear</button>
             )}
           </div>
         </div>
       )}
       {children}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto p-2 bg-slate-950 font-mono text-[10px] leading-relaxed">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto p-2 bg-sunken font-mono text-[10px] leading-relaxed">
         {lines.length === 0 && (
-          <p className="text-slate-600">{emptyMessage}</p>
+          <p className="text-ink-dim">{emptyMessage}</p>
         )}
         {lines.map((line, i) => (
           <div key={i} className="whitespace-pre-wrap break-all">
             {line.type === 'cmd' ? (
-              <span><span className="text-slate-500">{line.ts}</span> <span className="text-cyan-400">$ {line.cmd}</span></span>
+              <span><span className="text-ink-dim">{line.ts}</span> <span className="text-accent-text">$ {line.cmd}</span></span>
             ) : line.type === 'err' ? (
-              <span className="text-red-400">{line.text}</span>
+              <span className="text-danger">{line.text}</span>
             ) : line.type === 'sys' ? (
-              <span className="text-slate-500 italic">{line.text}</span>
+              <span className="text-ink-dim italic">{line.text}</span>
             ) : (
-              <span className="text-slate-300">{line.text}</span>
+              <span className="text-ink-muted">{line.text}</span>
             )}
           </div>
         ))}

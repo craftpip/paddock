@@ -191,36 +191,36 @@ export default function CreateAgent() {
 
   return (
     <div className="max-w-3xl mx-auto px-4 sm:px-6 py-8">
-      <nav className="flex items-center gap-2 text-sm text-slate-400 mb-6">
-        <Link to="/agents" className="hover:text-white transition-colors">Dashboard</Link>
+      <nav className="flex items-center gap-2 text-sm text-ink-faint mb-6">
+        <Link to="/agents" className="hover:text-ink transition-colors">Dashboard</Link>
         <span>/</span>
-        <span className="text-white">Create Agent</span>
+        <span className="text-ink">Create Agent</span>
       </nav>
 
       <h1 className="text-2xl font-bold mb-8">Create Agent</h1>
 
       {phase === 'idle' ? (
         <form onSubmit={handleSubmit} className="space-y-6">
-          <div className="bg-slate-800/60 border border-slate-700 rounded-xl p-5">
+          <div className="bg-panel/60 border border-line rounded-xl p-5">
             <div className="flex items-center gap-2">
-              <span className="text-sm font-medium text-slate-400">{prefix}-</span>
+              <span className="text-sm font-medium text-ink-faint">{prefix}-</span>
               <select value={agentType} onChange={(e) => setAgentType(e.target.value)}
-                      className="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-500 w-36">
+                      className="bg-raised border border-line-faint rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line w-36">
                 {agentTypes.length > 0
                   ? agentTypes.map((t) => <option key={t.type} value={t.type}>{t.type}</option>)
                   : <option value="openclaw">openclaw</option>}
               </select>
-              <span className="text-sm text-slate-500">-</span>
+              <span className="text-sm text-ink-dim">-</span>
               <input type="text" value={name} onChange={(e) => setName(e.target.value)} required
                      placeholder="my-agent"
-                     className="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 placeholder-slate-500" />
+                     className="flex-1 bg-raised border border-line-faint rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line focus:ring-1 focus:ring-accent-line placeholder-ink-dim" />
             </div>
           </div>
 
-          <div className="bg-slate-800/60 border border-slate-700 rounded-xl p-5">
-            <label className="block text-xs font-medium text-slate-400 mb-2 uppercase tracking-wider">Clone from backup (optional)</label>
+          <div className="bg-panel/60 border border-line rounded-xl p-5">
+            <label className="block text-xs font-medium text-ink-faint mb-2 uppercase tracking-wider">Clone from backup (optional)</label>
             <select value={backupFile} onChange={(e) => setBackupFile(e.target.value)}
-                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-500">
+                    className="w-full bg-raised border border-line-faint rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line">
               <option value="">No clone — Fresh install</option>
               {filteredBackups.map((b) => (
                 <option key={b.file} value={b.file}>
@@ -229,48 +229,48 @@ export default function CreateAgent() {
               ))}
             </select>
             {!isClone && (
-              <p className="text-xs text-slate-500 mt-2">
+              <p className="text-xs text-ink-dim mt-2">
                 {hasSetup
-                  ? <>Fresh installs run <code className="text-slate-400">{currentType.setupSteps.map((s) => s.cmd).join(', ')}</code> as part of creation.</>
+                  ? <>Fresh installs run <code className="text-ink-faint">{currentType.setupSteps.map((s) => s.cmd).join(', ')}</code> as part of creation.</>
                   : 'Fresh installs skip any setup step — the container just boots.'}
               </p>
             )}
           </div>
 
           <button type="submit" disabled={!name}
-                  className="w-full bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-semibold py-3.5 rounded-xl transition-all duration-200 shadow-lg shadow-cyan-900/30 disabled:opacity-50">
+                  className="w-full bg-gradient-to-r from-accent to-accent-deep hover:from-accent-hover hover:to-accent-deep text-accent-ink font-semibold py-3.5 rounded-xl transition-all duration-200 shadow-lg shadow-accent/25 disabled:opacity-50">
             Create {fullName}
           </button>
         </form>
       ) : (
         <div className="space-y-4">
           <div className="flex items-center justify-between">
-            <div className="text-sm text-slate-400">
+            <div className="text-sm text-ink-faint">
               {phase === 'creating' && (
                 <>
-                  <span className="inline-block w-3 h-3 rounded-full border-2 border-cyan-400 border-t-transparent animate-spin mr-2 align-middle" />
-                  Creating <span className="text-white font-medium">{jobName}</span>…
+                  <span className="inline-block w-3 h-3 rounded-full border-2 border-accent-line border-t-transparent animate-spin mr-2 align-middle" />
+                  Creating <span className="text-ink font-medium">{jobName}</span>…
                 </>
               )}
               {phase === 'done' && (
-                <span className="text-emerald-400 font-medium">
+                <span className="text-success font-medium">
                   {isClone ? 'Agent created! Taking you to the dashboard…' : 'Agent created! Setup complete.'}
                 </span>
               )}
               {phase === 'failed' && (
-                <span className="text-red-400 font-medium">Create failed</span>
+                <span className="text-danger font-medium">Create failed</span>
               )}
             </div>
             {phase !== 'creating' && (
               <button onClick={resetForm}
-                      className="text-sm text-slate-400 hover:text-white transition-colors">
+                      className="text-sm text-ink-faint hover:text-ink transition-colors">
                 ← Back to form
               </button>
             )}
           </div>
 
           {phase === 'failed' && (
-            <div className="bg-red-900/50 border border-red-800 rounded-xl p-4 text-sm text-red-400">{error}</div>
+            <div className="bg-danger-soft border border-danger-line rounded-xl p-4 text-sm text-danger">{error}</div>
           )}
 
           <Console
@@ -283,7 +283,7 @@ export default function CreateAgent() {
 
           {phase === 'done' && !isClone && (
             <button onClick={() => navigate('/agents/' + jobName)}
-                    className="w-full bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-semibold py-3.5 rounded-xl transition-all duration-200 shadow-lg shadow-emerald-900/30">
+                    className="w-full bg-gradient-to-r from-accent to-accent-deep hover:from-accent-hover hover:to-accent-deep text-accent-ink font-semibold py-3.5 rounded-xl transition-all duration-200 shadow-lg shadow-accent/25">
               Go to {jobName}
             </button>
           )}

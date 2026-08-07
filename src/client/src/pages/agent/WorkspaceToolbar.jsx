@@ -130,51 +130,51 @@ export default function WorkspaceToolbar({
   }
 
   return (
-    <div className="rounded-lg bg-slate-800 p-1.5 w-full mb-2" title="Browse (Container/Host), create files/folders, or upload">
+    <div className="rounded-lg bg-panel p-1.5 w-full mb-2" title="Browse (Container/Host), create files/folders, or upload">
       {/* Row 1 — navigation */}
       <div ref={wrapRef} className="flex items-center gap-1.5 min-w-0">
-        <div className="flex items-center rounded-md bg-slate-950/60 p-0.5 shrink-0">
+        <div className="flex items-center rounded-md bg-sunken/60 p-0.5 shrink-0">
           <button onClick={() => onSwitchScope('container')} disabled={!containerAvailable}
-                  className={`inline-flex items-center h-7 px-3 rounded-md text-xs font-medium transition-colors whitespace-nowrap ${scope === 'container' ? 'bg-cyan-600 text-white' : 'text-slate-300 hover:text-white'} ${!containerAvailable ? 'opacity-40 cursor-not-allowed' : ''}`}>
+                  className={`inline-flex items-center h-7 px-3 rounded-md text-xs font-medium transition-colors whitespace-nowrap ${scope === 'container' ? 'bg-accent text-accent-ink' : 'text-ink-muted hover:text-ink'} ${!containerAvailable ? 'opacity-40 cursor-not-allowed' : ''}`}>
             Container
           </button>
           <button onClick={() => onSwitchScope('host')}
-                  className={`inline-flex items-center h-7 px-3 rounded-md text-xs font-medium transition-colors whitespace-nowrap ${scope === 'host' ? 'bg-cyan-600 text-white' : 'text-slate-300 hover:text-white'}`}>
+                  className={`inline-flex items-center h-7 px-3 rounded-md text-xs font-medium transition-colors whitespace-nowrap ${scope === 'host' ? 'bg-accent text-accent-ink' : 'text-ink-muted hover:text-ink'}`}>
             Host
           </button>
         </div>
-        <span className="w-px h-7 bg-slate-700 mx-0.5 shrink-0" />
+        <span className="w-px h-7 bg-raised mx-0.5 shrink-0" />
         <button onClick={onGoUp} disabled={isNavRoot}
                 title="Go up one level"
-                className="flex items-center justify-center w-7 h-7 rounded-md text-slate-400 hover:text-white hover:bg-slate-700 disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-not-allowed transition-colors shrink-0">
+                className="flex items-center justify-center w-7 h-7 rounded-md text-ink-faint hover:text-ink hover:bg-raised disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-not-allowed transition-colors shrink-0">
           <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M5 15l7-7 7 7" /></svg>
         </button>
         <form onSubmit={(e) => { e.preventDefault(); onGo(pathDraft) }}
               className="flex flex-1 items-center gap-1.5 min-w-0 px-1">
-          <svg className="w-5 h-5 text-slate-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>
+          <svg className="w-5 h-5 text-ink-dim shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>
           <input
             ref={pathInputRef}
             value={pathDraft}
             onChange={(e) => setPathDraft(e.target.value)}
             spellCheck={false}
             placeholder="/"
-            className="flex-1 min-w-0 bg-transparent text-xs text-white font-mono placeholder-slate-600 focus:outline-none"
+            className="flex-1 min-w-0 bg-transparent text-xs text-ink font-mono placeholder-ink-dim focus:outline-none"
           />
           <button type="submit"
-                  className="inline-flex items-center h-7 px-3 bg-cyan-600 hover:bg-cyan-500 text-white rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0">
+                  className="inline-flex items-center h-7 px-3 bg-accent hover:bg-accent-hover text-accent-ink rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0">
             Go
           </button>
         </form>
-        <span className="w-px h-7 bg-slate-700 mx-0.5 shrink-0" />
-        <div className="flex items-center rounded-md bg-slate-950/60 p-0.5 shrink-0">
+        <span className="w-px h-7 bg-raised mx-0.5 shrink-0" />
+        <div className="flex items-center rounded-md bg-sunken/60 p-0.5 shrink-0">
           <button ref={btnRef} onClick={toggle}
                   title="Create a file/folder or upload"
-                  className={`flex items-center justify-center w-7 h-7 rounded-md transition-colors shrink-0 ${open ? 'bg-cyan-950/40 text-cyan-300' : 'text-slate-300 hover:text-white hover:bg-slate-700'}`}>
+                  className={`flex items-center justify-center w-7 h-7 rounded-md transition-colors shrink-0 ${open ? 'bg-accent-soft text-accent-text' : 'text-ink-muted hover:text-ink hover:bg-raised'}`}>
             <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M5 12h14" /></svg>
           </button>
           <button onClick={onHome}
                   title="Go to the workspace"
-                  className="inline-flex items-center h-7 gap-1.5 pl-1.5 pr-3 rounded-md text-xs text-slate-300 hover:text-white hover:bg-slate-700 transition-colors whitespace-nowrap">
+                  className="inline-flex items-center h-7 gap-1.5 pl-1.5 pr-3 rounded-md text-xs text-ink-muted hover:text-ink hover:bg-raised transition-colors whitespace-nowrap">
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20C12 13 15 9.5 19 5" /><path d="M19 5L14.5 6.5" /><path d="M19 5L18.5 10" /></svg>
             Workspace
           </button>
@@ -183,21 +183,21 @@ export default function WorkspaceToolbar({
         {/* "+" popup */}
         {open && anchor && (
           <div
-            className="fixed z-50 w-80 rounded-lg border border-slate-700 bg-slate-900 shadow-xl overflow-hidden"
+            className="fixed z-50 w-80 rounded-lg border border-line bg-sunken shadow-xl overflow-hidden"
             style={{ top: anchor.bottom + 6, right: Math.max(8, window.innerWidth - anchor.right) }}
           >
-            <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-slate-800">
-              <span className="text-xs font-medium text-slate-300 whitespace-nowrap">New entry</span>
-              <span className="text-[10px] text-slate-500 font-mono truncate">into {path}</span>
+            <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-line-faint">
+              <span className="text-xs font-medium text-ink-muted whitespace-nowrap">New entry</span>
+              <span className="text-[10px] text-ink-dim font-mono truncate">into {path}</span>
             </div>
 
-            <form onSubmit={submitCreate} className="flex items-center gap-1.5 px-2 py-2 border-b border-slate-800"
+            <form onSubmit={submitCreate} className="flex items-center gap-1.5 px-2 py-2 border-b border-line-faint"
                   title="Name with a dot (e.g. notes.md) creates a file; a name without a dot creates a folder">
               <input ref={createInputRef} type="text" value={createName} onChange={(e) => setCreateName(e.target.value)}
                      placeholder="notes.md = file · notes = folder"
-                     className="flex-1 min-w-0 px-2 py-1.5 rounded-lg text-xs bg-slate-950 border border-slate-700 text-white focus:border-cyan-500 focus:outline-none placeholder-slate-600" />
+                     className="flex-1 min-w-0 px-2 py-1.5 rounded-lg text-xs bg-sunken border border-line text-ink focus:border-accent-line focus:outline-none placeholder-ink-dim" />
               <button type="submit" disabled={!createName.trim()}
-                      className="px-3 py-1.5 rounded-lg text-xs bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-700 disabled:text-slate-500 text-white transition-colors whitespace-nowrap">
+                      className="px-3 py-1.5 rounded-lg text-xs bg-accent hover:bg-accent-hover disabled:bg-raised disabled:text-ink-dim text-accent-ink transition-colors whitespace-nowrap">
                 Create
               </button>
             </form>
@@ -207,16 +207,16 @@ export default function WorkspaceToolbar({
                  onDragLeave={(e) => { e.stopPropagation(); setDragOver(false) }}
                  onDrop={handleDrop}>
               <button onClick={() => fileInputRef.current?.click()}
-                      className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-slate-300 hover:text-white hover:bg-slate-800 transition-colors">
-                <svg className="w-4 h-4 text-slate-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
+                      className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-ink-muted hover:text-ink hover:bg-panel transition-colors">
+                <svg className="w-4 h-4 text-ink-dim shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
                 Upload file
               </button>
               <button onClick={() => folderInputRef.current?.click()}
-                      className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-slate-300 hover:text-white hover:bg-slate-800 transition-colors">
-                <svg className="w-4 h-4 text-slate-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>
+                      className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-ink-muted hover:text-ink hover:bg-panel transition-colors">
+                <svg className="w-4 h-4 text-ink-dim shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>
                 Upload folder
               </button>
-              <div className={`mt-1.5 px-2.5 py-3 rounded-lg border border-dashed text-center text-[11px] transition-colors ${dragOver ? 'border-cyan-400 bg-cyan-950/20 text-cyan-300' : 'border-slate-700 text-slate-500'}`}>
+              <div className={`mt-1.5 px-2.5 py-3 rounded-lg border border-dashed text-center text-[11px] transition-colors ${dragOver ? 'border-accent-line bg-accent-soft text-accent-text' : 'border-line text-ink-dim'}`}>
                 Drag &amp; drop files or folders here
               </div>
               <input ref={fileInputRef} type="file" multiple className="hidden" onChange={pickFiles} />
@@ -228,9 +228,9 @@ export default function WorkspaceToolbar({
 
       {/* Row 2 — ephemeral upload progress (bar only, hides when done) */}
       {uploading && (
-        <div className="mt-1.5 pt-1.5 border-t border-slate-700/60">
-          <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
-            <div className="h-full bg-cyan-500 rounded-full transition-all" style={{ width: (uploadPct || 0) + '%' }} />
+        <div className="mt-1.5 pt-1.5 border-t border-line/60">
+          <div className="h-1.5 bg-raised rounded-full overflow-hidden">
+            <div className="h-full bg-accent rounded-full transition-all" style={{ width: (uploadPct || 0) + '%' }} />
           </div>
         </div>
       )}

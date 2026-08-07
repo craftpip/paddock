@@ -92,8 +92,8 @@ export default function Dashboard() {
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-8">
       <div id="agents-header" className="flex items-center justify-between mb-8">
         <div>
-          <h1 className="text-2xl font-bold text-white">Agent Fleet</h1>
-          <p className="text-slate-400 text-sm mt-1">
+          <h1 className="text-2xl font-bold text-ink">Agent Fleet</h1>
+          <p className="text-ink-faint text-sm mt-1">
             {stats.total} agents &middot; {stats.running} running &middot; {stats.stopped} stopped
           </p>
         </div>
@@ -104,40 +104,40 @@ export default function Dashboard() {
             placeholder="Search agents..."
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            className="px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white w-48 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+            className="px-3 py-2 bg-sunken border border-line rounded-lg text-sm text-ink w-48 focus:border-accent-line focus:outline-none focus:ring-1 focus:ring-accent-line"
           />
           <a
             href="/agents/create"
-            className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-sm font-medium transition-colors whitespace-nowrap"
+            className="px-4 py-2 bg-accent hover:bg-accent-hover text-accent-ink rounded-lg text-sm font-medium transition-colors whitespace-nowrap"
           >
             + New Agent
           </a>
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-4 mb-6 px-4 py-3 border border-slate-800 rounded-xl bg-slate-900/50">
-        <span className="text-xs text-slate-500 font-medium">Fleet Resources</span>
-        <span className="w-px h-4 bg-slate-700" />
+      <div className="flex flex-wrap items-center gap-4 mb-6 px-4 py-3 border border-line-faint rounded-xl bg-canvas/50">
+        <span className="text-xs text-ink-dim font-medium">Fleet Resources</span>
+        <span className="w-px h-4 bg-raised" />
         <span className="flex items-center gap-2">
-          <span className="w-2 h-2 rounded-full bg-cyan-500" />
-          <span className="text-xs text-slate-400">CPU avg</span>
+          <span className="w-2 h-2 rounded-full bg-accent" />
+          <span className="text-xs text-ink-faint">CPU avg</span>
           {fleetLoading
             ? <span className="skeleton h-5 w-10 rounded" />
-            : <span className="text-sm font-mono text-white">{avgCpu}%</span>}
+            : <span className="text-sm font-mono text-ink">{avgCpu}%</span>}
         </span>
         <span className="flex items-center gap-2">
-          <span className="w-2 h-2 rounded-full bg-emerald-500" />
-          <span className="text-xs text-slate-400">Mem</span>
+          <span className="w-2 h-2 rounded-full bg-success" />
+          <span className="text-xs text-ink-faint">Mem</span>
           {fleetLoading
             ? <span className="skeleton h-5 w-24 rounded" />
-            : <span className="text-sm font-mono text-white">{memText}</span>}
+            : <span className="text-sm font-mono text-ink">{memText}</span>}
         </span>
         <span className="flex items-center gap-2">
-          <span className="w-2 h-2 rounded-full bg-amber-500" />
-          <span className="text-xs text-slate-400">Containers</span>
+          <span className="w-2 h-2 rounded-full bg-warning" />
+          <span className="text-xs text-ink-faint">Containers</span>
           {fleetLoading
             ? <span className="skeleton h-5 w-10 rounded" />
-            : <span className="text-sm font-mono text-white">{fleetStats.length}</span>}
+            : <span className="text-sm font-mono text-ink">{fleetStats.length}</span>}
         </span>
       </div>
 
@@ -148,15 +148,15 @@ export default function Dashboard() {
       </div>
 
       {agents.length === 0 && (
-        <div className="text-center py-20 text-slate-500">
-          <svg className="w-12 h-12 mx-auto mb-4 text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5">
+        <div className="text-center py-20 text-ink-dim">
+          <svg className="w-12 h-12 mx-auto mb-4 text-ink-dim" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5">
             <path strokeLinecap="round" strokeLinejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
           </svg>
           <p className="text-lg mb-2">No agents yet</p>
           <p className="text-sm mb-4">Create your first agent to get started.</p>
           <a
             href="/agents/create"
-            className="inline-block px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-sm transition-colors"
+            className="inline-block px-4 py-2 bg-accent hover:bg-accent-hover text-accent-ink rounded-lg text-sm transition-colors"
           >
             + New Agent
           </a>
@@ -164,7 +164,7 @@ export default function Dashboard() {
       )}
 
       {agents.length > 0 && filtered.length === 0 && (
-        <div className="text-center py-20 text-slate-500">
+        <div className="text-center py-20 text-ink-dim">
           <p className="text-lg mb-2">No matching agents</p>
           <p className="text-sm">Try a different search term.</p>
         </div>

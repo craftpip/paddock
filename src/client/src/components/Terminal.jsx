@@ -341,7 +341,6 @@ const Terminal = forwardRef(function Terminal(
       fontSize,
       fontFamily: '"Cascadia Code", "Fira Code", monospace',
       scrollback: 10000,
-      theme: { background: '#0f172a', foreground: '#e2e8f0', cursor: '#22d3ee', selectionBackground: '#334155' },
     })
     term.loadAddon(fitAddon)
     term.open(containerRef.current)
@@ -893,17 +892,17 @@ const Terminal = forwardRef(function Terminal(
   )
 
   return (
-    <div className={`flex flex-col border border-slate-800 overflow-hidden bg-[#0f172a] ${fullscreen ? 'fixed inset-0 z-[100] rounded-none' : 'relative rounded-xl'} ${className}`}>
-      <div className="flex items-center justify-between px-4 py-2 border-b border-slate-800 bg-slate-900/80 select-none">
+    <div className={`flex flex-col border border-line-faint overflow-hidden bg-sunken ${fullscreen ? 'fixed inset-0 z-[100] rounded-none' : 'relative rounded-xl'} ${className}`}>
+      <div className="flex items-center justify-between px-4 py-2 border-b border-line-faint bg-sunken/80 select-none">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
-            <span className={`w-2 h-2 rounded-full ${connState === 'connected' ? 'bg-emerald-400' : connState === 'connecting' ? 'bg-amber-400' : 'bg-slate-600'}`} />
-            <span className="text-xs text-slate-400 font-medium min-w-[8rem] whitespace-nowrap shrink-0">
+            <span className={`w-2 h-2 rounded-full ${connState === 'connected' ? 'bg-success' : connState === 'connecting' ? 'bg-warning' : 'bg-line'}`} />
+            <span className="text-xs text-ink-faint font-medium min-w-[8rem] whitespace-nowrap shrink-0">
               {connState === 'connected' ? 'Terminal Connected' : connState === 'connecting' ? 'Terminal Connecting' : 'Terminal Disconnected'}
             </span>
           </div>
           {uiLocked && !cmdRunning && (
-            <span className="flex items-center gap-1.5 text-xs text-amber-400 font-medium">
+            <span className="flex items-center gap-1.5 text-xs text-warning font-medium">
               <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
                 <path d="M7 11V7a5 5 0 0 1 10 0v4" />
@@ -911,13 +910,13 @@ const Terminal = forwardRef(function Terminal(
               Locked
             </span>
           )}
-          <span className="w-px h-4 bg-slate-700" />
-          <span className="text-xs text-slate-300 font-mono">{dynTitle || title || name}</span>
+          <span className="w-px h-4 bg-raised" />
+          <span className="text-xs text-ink-muted font-mono">{dynTitle || title || name}</span>
           {shellBusy && !collapsed && (
             <button
               onClick={() => ref.current?.close()}
               title="Send Ctrl+C to interrupt the running command"
-              className="px-2 py-1 text-xs text-red-400 hover:text-white hover:bg-red-900/40 rounded transition-colors"
+              className="px-2 py-1 text-xs text-danger hover:text-ink hover:bg-danger-soft rounded transition-colors"
             >
               Stop Command
             </button>
@@ -928,31 +927,31 @@ const Terminal = forwardRef(function Terminal(
             <button
               onClick={toggleSessions}
               title="Terminal sessions"
-              className="flex items-center gap-1 px-2 py-0.5 text-xs font-mono text-slate-300 bg-slate-800/60 border border-slate-700 rounded hover:border-cyan-700 hover:text-cyan-300 transition-colors"
+              className="flex items-center gap-1 px-2 py-0.5 text-xs font-mono text-ink-muted bg-panel/60 border border-line rounded hover:border-accent-line hover:text-accent-text transition-colors"
             >
               <span className="max-w-[8rem] truncate">{sessionId}</span>
-              <svg className="w-3 h-3 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg className="w-3 h-3 text-ink-dim" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M6 9l6 6 6-6" />
               </svg>
             </button>
             {showSessions && (
-              <div className="absolute right-0 top-full mt-1 w-64 max-h-72 overflow-y-auto rounded-lg border border-slate-700 bg-slate-900 shadow-xl z-50">
-                <div className="flex items-center justify-between px-3 py-2 border-b border-slate-800">
-                  <span className="text-xs font-medium text-slate-300">Terminal sessions</span>
+              <div className="absolute right-0 top-full mt-1 w-64 max-h-72 overflow-y-auto rounded-lg border border-line bg-sunken shadow-xl z-50">
+                <div className="flex items-center justify-between px-3 py-2 border-b border-line-faint">
+                  <span className="text-xs font-medium text-ink-muted">Terminal sessions</span>
                   <button
                     onClick={refreshSessions}
                     title="Refresh session list"
-                    className="text-slate-500 hover:text-white text-xs px-1"
+                    className="text-ink-dim hover:text-ink text-xs px-1"
                   >
                     ↻
                   </button>
                 </div>
                 <div className="py-1">
                   {(sessionsLoading || !sessionsLoaded) && sessions.length === 0 && (
-                    <div className="px-3 py-2 text-xs text-slate-500">Loading…</div>
+                    <div className="px-3 py-2 text-xs text-ink-dim">Loading…</div>
                   )}
                   {!sessionsLoading && sessionsLoaded && sessions.length === 0 && (
-                    <div className="px-3 py-2 text-xs text-slate-500">No sessions yet.</div>
+                    <div className="px-3 py-2 text-xs text-ink-dim">No sessions yet.</div>
                   )}
                   {sessions.map((s) => {
                       const isCur = s.name === sessionId
@@ -960,15 +959,15 @@ const Terminal = forwardRef(function Terminal(
                         <div key={s.name} className="flex items-center group">
                           <button
                             onClick={() => switchSession(s.name)}
-                            className="flex-1 text-left px-3 py-1.5 text-xs font-mono text-slate-300 hover:bg-slate-800 hover:text-cyan-300 transition-colors truncate"
+                            className="flex-1 text-left px-3 py-1.5 text-xs font-mono text-ink-muted hover:bg-panel hover:text-accent-text transition-colors truncate"
                             title={`Switch to session ${s.name}`}
                           >
                             {s.name}
-                            {isCur && <span className="ml-2 text-[10px] text-cyan-400">current</span>}
+                            {isCur && <span className="ml-2 text-[10px] text-accent-text">current</span>}
                           </button>
                           <button
                             onClick={() => closeSession(s.name)}
-                            className="px-2 py-1.5 text-slate-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity text-xs"
+                            className="px-2 py-1.5 text-ink-dim hover:text-danger opacity-0 group-hover:opacity-100 transition-opacity text-xs"
                             title={`Close session ${s.name}`}
                           >
                             ×
@@ -977,10 +976,10 @@ const Terminal = forwardRef(function Terminal(
                       )
                     })}
                 </div>
-                <div className="border-t border-slate-800 p-1">
+                <div className="border-t border-line-faint p-1">
                   <button
                     onClick={newSession}
-                    className="w-full text-left px-3 py-1.5 text-xs text-cyan-400 hover:bg-slate-800 hover:text-cyan-300 rounded transition-colors"
+                    className="w-full text-left px-3 py-1.5 text-xs text-accent-text hover:bg-panel hover:text-accent-text rounded transition-colors"
                   >
                     + New session
                   </button>
@@ -988,21 +987,21 @@ const Terminal = forwardRef(function Terminal(
               </div>
             )}
           </div>
-          <span className="w-px h-4 bg-slate-700" />
-          <button onClick={() => setFontSize((s) => Math.max(10, s - 1))} className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">A-</button>
-          <span className="text-xs text-slate-600 w-6 text-center">{fontSize}</span>
-          <button onClick={() => setFontSize((s) => Math.min(24, s + 1))} className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">A+</button>
-          <span className="w-px h-4 bg-slate-700" />
-          <button onClick={() => ref.current?.clear()} className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">Clear</button>
-          <button onClick={reconnect} className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors">Reconnect</button>
+          <span className="w-px h-4 bg-raised" />
+          <button onClick={() => setFontSize((s) => Math.max(10, s - 1))} className="px-2 py-1 text-xs text-ink-faint hover:text-ink hover:bg-raised rounded transition-colors">A-</button>
+          <span className="text-xs text-ink-dim w-6 text-center">{fontSize}</span>
+          <button onClick={() => setFontSize((s) => Math.min(24, s + 1))} className="px-2 py-1 text-xs text-ink-faint hover:text-ink hover:bg-raised rounded transition-colors">A+</button>
+          <span className="w-px h-4 bg-raised" />
+          <button onClick={() => ref.current?.clear()} className="px-2 py-1 text-xs text-ink-faint hover:text-ink hover:bg-raised rounded transition-colors">Clear</button>
+          <button onClick={reconnect} className="px-2 py-1 text-xs text-ink-faint hover:text-ink hover:bg-raised rounded transition-colors">Reconnect</button>
 
           {onToggleCollapse && showCollapse && !fullscreen && (
             <>
-              <span className="w-px h-4 bg-slate-700" />
+              <span className="w-px h-4 bg-raised" />
               <button
                 onClick={onToggleCollapse}
                 title={collapsed ? 'Expand terminal' : 'Collapse terminal'}
-                className="px-2 py-1 text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors"
+                className="px-2 py-1 text-ink-faint hover:text-ink hover:bg-raised rounded transition-colors"
               >
                 {collapsed ? (
                   <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -1021,7 +1020,7 @@ const Terminal = forwardRef(function Terminal(
             <button
               onClick={() => setFullscreen(false)}
               title="Exit fullscreen (Esc)"
-              className="px-2 py-1 text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors"
+              className="px-2 py-1 text-ink-faint hover:text-ink hover:bg-raised rounded transition-colors"
             >
               <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M4 14h6v6" />
@@ -1034,7 +1033,7 @@ const Terminal = forwardRef(function Terminal(
             <button
               onClick={() => setFullscreen(true)}
               title="Fullscreen"
-              className="px-2 py-1 text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors"
+              className="px-2 py-1 text-ink-faint hover:text-ink hover:bg-raised rounded transition-colors"
             >
               <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M15 3h6v6" />
@@ -1048,7 +1047,7 @@ const Terminal = forwardRef(function Terminal(
       </div>
       <div ref={containerRef} className={`w-full ${collapsed ? 'hidden' : ''}`} style={{ height, minHeight }}>
         {initError && (
-          <div className="p-4 text-sm text-red-400 font-mono whitespace-pre-wrap">{initError}</div>
+          <div className="p-4 text-sm text-danger font-mono whitespace-pre-wrap">{initError}</div>
         )}
       </div>
     </div>

@@ -5,8 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Paddock — Agent Manager</title>
     <link rel="icon" type="image/svg+xml" href="/paddock-logo.svg">
+    <script>
+      try {
+        var t = localStorage.getItem('paddock-theme')
+        document.documentElement.setAttribute('data-theme', t === 'light' ? 'light' : 'dark')
+      } catch (e) {
+        document.documentElement.setAttribute('data-theme', 'dark')
+      }
+    </script>
   </head>
-  <body class="bg-slate-900 text-slate-100 font-sans antialiased min-h-screen">
+  <body class="bg-canvas text-ink font-sans antialiased min-h-screen">
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
   </body>

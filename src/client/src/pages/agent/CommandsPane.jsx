@@ -16,14 +16,13 @@ import { useToast } from '../../lib/toast'
  */
 
 const COLORS = {
-  cyan:    { dot: 'bg-cyan-500',    pill: 'border-cyan-800/30 text-cyan-300 bg-cyan-950/20 hover:bg-cyan-900/30 hover:text-cyan-200' },
-  amber:   { dot: 'bg-amber-500',   pill: 'border-amber-800/30 text-amber-300 bg-amber-950/20 hover:bg-amber-900/30 hover:text-amber-200' },
-  rose:    { dot: 'bg-rose-500',    pill: 'border-rose-800/30 text-rose-300 bg-rose-950/20 hover:bg-rose-900/30 hover:text-rose-200' },
-  violet:  { dot: 'bg-violet-500',  pill: 'border-violet-800/30 text-violet-300 bg-violet-950/20 hover:bg-violet-900/30 hover:text-violet-200' },
-  emerald: { dot: 'bg-emerald-500', pill: 'border-emerald-800/30 text-emerald-300 bg-emerald-950/20 hover:bg-emerald-900/30 hover:text-emerald-200' },
-  teal:    { dot: 'bg-teal-500',    pill: 'border-teal-800/30 text-teal-300 bg-teal-950/20 hover:bg-teal-900/30 hover:text-teal-200' },
-  blue:    { dot: 'bg-blue-500',    pill: 'border-blue-800/30 text-blue-300 bg-blue-950/20 hover:bg-blue-900/30 hover:text-blue-200' },
-  slate:   { dot: 'bg-slate-500',   pill: 'border-slate-700/50 text-slate-400 bg-slate-800/50 hover:bg-slate-700 hover:text-slate-200' },
+  accent:  { dot: 'bg-accent',  pill: 'border-accent-line/30 text-accent-text bg-accent-soft hover:bg-accent/15 hover:text-accent-text' },
+  warning: { dot: 'bg-warning', pill: 'border-warning-line/30 text-warning bg-warning-soft hover:bg-warning/15 hover:text-warning' },
+  danger:  { dot: 'bg-danger',  pill: 'border-danger-line/30 text-danger bg-danger-soft hover:bg-danger/15 hover:text-danger' },
+  brand:   { dot: 'bg-brand',   pill: 'border-brand-line/30 text-brand bg-brand-soft hover:bg-brand/15 hover:text-brand' },
+  success: { dot: 'bg-success', pill: 'border-success-line/30 text-success bg-success-soft hover:bg-success/15 hover:text-success' },
+  info:    { dot: 'bg-info',    pill: 'border-info-line/30 text-info bg-info-soft hover:bg-info/15 hover:text-info' },
+  slate:   { dot: 'bg-line',    pill: 'border-line/50 text-ink-faint bg-panel/50 hover:bg-raised hover:text-ink' },
 }
 
 function matches(q, ...fields) {
@@ -51,7 +50,7 @@ function GroupLabel({ color, title }) {
   return (
     <span className="inline-flex items-center gap-1.5 shrink-0 ml-1 first:ml-0">
       <span className={`w-1.5 h-3 rounded-full ${c.dot}`} />
-      <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">{title}</span>
+      <span className="text-[10px] font-semibold text-ink-faint uppercase tracking-wider">{title}</span>
     </span>
   )
 }
@@ -59,17 +58,17 @@ function GroupLabel({ color, title }) {
 /** Neutral chip for data items (servers, skills, backups) in the flow. */
 function DataChip({ children, className = '' }) {
   return (
-    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs border border-slate-700/60 bg-slate-800/40 text-slate-300 shrink-0 ${className}`}>
+    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs border border-line/60 bg-panel/40 text-ink-muted shrink-0 ${className}`}>
       {children}
     </span>
   )
 }
 
 /** Small destructive inline action button used inside data chips. */
-function MiniBtn({ label, onClick, color = 'text-slate-400 hover:text-slate-200', disabled }) {
+function MiniBtn({ label, onClick, color = 'text-ink-faint hover:text-ink', disabled }) {
   return (
     <button onClick={onClick} disabled={disabled}
-            className={`px-1.5 py-0.5 rounded-lg text-[10px] ${color} hover:bg-slate-700/60 transition-colors disabled:opacity-40`}>
+            className={`px-1.5 py-0.5 rounded-lg text-[10px] ${color} hover:bg-raised/60 transition-colors disabled:opacity-40`}>
       {label}
     </button>
   )
@@ -116,9 +115,9 @@ function MessagingFlow({ query, run, connected }) {
 
   return (
     <>
-      <GroupLabel color="cyan" title="Messaging" />
+      <GroupLabel color="accent" title="Messaging" />
       {visible.map((x) => (
-        <Pill key={x.label} label={x.label} desc={x.desc} cmd={x.cmd} color={COLORS.cyan.pill} danger={x.danger}
+        <Pill key={x.label} label={x.label} desc={x.desc} cmd={x.cmd} color={COLORS.accent.pill} danger={x.danger}
               disabled={!connected}
               onClick={() => (x.click ? x.click() : run(x.cmd, x))} />
       ))}
@@ -168,9 +167,9 @@ function ModelsFlow({ agent, query, run, prompt, connected }) {
 
   return (
     <>
-      <GroupLabel color="blue" title="Models" />
+      <GroupLabel color="info" title="Models" />
       {visible.map((x) => (
-        <Pill key={x.label} label={x.label} desc={x.desc} cmd={x.cmd} color={COLORS.blue.pill}
+        <Pill key={x.label} label={x.label} desc={x.desc} cmd={x.cmd} color={COLORS.info.pill}
               disabled={!connected}
               onClick={() => (x.click ? x.click() : run(x.cmd, x))} />
       ))}
@@ -271,19 +270,19 @@ function McpFlow({ agent, query, run, prompt, connected }) {
 
   return (
     <>
-      {msg && <span className="text-[11px] text-cyan-400">{msg}</span>}
-      <GroupLabel color="emerald" title="MCP" />
+      {msg && <span className="text-[11px] text-accent-text">{msg}</span>}
+      <GroupLabel color="success" title="MCP" />
       {visible.map((x) => (
-        <Pill key={x.label} label={x.label} desc={x.desc} cmd={x.cmd} color={COLORS.emerald.pill}
+        <Pill key={x.label} label={x.label} desc={x.desc} cmd={x.cmd} color={COLORS.success.pill}
               disabled={!connected}
               onClick={() => (x.click ? x.click() : run(x.cmd))} />
       ))}
       {shown.map((s) => (
         <DataChip key={s.name} title={s.command || s.url || ''}>
-          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${s.ok === true ? 'bg-emerald-400' : s.ok === false ? 'bg-red-400' : 'bg-cyan-400'}`} />
-          <span className="font-medium text-slate-200">{s.name}</span>
-          {s.transport && <span className="text-[10px] text-slate-500">{s.transport}</span>}
-          <MiniBtn label={removing === s.name ? '…' : '×'} color="text-red-400 hover:text-red-300" disabled={removing === s.name}
+          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${s.ok === true ? 'bg-success' : s.ok === false ? 'bg-danger' : 'bg-accent'}`} />
+          <span className="font-medium text-ink">{s.name}</span>
+          {s.transport && <span className="text-[10px] text-ink-dim">{s.transport}</span>}
+          <MiniBtn label={removing === s.name ? '…' : '×'} color="text-danger hover:text-danger" disabled={removing === s.name}
                    onClick={() => removeServer(s.name)} />
         </DataChip>
       ))}
@@ -334,10 +333,10 @@ function SkillsFlow({ agent, query, run, prompt, connected }) {
 
   return (
     <>
-      {msg && <span className="text-[11px] text-cyan-400">{msg}</span>}
-      <GroupLabel color="violet" title="Skills" />
+      {msg && <span className="text-[11px] text-accent-text">{msg}</span>}
+      <GroupLabel color="brand" title="Skills" />
       {visible.map((x) => (
-        <Pill key={x.label} label={x.label} desc={x.desc} cmd={x.cmd} color={COLORS.violet.pill}
+        <Pill key={x.label} label={x.label} desc={x.desc} cmd={x.cmd} color={COLORS.brand.pill}
               disabled={!connected}
               onClick={() => (x.click ? x.click() : run(x.cmd, x))} />
       ))}
@@ -345,9 +344,9 @@ function SkillsFlow({ agent, query, run, prompt, connected }) {
         <form onSubmit={doInstall} className="inline-flex items-center gap-2">
           <input type="text" value={installRef} onChange={(e) => setInstallRef(e.target.value)}
                  placeholder="@owner/slug or owner/repo@ref"
-                 className="w-56 px-2.5 py-1.5 rounded-lg text-xs bg-slate-950 border border-slate-700 text-white focus:border-cyan-500 focus:outline-none placeholder-slate-600" />
+                 className="w-56 px-2.5 py-1.5 rounded-lg text-xs bg-sunken border border-line text-ink focus:border-accent-line focus:outline-none placeholder-ink-dim" />
           <button type="submit" disabled={installing}
-                  className="px-2.5 py-1.5 rounded-lg text-xs bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-700 text-white transition-colors">
+                  className="px-2.5 py-1.5 rounded-lg text-xs bg-accent hover:bg-accent-hover disabled:bg-raised text-accent-ink transition-colors">
             {installing ? '…' : 'Install'}
           </button>
         </form>
@@ -523,34 +522,34 @@ function VaultDropdown({ termRef, connected }) {
         disabled={!connected}
         title={connected ? 'Vault — paste a saved secret into the terminal' : 'Vault — waiting for the terminal to connect'}
         className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors whitespace-nowrap border shrink-0 disabled:opacity-40 disabled:cursor-not-allowed
-          ${open ? 'border-amber-500/70 bg-amber-950/40 text-amber-200' : 'border-amber-800/40 text-amber-300 bg-amber-950/20 hover:bg-amber-900/30 hover:text-amber-200'}`}
+          ${open ? 'border-warning-line/70 bg-warning-soft text-warning' : 'border-warning-line/40 text-warning bg-warning-soft hover:bg-warning-soft hover:text-warning'}`}
       >
         <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
           <path d="M7 11V7a5 5 0 0 1 10 0v4" />
         </svg>
         Vault
-        {items.length > 0 && <span className="text-[10px] text-amber-500/80">{items.length}</span>}
-        <svg className="w-3 h-3 text-amber-500/70" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        {items.length > 0 && <span className="text-[10px] text-warning/80">{items.length}</span>}
+        <svg className="w-3 h-3 text-warning/70" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <path d="M6 9l6 6 6-6" />
         </svg>
       </button>
 
       {open && anchor && (
         <div
-          className="fixed z-50 w-80 rounded-lg border border-slate-700 bg-slate-900 shadow-xl overflow-hidden"
+          className="fixed z-50 w-80 rounded-lg border border-line bg-sunken shadow-xl overflow-hidden"
           style={{ top: anchor.bottom + 6, right: Math.max(8, window.innerWidth - anchor.right) }}
         >
-          <div className="flex items-center justify-between px-3 py-2 border-b border-slate-800">
-            <span className="text-xs font-medium text-slate-300">Vault</span>
-            <button onClick={load} title="Refresh vault list" className="text-slate-500 hover:text-white text-xs px-1">
+          <div className="flex items-center justify-between px-3 py-2 border-b border-line-faint">
+            <span className="text-xs font-medium text-ink-muted">Vault</span>
+            <button onClick={load} title="Refresh vault list" className="text-ink-dim hover:text-ink text-xs px-1">
               ↻
             </button>
           </div>
 
-          <div className="px-2 py-1.5 border-b border-slate-800">
+          <div className="px-2 py-1.5 border-b border-line-faint">
             <div className="relative">
-              <svg className="w-3 h-3 text-slate-500 absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg className="w-3 h-3 text-ink-dim absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <circle cx="11" cy="11" r="8" />
                 <path d="m21 21-4.3-4.3" />
               </svg>
@@ -560,11 +559,11 @@ function VaultDropdown({ termRef, connected }) {
                 value={filter}
                 onChange={(e) => setFilter(e.target.value)}
                 placeholder="Filter vault…"
-                className="w-full pl-6 pr-6 py-1 rounded text-[11px] bg-slate-950 border border-slate-700 text-white focus:border-amber-500 focus:outline-none placeholder-slate-600"
+                className="w-full pl-6 pr-6 py-1 rounded text-[11px] bg-sunken border border-line text-ink focus:border-warning-line focus:outline-none placeholder-ink-dim"
               />
               {filter && (
                 <button onClick={() => setFilter('')} title="Clear filter"
-                        className="absolute right-1.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white text-xs px-0.5">
+                        className="absolute right-1.5 top-1/2 -translate-y-1/2 text-ink-dim hover:text-ink text-xs px-0.5">
                   ×
                 </button>
               )}
@@ -572,18 +571,18 @@ function VaultDropdown({ termRef, connected }) {
           </div>
 
           {locked && (
-            <div className="px-3 py-2 text-[11px] text-amber-300/90 border-b border-slate-800 flex items-center gap-1.5">
-              <svg className="w-3.5 h-3.5 text-amber-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <div className="px-3 py-2 text-[11px] text-warning/90 border-b border-line-faint flex items-center gap-1.5">
+              <svg className="w-3.5 h-3.5 text-warning shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
                 <path d="M7 11V7a5 5 0 0 1 10 0v4" />
               </svg>
               <span className="font-medium">Vault is locked</span>
-              <span className="text-amber-500/70">— enter your PIN to use a value</span>
+              <span className="text-warning/70">— enter your PIN to use a value</span>
             </div>
           )}
 
           {pinMode && (
-            <form onSubmit={submitPin} className="flex items-center gap-1.5 border-b border-slate-800 p-2">
+            <form onSubmit={submitPin} className="flex items-center gap-1.5 border-b border-line-faint p-2">
               <input
                 type="password"
                 inputMode="numeric"
@@ -592,26 +591,26 @@ function VaultDropdown({ termRef, connected }) {
                 placeholder="••••••"
                 autoFocus
                 autoComplete="current-password"
-                className="flex-1 min-w-0 px-2 py-1 rounded text-[11px] bg-slate-950 border border-slate-700 text-white focus:border-amber-500 focus:outline-none placeholder-slate-600 text-center tracking-[0.25em] font-mono"
+                className="flex-1 min-w-0 px-2 py-1 rounded text-[11px] bg-sunken border border-line text-ink focus:border-warning-line focus:outline-none placeholder-ink-dim text-center tracking-[0.25em] font-mono"
               />
               <button type="submit" disabled={pinBusy}
-                      className="px-2 py-1 rounded text-[11px] bg-amber-600 hover:bg-amber-500 disabled:bg-slate-700 text-white transition-colors whitespace-nowrap">
+                      className="px-2 py-1 rounded text-[11px] bg-warning hover:bg-warning disabled:bg-raised text-warning-ink transition-colors whitespace-nowrap">
                 {pinBusy ? '…' : (pinMode.type === 'paste' ? 'Unlock & paste' : 'Unlock & add')}
               </button>
               <button type="button" onClick={() => { setPinMode(null); setPastePin(''); setPinErr('') }} disabled={pinBusy}
-                      className="px-1.5 py-1 rounded text-[11px] text-slate-400 hover:text-white hover:bg-slate-700 transition-colors whitespace-nowrap">
+                      className="px-1.5 py-1 rounded text-[11px] text-ink-faint hover:text-ink hover:bg-raised transition-colors whitespace-nowrap">
                 ✕
               </button>
-              {pinErr && <span className="text-[10px] text-red-400">{pinErr}</span>}
+              {pinErr && <span className="text-[10px] text-danger">{pinErr}</span>}
             </form>
           )}
 
           <div className="max-h-56 overflow-y-auto py-1">
             {loading && items.length === 0 && (
-              <div className="px-3 py-2 text-xs text-slate-500">Loading…</div>
+              <div className="px-3 py-2 text-xs text-ink-dim">Loading…</div>
             )}
             {!loading && filtered.length === 0 && (
-              <div className="px-3 py-2 text-xs text-slate-500">
+              <div className="px-3 py-2 text-xs text-ink-dim">
                 {items.length === 0 ? 'No vault items yet.' : `No matches for "${filter}".`}
               </div>
             )}
@@ -620,34 +619,34 @@ function VaultDropdown({ termRef, connected }) {
                 key={item.id}
                 onClick={() => pasteItem(item)}
                 disabled={!!pastingId || !connected}
-                className="w-full text-left px-3 py-1.5 flex items-center gap-2 text-xs hover:bg-slate-800 hover:text-cyan-300 transition-colors group disabled:opacity-40"
+                className="w-full text-left px-3 py-1.5 flex items-center gap-2 text-xs hover:bg-panel hover:text-accent-text transition-colors group disabled:opacity-40"
                 title={locked ? 'Enter your PIN to paste this value' : 'Fetch value and paste into terminal'}
               >
-                <svg className="w-3 h-3 text-amber-500/70 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <svg className="w-3 h-3 text-warning/70 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" />
                 </svg>
                 <span className="min-w-0">
-                  <span className="block font-medium text-slate-200 group-hover:text-cyan-300 truncate">{item.name}</span>
+                  <span className="block font-medium text-ink group-hover:text-accent-text truncate">{item.name}</span>
                   {item.description && (
-                    <span className="block text-[10px] text-slate-500 truncate">{item.description}</span>
+                    <span className="block text-[10px] text-ink-dim truncate">{item.description}</span>
                   )}
                 </span>
-                {pastingId === item.id && <span className="ml-auto text-[10px] text-cyan-400">fetching…</span>}
+                {pastingId === item.id && <span className="ml-auto text-[10px] text-accent-text">fetching…</span>}
               </button>
             ))}
           </div>
 
-          <form onSubmit={addItem} className="flex flex-col gap-1.5 border-t border-slate-800 p-2">
-            <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider px-1">Add vault item</span>
+          <form onSubmit={addItem} className="flex flex-col gap-1.5 border-t border-line-faint p-2">
+            <span className="text-[10px] font-semibold text-ink-dim uppercase tracking-wider px-1">Add vault item</span>
             <div className="flex gap-1.5">
               <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="name"
-                     className="flex-1 min-w-0 px-2 py-1 rounded text-[11px] bg-slate-950 border border-slate-700 text-white focus:border-amber-500 focus:outline-none placeholder-slate-600" />
+                     className="flex-1 min-w-0 px-2 py-1 rounded text-[11px] bg-sunken border border-line text-ink focus:border-warning-line focus:outline-none placeholder-ink-dim" />
               <input type="password" value={value} onChange={(e) => setValue(e.target.value)} placeholder="value"
                      autoComplete="new-password"
-                     className="flex-1 min-w-0 px-2 py-1 rounded text-[11px] bg-slate-950 border border-slate-700 text-white focus:border-amber-500 focus:outline-none placeholder-slate-600 font-mono" />
+                     className="flex-1 min-w-0 px-2 py-1 rounded text-[11px] bg-sunken border border-line text-ink focus:border-warning-line focus:outline-none placeholder-ink-dim font-mono" />
             </div>
             <button type="submit" disabled={saving || !name.trim() || !value.trim()}
-                    className="px-2 py-1 rounded text-[11px] bg-amber-600 hover:bg-amber-500 disabled:bg-slate-700 disabled:text-slate-500 text-white transition-colors">
+                    className="px-2 py-1 rounded text-[11px] bg-warning hover:bg-warning disabled:bg-raised disabled:text-ink-dim text-warning-ink transition-colors">
               {saving ? 'Adding…' : '+ Add'}
             </button>
           </form>
@@ -696,7 +695,7 @@ export default function CommandsPane({ agent, termRef, run, connected }) {
           onClick={runTool}
           disabled={!connected}
           title={connected ? `Run ${tuiCommand} interactively in the terminal` : 'Waiting for the terminal to connect'}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-sm font-medium transition-colors whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-accent hover:bg-accent-hover text-accent-ink rounded-lg text-sm font-medium transition-colors whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
         >
           <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <polygon points="5 3 19 12 5 21 5 3" />
@@ -706,11 +705,11 @@ export default function CommandsPane({ agent, termRef, run, connected }) {
         <input type="text" value={query}
                onChange={(e) => { setQuery(e.target.value); if (e.target.value) setShowCommands(true) }}
                placeholder="Filter commands…"
-               className="flex-1 max-w-md px-3 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white focus:border-cyan-500 focus:outline-none placeholder-slate-600" />
+               className="flex-1 max-w-md px-3 py-1.5 bg-sunken border border-line rounded-lg text-sm text-ink focus:border-accent-line focus:outline-none placeholder-ink-dim" />
         <button
           onClick={() => setShowCommands((v) => !v)}
           title={showCommands ? 'Hide command buttons' : 'Show command buttons'}
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors whitespace-nowrap border shrink-0 ${showCommands ? 'border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-700 hover:text-slate-200' : 'border-slate-700 bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-slate-200'}`}
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors whitespace-nowrap border shrink-0 ${showCommands ? 'border-line bg-panel/60 text-ink-muted hover:bg-raised hover:text-ink' : 'border-line bg-panel text-ink-faint hover:bg-raised hover:text-ink'}`}
         >
           <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             {showCommands ? (

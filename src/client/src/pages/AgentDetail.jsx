@@ -43,14 +43,14 @@ function AgentHeader({ agent }) {
   const memUsage = stats?.MemUsage ? stats.MemUsage.split('/')[0].trim() : ''
 
   return (
-    <div className="flex items-center gap-4 px-6 py-3 border-b border-slate-800 bg-slate-900/40 flex-wrap">
-      <Link to="/agents" className="text-xs text-slate-500 hover:text-slate-300 transition-colors">&larr; Fleet</Link>
-      <div className="w-9 h-9 rounded-xl bg-slate-800 flex items-center justify-center text-lg font-bold text-cyan-400 flex-shrink-0">
+    <div className="flex items-center gap-4 px-6 py-3 border-b border-line-faint bg-canvas/40 flex-wrap">
+      <Link to="/agents" className="text-xs text-ink-dim hover:text-ink-muted transition-colors">&larr; Fleet</Link>
+      <div className="w-9 h-9 rounded-xl bg-panel flex items-center justify-center text-lg font-bold text-accent-text flex-shrink-0">
         {agent.display_name?.charAt(0) || '?'}
       </div>
       <div className="min-w-0">
-        <h1 className="text-sm font-bold text-white truncate leading-tight">{agent.display_name || agent.name}</h1>
-        <p className="text-xs text-slate-500 truncate leading-tight font-mono">{agent.name}</p>
+        <h1 className="text-sm font-bold text-ink truncate leading-tight">{agent.display_name || agent.name}</h1>
+        <p className="text-xs text-ink-dim truncate leading-tight font-mono">{agent.name}</p>
       </div>
       <span className={`px-2 py-0.5 rounded-full text-xs font-medium flex items-center gap-1.5 ${st.pill}`}>
         {isTransition ? (
@@ -65,20 +65,20 @@ function AgentHeader({ agent }) {
           </>
         )}
       </span>
-      <span className="w-px h-5 bg-slate-700" />
+      <span className="w-px h-5 bg-raised" />
       <div className="flex items-center gap-3 text-xs">
-        <span className="text-slate-500">CPU <span className="text-slate-200 font-mono ml-1">{agent.status === 'running' ? (cpuPct.toFixed(1) + '%') : '—'}</span></span>
-        <span className="text-slate-500">MEM <span className="text-slate-200 font-mono ml-1">{agent.status === 'running' && stats ? memUsage : '—'}</span></span>
+        <span className="text-ink-dim">CPU <span className="text-ink font-mono ml-1">{agent.status === 'running' ? (cpuPct.toFixed(1) + '%') : '—'}</span></span>
+        <span className="text-ink-dim">MEM <span className="text-ink font-mono ml-1">{agent.status === 'running' && stats ? memUsage : '—'}</span></span>
       </div>
       <div className="flex-1" />
       <div className="flex items-center gap-2">
         {agent.status === 'running' ? (
           <>
-            <button onClick={() => stopAgent(agent.name)} className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-xs font-medium transition-colors">Stop</button>
-            <button onClick={() => restartAgent(agent.name)} className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-xs font-medium transition-colors">Restart</button>
+            <button onClick={() => stopAgent(agent.name)} className="px-3 py-1.5 bg-warning hover:bg-warning text-warning-ink rounded-lg text-xs font-medium transition-colors">Stop</button>
+            <button onClick={() => restartAgent(agent.name)} className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-accent-ink rounded-lg text-xs font-medium transition-colors">Restart</button>
           </>
         ) : (
-          <button onClick={() => startAgent(agent.name)} className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-medium transition-colors">Start</button>
+          <button onClick={() => startAgent(agent.name)} className="px-3 py-1.5 bg-success hover:bg-success text-success-ink rounded-lg text-xs font-medium transition-colors">Start</button>
         )}
       </div>
     </div>
@@ -183,16 +183,16 @@ export default function AgentDetail() {
   if (!agent) {
     if (agentsLoading) {
       return (
-        <div className="flex items-center justify-center h-64 text-slate-500">
-          <span className="inline-block w-4 h-4 rounded-full border-2 border-cyan-400 border-t-transparent animate-spin mr-3" />
+        <div className="flex items-center justify-center h-64 text-ink-dim">
+          <span className="inline-block w-4 h-4 rounded-full border-2 border-accent-line border-t-transparent animate-spin mr-3" />
           <p>Loading agent…</p>
         </div>
       )
     }
     return (
-      <div className="flex flex-col items-center justify-center h-64 text-slate-500 gap-4">
+      <div className="flex flex-col items-center justify-center h-64 text-ink-dim gap-4">
         <p>Agent not found — it may have been deleted.</p>
-        <Link to="/agents" className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-sm font-medium transition-colors">
+        <Link to="/agents" className="px-4 py-2 bg-accent hover:bg-accent-hover text-accent-ink rounded-lg text-sm font-medium transition-colors">
           ← Back to fleet
         </Link>
       </div>
@@ -204,17 +204,17 @@ export default function AgentDetail() {
       <AgentHeader agent={agent} />
 
       {/* Mode tabs */}
-      <div className="flex items-center gap-1 px-6 py-2 border-b border-slate-800 overflow-x-auto flex-shrink-0">
+      <div className="flex items-center gap-1 px-6 py-2 border-b border-line-faint overflow-x-auto flex-shrink-0">
         {MODES.map((m) => (
           <button
             key={m.id}
             onClick={() => navigate(`/agents/${agent.name}/${m.id}`, { replace: true })}
             className={`px-3 py-1.5 text-sm font-medium rounded-lg transition-colors whitespace-nowrap ${
-              mode === m.id ? 'bg-slate-800' : 'hover:bg-slate-800/50'
+              mode === m.id ? 'bg-panel' : 'hover:bg-panel/50'
             } ${
               m.id === 'commands'
-                ? 'text-amber-300'
-                : mode === m.id ? 'text-cyan-400' : 'text-slate-400 hover:text-slate-200'
+                ? 'text-warning'
+                : mode === m.id ? 'text-accent-text' : 'text-ink-faint hover:text-ink'
             }`}
           >
             {m.id === 'commands' ? (agent.agent_type ? agent.agent_type.charAt(0).toUpperCase() + agent.agent_type.slice(1) : 'Commands') : m.label}
@@ -261,7 +261,7 @@ export default function AgentDetail() {
             title="Drag to resize terminal"
             className="group -mt-2 mb-1.5 flex h-2 items-center justify-center cursor-ns-resize select-none"
           >
-            <div className="h-1 w-32 rounded-full bg-slate-700 group-hover:bg-cyan-500 transition-colors" />
+            <div className="h-1 w-32 rounded-full bg-raised group-hover:bg-accent-hover transition-colors" />
           </div>
         )}
         <Terminal
@@ -572,7 +572,7 @@ function WorkspaceTab({ agent }) {
     <div>
       {/* Container down banner — pad not running, browsing from host */}
       {agent.status !== 'running' && (
-        <p className="-mt-2 mb-4 text-sm text-slate-400 leading-relaxed">The pad container is not running, so the workspace is being browsed from the host. You can still access your files here.</p>
+        <p className="-mt-2 mb-4 text-sm text-ink-faint leading-relaxed">The pad container is not running, so the workspace is being browsed from the host. You can still access your files here.</p>
       )}
 
       {/* Toolbar — single navigation row; "+" popup handles create/upload */}
@@ -595,13 +595,13 @@ function WorkspaceTab({ agent }) {
         uploadPct={uploadPct}
       />
 
-      {error && <p className="text-red-400 text-sm mb-4">{error}</p>}
+      {error && <p className="text-danger text-sm mb-4">{error}</p>}
 
       {/* Loading Spinner */}
       {loading && (
         <div className="flex items-center justify-center py-16">
-          <div className="flex items-center gap-3 text-slate-400">
-            <span className="w-5 h-5 border-2 border-slate-600 border-t-cyan-400 rounded-full animate-spin" />
+          <div className="flex items-center gap-3 text-ink-faint">
+            <span className="w-5 h-5 border-2 border-line-faint border-t-accent-text rounded-full animate-spin" />
             <span className="text-sm">Loading...</span>
           </div>
         </div>
@@ -609,11 +609,11 @@ function WorkspaceTab({ agent }) {
 
       {/* File Table */}
       {listing && !loading && (
-        <div className="border border-slate-800 rounded-xl overflow-hidden">
+        <div className="border border-line-faint rounded-xl overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b border-slate-800 text-left text-slate-500">
+                <tr className="border-b border-line-faint text-left text-ink-dim">
                   <th className="px-4 py-2 font-medium">Name</th>
                   <th className="px-4 py-2 font-medium w-24 hidden sm:table-cell">Size</th>
                   <th className="px-4 py-2 font-medium w-40 hidden md:table-cell">Modified</th>
@@ -622,42 +622,42 @@ function WorkspaceTab({ agent }) {
               </thead>
               <tbody>
                 {!isNavRoot && (
-                  <tr className="border-b border-slate-800/50 hover:bg-slate-800/30 cursor-pointer" onClick={goUp}>
-                    <td className="px-4 py-2 text-cyan-400" colSpan={4}>&larr; Up</td>
+                  <tr className="border-b border-line-faint/50 hover:bg-panel/30 cursor-pointer" onClick={goUp}>
+                    <td className="px-4 py-2 text-accent-text" colSpan={4}>&larr; Up</td>
                   </tr>
                 )}
                 {listing.entries?.filter((e) => !e.name.startsWith('.')).map((entry) => {
                   const entryPath = path === '/' ? '/' + entry.name : path + '/' + entry.name
                   return (
-                    <tr key={entry.name} className="border-b border-slate-800/50 hover:bg-slate-800/30 group">
+                    <tr key={entry.name} className="border-b border-line-faint/50 hover:bg-panel/30 group">
                       <td className="px-4 py-3 cursor-pointer"
                           onClick={() => {
                             if (entry.type !== 'directory') openFile(entryPath)
                             else goToDir(entryPath)
                           }}>
                         {entry.type === 'directory' ? (
-                          <span className="text-cyan-400">
-                            <span className="mr-1.5 text-slate-500">📁</span>{entry.name}
-                            {scope === 'container' && entry.name === 'workspace' && <span className="ml-2 inline-block px-1.5 py-0.5 rounded text-[10px] font-medium bg-cyan-900/50 text-cyan-300 border border-cyan-800/50 align-middle">workspace</span>}
+                          <span className="text-accent-text">
+                            <span className="mr-1.5 text-ink-dim">📁</span>{entry.name}
+                            {scope === 'container' && entry.name === 'workspace' && <span className="ml-2 inline-block px-1.5 py-0.5 rounded text-[10px] font-medium bg-accent-soft text-accent-text border border-accent-line/50 align-middle">workspace</span>}
                           </span>
                         ) : (
-                          <span className="text-slate-200">
-                            <span className="mr-1.5 text-slate-500">📄</span>{entry.name}
+                          <span className="text-ink">
+                            <span className="mr-1.5 text-ink-dim">📄</span>{entry.name}
                           </span>
                         )}
                       </td>
-                      <td className="px-4 py-2 text-slate-500 hidden sm:table-cell">{entry.size_hr || entry.size || '-'}</td>
-                      <td className="px-4 py-2 text-slate-500 hidden md:table-cell text-xs">{entry.modified ? new Date(entry.modified).toLocaleString() : '-'}</td>
+                      <td className="px-4 py-2 text-ink-dim hidden sm:table-cell">{entry.size_hr || entry.size || '-'}</td>
+                      <td className="px-4 py-2 text-ink-dim hidden md:table-cell text-xs">{entry.modified ? new Date(entry.modified).toLocaleString() : '-'}</td>
                       <td className="px-4 py-2">
                         <div className="flex items-center gap-1 opacity-50 group-hover:opacity-100 transition-opacity">
                           {entry.type === 'file' && (
                             <a href={`/api/agents/${agent.name}/workspace/download?path=${encodeURIComponent(entryPath)}&scope=${scope}`}
-                               className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors" title="Download" download>DL</a>
+                               className="px-2 py-1 text-xs text-ink-faint hover:text-ink hover:bg-raised rounded transition-colors" title="Download" download>DL</a>
                           )}
                           <button onClick={() => renameEntry(entryPath)}
-                                  className="px-2 py-1 text-xs text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors" title="Move">MV</button>
+                                  className="px-2 py-1 text-xs text-ink-faint hover:text-ink hover:bg-raised rounded transition-colors" title="Move">MV</button>
                           <button onClick={() => deleteEntry(entryPath, entry.name)}
-                                  className="px-2 py-1 text-xs text-red-400 hover:text-red-300 hover:bg-slate-700 rounded transition-colors" title="Delete">RM</button>
+                                  className="px-2 py-1 text-xs text-danger hover:text-danger hover:bg-raised rounded transition-colors" title="Delete">RM</button>
                         </div>
                       </td>
                     </tr>
@@ -666,8 +666,8 @@ function WorkspaceTab({ agent }) {
                 {listing.entries?.length === 0 && (
                   <tr>
                     <td colSpan={4} className="px-4 py-12 text-center">
-                      <svg className="w-8 h-8 mx-auto mb-2 text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5"><path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>
-                      <p className="text-slate-500">Empty directory</p>
+                      <svg className="w-8 h-8 mx-auto mb-2 text-ink-dim" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5"><path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>
+                      <p className="text-ink-dim">Empty directory</p>
                     </td>
                   </tr>
                 )}
@@ -679,38 +679,38 @@ function WorkspaceTab({ agent }) {
 
       {/* File Viewer/Editor Modal */}
       {fileModal && (
-        <div className="fixed inset-0 z-[60] bg-black/60 flex items-center justify-center"
+        <div className="fixed inset-0 z-[60] bg-overlay flex items-center justify-center"
              onClick={(e) => { if (e.target === e.currentTarget) closeFileModal() }}>
-          <div className="bg-slate-800 border border-slate-700 rounded-xl shadow-2xl flex flex-col" style={{ width: '80vw', maxWidth: '900px', height: '80vh' }}>
-            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700">
+          <div className="bg-panel border border-line rounded-xl shadow-2xl flex flex-col" style={{ width: '80vw', maxWidth: '900px', height: '80vh' }}>
+            <div className="flex items-center justify-between px-4 py-3 border-b border-line">
               <div className="flex items-center gap-3 min-w-0">
-                <span className="text-slate-400">📄</span>
-                <span className="text-sm font-medium text-white truncate">{fileModal.name}</span>
-                <span className="text-xs text-slate-500">{fileModal.size} bytes · {ext.replace('.', '').toUpperCase()}</span>
+                <span className="text-ink-faint">📄</span>
+                <span className="text-sm font-medium text-ink truncate">{fileModal.name}</span>
+                <span className="text-xs text-ink-dim">{fileModal.size} bytes · {ext.replace('.', '').toUpperCase()}</span>
                 {editable && (
-                  <span className={`text-xs ml-2 ${jsonError ? 'text-red-400' : fileSaved ? 'text-emerald-400' : fileDirty ? 'text-amber-400' : 'text-slate-600'}`}>
+                  <span className={`text-xs ml-2 ${jsonError ? 'text-danger' : fileSaved ? 'text-success' : fileDirty ? 'text-warning' : 'text-ink-dim'}`}>
                     {jsonError || (fileSaved ? 'Saved' : fileDirty ? 'Unsaved' : '')}
                   </span>
                 )}
                 {!editable && (
-                  <span className="text-xs text-slate-500 ml-2">Binary file — read-only</span>
+                  <span className="text-xs text-ink-dim ml-2">Binary file — read-only</span>
                 )}
               </div>
               <div className="flex items-center gap-2">
-                {editable && <button onClick={saveFile} className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded text-sm transition-colors">Save</button>}
+                {editable && <button onClick={saveFile} className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-accent-ink rounded text-sm transition-colors">Save</button>}
                 <a href={`/api/agents/${agent.name}/workspace/download?path=${encodeURIComponent(fileModal.path || fileModal.name)}&scope=${scope}`}
-                   className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded text-sm transition-colors" download>Download</a>
-                <button onClick={closeFileModal} className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded text-sm transition-colors">Close</button>
+                   className="px-3 py-1.5 bg-raised hover:bg-raised-hover text-ink rounded text-sm transition-colors" download>Download</a>
+                <button onClick={closeFileModal} className="px-3 py-1.5 bg-raised hover:bg-raised-hover text-ink rounded text-sm transition-colors">Close</button>
               </div>
             </div>
             <div className="flex-1 overflow-hidden p-4">
               {editable ? (
                 <textarea id="file-editor" value={fileModal.content}
                           onChange={(e) => { setFileModal({ ...fileModal, content: e.target.value }); setFileDirty(true); setFileSaved(false); setJsonError('') }}
-                          className="w-full h-full bg-slate-900 text-slate-200 font-mono text-sm p-4 rounded-lg border border-slate-700 focus:border-cyan-500 focus:outline-none resize-none"
+                          className="w-full h-full bg-sunken text-ink font-mono text-sm p-4 rounded-lg border border-line focus:border-accent-line focus:outline-none resize-none"
                           style={{ minHeight: '100%' }} />
               ) : (
-                <pre className="text-xs text-slate-300 font-mono whitespace-pre-wrap">{fileModal.content}</pre>
+                <pre className="text-xs text-ink-muted font-mono whitespace-pre-wrap">{fileModal.content}</pre>
               )}
             </div>
           </div>
@@ -737,31 +737,52 @@ function LogsTab({ agent }) {
   const [logs, setLogs] = useState('')
   const [tail, setTail] = useState(100)
   const [autoScroll, setAutoScroll] = useState(true)
+  const preRef = useRef(null)
 
   useEffect(() => {
-    api(`/api/agents/${agent.name}/logs?tail=${tail}`).then((d) => {
-      if (d.logs) setLogs(d.logs)
-    }).catch(() => {})
+    let cancelled = false
+    const load = () => {
+      api(`/api/agents/${agent.name}/logs?tail=${tail}`).then((d) => {
+        if (d.logs && !cancelled) setLogs(d.logs)
+      }).catch(() => {})
+    }
+    load()
+    const iv = setInterval(() => {
+      if (document.visibilityState !== 'hidden') load()
+    }, 5000)
+    return () => { cancelled = true; clearInterval(iv) }
   }, [agent.name, tail])
 
+  useEffect(() => {
+    const el = preRef.current
+    if (el && autoScroll) el.scrollTop = el.scrollHeight
+  }, [logs, autoScroll])
+
+  const onScroll = () => {
+    const el = preRef.current
+    if (!el) return
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30
+    if (autoScroll && !atBottom) setAutoScroll(false)
+  }
+
   return (
-    <div>
-      <div className="flex items-center justify-between mb-4">
+    <div className="flex flex-col h-full min-h-0">
+      <div className="flex items-center justify-between mb-3 flex-shrink-0">
         <div className="flex items-center gap-3">
-          <h3 className="text-sm font-medium text-slate-300">Container Logs</h3>
-          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+          <h3 className="text-sm font-medium text-ink-muted">Container Logs</h3>
+          <span className="w-2 h-2 rounded-full bg-success animate-pulse" />
         </div>
         <div className="flex items-center gap-2">
           <select value={tail} onChange={(e) => setTail(parseInt(e.target.value))}
-                  className="px-2 py-1 bg-slate-950 border border-slate-700 rounded text-xs text-white">
+                  className="px-2 py-1 bg-sunken border border-line rounded text-xs text-ink">
             <option value={50}>50</option><option value={100}>100</option><option value={500}>500</option><option value={1000}>1000</option>
           </select>
-          <button onClick={() => setAutoScroll(!autoScroll)}
-                  className={`px-2 py-1 rounded text-xs ${autoScroll ? 'bg-cyan-600 text-white' : 'bg-slate-800 text-slate-400'}`}>Auto-scroll</button>
+          <button onClick={() => { setAutoScroll(true); if (preRef.current) preRef.current.scrollTop = preRef.current.scrollHeight }}
+                  className={`px-2 py-1 rounded text-xs ${autoScroll ? 'bg-accent text-accent-ink' : 'bg-panel text-ink-faint'}`}>Auto-scroll</button>
         </div>
       </div>
-      <pre className="text-xs leading-tight overflow-auto max-h-96 bg-slate-950 border border-slate-800 rounded-xl p-4 text-slate-300 font-mono"
-           ref={(el) => { if (el && autoScroll) el.scrollTop = el.scrollHeight }}>
+      <pre ref={preRef} onScroll={onScroll}
+           className="flex-1 min-h-0 text-xs leading-tight overflow-auto bg-sunken border border-line-faint rounded-xl p-4 text-ink-muted font-mono">
         {logs || 'No logs available'}
       </pre>
     </div>
@@ -779,13 +800,13 @@ function SessionsTab({ agent }) {
     }).catch(() => {})
   }, [agent.name])
 
-  if (sessions.length === 0) return <p className="text-slate-500 text-sm">No sessions recorded yet.</p>
+  if (sessions.length === 0) return <p className="text-ink-dim text-sm">No sessions recorded yet.</p>
   return (
-    <div className="border border-slate-800 rounded-xl overflow-hidden">
+    <div className="border border-line-faint rounded-xl overflow-hidden">
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
-            <tr className="text-slate-500 text-xs border-b border-slate-800">
+            <tr className="text-ink-dim text-xs border-b border-line-faint">
               <th className="text-left px-4 py-2">ID</th>
               <th className="text-left px-4 py-2">Kind</th>
               <th className="text-left px-4 py-2">Status</th>
@@ -795,12 +816,12 @@ function SessionsTab({ agent }) {
           </thead>
           <tbody>
             {sessions.map((s) => (
-              <tr key={s.id} className="border-b border-slate-800/50">
-                <td className="px-4 py-2 text-slate-400 font-mono text-xs">{s.id?.slice(0, 12)}...</td>
-                <td className="px-4 py-2"><span className="px-2 py-0.5 rounded text-xs bg-slate-800 text-slate-300">{s.kind}</span></td>
-                <td className="px-4 py-2"><span className={`px-2 py-0.5 rounded text-xs ${s.status === 'active' ? 'bg-emerald-900/50 text-emerald-400' : 'bg-slate-800 text-slate-400'}`}>{s.status}</span></td>
-                <td className="px-4 py-2 text-slate-300">{s.model || '-'}</td>
-                <td className="px-4 py-2 text-right text-slate-400">{s.tokens_in || 0}/{s.tokens_out || 0}</td>
+              <tr key={s.id} className="border-b border-line-faint/50">
+                <td className="px-4 py-2 text-ink-faint font-mono text-xs">{s.id?.slice(0, 12)}...</td>
+                <td className="px-4 py-2"><span className="px-2 py-0.5 rounded text-xs bg-panel text-ink-muted">{s.kind}</span></td>
+                <td className="px-4 py-2"><span className={`px-2 py-0.5 rounded text-xs ${s.status === 'active' ? 'bg-success-soft text-success' : 'bg-panel text-ink-faint'}`}>{s.status}</span></td>
+                <td className="px-4 py-2 text-ink-muted">{s.model || '-'}</td>
+                <td className="px-4 py-2 text-right text-ink-faint">{s.tokens_in || 0}/{s.tokens_out || 0}</td>
               </tr>
             ))}
           </tbody>
@@ -821,13 +842,13 @@ function ActivityTab({ agent }) {
     }).catch(() => {})
   }, [agent.name])
 
-  if (activity.length === 0) return <p className="text-slate-500 text-sm">No activity recorded yet.</p>
+  if (activity.length === 0) return <p className="text-ink-dim text-sm">No activity recorded yet.</p>
   return (
-    <div className="border border-slate-800 rounded-xl overflow-hidden">
+    <div className="border border-line-faint rounded-xl overflow-hidden">
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
-            <tr className="text-slate-500 text-xs border-b border-slate-800">
+            <tr className="text-ink-dim text-xs border-b border-line-faint">
               <th className="text-left px-4 py-2">Action</th>
               <th className="text-left px-4 py-2">Details</th>
               <th className="text-right px-4 py-2">Timestamp</th>
@@ -835,15 +856,15 @@ function ActivityTab({ agent }) {
           </thead>
           <tbody>
             {activity.map((e, i) => {
-              const colors = { start: 'text-emerald-400', stop: 'text-amber-400', restart: 'text-cyan-400' }
+              const colors = { start: 'text-success', stop: 'text-warning', restart: 'text-accent-text' }
               return (
-                <tr key={i} className="border-b border-slate-800/50">
+                <tr key={i} className="border-b border-line-faint/50">
                   <td className="px-4 py-2">
-                    <span className={`w-1.5 h-1.5 rounded-full inline-block mr-2 ${e.status === 'ok' ? 'bg-emerald-400' : 'bg-red-400'}`} />
-                    <span className={colors[e.action] || 'text-slate-300'}>{e.action}</span>
+                    <span className={`w-1.5 h-1.5 rounded-full inline-block mr-2 ${e.status === 'ok' ? 'bg-success' : 'bg-danger'}`} />
+                    <span className={colors[e.action] || 'text-ink-muted'}>{e.action}</span>
                   </td>
-                  <td className="px-4 py-2 text-slate-500 text-xs">{e.details || '-'}</td>
-                  <td className="px-4 py-2 text-right text-slate-500 text-xs">{e.timestamp ? new Date(e.timestamp).toLocaleString() : '-'}</td>
+                  <td className="px-4 py-2 text-ink-dim text-xs">{e.details || '-'}</td>
+                  <td className="px-4 py-2 text-right text-ink-dim text-xs">{e.timestamp ? new Date(e.timestamp).toLocaleString() : '-'}</td>
                 </tr>
               )
             })}
@@ -886,18 +907,18 @@ function ConfigTab({ agent }) {
     <div>
       <div className="flex items-center justify-between mb-4">
         <div>
-          <h3 className="text-sm font-medium text-slate-300">Agent Configuration</h3>
-          <p className="text-xs text-slate-500">{configFile}{configFormat !== 'json' ? ` (${configFormat})` : ''}</p>
+          <h3 className="text-sm font-medium text-ink-muted">Agent Configuration</h3>
+          <p className="text-xs text-ink-dim">{configFile}{configFormat !== 'json' ? ` (${configFormat})` : ''}</p>
         </div>
         <div className="flex items-center gap-2">
-          <span className={`text-xs ${saved ? 'text-slate-500' : 'text-amber-400'}`}>{saved ? 'Saved' : 'Unsaved changes'}</span>
+          <span className={`text-xs ${saved ? 'text-ink-dim' : 'text-warning'}`}>{saved ? 'Saved' : 'Unsaved changes'}</span>
           <button onClick={handleSave}
-                  className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-xs font-medium transition-colors">Save</button>
+                  className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-accent-ink rounded-lg text-xs font-medium transition-colors">Save</button>
         </div>
       </div>
-      {msg && <div className="mb-4 text-xs text-cyan-400">{msg}</div>}
+      {msg && <div className="mb-4 text-xs text-accent-text">{msg}</div>}
       <textarea value={raw} onChange={(e) => { setRaw(e.target.value); setSaved(false); setMsg('') }}
-                className="w-full h-[500px] bg-slate-950 border border-slate-800 rounded-xl p-4 text-xs font-mono text-slate-200 focus:outline-none focus:border-cyan-500 resize-none"
+                className="w-full h-[500px] bg-sunken border border-line-faint rounded-xl p-4 text-xs font-mono text-ink focus:outline-none focus:border-accent-line resize-none"
                 spellCheck={false} />
     </div>
   )

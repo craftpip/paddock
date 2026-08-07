@@ -996,3 +996,21 @@ find /workspace/instances/<pad>/openclaw/ -type f | wc -l
 - **Never create random containers for testing.** Spin up test containers only through the project's own tools (add-vm scripts, docker-compose services, or the web UI). Running `docker run` with external images is outside our scope.
 - **Never refer to containers/PADs with a `vm-` prefix.** The naming scheme is not guaranteed. Refer to PADs by their actual name only.
 - **Never use the question tool to ask the user questions during a conversation.** Ask questions directly in text instead. The tool is only for fallback or complex multi-option scenarios when explicitly justified.
+
+## Persistent Container Logs (2026-08-07)
+
+- `docker logs` dies with the container (docker rm removes the log file), so a recreated PAD's Logs tab started empty.
+- `src/services/log-store.js` captures each container's logs into a rolling file at `instances/<name>/logs/container.log` (auto-gitignored — `instances/*` is already ignored). It runs `docker logs --timestamps`, parses each line's RFC3339Nano timestamp, appends only lines newer than the last captured one (`meta.json` stores `lastTs`), so a recreated container's logs naturally append with no dupes/gaps. File is trimmed past 8MB/20k lines.
+- Capture triggers: every `/api/agents/:name/logs` fetch (view is always fresh), a 30s `setInterval` sweep in app.js over all `safeVmName` containers (logs persist even if the page is never opened), and at the start of each backend recreate/delete/update/settings `setImmediate` (final lines survive the sweep window).
+- The MCP `paddock_agent_logs` tool also reads from log-store now.
+- The old `dockerLogs()` helpers were removed from app.js and mcp.js (dead). `routes/agents.js` still has one — that file is dead code, not mounted.
+
+## Theme / Logs UI fixes (2026-08-07)
+
+- Custom scrollbars: global CSS in `src/client/src/index.css` — `scrollbar-width: thin` + `scrollbar-color: var(--t-raised) transparent` for Firefox, `::-webkit-scrollbar` (10px, rounded thumb, `background-clip: padding-box`, hover `--t-raised-hover`) for WebKit. Token-driven so it themes with light/dark.
+- Logs tab 100% height: the `<pre>` had `max-h-96` capping it. LogsTab root is now `flex flex-col h-full min-h-0`, header `flex-shrink-0`, pre `flex-1 min-h-0 overflow-auto` — it fills the mode-content area and scrolls internally.
+- **Terminal keeps xterm's DEFAULT colors** — the themed `xtermTheme()` (CSS-var bg + palette ANSI colors) and the `paddock:theme` listener were REMOVED from `Terminal.jsx` at the user's request. The terminal stays black-on-white-foreground in both light and dark modes; the theme toggle only affects the app UI around it, not the shell. Do not re-theme the terminal.
+
+### Do Not Do (SPA rebuild gotcha)
+
+- **JSX/CSS edits need `cd src/client && npm run build` + `docker restart paddock`** — the bind mount serves the BUILT bundle from `src/public/`, so editing a `.jsx` file alone does nothing until rebuilt. Symptom: new className never appears in the DOM (computed styles unchanged). Always verify the class string made it into `src/public/assets/index-*.js` before browser-testing.

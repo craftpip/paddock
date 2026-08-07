@@ -1,7 +1,93 @@
 @import "tailwindcss";
+@import "./styles/palette.css";
+
+@theme inline {
+  /* surfaces */
+  --color-canvas: var(--t-canvas);
+  --color-panel: var(--t-panel);
+  --color-sunken: var(--t-sunken);
+  --color-raised: var(--t-raised);
+  --color-raised-hover: var(--t-raised-hover);
+
+  /* lines */
+  --color-line: var(--t-line);
+  --color-line-faint: var(--t-line-faint);
+
+  /* text */
+  --color-ink: var(--t-ink);
+  --color-ink-muted: var(--t-ink-muted);
+  --color-ink-faint: var(--t-ink-faint);
+  --color-ink-dim: var(--t-ink-dim);
+
+  /* horse-brown accent */
+  --color-accent: var(--t-accent);
+  --color-accent-hover: var(--t-accent-hover);
+  --color-accent-deep: var(--t-accent-deep);
+  --color-accent-soft: var(--t-accent-soft);
+  --color-accent-line: var(--t-accent-line);
+  --color-accent-text: var(--t-accent-text);
+  --color-accent-ink: var(--t-accent-ink);
+
+  /* status */
+  --color-success: var(--t-success);
+  --color-success-soft: var(--t-success-soft);
+  --color-success-line: var(--t-success-line);
+  --color-success-ink: var(--t-success-ink);
+  --color-warning: var(--t-warning);
+  --color-warning-soft: var(--t-warning-soft);
+  --color-warning-line: var(--t-warning-line);
+  --color-warning-ink: var(--t-warning-ink);
+  --color-danger: var(--t-danger);
+  --color-danger-soft: var(--t-danger-soft);
+  --color-danger-line: var(--t-danger-line);
+  --color-danger-ink: var(--t-danger-ink);
+  --color-info: var(--t-info);
+  --color-info-soft: var(--t-info-soft);
+  --color-info-line: var(--t-info-line);
+  --color-info-ink: var(--t-info-ink);
+  --color-brand: var(--t-brand);
+  --color-brand-soft: var(--t-brand-soft);
+  --color-brand-line: var(--t-brand-line);
+  --color-brand-ink: var(--t-brand-ink);
+
+  /* overlay */
+  --color-overlay: var(--t-overlay);
+}
+
+/* ────────────────────────────── Scrollbars ─────────────────────────────── */
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--t-raised) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--t-raised);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--t-raised-hover);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
 
 .skeleton {
-  background: linear-gradient(90deg, #1e293b 25%, #334155 50%, #1e293b 75%);
+  background: linear-gradient(90deg, var(--t-panel) 25%, var(--t-raised) 50%, var(--t-panel) 75%);
   background-size: 200% 100%;
   animation: shimmer 1.5s infinite;
   border-radius: 0.5rem;

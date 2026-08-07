@@ -42,7 +42,7 @@ const HERMES = {
    *  opencode/picoclaw it has almost the whole surface area. */
   commands: [
     {
-      title: 'Status', color: 'cyan',
+      title: 'Status', color: 'accent',
       commands: [
         { cmd: 'hermes status', label: 'Status', desc: 'Health check — environment, models, providers, gateway status' },
         { cmd: 'hermes version', label: 'Version', desc: 'Hermes version + install info' },
@@ -51,7 +51,7 @@ const HERMES = {
       ],
     },
     {
-      title: 'Model', color: 'teal',
+      title: 'Model', color: 'info',
       commands: [
         { cmd: 'hermes model', label: 'Default model', desc: 'Pick default model + provider (interactive)' },
         { cmd: 'hermes fallback', label: 'Fallbacks', desc: 'Manage fallback providers' },
@@ -59,7 +59,7 @@ const HERMES = {
       ],
     },
     {
-      title: 'Auth', color: 'violet',
+      title: 'Auth', color: 'brand',
       commands: [
         { cmd: 'hermes login', label: 'Login', desc: 'Log in to an inference provider' },
         { cmd: 'hermes logout', label: 'Logout', desc: 'Clear provider credentials' },
@@ -67,7 +67,7 @@ const HERMES = {
       ],
     },
     {
-      title: 'Gateway', color: 'amber',
+      title: 'Gateway', color: 'warning',
       commands: [
         { cmd: 'hermes gateway status', label: 'Gateway status', desc: 'Health check — is the messaging gateway running?' },
         { cmd: 'hermes gateway list', label: 'List profiles', desc: 'All profiles + gateway status' },
@@ -76,28 +76,28 @@ const HERMES = {
       ],
     },
     {
-      title: 'Cron', color: 'emerald',
+      title: 'Cron', color: 'success',
       commands: [
         { cmd: 'hermes cron list', label: 'List jobs', desc: 'All scheduled jobs' },
         { cmd: 'hermes cron create', label: 'Add job', desc: 'Schedule a new job (interactive)' },
       ],
     },
     {
-      title: 'Skills', color: 'sky',
+      title: 'Skills', color: 'info',
       commands: [
         { cmd: 'hermes skills list', label: 'List installed', desc: 'Installed skills' },
         { cmd: 'hermes skills install', label: 'Install', desc: 'Install a skill from the hub' },
       ],
     },
     {
-      title: 'Memory', color: 'pink',
+      title: 'Memory', color: 'brand',
       commands: [
         { cmd: 'hermes memory status', label: 'Memory status', desc: 'Health check — memory store state' },
         { cmd: 'hermes memory setup', label: 'Setup memory', desc: 'Configure the memory store' },
       ],
     },
     {
-      title: 'Sessions', color: 'indigo',
+      title: 'Sessions', color: 'info',
       commands: [
         { cmd: 'hermes sessions list', label: 'List sessions', desc: 'Recent sessions' },
         { cmd: 'hermes --continue', label: 'Continue last', desc: 'Resume the most recent session' },

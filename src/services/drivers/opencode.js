@@ -35,7 +35,7 @@ const OPENCODE = {
   /** Command groups served to the Commands tab. */
   commands: [
     {
-      title: 'Model', color: 'teal',
+      title: 'Model', color: 'info',
       commands: [
         { cmd: 'opencode providers list', label: 'List providers', desc: 'Providers + saved credentials' },
         { cmd: 'opencode providers login', label: 'Login', desc: 'Log in to a provider (interactive)' },
@@ -44,7 +44,7 @@ const OPENCODE = {
       ],
     },
     {
-      title: 'Session', color: 'blue',
+      title: 'Session', color: 'info',
       commands: [
         { cmd: 'opencode session list', label: 'List sessions', desc: 'Recent sessions' },
         { cmd: 'opencode stats', label: 'Token usage', desc: 'Usage + cost statistics' },
@@ -52,7 +52,7 @@ const OPENCODE = {
       ],
     },
     {
-      title: 'MCP', color: 'emerald',
+      title: 'MCP', color: 'success',
       commands: [
         { cmd: 'opencode mcp list', label: 'List servers', desc: 'Health check — MCP servers + status' },
         { cmd: 'opencode mcp add', label: 'Add server', desc: 'Add an MCP server (interactive)' },
@@ -60,7 +60,7 @@ const OPENCODE = {
       ],
     },
     {
-      title: 'Agent', color: 'violet',
+      title: 'Agent', color: 'brand',
       commands: [
         { cmd: 'opencode agent list', label: 'List agents', desc: 'Available agents' },
         { cmd: 'opencode agent create', label: 'Create agent', desc: 'Create a new agent (interactive)' },

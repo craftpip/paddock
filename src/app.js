@@ -20,6 +20,7 @@ const drivers = require('./services/drivers');
 const jobLog = require('./services/job-log');
 const apiKeys = require('./services/api-keys');
 const containerHealth = require('./services/container-health');
+const logStore = require('./services/log-store');
 const { getDb } = require('./services/db');
 const { runCmdStream } = require('./services/cmd');
 const { setupSession, getSessionFromCookie, requireAuth, requireAdmin, csrfToken, csrfCheck, hashPassword, verifyPassword, checkNeedsSetup } = require('./middleware/auth');
@@ -304,11 +305,6 @@ function formatBackupTimestamp(ts) {
 
 async function dockerExec(vmName, cmd, timeout = 30000) {
   return runCmd('docker', ['exec', '-i', vmName, 'sh', '-lc', cmd], { timeout });
-}
-
-async function dockerLogs(vmName, tail = 100) {
-  const r = await runCmd('docker', ['logs', '--tail', String(tail), vmName], { timeout: 15000, check: false });
-  return r.stdout + r.stderr;
 }
 
 // ─── Terminal sessions (persistent tmux shells inside the PAD) ─────────────
@@ -839,6 +835,7 @@ app.post('/api/agents/:name/restart', async (req, res) => {
 app.post('/api/agents/:name/delete', async (req, res) => {
   if (!safeVmName(req.params.name)) return res.status(400).json({ error: 'Invalid name' });
   try {
+    await logStore.capture(req.params.name);
     await vm.removeVm(req.params.name);
     registry.removeAgentFromDb(req.params.name);
     jobLog.clearJob(req.params.name);
@@ -981,6 +978,7 @@ app.post('/api/agents/:name/settings', async (req, res) => {
     setImmediate(async () => {
       registry.setRestarting(name, true);
       try {
+        await logStore.capture(name);
         if (wasRunning) {
           step('stop', 'start');
           await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 });
@@ -1064,6 +1062,7 @@ app.post('/api/agents/:name/recreate', async (req, res) => {
     setImmediate(async () => {
       registry.setRestarting(name, true);
       try {
+        await logStore.capture(name);
         if (wasRunning) {
           step('stop', 'start');
           await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 });
@@ -1113,6 +1112,7 @@ app.post('/api/agents/:name/update', async (req, res) => {
 
   setImmediate(async () => {
     try {
+      await logStore.capture(name);
       await vm.updateAgent(name, {
         onLog: log,
         onStep: (stepName, state) => {
@@ -1518,7 +1518,8 @@ app.get('/api/agents/:name/logs', async (req, res) => {
   if (!agent) return res.status(404).json({ error: 'Agent not found' });
   const tail = Math.min(parseInt(req.query.tail) || 100, 5000);
   try {
-    const logs = await dockerLogs(agent.runtime_ref, tail);
+    await logStore.capture(agent.name);
+    const logs = logStore.readLogs(agent.name, tail);
     res.json({ logs });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -2215,6 +2216,19 @@ app.use((err, req, res, next) => {
 // ─── Boot ───────────────────────────────────────────────────
 
 const server = app.listen(6789, () => console.log('VM WebUI listening on port 6789'));
+
+// Periodic capture of every existing container's logs into its persistent
+// file, so container logs survive a recreate/delete even if the Logs page was
+// never opened. Capture is also done on every logs fetch and right before any
+// backend-driven recreate/delete — this sweep just closes the gap for changes
+// made outside Paddock (docker CLI, compose, crash loops).
+(async function logSweep() {
+  try {
+    const containers = await dockerPsList();
+    await logStore.captureAll(Object.keys(containers).filter((n) => safeVmName(n)));
+  } catch {}
+  setTimeout(logSweep, 30000);
+})();
 
 const wss = new WebSocketServer({ server });
 

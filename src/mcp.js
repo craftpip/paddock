@@ -12,6 +12,7 @@ const apiKeys = require('./services/api-keys');
 const registry = require('./services/agent-registry');
 const backup = require('./services/backup-manager');
 const workspace = require('./services/workspace');
+const logStore = require('./services/log-store');
 const { getDb } = require('./services/db');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
@@ -56,11 +57,6 @@ function runCmd(cmd, args, options = {}) {
 
 async function dockerExec(vmName, cmd, timeout = 30000) {
   return runCmd('docker', ['exec', '-i', vmName, 'sh', '-lc', cmd], { timeout });
-}
-
-async function dockerLogs(vmName, tail = 100) {
-  const r = await runCmd('docker', ['logs', '--tail', String(tail), vmName], { timeout: 15000, check: false });
-  return r.stdout + r.stderr;
 }
 
 function getUserRole(userId) {
@@ -164,7 +160,8 @@ function registerTools(server) {
     async ({ name, tail }) => {
       requireAccess(currentUser(), name);
       const agent = requireAgent(name);
-      const logs = await dockerLogs(agent.runtime_ref, Math.min(tail || 100, 5000));
+      await logStore.capture(agent.name);
+      const logs = logStore.readLogs(agent.name, Math.min(tail || 100, 5000));
       return textResult({ name, logs });
     }
   );

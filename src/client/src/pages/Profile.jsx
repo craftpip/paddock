@@ -10,22 +10,22 @@ const USERNAME_RE = /^[A-Za-z0-9]{3,32}$/
 const KEY_NAME_RE = /^[A-Za-z0-9]{3,64}$/
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
-const inputBase = "w-full px-3 py-2 bg-slate-950 border rounded-lg text-white text-sm placeholder:text-slate-600 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500/20"
-const inputCls = inputBase + " border-slate-700"
-const inputErrCls = inputBase + " border-red-600"
-const cardCls = "border border-slate-800 rounded-xl bg-slate-900/50 p-5"
-const btnCls = "px-4 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:bg-cyan-900/60 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors"
-const btnGhost = "px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-sm font-medium transition-colors"
+const inputBase = "w-full px-3 py-2 bg-sunken border rounded-lg text-ink text-sm placeholder:text-ink-dim focus:border-accent-line focus:outline-none focus:ring-1 focus:ring-accent-line/20"
+const inputCls = inputBase + " border-line"
+const inputErrCls = inputBase + " border-danger-line"
+const cardCls = "border border-line-faint rounded-xl bg-canvas/50 p-5"
+const btnCls = "px-4 py-2 bg-accent hover:bg-accent-hover disabled:bg-accent-soft disabled:cursor-not-allowed text-accent-ink rounded-lg text-sm font-medium transition-colors"
+const btnGhost = "px-4 py-2 bg-panel hover:bg-raised text-ink rounded-lg text-sm font-medium transition-colors"
 
 function Field({ label, hint, error, children }) {
   return (
     <div>
-      <label className="block text-xs font-medium text-slate-400 mb-1.5">{label}</label>
+      <label className="block text-xs font-medium text-ink-faint mb-1.5">{label}</label>
       {children}
       {error ? (
-        <p className="text-xs text-red-400 mt-1.5">{error}</p>
+        <p className="text-xs text-danger mt-1.5">{error}</p>
       ) : hint ? (
-        <p className="text-xs text-slate-500 mt-1.5">{hint}</p>
+        <p className="text-xs text-ink-dim mt-1.5">{hint}</p>
       ) : null}
     </div>
   )
@@ -41,10 +41,10 @@ function Modal({ title, description, onClose, width = 'max-w-sm', children }) {
   }, [onClose])
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50" onClick={onClose}>
-      <div className={`bg-slate-800 rounded-xl p-6 ${width} w-full mx-4 border border-slate-700 shadow-2xl`} onClick={(e) => e.stopPropagation()}>
-        <h2 className="text-lg font-bold text-white">{title}</h2>
-        {description && <p className="text-sm text-slate-400 mt-1 mb-4">{description}</p>}
+    <div className="fixed inset-0 bg-overlay backdrop-blur-sm flex items-center justify-center z-50" onClick={onClose}>
+      <div className={`bg-panel rounded-xl p-6 ${width} w-full mx-4 border border-line shadow-2xl`} onClick={(e) => e.stopPropagation()}>
+        <h2 className="text-lg font-bold text-ink">{title}</h2>
+        {description && <p className="text-sm text-ink-faint mt-1 mb-4">{description}</p>}
         {children}
       </div>
     </div>
@@ -52,7 +52,7 @@ function Modal({ title, description, onClose, width = 'max-w-sm', children }) {
 }
 
 function ErrorBanner({ children }) {
-  return <div className="bg-red-900/30 border border-red-700/60 text-red-200 px-4 py-3 rounded-lg text-sm mb-4">{children}</div>
+  return <div className="bg-danger-soft border border-danger-line/60 text-danger px-4 py-3 rounded-lg text-sm mb-4">{children}</div>
 }
 
 function Snippet({ label, code }) {
@@ -69,10 +69,10 @@ function Snippet({ label, code }) {
   return (
     <div>
       <div className="flex items-center justify-between mb-1.5">
-        <p className="text-xs font-medium text-slate-300">{label}</p>
-        <button onClick={copyCode} className="text-xs text-slate-500 hover:text-cyan-400 transition-colors">{copied ? 'Copied' : 'Copy'}</button>
+        <p className="text-xs font-medium text-ink-muted">{label}</p>
+        <button onClick={copyCode} className="text-xs text-ink-dim hover:text-accent-text transition-colors">{copied ? 'Copied' : 'Copy'}</button>
       </div>
-      <pre className="bg-slate-950 border border-slate-800 rounded-lg p-3 text-[11px] text-slate-300 overflow-x-auto">{code}</pre>
+      <pre className="bg-sunken border border-line-faint rounded-lg p-3 text-[11px] text-ink-muted overflow-x-auto">{code}</pre>
     </div>
   )
 }
@@ -284,21 +284,21 @@ export default function Profile() {
   return (
     <div className="max-w-4xl mx-auto px-4 sm:px-6 py-8">
       <div className="mb-8">
-        <h1 className="text-2xl font-bold text-white">Settings</h1>
+        <h1 className="text-2xl font-bold text-ink">Settings</h1>
         <div className="flex items-center gap-2 mt-1.5">
-          <span className="text-slate-400 text-sm">{username}</span>
-          <span className={`px-2 py-0.5 rounded-full text-xs font-medium capitalize ${role === 'admin' ? 'bg-purple-900/50 text-purple-300 border border-purple-800' : 'bg-slate-800 text-slate-300 border border-slate-700'}`}>
+          <span className="text-ink-faint text-sm">{username}</span>
+          <span className={`px-2 py-0.5 rounded-full text-xs font-medium capitalize ${role === 'admin' ? 'bg-brand-soft text-brand border border-brand-line' : 'bg-panel text-ink-muted border border-line'}`}>
             {role}
           </span>
         </div>
       </div>
 
-      <div className="flex gap-1 border-b border-slate-800 mb-6">
+      <div className="flex gap-1 border-b border-line-faint mb-6">
         {navItems.map((t) => (
           <button
             key={t.id}
             onClick={() => selectTab(t.id)}
-            className={`px-3 py-2 text-sm font-medium whitespace-nowrap border-b-2 -mb-px transition-colors ${tab === t.id ? 'text-white border-cyan-500' : 'text-slate-400 border-transparent hover:text-slate-200'}`}
+            className={`px-3 py-2 text-sm font-medium whitespace-nowrap border-b-2 -mb-px transition-colors ${tab === t.id ? 'text-ink border-accent-line' : 'text-ink-faint border-transparent hover:text-ink'}`}
           >
             {t.label}
           </button>
@@ -310,21 +310,21 @@ export default function Profile() {
           <div className="space-y-6">
             <div className={cardCls}>
               <div className="mb-4">
-                <h2 className="text-sm font-semibold text-white">Account</h2>
-                <p className="text-xs text-slate-500 mt-0.5">Basic information about your sign-in.</p>
+                <h2 className="text-sm font-semibold text-ink">Account</h2>
+                <p className="text-xs text-ink-dim mt-0.5">Basic information about your sign-in.</p>
               </div>
               <dl className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
                 <div>
-                  <dt className="text-xs text-slate-500 mb-1">Username</dt>
-                  <dd className="text-white font-medium">{account?.username || username}</dd>
+                  <dt className="text-xs text-ink-dim mb-1">Username</dt>
+                  <dd className="text-ink font-medium">{account?.username || username}</dd>
                 </div>
                 <div>
-                  <dt className="text-xs text-slate-500 mb-1">Role</dt>
-                  <dd className="capitalize text-white font-medium">{role}</dd>
+                  <dt className="text-xs text-ink-dim mb-1">Role</dt>
+                  <dd className="capitalize text-ink font-medium">{role}</dd>
                 </div>
                 <div>
-                  <dt className="text-xs text-slate-500 mb-1">Member since</dt>
-                  <dd className="text-white font-medium">
+                  <dt className="text-xs text-ink-dim mb-1">Member since</dt>
+                  <dd className="text-ink font-medium">
                     {account?.created_at ? new Date(account.created_at + 'Z').toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '—'}
                   </dd>
                 </div>
@@ -333,8 +333,8 @@ export default function Profile() {
 
             <div className={cardCls}>
               <div className="mb-4">
-                <h2 className="text-sm font-semibold text-white">Email</h2>
-                <p className="text-xs text-slate-500 mt-0.5">Used for account recovery and notifications.</p>
+                <h2 className="text-sm font-semibold text-ink">Email</h2>
+                <p className="text-xs text-ink-dim mt-0.5">Used for account recovery and notifications.</p>
               </div>
               <form onSubmit={saveEmail} className="flex gap-2 items-start">
                 <div className="flex-1">
@@ -345,17 +345,17 @@ export default function Profile() {
                     placeholder="you@example.com"
                     className={emailError ? inputErrCls : inputCls}
                   />
-                  {emailError && <p className="text-xs text-red-400 mt-1.5">{emailError}</p>}
+                  {emailError && <p className="text-xs text-danger mt-1.5">{emailError}</p>}
                 </div>
                 <button type="submit" disabled={saving} className={`${btnCls} whitespace-nowrap`}>{saving ? 'Saving…' : 'Save'}</button>
               </form>
-              {msg && !emailError && <p className={`text-xs mt-2 ${msg.includes('Failed') ? 'text-red-400' : 'text-emerald-400'}`}>{msg}</p>}
+              {msg && !emailError && <p className={`text-xs mt-2 ${msg.includes('Failed') ? 'text-danger' : 'text-success'}`}>{msg}</p>}
             </div>
 
             <div className={cardCls}>
               <div className="mb-4">
-                <h2 className="text-sm font-semibold text-white">Password</h2>
-                <p className="text-xs text-slate-500 mt-0.5">Keep your account secure with a strong password.</p>
+                <h2 className="text-sm font-semibold text-ink">Password</h2>
+                <p className="text-xs text-ink-dim mt-0.5">Keep your account secure with a strong password.</p>
               </div>
               <form onSubmit={changePassword} className="space-y-3 max-w-md">
                 <Field label="Current password">
@@ -369,7 +369,7 @@ export default function Profile() {
                 </Field>
                 <div>
                   <button type="submit" disabled={pwSaving} className={btnCls}>{pwSaving ? 'Updating…' : 'Change Password'}</button>
-                  {pwMsg && <p className={`text-xs mt-2 ${pwMsg.includes('incorrect') || pwMsg.includes('Failed') || pwMsg.includes('match') ? 'text-red-400' : 'text-emerald-400'}`}>{pwMsg}</p>}
+                  {pwMsg && <p className={`text-xs mt-2 ${pwMsg.includes('incorrect') || pwMsg.includes('Failed') || pwMsg.includes('match') ? 'text-danger' : 'text-success'}`}>{pwMsg}</p>}
                 </div>
               </form>
             </div>
@@ -380,8 +380,8 @@ export default function Profile() {
           <>
           <div className={cardCls}>
             <div className="mb-4">
-              <h2 className="text-sm font-semibold text-white">API Keys</h2>
-              <p className="text-xs text-slate-500 mt-0.5">Bearer tokens that MCP clients use to authenticate with this server.</p>
+              <h2 className="text-sm font-semibold text-ink">API Keys</h2>
+              <p className="text-xs text-ink-dim mt-0.5">Bearer tokens that MCP clients use to authenticate with this server.</p>
             </div>
 
             <form onSubmit={createKey} className="flex flex-col sm:flex-row gap-2 mb-4 items-start">
@@ -400,7 +400,7 @@ export default function Profile() {
                   placeholder="Key name (e.g. opencode)"
                   className={keyNameError ? inputErrCls : inputCls}
                 />
-                <p className={`text-xs mt-1.5 ${keyNameError ? 'text-red-400' : 'text-slate-500'}`}>
+                <p className={`text-xs mt-1.5 ${keyNameError ? 'text-danger' : 'text-ink-dim'}`}>
                   {keyNameError || 'Letters and numbers only.'}
                 </p>
               </div>
@@ -409,16 +409,16 @@ export default function Profile() {
               </select>
               <button type="submit" disabled={creating || !canCreateKey} className={`${btnCls} whitespace-nowrap`}>{creating ? 'Creating…' : 'Create Key'}</button>
             </form>
-            {keyMsg && <p className="text-xs text-red-400 mb-3">{keyMsg}</p>}
+            {keyMsg && <p className="text-xs text-danger mb-3">{keyMsg}</p>}
 
             {keysLoading ? (
-              <div className="text-sm text-slate-500 py-8 text-center">Loading keys…</div>
+              <div className="text-sm text-ink-dim py-8 text-center">Loading keys…</div>
             ) : keys.length === 0 ? (
-              <div className="text-sm text-slate-500 py-8 text-center border-t border-slate-800">No API keys yet. Create one to connect an MCP client.</div>
+              <div className="text-sm text-ink-dim py-8 text-center border-t border-line-faint">No API keys yet. Create one to connect an MCP client.</div>
             ) : (
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="border-b border-slate-700 text-left text-xs text-slate-500 uppercase tracking-wide">
+                  <tr className="border-b border-line text-left text-xs text-ink-dim uppercase tracking-wide">
                     <th className="pb-2 pr-3 font-medium">Name</th>
                     <th className="pb-2 pr-3 font-medium">Prefix</th>
                     <th className="pb-2 pr-3 font-medium">Scope</th>
@@ -428,12 +428,12 @@ export default function Profile() {
                 </thead>
                 <tbody>
                   {keys.map((k) => (
-                    <tr key={k.id} className="border-b border-slate-800">
-                      <td className="py-3 pr-3 font-medium text-white">{k.name}</td>
+                    <tr key={k.id} className="border-b border-line-faint">
+                      <td className="py-3 pr-3 font-medium text-ink">{k.name}</td>
                       <td className="py-3 pr-3">
-                        <span className="inline-flex items-center gap-1.5 font-mono text-xs text-slate-400 bg-slate-950 border border-slate-800 rounded-md px-2 py-0.5">
+                        <span className="inline-flex items-center gap-1.5 font-mono text-xs text-ink-faint bg-sunken border border-line-faint rounded-md px-2 py-0.5">
                           {k.prefix}
-                          <button onClick={() => copy(k.prefix)} title="Copy prefix" className="text-slate-500 hover:text-cyan-400 transition-colors">
+                          <button onClick={() => copy(k.prefix)} title="Copy prefix" className="text-ink-dim hover:text-accent-text transition-colors">
                             <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                               <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
                               <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
@@ -442,11 +442,11 @@ export default function Profile() {
                         </span>
                       </td>
                       <td className="py-3 pr-3">
-                        <span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-slate-800 text-slate-300">{k.scopes}</span>
+                        <span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-panel text-ink-muted">{k.scopes}</span>
                       </td>
-                      <td className="py-3 pr-3 text-xs text-slate-500">{fmt(k.last_used_at)}</td>
+                      <td className="py-3 pr-3 text-xs text-ink-dim">{fmt(k.last_used_at)}</td>
                       <td className="py-3 text-right">
-                        <button onClick={() => revokeKey(k.id, k.name)} className="px-2.5 py-1 bg-red-900/40 hover:bg-red-800/50 text-red-300 rounded-lg text-xs transition-colors">Revoke</button>
+                        <button onClick={() => revokeKey(k.id, k.name)} className="px-2.5 py-1 bg-danger-soft hover:bg-danger-soft text-danger rounded-lg text-xs transition-colors">Revoke</button>
                       </td>
                     </tr>
                   ))}
@@ -458,13 +458,13 @@ export default function Profile() {
           <div className="mt-6">
             <div className="flex items-start justify-between gap-3 mb-4">
               <div>
-                <h2 className="text-sm font-semibold text-white">Connect an MCP client</h2>
-                <p className="text-xs text-slate-500 mt-0.5">Paddock serves a Streamable HTTP MCP server. Coding agents can use it to control the fleet — list/start/stop PADs, read & write workspace files, manage backups, view configs and logs, and run in-container commands.</p>
+                <h2 className="text-sm font-semibold text-ink">Connect an MCP client</h2>
+                <p className="text-xs text-ink-dim mt-0.5">Paddock serves a Streamable HTTP MCP server. Coding agents can use it to control the fleet — list/start/stop PADs, read & write workspace files, manage backups, view configs and logs, and run in-container commands.</p>
               </div>
               <button
                 onClick={() => setShowUrlNote((v) => !v)}
                 title="Why does the URL change?"
-                className={`shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium transition-colors ${showUrlNote ? 'bg-cyan-900/40 text-cyan-300 border border-cyan-700' : 'bg-slate-800 text-slate-400 border border-slate-700 hover:text-slate-200'}`}
+                className={`shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium transition-colors ${showUrlNote ? 'bg-accent-soft text-accent-text border border-accent-line' : 'bg-panel text-ink-faint border border-line hover:text-ink'}`}
               >
                 <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <circle cx="12" cy="12" r="10" />
@@ -475,12 +475,12 @@ export default function Profile() {
               </button>
             </div>
             {showUrlNote && (
-              <div className="mb-5 border border-slate-700 bg-slate-900 rounded-lg p-3.5 text-xs text-slate-400 leading-relaxed">
-                <p className="font-medium text-slate-200 mb-1">About the server URL</p>
-                The URL in the snippets below always matches the address you are currently using to reach Paddock. If you opened it through <code className="text-slate-300">localhost</code>, the snippets will say <code className="text-slate-300">localhost</code> — that only works for clients running on this same machine. To let clients on other machines connect, open Paddock via its LAN address or hostname instead and the snippets update automatically.
+              <div className="mb-5 border border-line bg-sunken rounded-lg p-3.5 text-xs text-ink-faint leading-relaxed">
+                <p className="font-medium text-ink mb-1">About the server URL</p>
+                The URL in the snippets below always matches the address you are currently using to reach Paddock. If you opened it through <code className="text-ink-muted">localhost</code>, the snippets will say <code className="text-ink-muted">localhost</code> — that only works for clients running on this same machine. To let clients on other machines connect, open Paddock via its LAN address or hostname instead and the snippets update automatically.
               </div>
             )}
-            <ol className="text-sm text-slate-300 space-y-1.5 list-decimal list-inside mb-5">
+            <ol className="text-sm text-ink-muted space-y-1.5 list-decimal list-inside mb-5">
               <li>Create an API key with the form above — it is shown only once.</li>
               <li>Add the server to your client config using the matching snippet below.</li>
               <li>Every request authenticates with the key as a Bearer token.</li>
@@ -528,8 +528,8 @@ export default function Profile() {
           <div className={cardCls}>
             <div className="flex items-start justify-between mb-4">
               <div>
-                <h2 className="text-sm font-semibold text-white">Users</h2>
-                <p className="text-xs text-slate-500 mt-0.5">People who can sign in to this dashboard.</p>
+                <h2 className="text-sm font-semibold text-ink">Users</h2>
+                <p className="text-xs text-ink-dim mt-0.5">People who can sign in to this dashboard.</p>
               </div>
               <button
                 onClick={() => {
@@ -537,21 +537,21 @@ export default function Profile() {
                   setNewUser({ username: '', password: '', role: 'user' })
                   setShowCreate(true)
                 }}
-                className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-xs font-medium transition-colors whitespace-nowrap"
+                className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-accent-ink rounded-lg text-xs font-medium transition-colors whitespace-nowrap"
               >
                 + Create User
               </button>
             </div>
 
             {usersLoading ? (
-              <div className="text-slate-500 text-sm py-8 text-center">Loading users…</div>
+              <div className="text-ink-dim text-sm py-8 text-center">Loading users…</div>
             ) : users.length === 0 ? (
-              <div className="text-slate-500 text-sm py-8 text-center">No users yet.</div>
+              <div className="text-ink-dim text-sm py-8 text-center">No users yet.</div>
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
-                    <tr className="border-b border-slate-700 text-left text-xs text-slate-500 uppercase tracking-wide">
+                    <tr className="border-b border-line text-left text-xs text-ink-dim uppercase tracking-wide">
                       <th className="pb-2 pr-4 font-medium">Username</th>
                       <th className="pb-2 pr-4 font-medium">Email</th>
                       <th className="pb-2 pr-4 font-medium">Role</th>
@@ -562,26 +562,26 @@ export default function Profile() {
                   </thead>
                   <tbody>
                     {users.map((u) => (
-                      <tr key={u.id} className="border-b border-slate-800 text-slate-300">
-                        <td className="py-3 pr-4 font-medium text-white">{u.username}</td>
-                        <td className="py-3 pr-4 text-slate-400">{u.email || '—'}</td>
+                      <tr key={u.id} className="border-b border-line-faint text-ink-muted">
+                        <td className="py-3 pr-4 font-medium text-ink">{u.username}</td>
+                        <td className="py-3 pr-4 text-ink-faint">{u.email || '—'}</td>
                         <td className="py-3 pr-4">
-                          <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${u.role === 'admin' ? 'bg-purple-900/50 text-purple-300' : 'bg-slate-800 text-slate-300'}`}>
+                          <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${u.role === 'admin' ? 'bg-brand-soft text-brand' : 'bg-panel text-ink-muted'}`}>
                             {u.role}
                           </span>
                         </td>
                         <td className="py-3 pr-4">{u.agent_count}</td>
-                        <td className="py-3 pr-4 text-slate-400">{u.created_at ? new Date(u.created_at + 'Z').toLocaleDateString() : '—'}</td>
+                        <td className="py-3 pr-4 text-ink-faint">{u.created_at ? new Date(u.created_at + 'Z').toLocaleDateString() : '—'}</td>
                         <td className="py-3">
                           <div className="flex gap-2 justify-end">
                             <button
                               onClick={() => { setUsersError(''); setResetPassword(''); setResetPwUser(u) }}
-                              className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs transition-colors"
+                              className="px-3 py-1 bg-panel hover:bg-raised text-ink-muted rounded-lg text-xs transition-colors"
                             >
                               Reset PW
                             </button>
                             {u.role !== 'admin' && (
-                              <button onClick={() => deleteUser(u.id)} className="px-3 py-1 bg-red-900/40 hover:bg-red-800/50 text-red-300 rounded-lg text-xs transition-colors">
+                              <button onClick={() => deleteUser(u.id)} className="px-3 py-1 bg-danger-soft hover:bg-danger-soft text-danger rounded-lg text-xs transition-colors">
                                 Delete
                               </button>
                             )}
@@ -600,11 +600,11 @@ export default function Profile() {
       {revealed && (
         <Modal title="API key created" description="Copy this key now — you will not be able to see it again." onClose={() => setRevealed(null)} width="max-w-lg">
           <div className="flex gap-2 mb-4">
-            <code className="flex-1 px-3 py-2.5 bg-slate-950 border border-slate-700 rounded-lg text-xs text-emerald-300 font-mono break-all">{revealed.key}</code>
+            <code className="flex-1 px-3 py-2.5 bg-sunken border border-line rounded-lg text-xs text-success font-mono break-all">{revealed.key}</code>
             <button onClick={() => { copy(revealed.key); setCopied(true) }} className={`${btnCls} whitespace-nowrap`}>{copied ? 'Copied' : 'Copy'}</button>
           </div>
-          <p className="text-xs font-medium text-slate-300 mb-2">Client config for “{revealed.name}”</p>
-          <pre className="bg-slate-950 border border-slate-700 rounded-lg p-3 text-[11px] text-slate-300 overflow-x-auto mb-4">{`{
+          <p className="text-xs font-medium text-ink-muted mb-2">Client config for “{revealed.name}”</p>
+          <pre className="bg-sunken border border-line rounded-lg p-3 text-[11px] text-ink-muted overflow-x-auto mb-4">{`{
   "mcpServers": {
     "paddock": {
       "type": "http",

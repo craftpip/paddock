@@ -263,15 +263,15 @@ export default function SettingsTab({ agent }) {
 
   return (
     <div className="max-w-3xl space-y-6">
-      {loadError && <p className="text-red-400 text-sm">{loadError}</p>}
+      {loadError && <p className="text-danger text-sm">{loadError}</p>}
 
       {/* 0. Stale network peer warning */}
       {networkBroken && (
-        <section className="bg-amber-900/20 border border-amber-700/70 rounded-xl p-5">
-          <h3 className="text-sm font-medium text-amber-300">
+        <section className="bg-warning-soft border border-warning-line/70 rounded-xl p-5">
+          <h3 className="text-sm font-medium text-warning">
             {networkStale ? 'Network peer is stale — container can\u2019t start' : 'Network peer is stopped'}
           </h3>
-          <p className="text-xs text-amber-200/90 mt-1 max-w-lg">
+          <p className="text-xs text-warning/90 mt-1 max-w-lg">
             {networkStale
               ? `This agent routes through ${networkPeerLabel}, which has been recreated since this container was created. Docker still points at the old (now-deleted) container, so starting fails with "No such container". This is not a Paddock issue — the peer moved.`
               : `This agent routes through ${networkPeerLabel}, which exists but is currently stopped. The agent can't start until the peer is running. Start ${networkPeerLabel} first, then recreate this agent.`}
@@ -280,7 +280,7 @@ export default function SettingsTab({ agent }) {
             <button
               onClick={handleRecreateNetwork}
               disabled={saving}
-              className="mt-3 px-3 py-1.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white rounded-lg text-xs font-medium transition-colors"
+              className="mt-3 px-3 py-1.5 bg-warning hover:bg-warning disabled:opacity-50 text-warning-ink rounded-lg text-xs font-medium transition-colors"
             >
               Recreate to fix
             </button>
@@ -289,8 +289,8 @@ export default function SettingsTab({ agent }) {
       )}
 
       {/* 1. Container Info */}
-      <section className="bg-slate-800/60 border border-slate-700 rounded-xl p-5">
-        <h3 className="text-sm font-medium text-slate-300 mb-4">Container Info</h3>
+      <section className="bg-panel/60 border border-line rounded-xl p-5">
+        <h3 className="text-sm font-medium text-ink-muted mb-4">Container Info</h3>
         <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm sm:grid-cols-3">
           {[
             ['Name', agent.name],
@@ -301,26 +301,26 @@ export default function SettingsTab({ agent }) {
             ['Version', settings?.version || '—'],
           ].map(([k, v]) => (
             <div key={k}>
-              <dt className="text-xs text-slate-500">{k}</dt>
-              <dd className="text-slate-200 font-mono text-xs mt-0.5 break-all">{v}</dd>
+              <dt className="text-xs text-ink-dim">{k}</dt>
+              <dd className="text-ink font-mono text-xs mt-0.5 break-all">{v}</dd>
             </div>
           ))}
         </dl>
       </section>
 
       {/* 2. Update */}
-      <section className="bg-slate-800/60 border border-slate-700 rounded-xl p-5">
+      <section className="bg-panel/60 border border-line rounded-xl p-5">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h3 className="text-sm font-medium text-slate-300">Update</h3>
-            <p className="text-xs text-slate-500 mt-1 max-w-md">
+            <h3 className="text-sm font-medium text-ink-muted">Update</h3>
+            <p className="text-xs text-ink-dim mt-1 max-w-md">
               Redownloads the image, rebuilds it, and recreates the container. The container restarts automatically when it's done.
             </p>
           </div>
           <button
             onClick={handleUpdate}
             disabled={saving}
-            className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white rounded-lg text-xs font-medium transition-colors whitespace-nowrap"
+            className="px-3 py-1.5 bg-accent hover:bg-accent-hover disabled:opacity-50 text-accent-ink rounded-lg text-xs font-medium transition-colors whitespace-nowrap"
           >
             Update
           </button>
@@ -328,28 +328,28 @@ export default function SettingsTab({ agent }) {
       </section>
 
       {/* 3. Container Health Checkup */}
-      <section className="bg-slate-800/60 border border-slate-700 rounded-xl p-5">
+      <section className="bg-panel/60 border border-line rounded-xl p-5">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h3 className="text-sm font-medium text-slate-300">Container Health Checkup</h3>
-            <p className="text-xs text-slate-500 mt-1 max-w-md">
+            <h3 className="text-sm font-medium text-ink-muted">Container Health Checkup</h3>
+            <p className="text-xs text-ink-dim mt-1 max-w-md">
               Inspects the actual Docker container against the compose file — status, restart policy, network peer, mounts, ports, env. Each check streams live with a pass/fail.
             </p>
-            {healthError && <p className="text-xs text-red-400 mt-1">{healthError}</p>}
+            {healthError && <p className="text-xs text-danger mt-1">{healthError}</p>}
           </div>
           <div className="flex items-center gap-3 shrink-0">
             {healthLoading ? (
-              <span className="text-xs text-slate-500">Checking…</span>
+              <span className="text-xs text-ink-dim">Checking…</span>
             ) : healthStatus ? (
               <button
                 onClick={openHealthCheck}
                 title="Open full checkup report"
                 className={`text-xs font-medium px-2.5 py-1 rounded-full transition-colors ${
                   healthStatus === 'ok'
-                    ? 'bg-emerald-900/60 text-emerald-300 hover:bg-emerald-800/60'
+                    ? 'bg-success-soft text-success hover:bg-success-soft'
                     : healthStatus === 'warn'
-                      ? 'bg-amber-900/60 text-amber-300 hover:bg-amber-800/60'
-                      : 'bg-red-900/60 text-red-300 hover:bg-red-800/60'
+                      ? 'bg-warning-soft text-warning hover:bg-warning-soft'
+                      : 'bg-danger-soft text-danger hover:bg-danger-soft'
                 }`}
               >
                 {healthStatus === 'ok'
@@ -362,7 +362,7 @@ export default function SettingsTab({ agent }) {
             <button
               onClick={runHealthCheck}
               disabled={saving}
-              className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white rounded-lg text-xs font-medium transition-colors whitespace-nowrap"
+              className="px-3 py-1.5 bg-accent hover:bg-accent-hover disabled:opacity-50 text-accent-ink rounded-lg text-xs font-medium transition-colors whitespace-nowrap"
             >
               Run Health Check
             </button>
@@ -371,12 +371,12 @@ export default function SettingsTab({ agent }) {
       </section>
 
       {/* 4. Allow docker in the container */}
-      <section className="bg-slate-800/60 border border-slate-700 rounded-xl p-5">
+      <section className="bg-panel/60 border border-line rounded-xl p-5">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h3 className="text-sm font-medium text-slate-300">Allow docker in the container</h3>
-            <p className="text-xs text-slate-500 mt-1 max-w-md">
-              Lets this agent run <code className="text-slate-400">docker</code> commands (docker CLI + host socket). Rebuilds the image if it has no docker CLI.
+            <h3 className="text-sm font-medium text-ink-muted">Allow docker in the container</h3>
+            <p className="text-xs text-ink-dim mt-1 max-w-md">
+              Lets this agent run <code className="text-ink-faint">docker</code> commands (docker CLI + host socket). Rebuilds the image if it has no docker CLI.
             </p>
           </div>
           <button
@@ -384,29 +384,29 @@ export default function SettingsTab({ agent }) {
             aria-checked={toggleDocker}
             onClick={handleToggleDocker}
             disabled={saving}
-            className={`relative w-10 h-6 rounded-full transition-colors shrink-0 disabled:opacity-50 ${toggleDocker ? 'bg-cyan-600' : 'bg-slate-700'}`}
+            className={`relative w-10 h-6 rounded-full transition-colors shrink-0 disabled:opacity-50 ${toggleDocker ? 'bg-accent' : 'bg-raised'}`}
           >
             <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${toggleDocker ? 'translate-x-4' : ''}`} />
           </button>
         </div>
         {toggleDocker && (
-          <p className="mt-3 text-xs text-amber-400/90 bg-amber-900/20 border border-amber-800/60 rounded-lg px-3 py-2">
+          <p className="mt-3 text-xs text-warning/90 bg-warning-soft border border-warning-line/60 rounded-lg px-3 py-2">
             ⚠ The docker socket is host-root equivalent. This agent can control the entire host.
           </p>
         )}
       </section>
 
       {/* 5. Network */}
-      <section className="bg-slate-800/60 border border-slate-700 rounded-xl p-5">
-        <h3 className="text-sm font-medium text-slate-300">Network</h3>
-        <p className="text-xs text-slate-500 mt-1 max-w-md">
+      <section className="bg-panel/60 border border-line rounded-xl p-5">
+        <h3 className="text-sm font-medium text-ink-muted">Network</h3>
+        <p className="text-xs text-ink-dim mt-1 max-w-md">
           Route this agent's traffic through another running container by joining its network namespace (e.g. gluetun for VPN).
         </p>
         <select
           value={currentNetwork}
           onChange={(e) => handleNetworkChange(e.target.value)}
           disabled={saving}
-          className="mt-3 w-full sm:w-96 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-500 disabled:opacity-50"
+          className="mt-3 w-full sm:w-96 bg-sunken border border-line rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line disabled:opacity-50"
         >
           <option value="">Default (no override)</option>
           {networkOptions.map((c) => (
@@ -415,21 +415,21 @@ export default function SettingsTab({ agent }) {
             </option>
           ))}
         </select>
-        <p className="mt-3 text-xs text-slate-500">
+        <p className="mt-3 text-xs text-ink-dim">
           ⚠ Joining a container's network means the agent shares its network stack. If the target stops, the agent loses its network.
         </p>
       </section>
 
       {/* 6. Danger Zone */}
-      <section className="bg-red-950/20 border border-red-900/60 rounded-xl p-5">
-        <h3 className="text-sm font-medium text-red-400">Danger Zone</h3>
-        <p className="text-xs text-slate-500 mt-1 max-w-md">
+      <section className="bg-danger-soft border border-danger-line/60 rounded-xl p-5">
+        <h3 className="text-sm font-medium text-danger">Danger Zone</h3>
+        <p className="text-xs text-ink-dim mt-1 max-w-md">
           Permanently delete this agent, its container, and all files. This cannot be undone.
         </p>
         <button
           onClick={handleDelete}
           disabled={saving}
-          className="mt-3 px-3 py-1.5 bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white rounded-lg text-xs font-medium transition-colors"
+          className="mt-3 px-3 py-1.5 bg-danger hover:bg-danger disabled:opacity-50 text-danger-ink rounded-lg text-xs font-medium transition-colors"
         >
           Delete Container
         </button>

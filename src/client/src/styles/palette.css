@@ -1,0 +1,114 @@
+/**
+ * Horse Brown palette — the ONLY place colors are defined.
+ *
+ * Every color in the panel lives here as a --t-* custom property, in two
+ * modes: light (Sunlit Barn) and dark (Espresso Barn). Tailwind maps these to
+ * semantic utilities in index.css (@theme inline), so components only ever
+ * use class names like bg-panel / text-ink / bg-accent.
+ *
+ * To change the look of the whole app, edit the hex values in this file only.
+ */
+
+/* ─────────────────────────── Light — Sunlit Barn ─────────────────────────── */
+
+:root {
+  /* surfaces */
+  --t-canvas:        #f6eeda;   /* page background          */
+  --t-panel:         #fffdf6;   /* cards, nav, modals, inputs */
+  --t-sunken:        #efe4c8;   /* terminal, code, dropdowns */
+  --t-raised:        #e8dbb9;   /* hover fills, secondary buttons */
+  --t-raised-hover:  #dccb9f;   /* hover of secondary       */
+
+  /* lines */
+  --t-line:          #d5c196;   /* borders                  */
+  --t-line-faint:    #e6d9b8;   /* subtle borders, dividers */
+
+  /* text */
+  --t-ink:           #2a1d0e;   /* primary text             */
+  --t-ink-muted:     #5c4426;   /* secondary text           */
+  --t-ink-faint:     #7c613e;   /* muted text               */
+  --t-ink-dim:       #97794f;   /* faintest text, placeholders */
+
+  /* horse-brown accent */
+  --t-accent:        #a86a12;   /* buttons, active states   */
+  --t-accent-hover:  #94590d;   /* accent hover             */
+  --t-accent-deep:   #7d4c0d;   /* gradient end             */
+  --t-accent-soft:   #f2d493;   /* tinted chips             */
+  --t-accent-line:   #c07d1d;   /* borders, focus rings     */
+  --t-accent-text:   #94590d;   /* accent text, icons       */
+  --t-accent-ink:    #ffffff;   /* text on accent buttons   */
+
+  /* status */
+  --t-success:       #059669;
+  --t-success-soft:  #d1fae5;
+  --t-success-line:  #059669;
+  --t-success-ink:   #ffffff;
+  --t-warning:       #b45309;
+  --t-warning-soft:  #fef3c7;
+  --t-warning-line:  #b45309;
+  --t-warning-ink:   #ffffff;
+  --t-danger:        #dc2626;
+  --t-danger-soft:   #fee2e2;
+  --t-danger-line:   #dc2626;
+  --t-danger-ink:    #ffffff;
+  --t-info:          #2563eb;
+  --t-info-soft:     #dbeafe;
+  --t-info-line:     #2563eb;
+  --t-info-ink:      #ffffff;
+  --t-brand:         #6d28d9;
+  --t-brand-soft:    #ede9fe;
+  --t-brand-line:    #7c3aed;
+  --t-brand-ink:     #ffffff;
+
+  /* overlay */
+  --t-overlay:       rgba(42, 30, 18, 0.55);
+}
+
+/* ─────────────────────────── Dark — Espresso Barn ────────────────────────── */
+
+[data-theme="dark"] {
+  --t-canvas:        #19120a;
+  --t-panel:         #211710;
+  --t-sunken:        #100b05;
+  --t-raised:        #332416;
+  --t-raised-hover:  #453221;
+
+  --t-line:          #45301f;
+  --t-line-faint:    #2b1d11;
+
+  --t-ink:           #f1e7cf;
+  --t-ink-muted:     #d9c49a;
+  --t-ink-faint:     #b0946c;
+  --t-ink-dim:       #8d7350;
+
+  --t-accent:        #c98a1c;
+  --t-accent-hover:  #dd9f2a;
+  --t-accent-deep:   #8a5a12;
+  --t-accent-soft:   #4a2f12;
+  --t-accent-line:   #d99e33;
+  --t-accent-text:   #e2a832;
+  --t-accent-ink:    #1c1409;
+
+  --t-success:       #34d399;
+  --t-success-soft:  #0d3329;
+  --t-success-line:  #10b981;
+  --t-success-ink:   #062a1f;
+  --t-warning:       #fbbf24;
+  --t-warning-soft:  #3a2805;
+  --t-warning-line:  #a86a10;
+  --t-warning-ink:   #2b1c04;
+  --t-danger:        #f87171;
+  --t-danger-soft:   #3d1210;
+  --t-danger-line:   #b91c1c;
+  --t-danger-ink:    #2f0b0b;
+  --t-info:          #60a5fa;
+  --t-info-soft:     #12263f;
+  --t-info-line:     #2563eb;
+  --t-info-ink:      #0b1f33;
+  --t-brand:         #c4b5fd;
+  --t-brand-soft:    #31224e;
+  --t-brand-line:    #8b5cf6;
+  --t-brand-ink:     #1e1233;
+
+  --t-overlay:       rgba(10, 6, 2, 0.6);
+}

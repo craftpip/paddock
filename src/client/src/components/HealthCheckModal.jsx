@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 
 const STATUS_ICON = {
-  ok: { sym: '✓', cls: 'text-emerald-400' },
-  error: { sym: '✗', cls: 'text-red-400' },
-  warn: { sym: '~', cls: 'text-amber-400' },
-  running: { sym: '·', cls: 'text-slate-500' },
+  ok: { sym: '✓', cls: 'text-success' },
+  error: { sym: '✗', cls: 'text-danger' },
+  warn: { sym: '~', cls: 'text-warning' },
+  running: { sym: '·', cls: 'text-ink-dim' },
 }
 
 /**
@@ -78,10 +78,10 @@ export default function HealthCheckModal({ name, title, onDone, onClose }) {
 
   const badgeCls =
     overall === 'ok'
-      ? 'bg-emerald-900/60 text-emerald-300'
+      ? 'bg-success-soft text-success'
       : overall === 'warn'
-        ? 'bg-amber-900/60 text-amber-300'
-        : 'bg-red-900/60 text-red-300'
+        ? 'bg-warning-soft text-warning'
+        : 'bg-danger-soft text-danger'
   const badgeText =
     phase === 'running'
       ? 'Running…'
@@ -94,14 +94,14 @@ export default function HealthCheckModal({ name, title, onDone, onClose }) {
             : 'Problems found'
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-overlay backdrop-blur-sm">
       <div
         role="dialog"
         aria-modal="true"
-        className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-full max-w-2xl mx-4 overflow-hidden"
+        className="bg-panel border border-line rounded-xl shadow-2xl w-full max-w-2xl mx-4 overflow-hidden"
       >
         <div className="flex items-center justify-between px-5 pt-4 pb-2">
-          <h3 className="text-base font-semibold text-slate-100">{title || 'Health Check'}</h3>
+          <h3 className="text-base font-semibold text-ink">{title || 'Health Check'}</h3>
           <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${badgeCls}`}>{badgeText}</span>
         </div>
 
@@ -114,34 +114,34 @@ export default function HealthCheckModal({ name, title, onDone, onClose }) {
                 <li key={`${c.key}-${i}`} className="flex items-center gap-2.5">
                   <span className={`text-sm leading-none font-bold shrink-0 ${ic.cls}`}>{ic.sym}</span>
                   <div className="min-w-0">
-                    <p className="text-xs text-slate-300">{c.label}</p>
+                    <p className="text-xs text-ink-muted">{c.label}</p>
                     {showDetail && (
-                      <p className="text-xs font-mono text-slate-400 mt-0.5 break-all">
+                      <p className="text-xs font-mono text-ink-faint mt-0.5 break-all">
                         expected: {c.expected} · found: {c.actual}
                       </p>
                     )}
-                    {c.hint && <p className="text-xs text-slate-500 mt-0.5">{c.hint}</p>}
+                    {c.hint && <p className="text-xs text-ink-dim mt-0.5">{c.hint}</p>}
                   </div>
                 </li>
               )
             })}
             {phase === 'running' && checks.length === 0 && (
-              <li className="text-xs text-slate-500 py-3">Running checkup…</li>
+              <li className="text-xs text-ink-dim py-3">Running checkup…</li>
             )}
           </ul>
 
           {phase === 'failed' && error && (
-            <p className="mt-3 bg-red-900/50 border border-red-800 rounded-lg p-3 text-xs text-red-400 whitespace-pre-wrap">{error}</p>
+            <p className="mt-3 bg-danger-soft border border-danger-line rounded-lg p-3 text-xs text-danger whitespace-pre-wrap">{error}</p>
           )}
         </div>
 
         <div className="flex items-center justify-end gap-3 px-5 py-4">
-          <p className="mr-auto text-xs text-slate-500">
+          <p className="mr-auto text-xs text-ink-dim">
             {counts.ok} ✓ · {counts.warn} ~ · {counts.error} ✗
           </p>
           <button
             onClick={onClose}
-            className="px-4 py-2 text-sm font-medium text-white bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors"
+            className="px-4 py-2 text-sm font-medium text-ink bg-raised hover:bg-raised-hover rounded-lg transition-colors"
           >
             {phase === 'running' ? 'Close' : 'Done'}
           </button>

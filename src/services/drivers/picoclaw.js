@@ -40,7 +40,7 @@ const PICOCLAW = {
    *  doesn't ship them. */
   commands: [
     {
-      title: 'Status', color: 'cyan',
+      title: 'Status', color: 'accent',
       commands: [
         { cmd: 'picoclaw status', label: 'Status', desc: 'Health check — version, config + workspace status' },
         { cmd: 'picoclaw version', label: 'Version', desc: 'picoclaw version' },
@@ -48,7 +48,7 @@ const PICOCLAW = {
       ],
     },
     {
-      title: 'Auth', color: 'teal',
+      title: 'Auth', color: 'info',
       commands: [
         { cmd: 'picoclaw auth status', label: 'Auth status', desc: 'Health check — current login state' },
         { cmd: 'picoclaw auth models', label: 'Available models', desc: 'Models for configured providers' },
@@ -57,7 +57,7 @@ const PICOCLAW = {
       ],
     },
     {
-      title: 'Cron', color: 'violet',
+      title: 'Cron', color: 'brand',
       commands: [
         { cmd: 'picoclaw cron list', label: 'List jobs', desc: 'All scheduled jobs' },
         { cmd: 'picoclaw cron add', label: 'Add job', desc: 'Schedule a new job (interactive)' },
@@ -65,7 +65,7 @@ const PICOCLAW = {
       ],
     },
     {
-      title: 'Skills', color: 'emerald',
+      title: 'Skills', color: 'success',
       commands: [
         { cmd: 'picoclaw skills list', label: 'List installed', desc: 'Installed skills' },
         { cmd: 'picoclaw skills list-builtin', label: 'Builtin skills', desc: 'Available builtin skills' },

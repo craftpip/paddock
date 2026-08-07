@@ -95,21 +95,21 @@ export default function CommandModal({ name, title, onDone, onClose }) {
   const busy = phase === 'running'
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-overlay backdrop-blur-sm">
       <div
         role="dialog"
         aria-modal="true"
-        className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-full max-w-2xl mx-4 overflow-hidden focus:outline-none"
+        className="bg-panel border border-line rounded-xl shadow-2xl w-full max-w-2xl mx-4 overflow-hidden focus:outline-none"
       >
         <div className="flex items-center justify-between px-5 pt-4 pb-2">
-          <h3 className="text-base font-semibold text-slate-100">{title}</h3>
+          <h3 className="text-base font-semibold text-ink">{title}</h3>
           <span
             className={`text-xs font-medium px-2 py-0.5 rounded-full ${
               phase === 'running'
-                ? 'bg-cyan-900/60 text-cyan-300'
+                ? 'bg-accent-soft text-accent-text'
                 : phase === 'done'
-                  ? 'bg-emerald-900/60 text-emerald-300'
-                  : 'bg-red-900/60 text-red-300'
+                  ? 'bg-success-soft text-success'
+                  : 'bg-danger-soft text-danger'
             }`}
           >
             {phase === 'running' ? 'Running…' : phase === 'done' ? 'Done' : 'Failed'}
@@ -119,15 +119,15 @@ export default function CommandModal({ name, title, onDone, onClose }) {
         <div className="px-5">
           <Console label="Command output" runningCmd={runningCmd} lines={lines} emptyMessage="Waiting for output…" className="h-72" />
           {phase === 'failed' && (
-            <p className="mt-3 bg-red-900/50 border border-red-800 rounded-lg p-3 text-xs text-red-400 whitespace-pre-wrap">{error}</p>
+            <p className="mt-3 bg-danger-soft border border-danger-line rounded-lg p-3 text-xs text-danger whitespace-pre-wrap">{error}</p>
           )}
         </div>
 
         <div className="flex items-center justify-end gap-3 px-5 py-4">
-          {busy && <p className="mr-auto text-xs text-slate-500">You can close this — the operation continues in the background.</p>}
+          {busy && <p className="mr-auto text-xs text-ink-dim">You can close this — the operation continues in the background.</p>}
           <button
             onClick={onClose}
-            className="px-4 py-2 text-sm font-medium text-white bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors"
+            className="px-4 py-2 text-sm font-medium text-ink bg-raised hover:bg-raised-hover rounded-lg transition-colors"
           >
             {phase === 'done' ? 'Done' : 'Close'}
           </button>

@@ -36,7 +36,7 @@ const CODEX = {
   /** Command groups served to the Commands tab. */
   commands: [
     {
-      title: 'Session', color: 'blue',
+      title: 'Session', color: 'info',
       commands: [
         { cmd: 'codex exec --help', label: 'Exec help', desc: 'codex exec usage (run codex non-interactively)' },
         { cmd: 'codex eval --help', label: 'Eval help', desc: 'codex eval usage' },
