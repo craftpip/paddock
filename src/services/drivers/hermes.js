@@ -24,6 +24,7 @@ const HERMES = {
   baseImage: 'nousresearch/hermes-agent:latest',
   dataDir: '/opt/data',
   workspaceDir: '/opt/data',
+  workspaceCapability: 'none',
   configFile: 'config.yaml',
   configFormat: 'yaml',
   tuiCommand: 'hermes',

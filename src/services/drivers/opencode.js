@@ -24,6 +24,7 @@ const OPENCODE = {
   baseImage: '',
   dataDir: '/root/.opencode',
   workspaceDir: '/root/.opencode/workspace',
+  workspaceCapability: 'editable',
   configFile: 'opencode.json',
   tuiCommand: 'opencode',
   backupTypeMarker: '',

@@ -44,6 +44,180 @@ function instanceComposePath(name) {
   return path.join(INSTANCES_DIR, name, 'docker-compose.yml');
 }
 
+// ─── Custom workspace mount (plan 24) ────────────────────────
+
+// Host dirs that must never be bound as a workspace source.
+const HOST_SYSTEM_DIRS = ['/etc', '/proc', '/sys', '/dev', '/boot', '/bin', '/sbin', '/usr', '/lib', '/home', '/root', '/opt', '/tmp', '/var/run'];
+// Container paths (and descendants) that must never be bound as a workspace
+// destination. NOTE: /root and /opt are intentionally NOT here — every
+// supported driver keeps its data dir below one of them.
+const CONTAINER_PROTECTED = ['/etc', '/proc', '/sys', '/dev', '/var/run', '/usr', '/bin', '/sbin', '/lib', '/boot', '/tmp'];
+
+/** Recompute the visibility flags for a stored workspace mount. hostBrowsable
+ *  means the source lives inside this agent's data directory on the host
+ *  (`instances/<name>/<agent>`), the only source the host-scope file browser
+ *  clamp can safely reach. webuiVisible means the source is under the project
+ *  root (HOST_WORKSPACE). Shared by create/settings/registry so every consumer
+ *  derives the same flags from the same stored metadata. */
+function workspaceMountInfo(name, agent, host, container) {
+  const hostNorm = path.normalize(String(host));
+  const agentDataHost = path.join(HOST_WORKSPACE, 'instances', name, agent);
+  return {
+    host: hostNorm,
+    container: path.normalize(String(container)),
+    webuiVisible: hostNorm === HOST_WORKSPACE || hostNorm.startsWith(HOST_WORKSPACE + path.sep),
+    hostBrowsable: hostNorm === agentDataHost || hostNorm.startsWith(agentDataHost + path.sep),
+  };
+}
+
+function isParentOrSelf(parent, child) {
+  return child === parent || child.startsWith(parent + path.sep);
+}
+
+/** Map a HOST-side absolute path onto the webui container's own filesystem
+ *  view (host HOST_WORKSPACE ↔ container WORKSPACE, since the project is
+ *  bind-mounted at /workspace). Returns null for host-only paths the webui
+ *  cannot see (e.g. an external drive) — those are only resolvable by the
+ *  Docker daemon on the host and are never touched from the container. */
+function containerViewOf(hostPath) {
+  const p = path.normalize(String(hostPath));
+  if (p === HOST_WORKSPACE) return WORKSPACE;
+  if (p.startsWith(HOST_WORKSPACE + path.sep)) return WORKSPACE + p.slice(HOST_WORKSPACE.length);
+  return null;
+}
+
+/** Validate a user-requested workspace mount `{ workspaceHost, workspaceDir }`
+ *  against the server rules. Returns the normalized
+ *  `{ host, container, webuiVisible, hostBrowsable }` for storage, or throws
+ *  with a clear message. Empty BOTH values → returns null (no mount). */
+function validateWorkspaceMount(name, agent, workspaceHost, workspaceDir) {
+  const driver = getDriver(agent);
+  const cap = driver.workspaceCapability || 'fixed';
+
+  if (!workspaceHost && !workspaceDir) return null;
+
+  if (cap === 'none') {
+    throw new Error('This agent type does not support a custom workspace — its data directory IS the workspace');
+  }
+  if (!workspaceHost || !workspaceDir) {
+    throw new Error('Both the host workspace source and the container workspace path are required');
+  }
+
+  const hostRaw = String(workspaceHost).trim();
+  const dirRaw = String(workspaceDir).trim();
+  if (/[\u0000-\u001f\u007f]/.test(hostRaw) || /[\u0000-\u001f\u007f]/.test(dirRaw)) {
+    throw new Error('Control characters are not allowed in workspace paths');
+  }
+  if (/['"\\]/.test(hostRaw) || /['"\\]/.test(dirRaw)) {
+    throw new Error('Quotes and backslashes are not allowed in workspace paths');
+  }
+
+  // ── Host source ──
+  if (hostRaw === '/') throw new Error('The workspace source cannot be the host root');
+  if (hostRaw.split('/').some((s) => s === '.' || s === '..')) {
+    throw new Error('"." and ".." path segments are not allowed in the workspace source');
+  }
+  if (hostRaw.includes(':')) {
+    throw new Error('The workspace source cannot contain ":"');
+  }
+  let host;
+  if (hostRaw.startsWith('/')) {
+    host = path.normalize(hostRaw.replace(/\/{2,}/g, '/').replace(/\/+$/, ''));
+  } else {
+    if (!hostRaw.startsWith('instances/')) {
+      throw new Error('Host workspace source must be an absolute path or start with "instances/"');
+    }
+    host = path.normalize(path.join(HOST_WORKSPACE, hostRaw));
+  }
+
+  for (const sd of HOST_SYSTEM_DIRS) {
+    if (host === sd || host.startsWith(sd + path.sep)) {
+      throw new Error(`The workspace source cannot be a system directory (${sd})`);
+    }
+  }
+  if (host === HOST_WORKSPACE) {
+    throw new Error('The project root cannot be the workspace source');
+  }
+  if (host === '/app' || host.startsWith('/app/')) {
+    throw new Error('The webui code folder (/app) cannot be a workspace source');
+  }
+  const webuiSrc = path.join(HOST_WORKSPACE, 'src');
+  if (host === webuiSrc || host.startsWith(webuiSrc + path.sep)) {
+    throw new Error('The webui source folder (src) cannot be a workspace source');
+  }
+
+  const instancesHost = path.join(HOST_WORKSPACE, 'instances');
+  const ownInstDir = path.join(instancesHost, name);
+  const agentDataHost = path.join(ownInstDir, agent);
+  if (isParentOrSelf(host, instancesHost) || host === instancesHost) {
+    throw new Error('The workspace source cannot be the instances folder or a parent of it');
+  }
+  if (host === ownInstDir) {
+    throw new Error('The workspace source cannot be the agent instance folder itself');
+  }
+  if (host === agentDataHost || isParentOrSelf(host, agentDataHost)) {
+    throw new Error('The workspace source would swallow the agent data folder');
+  }
+  if (host.startsWith(instancesHost + path.sep)) {
+    const first = path.relative(instancesHost, host).split(path.sep)[0];
+    if (first !== name) {
+      throw new Error(`The workspace source cannot be inside another agent's folder (instances/${first})`);
+    }
+  }
+
+  // Symlink escape: for sources the webui can see, resolve the nearest
+  // existing ancestor and require it stays under the project root. Missing
+  // suffixes are fine (the dir will be created) — the real path must never
+  // walk out of the webui's own /workspace bind. Host-only paths (outside
+  // HOST_WORKSPACE) are skipped: the container has no view of them to resolve,
+  // and only the Docker daemon on the host mounts them.
+  const webuiVisible = host === HOST_WORKSPACE || host.startsWith(HOST_WORKSPACE + path.sep);
+  if (webuiVisible) {
+    let probe = containerViewOf(host);
+    while (probe && !fs.existsSync(probe)) probe = path.dirname(probe);
+    const real = probe ? fs.realpathSync(probe) : '';
+    if (real && real !== WORKSPACE && !real.startsWith(WORKSPACE + path.sep)) {
+      throw new Error('The workspace source must stay under the project root');
+    }
+  }
+  if (fs.existsSync(host) && !fs.statSync(host).isDirectory()) {
+    throw new Error('The host workspace source already exists and is not a directory');
+  }
+
+  // ── Container destination ──
+  const dir = path.normalize(dirRaw.replace(/\/{2,}/g, '/').replace(/\/+$/, ''));
+  if (!dir.startsWith('/')) throw new Error('Container workspace path must be absolute');
+  if (dir === '/') throw new Error('Container workspace path cannot be the host root');
+  for (const p of CONTAINER_PROTECTED) {
+    if (dir === p || dir.startsWith(p + '/')) {
+      throw new Error(`Cannot mount a workspace at the system path ${p}`);
+    }
+  }
+  const dataDir = driver.dataDir;
+  if (dir === dataDir || isParentOrSelf(dir, dataDir)) {
+    throw new Error('Container workspace path would swallow the agent data directory');
+  }
+  const wsDir = driver.workspaceDir;
+  if (isParentOrSelf(dataDir, dir)) {
+    // Descendant of dataDir: only the driver's own workspace path is allowed —
+    // anything else (…/config, …/sessions, …/agents) shadows critical state.
+    if (dir !== wsDir && !isParentOrSelf(wsDir, dir)) {
+      throw new Error('Container workspace path shadows critical agent state');
+    }
+  }
+  if (cap === 'fixed' && dir !== wsDir) {
+    throw new Error(`${driver.type} requires its workspace at ${wsDir}`);
+  }
+
+  return workspaceMountInfo(name, agent, host, dir);
+}
+
+/** YAML-safe scalar for user-provided paths (compose values). Always quoted so
+ *  spaces/colons in a path can never break the generated YAML. */
+function yamlScalar(s) {
+  return `"${String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
 /** Shared build-template dir for an agent type (`src/vm-builds/<type>`). */
 function buildTemplateDir(agent) {
   return path.join(BUILD_TEMPLATES_DIR, agent);
@@ -135,11 +309,27 @@ async function getNetworkHealth(name) {
   return { state: 'ok', networkMode: mode, peerId, peerName, peerState };
 }
 
+/** Read the persisted custom workspace mount (meta.env WORKSPACE_HOST/WORKSPACE_DIR)
+ *  and return its normalized info, or null when not configured. Never throws:
+ *  a corrupt/stale pair is ignored by compose generation (the Settings tab
+ *  validates before writing, and writeInstanceCompose uses the already-validated
+ *  value). */
+function readWorkspaceMount(name, agent) {
+  const meta = readMeta(path.join(INSTANCES_DIR, name)) || {};
+  if (!meta.WORKSPACE_HOST || !meta.WORKSPACE_DIR) return null;
+  try {
+    return validateWorkspaceMount(name, agent, meta.WORKSPACE_HOST, meta.WORKSPACE_DIR);
+  } catch {
+    return null;
+  }
+}
+
 function generateInstanceCompose(name, agent, password, port, opts = {}) {
   const { allowDocker = false, network = '', webService = null, webPeerNetwork = '' } = opts;
   const driver = getDriver(agent);
   const image = imageFor(name);
   const dataDir = driver.dataDir;
+  const wsMount = readWorkspaceMount(name, agent);
 
   let yaml = 'services:\n';
   yaml += `  ${name}:\n`;
@@ -178,6 +368,19 @@ function generateInstanceCompose(name, agent, password, port, opts = {}) {
   // Volume sources are resolved by the Docker DAEMON → use HOST_WORKSPACE
   // (the daemon's host view, e.g. /www2/paddock).
   yaml += `    volumes:\n      - ${HOST_WORKSPACE}/instances/${name}/${agent}:${dataDir}\n`;
+  if (wsMount) {
+    // Custom workspace bind (plan 24): an independent host→container mount
+    // replacing the implicit `…/workspace` directory. Values come from meta
+    // flags and were validated before write. The WHOLE `host:container`
+    // string is quoted as one scalar — docker compose splits the volume spec
+    // on the last colon, so quoting the two sides separately would produce a
+    // flow-mapping fragment that yaml rejects.
+    yaml += `      - ${yamlScalar(`${wsMount.host}:${wsMount.container}`)}\n`;
+    // Start the container IN the custom workspace so `docker exec`, the tmux
+    // terminal pane, and any cwd-relative tooling automatically land in the
+    // workspace folder — no shell-level `cd` required.
+    yaml += `    working_dir: ${yamlScalar(wsMount.container)}\n`;
+  }
   if (allowDocker) yaml += `      - /var/run/docker.sock:/var/run/docker.sock\n`;
   if (network) yaml += `    network_mode: container:${network}\n`;
   yaml += `    environment:\n      TZ: Asia/Kolkata\n      ROOT_PASSWORD: ${password || ''}\n`;
@@ -249,6 +452,30 @@ async function applySettings(name, opts = {}) {
 
   seedBuildDir(name, agent, { installDocker: allowDocker });
 
+  // Custom workspace bind (plan 24). `opts.workspaceHost`/`opts.workspaceDir`
+  // are the NEW values from the settings form; the stored pair is the
+  // fallback when the form only sends one side. Flags MUST be written before
+  // writeInstanceCompose — the compose generator reads them from meta to emit
+  // the extra bind.
+  const oldMount = readWorkspaceMount(name, agent);
+  const newHost = opts.workspaceHost !== undefined ? opts.workspaceHost : (oldMount ? oldMount.host : '');
+  const newDir = opts.workspaceDir !== undefined ? opts.workspaceDir : (oldMount ? oldMount.container : '');
+  const wsMount = (newHost || newDir)
+    ? validateWorkspaceMount(name, agent, newHost, newDir)
+    : null;
+
+  if (wsMount && wsMount.webuiVisible) {
+    const view = containerViewOf(wsMount.host);
+    if (view && !fs.existsSync(view)) fs.mkdirSync(view, { recursive: true });
+  }
+  if (wsMount) {
+    setMetaFlag(name, 'WORKSPACE_HOST', wsMount.host);
+    setMetaFlag(name, 'WORKSPACE_DIR', wsMount.container);
+  } else {
+    setMetaFlag(name, 'WORKSPACE_HOST', '');
+    setMetaFlag(name, 'WORKSPACE_DIR', '');
+  }
+
   let webPeerNetwork = '';
   if (webService && network) {
     webPeerNetwork = await getPeerNetworkName(network);
@@ -263,6 +490,7 @@ async function applySettings(name, opts = {}) {
     network,
     image: imageFor(name),
     agent,
+    workspace: wsMount,
   };
 }
 
@@ -407,6 +635,7 @@ async function createVm(name, options = {}) {
     agent = 'openclaw', mode = 'fresh', cloneSource = '',
     sshEnabled = false, port = '', password = '',
     onLog = () => {}, onStep = () => {}, skipSetup = false,
+    workspaceHost = '', workspaceDir = '',
   } = options;
 
   if (existingServices().has(name)) {
@@ -441,9 +670,28 @@ async function createVm(name, options = {}) {
     }
   }
 
-  const workspaceDir = path.join(instDir, agent);
-  fs.mkdirSync(workspaceDir, { recursive: true });
+  // Custom workspace bind (plan 24): validate BEFORE writing meta/compose so a
+  // bad request aborts with a clear error and leaves nothing behind. `wsMount`
+  // is `{ host, container, webuiVisible, hostBrowsable }` or null.
+  const wsMount = workspaceHost || workspaceDir
+    ? validateWorkspaceMount(name, agent, workspaceHost, workspaceDir)
+    : null;
+
+  const agentDataDir = path.join(instDir, agent);
+  fs.mkdirSync(agentDataDir, { recursive: true });
   onLog('system', `Created instance directory: ${instDir}`);
+
+  // Create the host workspace source up front so a fresh mount has somewhere to
+  // land. Only when the source is under the project root — the webui is the
+  // only thing that can create dirs there (host sources outside HOST_WORKSPACE
+  // are expected to already exist, e.g. a shared data drive).
+  if (wsMount && wsMount.webuiVisible) {
+    const view = containerViewOf(wsMount.host);
+    if (view && !fs.existsSync(view)) {
+      fs.mkdirSync(view, { recursive: true });
+      onLog('system', `Created workspace source: ${wsMount.host}`);
+    }
+  }
 
   if (mode === 'clone') {
     // Clone is type-locked: a clone inherits the source's build files + data
@@ -469,7 +717,7 @@ async function createVm(name, options = {}) {
       onLog('system', `Cloning workspace from ${src}…`);
       for (const entry of fs.readdirSync(srcDir)) {
         const srcPath = path.join(srcDir, entry);
-        const dstPath = path.join(workspaceDir, entry);
+        const dstPath = path.join(agentDataDir, entry);
         if (fs.statSync(srcPath).isDirectory()) {
           fs.cpSync(srcPath, dstPath, { recursive: true });
         } else {
@@ -493,6 +741,9 @@ async function createVm(name, options = {}) {
 
   let metaTxt = `ROOT_PASSWORD=${pw}\nAGENT=${agent}\n`;
   if (finalPort) metaTxt += `PORT=${finalPort}\n`;
+  // Workspace mount flags MUST be written before writeInstanceCompose — the
+  // compose generator reads them from meta to emit the extra bind.
+  if (wsMount) metaTxt += `WORKSPACE_HOST=${wsMount.host}\nWORKSPACE_DIR=${wsMount.container}\n`;
   fs.writeFileSync(path.join(instDir, 'meta.env'), metaTxt);
 
   writeInstanceCompose(name, agent, pw, finalPort);
@@ -555,6 +806,22 @@ async function removeVm(name) {
   try { await runCmd('docker', ['rm', '-f', name], { timeout: 30000 }); } catch {}
   try { await runCmd('docker', ['network', 'rm', `${name}_default`], { timeout: 30000 }); } catch {}
   const instDir = path.join(INSTANCES_DIR, name);
+  const meta = readMeta(instDir) || {};
+  const agent = meta.AGENT || 'openclaw';
+  // Custom workspace source (plan 24): when the mount lives OUTSIDE the agent's
+  // data dir but still under the project root, remove it so the delete leaves
+  // no orphan folder. Sources inside the data dir are deleted with it; sources
+  // outside HOST_WORKSPACE are never touched.
+  if (meta.WORKSPACE_HOST) {
+    try {
+      const info = workspaceMountInfo(name, agent, meta.WORKSPACE_HOST, meta.WORKSPACE_DIR || '');
+      const dataHost = path.join(HOST_WORKSPACE, 'instances', name, agent);
+      if (info.webuiVisible && info.host !== dataHost && !info.host.startsWith(dataHost + path.sep)) {
+        const view = containerViewOf(info.host);
+        if (view && fs.existsSync(view)) fs.rmSync(view, { recursive: true, force: true });
+      }
+    } catch {}
+  }
   if (fs.existsSync(instDir)) fs.rmSync(instDir, { recursive: true, force: true });
   // The per-instance image is this PAD's own tag — drop it too, otherwise every
   // create/delete cycle leaks a paddock-vm-<name>:latest image.
@@ -668,9 +935,11 @@ module.exports = {
   existingServices, startAgent,
   readWebService, applyWebServices, webHookPath,
   writeWebStartHook, removeWebStartHook, webDoorName,
+  validateWorkspaceMount, workspaceMountInfo, readWorkspaceMount,
   imageFor, seedBuildDir, buildDir, buildEnvPath,
   readBuildEnv, setBuildEnv,
   argsFromDockerfile,
   composeCommand, ensureInstanceBuilds,
   INSTANCES_DIR, PREFIX, PREFIX_RE,
+  HOST_WORKSPACE, WORKSPACE,
 };

@@ -15,13 +15,17 @@ function getDriver(type) {
   return drivers[type] || openclaw;
 }
 
-/** All known drivers as [{ type, label, setupSteps }] — feeds the CreateAgent
- *  select and the commands endpoint. */
+/** All known drivers as [{ type, label, setupSteps, workspaceCapability,
+ *  workspaceDir }] — feeds the CreateAgent select, the commands endpoint, and
+ *  the create-form Workspace card (plan 24). */
 function listDrivers() {
   return Object.values(drivers).map((d) => ({
     type: d.type,
     label: d.label,
     setupSteps: d.setupSteps || [],
+    workspaceCapability: d.workspaceCapability || 'fixed',
+    workspaceDir: d.workspaceDir || '',
+    dataDir: d.dataDir || '',
   }));
 }
 

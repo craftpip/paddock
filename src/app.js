@@ -891,12 +891,17 @@ app.get('/api/agents/:name/settings', async (req, res) => {
     try {
       networkHealth = await vm.getNetworkHealth(name);
     } catch {}
+    let workspaceMount = null;
+    try {
+      workspaceMount = vm.readWorkspaceMount(name, agentType);
+    } catch {}
     res.json({
       allowDocker: meta.DOCKER === '1',
       network: meta.NETWORK || '',
       image,
       version,
       networkHealth,
+      workspaceMount,
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -951,6 +956,25 @@ app.post('/api/agents/:name/settings', async (req, res) => {
     const newAllow = allowDocker !== undefined ? !!allowDocker : oldAllow;
     const newNetwork = network !== undefined ? (network || '') : oldNetwork;
 
+    // Custom workspace bind (plan 24). Pre-validate BEFORE the SSE job starts so
+    // an invalid mount returns 400 immediately (matching create). When the form
+    // omits one side, the stored value carries over; both absent = no change.
+    const agentType = meta.AGENT || 'openclaw';
+    const oldMount = vm.readWorkspaceMount(name, agentType);
+    const reqHost = req.body.workspaceHost !== undefined
+      ? req.body.workspaceHost
+      : (oldMount ? oldMount.host : '');
+    const reqDir = req.body.workspaceDir !== undefined
+      ? req.body.workspaceDir
+      : (oldMount ? oldMount.container : '');
+    let wsMount = null;
+    if (reqHost || reqDir) {
+      wsMount = vm.validateWorkspaceMount(name, agentType, reqHost, reqDir);
+    }
+    const oldWsKey = oldMount ? `${oldMount.host}\u0000${oldMount.container}` : '';
+    const newWsKey = wsMount ? `${wsMount.host}\u0000${wsMount.container}` : '';
+    const workspaceChanged = oldWsKey !== newWsKey;
+
     // Network target validation (only on a real change to a non-empty target)
     if (newNetwork !== oldNetwork && newNetwork) {
       if (newNetwork === name) return res.status(400).json({ error: 'Cannot route an agent through itself' });
@@ -961,12 +985,11 @@ app.post('/api/agents/:name/settings', async (req, res) => {
       }
     }
 
-    const agentType = meta.AGENT || 'openclaw';
     const image = vm.imageFor(name);
     const dockerChanged = newAllow !== oldAllow;
     const networkChanged = newNetwork !== oldNetwork;
-    if (!dockerChanged && !networkChanged) {
-      return res.json({ allowDocker: newAllow, network: newNetwork, image });
+    if (!dockerChanged && !networkChanged && !workspaceChanged) {
+      return res.json({ allowDocker: newAllow, network: newNetwork, image, workspaceMount: oldMount });
     }
 
     // Persist the requested docker state in the instance build.env — the toggle
@@ -988,7 +1011,7 @@ app.post('/api/agents/:name/settings', async (req, res) => {
     const log = (stream, text) => jobLog.line(job, stream, text);
     const step = (stepName, state) => jobLog.setStep(job, stepName, state);
 
-    const reason = needRebuild ? 'rebuild' : dockerChanged ? 'docker' : 'network';
+    const reason = needRebuild ? 'rebuild' : dockerChanged ? 'docker' : networkChanged ? 'network' : 'workspace';
     res.status(202).json({ ok: true, job: jobKey, streaming: true, reason });
 
     setImmediate(async () => {
@@ -1008,12 +1031,18 @@ app.post('/api/agents/:name/settings', async (req, res) => {
         const summary = [];
         if (dockerChanged) summary.push(`allowDocker=${newAllow}`);
         if (networkChanged) summary.push(`network=${newNetwork || 'default'}`);
+        if (workspaceChanged) summary.push(wsMount ? `workspace=${wsMount.host} → ${wsMount.container}` : 'workspace=default');
         log('system', `Applying settings: ${summary.join(', ')}`);
         if (webService) {
           log('system', `Web app is published (host port ${webService.hostPort}) — keeping it live across the change`);
         }
 
-        await vm.applySettings(name, { allowDocker: newAllow, network: newNetwork });
+        await vm.applySettings(name, {
+          allowDocker: newAllow,
+          network: newNetwork,
+          workspaceHost: wsMount ? wsMount.host : '',
+          workspaceDir: wsMount ? wsMount.container : '',
+        });
         registry.dockerPsList(true);
 
         // Leaving peer mode: the socat door is orphaned and still holds the host
@@ -1087,7 +1116,12 @@ app.post('/api/agents/:name/settings', async (req, res) => {
         // Roll settings back so the agent stays usable, then bring it back up
         // if it was running.
         try {
-          await vm.applySettings(name, { allowDocker: oldAllow, network: oldNetwork });
+          await vm.applySettings(name, {
+            allowDocker: oldAllow,
+            network: oldNetwork,
+            workspaceHost: oldMount ? oldMount.host : '',
+            workspaceDir: oldMount ? oldMount.container : '',
+          });
           // Same ordering rule as the happy path: the door must be gone before
           // the agent recreate when rolling back to the default network, or the
           // agent's port bind collides with the still-running door.
@@ -1592,7 +1626,11 @@ app.get('/api/agents/:name/health-log', (req, res) => {
 });
 
 app.get('/api/config', (req, res) => {
-  res.json({ containerPrefix: PREFIX });
+  res.json({
+    containerPrefix: PREFIX,
+    hostWorkspaceRoot: vm.HOST_WORKSPACE || process.env.HOST_WORKSPACE_ROOT || '',
+    workspaceRoot: vm.WORKSPACE || process.env.WORKSPACE_ROOT || '/workspace',
+  });
 });
 
 // ─── Agent type registry (drivers) ─────────────────────────────
@@ -2342,11 +2380,24 @@ app.get('/api/vault/:id/decrypt', requireAdmin, (req, res) => {
 // ─── API: Create Agent ──────────────────────────────────────
 
 app.post('/api/agents/create', async (req, res) => {
-  const { name, agent, backup_file, assign_to } = req.body;
+  const { name, agent, backup_file, assign_to, workspace_host, workspace_dir } = req.body;
   if (!name) return res.status(400).json({ error: 'Name is required' });
   if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
   if (registry.getAgent(name)) return res.status(409).json({ error: 'Agent already exists' });
   if (backup_file && !safeBackupPath(backup_file)) return res.status(400).json({ error: 'Invalid backup file' });
+
+  // Custom workspace bind (plan 24): validate BEFORE the 202 response so a bad
+  // mount aborts with 400 and nothing is created. Clone-from-backup never seeds
+  // a custom workspace — it is a restore flow, not an agent clone.
+  const isClone = !!backup_file;
+  let wsMount = null;
+  if (!isClone && (workspace_host || workspace_dir)) {
+    try {
+      wsMount = vm.validateWorkspaceMount(name, agent || 'openclaw', workspace_host, workspace_dir);
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
+    }
+  }
 
   const job = jobLog.getOrCreateJob(name);
   const log = (stream, text) => jobLog.line(job, stream, text);
@@ -2358,11 +2409,12 @@ app.post('/api/agents/create', async (req, res) => {
 
   setImmediate(async () => {
     try {
-      const isClone = !!backup_file;
       await vm.createVm(name, {
         agent: agent || 'openclaw',
         mode: 'fresh',
         skipSetup: isClone,
+        workspaceHost: wsMount ? wsMount.host : '',
+        workspaceDir: wsMount ? wsMount.container : '',
         onLog: log,
         onStep: step,
       });

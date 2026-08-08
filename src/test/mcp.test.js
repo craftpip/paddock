@@ -28,6 +28,7 @@ describe('MCP Server - Handshake', () => {
 
   after(async () => {
     if (client) await client.close();
+    if (server) await server.close();
   });
 
   it('initializes and lists paddock_* tools', async () => {

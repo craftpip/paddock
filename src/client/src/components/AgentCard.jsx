@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom'
 import { useAgents } from '../stores/agents'
 import { statusMeta } from '../lib/status'
+import { webUrlForAgent } from '../lib/web'
 
 export default function AgentCard({ agent }) {
   const st = statusMeta(agent.status)
@@ -46,6 +47,19 @@ export default function AgentCard({ agent }) {
           Details &rarr;
         </Link>
         <div className="flex items-center gap-1">
+          {webUrlForAgent(agent) && (
+            <a
+              href={webUrlForAgent(agent)}
+              target="_blank"
+              rel="noreferrer"
+              className="p-2 rounded-lg text-accent-text hover:text-ink hover:bg-accent-soft transition-colors"
+              title={`Open ${agent.web.label || 'web app'} at ${webUrlForAgent(agent)}`}
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M14 5h5v5M19 5l-8 8M9 5H5a2 2 0 00-2 2v12a2 2 0 002 2h12a2 2 0 002-2v-4" />
+              </svg>
+            </a>
+          )}
           {agent.status === 'running' ? (
             <>
               <button

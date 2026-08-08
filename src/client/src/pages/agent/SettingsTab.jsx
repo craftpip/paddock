@@ -24,6 +24,11 @@ export default function SettingsTab({ agent }) {
   const [healthCounts, setHealthCounts] = useState(null)
   const [healthLoading, setHealthLoading] = useState(false)
   const [healthError, setHealthError] = useState('')
+  const [hostWorkspaceRoot, setHostWorkspaceRoot] = useState('')
+  const [driverInfo, setDriverInfo] = useState(null)
+  const [wsEnabled, setWsEnabled] = useState(false)
+  const [wsHost, setWsHost] = useState('')
+  const [wsDir, setWsDir] = useState('')
 
   function refresh() {
     api(`/api/agents/${agent.name}/settings`)
@@ -53,8 +58,30 @@ export default function SettingsTab({ agent }) {
     api('/api/containers')
       .then((d) => setContainers(d.containers || []))
       .catch(() => {})
+    api('/api/config')
+      .then((c) => {
+        if (c.hostWorkspaceRoot) setHostWorkspaceRoot(c.hostWorkspaceRoot)
+      })
+      .catch(() => {})
+    api('/api/agent-types')
+      .then((d) => {
+        const t = d.types?.find((x) => x.type === agent.agent_type)
+        if (t) setDriverInfo(t)
+      })
+      .catch(() => {})
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agent.name])
+
+  // Sync the Workspace card with the stored mount (after settings load, and
+  // whenever driver info arrives so the fixed/editable defaults are available).
+  useEffect(() => {
+    if (!settings) return
+    const m = settings.workspaceMount
+    setWsEnabled(!!m)
+    setWsHost(m ? m.host : '')
+    setWsDir(m ? m.container : (driverInfo?.workspaceDir || agent.workspace_dir || ''))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings, driverInfo, agent.name])
 
   function closeModal() {
     setModal(null)
@@ -261,6 +288,97 @@ export default function SettingsTab({ agent }) {
     .slice()
     .sort((a, b) => a.name.localeCompare(b.name))
 
+  // ── Custom workspace (plan 24) ────────────────────────────
+
+  const wsCapability = driverInfo?.workspaceCapability || agent.workspace_capability || 'fixed'
+  const wsHidden = wsCapability === 'none'
+  const wsFixed = wsCapability === 'fixed'
+  const defaultWsHost = `instances/${agent.name}/${agent.agent_type}/workspace`
+  const agentDataHost = hostWorkspaceRoot
+    ? `${hostWorkspaceRoot}/instances/${agent.name}/${agent.agent_type}`
+    : ''
+  // An empty Host field means the default `instances/…` path (shown as the
+  // placeholder) is used on save — never pre-fill it, so it stays obvious
+  // whether the user edited the field.
+  const wsHostEff = wsEnabled ? (wsHost.trim() || defaultWsHost) : ''
+  const wsBrowsable = agentDataHost && wsHostEff.startsWith(agentDataHost + '/')
+
+  function wsHostIssue(h) {
+    const v = (h || '').trim()
+    if (!v) return ''
+    if (v.startsWith('/')) {
+      if (v === '/') return 'Cannot be the host root'
+      const sys = ['/etc', '/proc', '/sys', '/dev', '/boot', '/bin', '/sbin', '/usr', '/lib', '/home', '/root', '/opt', '/tmp', '/var/run']
+      for (const s of sys) {
+        if (v === s || v.startsWith(s + '/')) return `System directory (${s}) cannot be a workspace source`
+      }
+    } else if (!v.startsWith('instances/')) {
+      return 'Must be an absolute path or start with instances/'
+    }
+    return ''
+  }
+
+  function wsDirIssue(d) {
+    const v = (d || '').trim()
+    if (!v) return ''
+    if (!v.startsWith('/')) return 'Container path must be absolute'
+    if (v === '/') return 'Container path cannot be /'
+    const prot = ['/etc', '/proc', '/sys', '/dev', '/var/run', '/usr', '/bin', '/sbin', '/lib', '/boot', '/tmp']
+    for (const p of prot) {
+      if (v === p || v.startsWith(p + '/')) return `Cannot mount a workspace at the system path ${p}`
+    }
+    return ''
+  }
+
+  async function handleWorkspaceSave() {
+    const on = wsEnabled
+    const host = on ? (wsHost.trim() || defaultWsHost) : ''
+    const dir = on ? wsDir.trim() : ''
+    if (on) {
+      const he = wsHostIssue(host)
+      const de = wsDirIssue(dir)
+      if (he || de) {
+        toast.error(he || de)
+        return
+      }
+    }
+    const ok = await confirm({
+      title: on ? 'Apply custom workspace' : 'Remove custom workspace',
+      message: on
+        ? `This will stop and recreate ${agent.name} to mount:\n\nHost: ${host}\nContainer: ${dir}\n\nExisting files are NOT moved — the old folder is left on disk untouched. Move files yourself before or after the change.`
+        : `This will stop and recreate ${agent.name} to remove the custom workspace mount. Files are NOT deleted — the folder stays on disk.`,
+      confirmText: on ? 'Apply & recreate' : 'Remove & recreate',
+      cancelText: 'Cancel',
+    })
+    if (!ok) return
+    setSaving(true)
+    if (agent.status === 'running') updateAgentStatus(agent.name, 'restarting')
+    try {
+      const d = await api(`/api/agents/${agent.name}/settings`, {
+        method: 'POST',
+        body: { workspaceHost: host, workspaceDir: dir },
+      })
+      if (d && d.streaming) {
+        setModal({
+          key: `ws-${Date.now()}`,
+          title: on ? `Applying custom workspace for ${agent.name}` : `Removing custom workspace from ${agent.name}`,
+          onDone: () => {
+            refresh()
+            fetchAgents()
+            toast.success(on ? 'Workspace mount applied' : 'Workspace mount removed')
+          },
+        })
+      } else {
+        setSettings(d)
+        toast.success(on ? 'Workspace mount applied' : 'Workspace mount removed')
+        setSaving(false)
+      }
+    } catch (err) {
+      toast.error(err.error || err.message || 'Failed to update workspace')
+      setSaving(false)
+    }
+  }
+
   return (
     <div className="max-w-3xl space-y-6">
       {loadError && <p className="text-danger text-sm">{loadError}</p>}
@@ -419,6 +537,78 @@ export default function SettingsTab({ agent }) {
           ⚠ Joining a container's network means the agent shares its network stack. If the target stops, the agent loses its network.
         </p>
       </section>
+
+      {/* 5b. Custom workspace */}
+      {!wsHidden && (
+        <section className="bg-panel/60 border border-line rounded-xl p-5">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h3 className="text-sm font-medium text-ink-muted">Custom workspace folder</h3>
+              <p className="text-xs text-ink-dim mt-1 max-w-md">
+                Mounts an independent host folder at a container workspace path. Changing it recreates the container; files are never moved or deleted.
+              </p>
+            </div>
+            <button
+              role="switch"
+              aria-checked={wsEnabled}
+              onClick={() => setWsEnabled(!wsEnabled)}
+              disabled={saving}
+              className={`relative w-10 h-6 rounded-full transition-colors shrink-0 disabled:opacity-50 ${wsEnabled ? 'bg-accent' : 'bg-raised'}`}
+            >
+              <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${wsEnabled ? 'translate-x-4' : ''}`} />
+            </button>
+          </div>
+
+          {wsEnabled && (
+            <div className="mt-4 space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-ink-faint mb-1.5 uppercase tracking-wider">
+                  Host workspace source
+                </label>
+                <input type="text" value={wsHost} onChange={(e) => setWsHost(e.target.value)}
+                       placeholder={defaultWsHost}
+                       className="w-full bg-sunken border border-line rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line font-mono" />
+                {wsHostIssue(wsHost) && (
+                  <p className="text-xs text-danger mt-1">{wsHostIssue(wsHost)}</p>
+                )}
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-ink-faint mb-1.5 uppercase tracking-wider">
+                  Container workspace path
+                </label>
+                <input type="text" value={wsDir}
+                       onChange={(e) => !wsFixed && setWsDir(e.target.value)}
+                       readOnly={wsFixed}
+                       className={`w-full bg-sunken border border-line rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line font-mono ${wsFixed ? 'opacity-70 cursor-not-allowed' : ''}`} />
+                {wsFixed && (
+                  <p className="text-xs text-ink-dim mt-1">
+                    Fixed by {agent.agent_type} — its CLI requires the workspace at this path
+                  </p>
+                )}
+                {wsDirIssue(wsDir) && (
+                  <p className="text-xs text-danger mt-1">{wsDirIssue(wsDir)}</p>
+                )}
+              </div>
+
+              {hostWorkspaceRoot && !wsBrowsable && (
+                <div className="rounded-lg bg-warning-soft border border-warning-line/70 px-3 py-2 text-xs text-warning">
+                  Custom workspace → the host file browser won't be available for this agent. Use the running container workspace instead.
+                </div>
+              )}
+              <p className="text-xs text-ink-dim">
+                A custom workspace is a separate bind mount and is <strong>not</strong> included in agent-data backups.
+              </p>
+              <button
+                onClick={handleWorkspaceSave}
+                disabled={saving}
+                className="px-3 py-1.5 bg-accent hover:bg-accent-hover disabled:opacity-50 text-accent-ink rounded-lg text-xs font-medium transition-colors"
+              >
+                Apply workspace & recreate
+              </button>
+            </div>
+          )}
+        </section>
+      )}
 
       {/* 6. Danger Zone */}
       <section className="bg-danger-soft border border-danger-line/60 rounded-xl p-5">

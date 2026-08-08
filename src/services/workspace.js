@@ -34,13 +34,22 @@ function resolveHostPath(workspaceRoot, relativePath) {
 
 function resolveSafePath(workspaceRoot, relativePath) {
   const raw = (relativePath || '/').trim();
-  if (raw.startsWith('/')) {
-    const normalized = path.normalize(raw);
-    if (!normalized.startsWith('/')) throw new Error('Invalid path');
-    if (normalized.includes('\0')) throw new Error('Invalid path');
-    return normalized;
+  if (raw.includes('\0')) throw new Error('Invalid path');
+  // Decode %XX before resolving so encoded traversal (`foo%2F..%2F..`) is
+  // caught by the same checks as the plain form.
+  let decoded;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch {
+    throw new Error('Invalid path');
   }
-  const cleaned = path.normalize(raw).replace(/^\/+/, '');
+  if (decoded.startsWith('/')) {
+    // '/' (and empty) mean "the workspace root itself"; any other absolute
+    // path is outside the workspace and rejected outright.
+    if (decoded === '/' || decoded === '') return workspaceRoot;
+    throw new Error('Path traversal rejected');
+  }
+  const cleaned = path.normalize(decoded).replace(/^\/+/, '');
   const resolved = path.resolve(workspaceRoot, cleaned);
   if (!resolved.startsWith(workspaceRoot + path.sep) && resolved !== workspaceRoot) {
     throw new Error('Path traversal rejected');
@@ -102,6 +111,22 @@ function requireAgent(agentId) {
   return agent;
 }
 
+// Central host-scope authorization (plan 24). The host file browser is clamped
+// to `agent.workspace_root` (the agent's data dir on the host). A custom
+// workspace mount whose source sits OUTSIDE that folder cannot be reached by
+// the clamp — either the source is in another project folder (reachable by the
+// webui but outside workspace_root) or completely outside the webui's bind
+// mounts. In both cases every host operation must be rejected up front with a
+// clear message; container scope (docker exec) remains the way to browse that
+// workspace while the agent runs.
+function requireHostBrowsable(agent) {
+  const mount = agent.workspace_mount;
+  if (mount && !mount.hostBrowsable) {
+    throw new Error('Host file browser is not available for this agent — the workspace is mounted from a folder outside the agent folder. Use the container workspace while the agent is running.');
+  }
+  return agent;
+}
+
 function fsList(absPath) {
   if (!fs.existsSync(absPath)) return { path: absPath, entries: [] };
   const stat = fs.statSync(absPath);
@@ -132,6 +157,7 @@ async function listDir(agentId, relativePath, scope) {
   if (scope === 'container') {
     return containerExec(agent.name, { op: 'list', path: relativePath || '/' });
   }
+  requireHostBrowsable(agent);
   return fsList(resolveHostPath(agent.workspace_root, relativePath || ''));
 }
 
@@ -140,6 +166,7 @@ async function readFile(agentId, relativePath, scope) {
   if (scope === 'container') {
     return containerExec(agent.name, { op: 'read', path: relativePath });
   }
+  requireHostBrowsable(agent);
   const absPath = resolveHostPath(agent.workspace_root, relativePath);
   if (!fs.existsSync(absPath)) throw new Error('File not found');
   const stat = fs.statSync(absPath);
@@ -157,6 +184,7 @@ async function writeFile(agentId, relativePath, content, scope) {
   if (scope === 'container') {
     return containerExec(agent.name, { op: 'save', path: relativePath, content });
   }
+  requireHostBrowsable(agent);
   const absPath = resolveHostPath(agent.workspace_root, relativePath);
   if (fs.existsSync(absPath)) {
     const stat = fs.statSync(absPath);
@@ -175,6 +203,7 @@ async function readFileB64(agentId, relativePath, scope) {
   if (scope === 'container') {
     return containerExec(agent.name, { op: 'readB64', path: relativePath });
   }
+  requireHostBrowsable(agent);
   const absPath = resolveHostPath(agent.workspace_root, relativePath);
   if (!fs.existsSync(absPath)) throw new Error('File not found');
   const stat = fs.statSync(absPath);
@@ -194,6 +223,7 @@ async function writeFileB64(agentId, dirPath, fileName, buffer, scope) {
     const target = path.posix ? path.posix.join(dirPath, safeName) : `${dirPath}/${safeName}`;
     return containerExec(agent.name, { op: 'writeB64', path: target, content: buffer.toString('base64') });
   }
+  requireHostBrowsable(agent);
   const destDir = resolveHostPath(agent.workspace_root, dirPath || '/');
   fs.writeFileSync(path.join(destDir, safeName), buffer);
   return { ok: true };
@@ -222,6 +252,7 @@ async function createDirectories(agentId, dirPath, scope) {
   if (scope === 'container') {
     return containerExec(agent.name, { op: 'mkdirp', path: dirPath });
   }
+  requireHostBrowsable(agent);
   const absPath = resolveHostPath(agent.workspace_root, dirPath || '/');
   fs.mkdirSync(absPath, { recursive: true });
   return { ok: true };
@@ -232,6 +263,7 @@ async function createFolder(agentId, relativePath, folderName, scope) {
   if (scope === 'container') {
     return containerExec(agent.name, { op: 'mkdir', path: relativePath || '/', name: folderName });
   }
+  requireHostBrowsable(agent);
   const parentPath = resolveHostPath(agent.workspace_root, relativePath || '');
   const safeName = path.basename(folderName);
   if (!safeName || safeName.startsWith('.')) throw new Error('Invalid folder name');
@@ -246,6 +278,7 @@ async function renameEntry(agentId, relativePath, newName, scope) {
   if (scope === 'container') {
     return containerExec(agent.name, { op: 'rename', path: relativePath, name: newName });
   }
+  requireHostBrowsable(agent);
   const absPath = resolveHostPath(agent.workspace_root, relativePath);
   if (!fs.existsSync(absPath)) throw new Error('Entry not found');
   const safeName = path.basename(newName);
@@ -261,6 +294,7 @@ async function deleteEntry(agentId, relativePath, scope) {
   if (scope === 'container') {
     return containerExec(agent.name, { op: 'delete', path: relativePath });
   }
+  requireHostBrowsable(agent);
   const absPath = resolveHostPath(agent.workspace_root, relativePath);
   if (!fs.existsSync(absPath)) throw new Error('Entry not found');
   const stat = fs.statSync(absPath);
@@ -276,6 +310,7 @@ async function moveEntry(agentId, fromPath, toPath, scope) {
   if (scope === 'container') {
     return containerExec(agent.name, { op: 'move', path: fromPath, to: toPath });
   }
+  requireHostBrowsable(agent);
   const src = resolveHostPath(agent.workspace_root, fromPath);
   const dst = resolveHostPath(agent.workspace_root, toPath);
   if (src === dst) return { path: toPath };
@@ -300,7 +335,13 @@ function getBreadcrumbs(relativePath) {
 }
 
 function isPreviewable(filename) {
-  const ext = path.extname(filename).toLowerCase();
+  let ext = path.extname(filename).toLowerCase();
+  // Dotfiles like `.gitignore` / `.env` have no trailing extension —
+  // `path.extname` returns '' for them. Treat the whole name as the extension
+  // so they match the previewable list the same way `name.ext` does.
+  if (!ext && filename.startsWith('.') && filename.length > 1) {
+    ext = filename.toLowerCase();
+  }
   const previewable = [
     '.txt', '.md', '.json', '.js', '.ts', '.jsx', '.tsx', '.py', '.rb',
     '.go', '.rs', '.java', '.c', '.cpp', '.h', '.hpp', '.css', '.scss',
@@ -427,6 +468,7 @@ module.exports = {
   getMimeType,
   resolveSafePath,
   resolveHostPath,
+  requireHostBrowsable,
   CONTAINER_DATA_DIR,
   listParentDir,
   readParentFile,

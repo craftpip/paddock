@@ -16,6 +16,7 @@ export default function WorkspaceToolbar({
   setPathDraft,
   pathInputRef,
   containerAvailable,
+  hostBrowsable = true,
   isNavRoot,
   onSwitchScope,
   onGoUp,
@@ -138,10 +139,12 @@ export default function WorkspaceToolbar({
                   className={`inline-flex items-center h-7 px-3 rounded-md text-xs font-medium transition-colors whitespace-nowrap ${scope === 'container' ? 'bg-accent text-accent-ink' : 'text-ink-muted hover:text-ink'} ${!containerAvailable ? 'opacity-40 cursor-not-allowed' : ''}`}>
             Container
           </button>
-          <button onClick={() => onSwitchScope('host')}
-                  className={`inline-flex items-center h-7 px-3 rounded-md text-xs font-medium transition-colors whitespace-nowrap ${scope === 'host' ? 'bg-accent text-accent-ink' : 'text-ink-muted hover:text-ink'}`}>
-            Host
-          </button>
+          {hostBrowsable && (
+            <button onClick={() => onSwitchScope('host')}
+                    className={`inline-flex items-center h-7 px-3 rounded-md text-xs font-medium transition-colors whitespace-nowrap ${scope === 'host' ? 'bg-accent text-accent-ink' : 'text-ink-muted hover:text-ink'}`}>
+              Host
+            </button>
+          )}
         </div>
         <span className="w-px h-7 bg-raised mx-0.5 shrink-0" />
         <button onClick={onGoUp} disabled={isNavRoot}

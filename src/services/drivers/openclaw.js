@@ -28,6 +28,10 @@ const OPENCLAW = {
   baseImage: 'ghcr.io/openclaw/openclaw:latest',
   dataDir: '/root/.openclaw',
   workspaceDir: '/root/.openclaw/workspace',
+  /** Workspace-mount capability (plan 24): 'fixed' = the CLI requires its
+   *  workspace at workspaceDir (container path input is read-only);
+   *  'editable' = any valid container path works; 'none' = no custom mount. */
+  workspaceCapability: 'fixed',
   configFile: 'openclaw.json',
   tuiCommand: 'openclaw',
   backupTypeMarker: '_openclaw-backup-cli_',

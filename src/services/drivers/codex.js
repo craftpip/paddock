@@ -24,6 +24,7 @@ const CODEX = {
   baseImage: 'node:20-slim',
   dataDir: '/root/.codex',
   workspaceDir: '/root/.codex/workspace',
+  workspaceCapability: 'editable',
   configFile: 'config.toml',
   configFormat: 'toml',
   tuiCommand: 'codex',

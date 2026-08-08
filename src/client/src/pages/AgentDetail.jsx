@@ -3,6 +3,7 @@ import { useParams, useNavigate, Link, useSearchParams } from 'react-router-dom'
 import { useAgents } from '../stores/agents'
 import { api, getCsrfToken } from '../lib/api'
 import { statusMeta } from '../lib/status'
+import { webUrlForAgent } from '../lib/web'
 import { useConfirm } from '../lib/confirm'
 import Terminal from '../components/Terminal'
 import CommandsPane from './agent/CommandsPane'
@@ -207,21 +208,41 @@ export default function AgentDetail() {
 
       {/* Mode tabs */}
       <div className="flex items-center gap-1 px-6 py-2 border-b border-line-faint overflow-x-auto flex-shrink-0">
-        {MODES.map((m) => (
-          <button
-            key={m.id}
-            onClick={() => navigate(`/agents/${agent.name}/${m.id}`, { replace: true })}
-            className={`px-3 py-1.5 text-sm font-medium rounded-lg transition-colors whitespace-nowrap ${
-              mode === m.id ? 'bg-panel' : 'hover:bg-panel/50'
-            } ${
-              m.id === 'commands'
-                ? 'text-warning'
-                : mode === m.id ? 'text-accent-text' : 'text-ink-faint hover:text-ink'
-            }`}
-          >
-            {m.id === 'commands' ? (agent.agent_type ? agent.agent_type.charAt(0).toUpperCase() + agent.agent_type.slice(1) : 'Commands') : m.label}
-          </button>
-        ))}
+        {MODES.map((m) => {
+          const webUrl = m.id === 'web' ? webUrlForAgent(agent) : ''
+          return (
+            <button
+              key={m.id}
+              onClick={() => navigate(`/agents/${agent.name}/${m.id}`, { replace: true })}
+              className={`px-3 py-1.5 text-sm font-medium rounded-lg transition-colors whitespace-nowrap inline-flex items-center gap-1.5 ${
+                mode === m.id ? 'bg-panel' : 'hover:bg-panel/50'
+              } ${
+                m.id === 'commands'
+                  ? 'text-warning'
+                  : mode === m.id ? 'text-accent-text' : 'text-ink-faint hover:text-ink'
+              }`}
+            >
+              {m.id === 'commands' ? (agent.agent_type ? agent.agent_type.charAt(0).toUpperCase() + agent.agent_type.slice(1) : 'Commands') : m.label}
+              {webUrl && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    window.open(webUrl, '_blank', 'noopener,noreferrer')
+                  }}
+                  title={`Open ${agent.web.label || 'web app'} at ${webUrl}`}
+                  aria-label={`Open ${agent.web.label || 'web app'} in a new tab`}
+                  className={`p-0.5 rounded transition-colors ${
+                    mode === 'web' ? 'text-accent-text hover:bg-raised' : 'hover:bg-raised'
+                  }`}
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M14 5h5v5M19 5l-8 8M9 5H5a2 2 0 00-2 2v12a2 2 0 002 2h12a2 2 0 002-2v-4" />
+                  </svg>
+                </button>
+              )}
+            </button>
+          )
+        })}
       </div>
 
       {/* Mode content */}
@@ -314,6 +335,13 @@ function WorkspaceTab({ agent }) {
     return hostRoot
   }
 
+  // Custom workspace mounts can be outside the webui's reach (hostBrowsable
+  // false) — then the Host scope is unavailable entirely, and when the
+  // container is down there is nothing to browse at all.
+  const wsMount = agent.workspace_mount
+  const hostBrowsable = !wsMount || wsMount.hostBrowsable
+  const wsBrowseBlocked = !hostBrowsable && !containerAvailable
+
   // Scope and path live in the URL (?scope=container|host&path=...) so the
   // browser back/forward buttons step through the workspace history and the
   // current folder is shareable/restorable.
@@ -321,16 +349,22 @@ function WorkspaceTab({ agent }) {
   const urlPath = searchParams.get('path')
   let scope = urlScope === 'host' || urlScope === 'container' ? urlScope : null
   let path = urlPath ? normalizePath(urlPath) : null
-  if (!containerAvailable) {
-    // Container is down: force host scope and mirror the container folder to
-    // the matching host folder so we never leave a dead container listing up.
-    if (scope === 'container') path = containerToHost(path)
-    scope = 'host'
+  if (wsBrowseBlocked) {
+    scope = 'container'
+    path = path || containerRoot
+  } else {
+    if (!hostBrowsable && containerAvailable && scope === 'host') scope = 'container'
+    if (!containerAvailable) {
+      // Container is down: force host scope and mirror the container folder to
+      // the matching host folder so we never leave a dead container listing up.
+      if (scope === 'container') path = containerToHost(path)
+      scope = 'host'
+    }
+    if (!scope) scope = containerAvailable ? 'container' : 'host'
+    if (!path) path = scope === 'container' ? containerRoot : hostRoot
+    if (scope === 'container' && !path.startsWith('/')) path = containerRoot
+    if (scope === 'host' && path !== hostRoot && !path.startsWith(hostRoot + '/')) path = hostRoot
   }
-  if (!scope) scope = containerAvailable ? 'container' : 'host'
-  if (!path) path = scope === 'container' ? containerRoot : hostRoot
-  if (scope === 'container' && !path.startsWith('/')) path = containerRoot
-  if (scope === 'host' && path !== hostRoot && !path.startsWith(hostRoot + '/')) path = hostRoot
 
   const navigateWorkspace = useCallback((sc, p, { replace = false } = {}) => {
     setSearchParams({ scope: sc, path: p }, { replace })
@@ -363,18 +397,23 @@ function WorkspaceTab({ agent }) {
     .finally(() => setLoading(false))
   }, [agent.name, navigateWorkspace])
 
-  useEffect(() => { load(path, scope) }, [path, scope, load])
+  useEffect(() => {
+    if (wsBrowseBlocked) { setListing(null); setError(''); return }
+    load(path, scope)
+  }, [path, scope, load, wsBrowseBlocked])
 
   // When the container drops, rewrite the URL to host scope at the mirrored
   // folder so the browser never shows a dead container listing (and the URL
   // always reflects what is on screen). Coming back online keeps the URL as-is.
+  // Non-browsable mounts have no host scope, so stay on container scope (the
+  // tab shows the empty state instead).
   const prevAvailableRef = useRef(containerAvailable)
   useEffect(() => {
     const prev = prevAvailableRef.current
     prevAvailableRef.current = containerAvailable
     if (prev === containerAvailable) return
-    if (!containerAvailable) navigateWorkspace('host', containerToHost(path), { replace: true })
-  }, [containerAvailable, navigateWorkspace, path])
+    if (!containerAvailable && hostBrowsable) navigateWorkspace('host', containerToHost(path), { replace: true })
+  }, [containerAvailable, navigateWorkspace, path, hostBrowsable])
   useEffect(() => {
     pathDraftRef.current = pathDraft
   }, [pathDraft])
@@ -398,6 +437,7 @@ function WorkspaceTab({ agent }) {
 
   function switchScope(next) {
     if (next === scope) return
+    if (next === 'host' && !hostBrowsable) return
     navigateWorkspace(next, next === 'container' ? hostToContainer(path) : containerToHost(path))
   }
   function goToDir(p) { navigateWorkspace(scope, normalizePath(p)) }
@@ -573,6 +613,18 @@ function WorkspaceTab({ agent }) {
 
   return (
     <div>
+      {wsBrowseBlocked ? (
+        <div className="flex flex-col items-center justify-center py-20 text-center">
+          <svg className="w-10 h-10 text-ink-dim mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5"><path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>
+          <p className="text-sm text-ink-faint max-w-md leading-relaxed">
+            This agent's workspace is mounted from a folder outside the webui's reach, and the container is not running, so there's nothing to browse right now.
+          </p>
+          <p className="text-xs text-ink-dim mt-2 max-w-md leading-relaxed">
+            Start the agent to access its container workspace at <code className="font-mono">{containerRoot}</code>.
+          </p>
+        </div>
+      ) : (
+        <>
       {/* Container down banner — pad not running, browsing from host */}
       {agent.status !== 'running' && (
         <p className="-mt-2 mb-4 text-sm text-ink-faint leading-relaxed">The pad container is not running, so the workspace is being browsed from the host. You can still access your files here.</p>
@@ -587,6 +639,7 @@ function WorkspaceTab({ agent }) {
         setPathDraft={setPathDraft}
         pathInputRef={pathInputRef}
         containerAvailable={containerAvailable}
+        hostBrowsable={hostBrowsable}
         isNavRoot={isNavRoot}
         onSwitchScope={switchScope}
         onGoUp={goUp}
@@ -678,6 +731,8 @@ function WorkspaceTab({ agent }) {
             </table>
           </div>
         </div>
+      )}
+        </>
       )}
 
       {/* File Viewer/Editor Modal */}

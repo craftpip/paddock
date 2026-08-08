@@ -1,5 +1,17 @@
 # Custom Workspace Path + Bind Mount at Create Time (plan 24)
 
+> **Updated 2026-08-08** — plan 25 (independent per-instance build files) is now
+> implemented. This plan was refreshed to match the post-plan-25 codebase:
+> `generateInstanceCompose` now also emits the per-instance build block
+> (context `instances/<name>/build`, image `paddock-vm-<name>:latest`, generated
+> `build.args:`), drivers dropped `buildImage`/`installDockerBuildArg` and
+> renamed `buildRel` → `templateDir`, and `updateAgent`/settings run through the
+> `--env-file` `composeCommand` helper. **None of that changes this plan's
+> design** — the workspace mount is an extra volume line in the same
+> `generateInstanceCompose`, and `WORKSPACE_*` meta flags stay the source of
+> truth for it. Line references below point at the current code.
+> Plan 24 itself is **not yet implemented**.
+
 ## Goal
 
 When creating a new agent, let the user choose:
@@ -56,30 +68,50 @@ we ship the trade-off and tell the user plainly in the UI.
   the existing host-scope clamp can safely reach it. This is stricter than
   webui-visible.
 
-## Current behavior (verified 2026-08-08)
+## Current behavior (verified 2026-08-08, post-plan-25)
 
 - Compose emits exactly one volume: `HOST_WORKSPACE/instances/<name>/<agent>:<dataDir>`
-  (`vm-manager.js` `generateInstanceCompose` line ~115).
+  (`vm-manager.js` `generateInstanceCompose`, volume line at :180).
+- The compose now also carries plan 25's per-instance build block: context
+  `instances/<name>/build`, image `imageFor(name)` = `paddock-vm-<name>:latest`,
+  and a `build.args:` block generated from the instance Dockerfile's ARG lines
+  (`vm-manager.js:146-162`, via `instance-image.js` `argsFromDockerfile`). The
+  workspace is **still not its own mount** — plan 25 touched build/image only.
 - The workspace is `<dataDir>/workspace`, i.e. on the host it lands at
   `instances/<name>/<agent>/workspace` — a side effect of the data mount, not a
   deliberate workspace mount.
 - `driver.workspaceDir` is static per driver (`/root/.openclaw/workspace`,
   `/opt/data`, `/root/.codex/workspace`, `/root/.opencode/workspace`,
-  `/root/.picoclaw/workspace`).
+  `/root/.picoclaw/workspace`). `driver.dataDir`/`workspaceDir` are unchanged by
+  plan 25; what changed is `buildRel` → `templateDir` (the create-time copy
+  source) and the removal of `buildImage`/`installDockerBuildArg`.
 - `buildAgent()` (`agent-registry.js`) sets `workspace_root` = host agent dir
-  (`instances/<name>/<agent>`), `workspace_dir` = `driver.workspaceDir`.
+  (`instances/<name>/<agent>`, :197), `workspace_dir` = `driver.workspaceDir`
+  (:200).
 - Workspace tab (`AgentDetail.jsx` WorkspaceTab) assumes hostRoot
   (`workspace_root`) and containerRoot (`data_dir`) are the **same bind mount**
   and maps host↔container 1:1 by prefix.
 - `workspace.js` host scope resolves every op against
   `resolveHostPath(agent.workspace_root, path)` — clamped to the agent dir.
-- `createVm()` creates `instances/<name>/<agent>` and (in clone mode) copies the
-  source agent dir's contents into it.
+- `createVm()` (`vm-manager.js:405`) creates `instances/<name>/<agent>`, seeds
+  `instances/<name>/build/` from the shared template (plan 25), writes
+  `meta.env` as a fresh file (:494), then `writeInstanceCompose` (:498), then
+  builds/ups via `composeCommand` (`--env-file`, :504/:513). Clone mode copies
+  the source agent dir **and** the source `build/` (:467-489).
 - The current "Clone from backup" UI option restores an archive. It is not an
   agent clone and is deliberately out of scope for this workspace-mount plan.
-- Every compose regeneration (create, settings, web publish, reset) funnels
-  through `generateInstanceCompose()`, so a meta-read inside it is sticky
-  everywhere with no caller changes.
+- Every compose regeneration (create, settings, web publish, reset, **and plan
+  25's `ensureInstanceBuilds` migration**, which reads the same meta and
+  regenerates the compose at `vm-manager.js:642`) funnels through
+  `generateInstanceCompose()`, so a meta-read inside it is sticky everywhere
+  with no caller changes — the migration picks up a custom workspace mount for
+  free.
+- Settings flow (plan 25 state): GET returns
+  `{ allowDocker, network, image, version, networkHealth }` where `image` comes
+  from `vm.imageFor(name)` (`app.js:885`); POST persists the docker toggle in
+  `instances/<name>/build/build.env` via `vm.setBuildEnv` (`app.js:978`) and
+  only rebuilds when the image lacks the CLI. There is no `driver.buildImage`
+  anywhere anymore.
 
 ## Design
 
@@ -190,11 +222,12 @@ button:
 
 - `generateInstanceCompose()` reads `meta.env` for `WORKSPACE_HOST` /
   `WORKSPACE_DIR` (it already receives `name`). When both present, emit a second
-  volume line. The agent data folder's existing mount is **untouched** — only
-  its `workspace` subfolder is additionally mapped by the user:
+  volume line in the existing volumes block (`vm-manager.js:180`). The agent
+  data folder's existing mount is **untouched** — only its `workspace`
+  subfolder is additionally mapped by the user:
   ```yaml
   volumes:
-    - <HOST_WORKSPACE>/instances/<name>/<agent>:<dataDir>   # unchanged
+    - <HOST_WORKSPACE>/instances/<name>/<agent>:<dataDir>   # unchanged (line 180)
     - <workspace_host>:<workspace_dir>                      # NEW: user-mapped workspace
     - /var/run/docker.sock:/var/run/docker.sock             # when allowDocker
   ```
@@ -202,10 +235,13 @@ button:
   <agent>/workspace`, `<workspace_dir>` = `<dataDir>/workspace` — the second
   mount is then a shadow of the first's own workspace subfolder (same content,
   harmless). Editing either side makes the workspace genuinely distinct.
-  Because every regen path (settings, web publish, reset, update) funnels
-  through this function, the mount is **sticky** with zero caller changes.
-  Serialize the compose structure with a YAML library, or safely quote every
-  volume value. User-provided paths must not be interpolated as raw YAML.
+  Because every regen path (settings, web publish, reset, update, **and plan
+  25's `ensureInstanceBuilds` migration**) funnels through this function, the
+  mount is **sticky** with zero caller changes. The plan-25 build block
+  (`context`/`image`/`args`, `vm-manager.js:146-162`) is unrelated and stays as
+  is — it already reads `meta` indirectly only via `name`. Serialize the compose
+  structure with a YAML library, or safely quote every volume value.
+  User-provided paths must not be interpolated as raw YAML.
 - **Split-brain note**: the source is resolved by the real host's daemon →
   absolute source paths must use `HOST_WORKSPACE_ROOT` (host view), never the
   webui container's `/workspace` view. Relative host input resolves to
@@ -216,14 +252,19 @@ button:
   2. If `webuiVisible`: `fs.mkdirSync(host, { recursive: true })` **before**
      `writeInstanceCompose`. Otherwise skip mkdir because the webui cannot see
      that source; Docker creates a missing source directory on the real host.
-  3. Persist `WORKSPACE_HOST=…` + `WORKSPACE_DIR=…` in `meta.env`
-     (via `setMetaFlag`) **before** `writeInstanceCompose` so the compose picks
-     it up.
+  3. Persist `WORKSPACE_HOST=…` + `WORKSPACE_DIR=…` in `meta.env` **before**
+     `writeInstanceCompose` so the compose picks it up. Today `createVm` writes
+     `meta.env` as a fresh file at `vm-manager.js:494` and only calls
+     `writeInstanceCompose` at :498 — fold the `WORKSPACE_*` lines into that
+     initial `metaTxt` (or `setMetaFlag` right after the write) so they land
+     before :498. Plan 25's `seedBuildDir` (:491) is unaffected.
   4. Apply the driver's workspace capability. Openclaw and picoclaw keep their
      fixed `workspaceDir`; opencode and codex are configured to use
      `WORKSPACE_DIR` as their effective workspace. Terminal startup and the
      Workspace tab consume that effective path; they do not invent a separate
-     workspace.
+     workspace. (Open question 3's verification — how opencode/codex are told
+     their workspace — should reuse plan 25's per-instance `start.sh`/build-dir
+     mechanism where possible.)
 - `removeVm()`: when the agent has a `WORKSPACE_HOST` that lies **under
   `HOST_WORKSPACE`**, remove it too (never touch absolute paths outside the
   project). Existing behavior otherwise unchanged.
@@ -242,8 +283,9 @@ reason to add an unfinished archive format to this feature.
 
 ### Agent payload / consumers
 
-- `buildAgent()` (`agent-registry.js`) — read `WORKSPACE_HOST`/`WORKSPACE_DIR`
-  from meta:
+- `buildAgent()` (`agent-registry.js:136`) — read `WORKSPACE_HOST`/`WORKSPACE_DIR`
+  from meta (today it hardcodes `workspace_root` = host agent dir at :197 and
+  `workspace_dir` = `driver.workspaceDir` at :200):
   - present → `workspace_dir = <container>` (custom), new field
     `workspace_mount: { host, container, webuiVisible, hostBrowsable }`.
     `webuiVisible` means the source is under the project root;
@@ -292,12 +334,13 @@ reason to add an unfinished archive format to this feature.
   workspaceHost, workspaceDir })` → force-recreate → rollback on failure.
   `applySettings` sets/clears the `WORKSPACE_*` meta flags; the compose regen
   picks them up, so the mount swaps on the recreate. No image rebuild — a mount
-  change is just a recreate (the docker-CLI rebuild logic is untouched).
+  change is just a recreate (plan 25's docker-CLI rebuild logic is untouched and
+  only triggers when the docker toggle changes and the image lacks the CLI).
   ⚠️ **Ordering**: `applySettings` today writes the compose FIRST, then meta
-  flags (`vm-manager.js:190-192`). Because `generateInstanceCompose` reads
-  `WORKSPACE_*` from meta, the flags must be written **before**
-  `writeInstanceCompose` here (opposite of the DOCKER/NETWORK pattern) — see
-  Open questions (5).
+  flags (`vm-manager.js:257-259`; it also calls `seedBuildDir` first at :250).
+  Because `generateInstanceCompose` reads `WORKSPACE_*` from meta, the flags
+  must be written **before** `writeInstanceCompose` here (opposite of the
+  DOCKER/NETWORK pattern) — see Open questions (5).
 - **Data safety:** changing or clearing the mount does **not** move or delete
   files — the new folder starts empty and the old folder is left on disk
   untouched. The confirm dialog warns the user to move files themselves. (A
@@ -330,18 +373,29 @@ reason to add an unfinished archive format to this feature.
   independent host/container inputs, hints, submit fields).
 - **Modified** `src/client/src/pages/AgentDetail.jsx` — WorkspaceTab: hide the
   Host scope + container-down empty state for out-of-project mounts.
-- **Modified** `src/app.js` — `/api/config` (`hostWorkspaceRoot`), create route
-  validation + pass-through.
+- **Modified** `src/app.js` — `/api/config` (`hostWorkspaceRoot`; today it only
+  returns `{ containerPrefix }` at :1594), create route
+  validation + pass-through (:2344).
 - **Modified** `src/app.js` — settings GET/POST carry the workspace mount
-  (`workspaceMount` in GET, `workspaceHost`/`workspaceDir` in POST).
+  (`workspaceMount` in GET, `workspaceHost`/`workspaceDir` in POST). Today the
+  GET returns `{ allowDocker, network, image, version, networkHealth }` at :877
+  and the POST at :938 uses the SSE job flow + `vm.applySettings`.
 - **Modified** `src/services/vm-manager.js` — `validateWorkspaceMount()`,
-  compose volume emission from meta with safe YAML serialization, `createVm`
-  (mkdir only when webui-visible, meta flags before compose, configure the
-  effective workspace), `applySettings`
-  (set/clear `WORKSPACE_*` flags — order per open question), `removeVm`
-  workspace cleanup.
+  compose volume emission from meta with safe YAML serialization (volumes block
+  at :180), `createVm`
+  (mkdir only when webui-visible, meta flags before compose at :498, configure
+  the effective workspace), `applySettings`
+  (set/clear `WORKSPACE_*` flags — order per open question; today compose→meta
+  at :257-259), `removeVm`
+  workspace cleanup (today it also drops the per-instance image via
+  `imageFor(name)` at :561 — keep that).
+- **Unchanged** `src/services/instance-image.js` + `composeCommand` (plan 25) —
+  the workspace mount lives in the compose `volumes:` block only; it does not
+  touch build args, build.env, or the image tag. `seedBuildDir`/`buildDir`
+  already exported from vm-manager stay as-is.
 - **Modified** `src/services/agent-registry.js` — `workspace_mount` + custom
-  `workspace_dir` in `buildAgent`.
+  `workspace_dir` in `buildAgent` (:136, reads `WORKSPACE_*` from meta at
+  :197-200).
 - **Modified** `src/services/workspace.js` — central host-scope guard for every
   operation when `workspace_mount.hostBrowsable` is false.
 - **Modified** `src/client/src/pages/agent/SettingsTab.jsx` — Workspace card
@@ -394,8 +448,9 @@ The feature is complete only when all of these outcomes are true:
   (list, read, save, upload, create, rename, move, delete, download). A source
   outside the agent data directory hides Host scope; every host-operation API
   endpoint rejects it, while Container scope works when the agent is running.
-- **Lifecycle:** create, settings changes, web publishing, update, reset, and
-  recreate preserve the configured mount. Changing or clearing a mount does not
+- **Lifecycle:** create, settings changes, web publishing, update, reset,
+  recreate, and plan 25's `ensureInstanceBuilds` migration preserve the
+  configured mount. Changing or clearing a mount does not
   delete or migrate the old source directory.
 - **Regression:** existing backup/restore and “Clone from backup” behavior are
   unchanged. The UI clearly says an external workspace is not part of the
@@ -450,8 +505,11 @@ curl http://10.69.1.164:6789/api/config   # now includes hostWorkspaceRoot
    disable later than to rebuild.
 3. **Opencode/Codex implementation detail**: verify the current supported way
    to make their editable Container path the effective workspace before coding.
-   If either CLI cannot support it, change that driver to a fixed-path capability
-   rather than creating a mount the CLI ignores.
+   Plan 25 made the per-instance `start.sh` the natural place for this (each PAD
+   owns its build dir), but whether the CLI itself can work from an arbitrary
+   path still needs checking. If either CLI cannot support it, change that
+   driver to a fixed-path capability rather than creating a mount the CLI
+   ignores.
 4. **Always-on vs toggle**: plan ships the section with the toggle defaulting
    **off** (no behavior change). If the user wants every new agent to get a
    separate workspace mount by default, flip the default and set both fields'
@@ -459,9 +517,14 @@ curl http://10.69.1.164:6789/api/config   # now includes hostWorkspaceRoot
 5. **`applySettings` ordering**: because `generateInstanceCompose` will read
    `WORKSPACE_*` from meta, the flags must be written BEFORE `writeInstanceCompose`
    in `applySettings` (today the compose is written first, then meta —
-   `vm-manager.js:190-192`, opposite order from DOCKER/NETWORK). Decide whether
+   `vm-manager.js:257-259`, opposite order from DOCKER/NETWORK; `seedBuildDir`
+   runs first at :250). Decide whether
    to always set workspace flags before writing compose, or to pass
    `workspaceHost/workspaceDir` as explicit opts through the whole regen chain.
+   Note the same ordering holds in the plan-25 `ensureInstanceBuilds` migration
+   (`vm-manager.js:642`) and `applyWebServices` (:317) if they ever need to
+   re-emit the mount — a meta-read inside `generateInstanceCompose` covers all
+   three with no per-caller code.
 6. **Editing after creation — file migration**: changing the mount (new path,
    different container name, or toggling off) leaves old files untouched by
    default (user moves them). A "copy existing workspace into the new folder"

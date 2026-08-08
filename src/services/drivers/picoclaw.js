@@ -24,6 +24,7 @@ const PICOCLAW = {
   baseImage: 'sipeed/picoclaw:v0.2.5-launcher',
   dataDir: '/root/.picoclaw',
   workspaceDir: '/root/.picoclaw/workspace',
+  workspaceCapability: 'fixed',
   configFile: 'config.json',
   tuiCommand: 'picoclaw agent',
   backupTypeMarker: '',

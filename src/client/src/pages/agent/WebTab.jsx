@@ -2,9 +2,8 @@ import { useEffect, useState } from 'react'
 import { api } from '../../lib/api'
 import { useConfirm } from '../../lib/confirm'
 import { useToast } from '../../lib/toast'
+import { webUrlForPort } from '../../lib/web'
 import CommandModal from '../../components/CommandModal'
-
-const HOST_BASE = 'http://10.69.1.164'
 
 function randomPassword() {
   const chars = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
@@ -111,7 +110,7 @@ export default function WebTab({ agent }) {
   const active = data.active
   const webApp = data.webApp
   const viaDoor = !!data.networkMode
-  const accessUrl = data.webService ? `${HOST_BASE}:${data.webService.hostPort}` : ''
+  const accessUrl = data.webService ? webUrlForPort(data.webService.hostPort) : ''
   const published = (data.actualPorts || []).find(
     (p) => p.container === `${webApp.containerPort}/tcp` && p.host,
   )

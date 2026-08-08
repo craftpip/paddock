@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { getDb } = require('./db');
 const { getDriver } = require('./drivers');
+const { workspaceMountInfo, readWebService } = require('./vm-manager');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const INSTANCES_DIR = path.join(WORKSPACE, 'instances');
@@ -141,6 +142,22 @@ function buildAgent(vmName, dockerState) {
   const workspaceRoot = path.join(agentDir, 'workspace');
   const configRoot = agentDir;
   const driver = getDriver(agentType);
+  // Custom workspace bind (plan 24): meta may carry WORKSPACE_HOST/WORKSPACE_DIR
+  // pointing the agent's workspace at an independent host source + container
+  // path. `workspace_mount` carries the normalized info for the frontend
+  // (workspace tab + settings), and `workspace_dir`/`workspace_root` reflect the
+  // EFFECTIVE workspace (the mount's container path / host source) instead of
+  // the driver default. When no mount is configured the driver defaults stand.
+  let wsMount = null;
+  try {
+    wsMount = (meta.WORKSPACE_HOST && meta.WORKSPACE_DIR)
+      ? workspaceMountInfo(vmName, agentType, meta.WORKSPACE_HOST, meta.WORKSPACE_DIR)
+      : null;
+  } catch {}
+  let effectiveWsDir = driver.workspaceDir || '';
+  if (wsMount) {
+    effectiveWsDir = wsMount.container;
+  }
   let status = dockerState[vmName] || 'missing';
   if (_lifecycle[vmName]) status = _lifecycle[vmName];
 
@@ -186,6 +203,22 @@ function buildAgent(vmName, dockerState) {
     } catch {}
   }
 
+  // Published web app summary (Web tab). null when the agent type ships no
+  // built-in web app or nothing is published. The frontend uses it to render
+  // the direct "open" link on the dashboard card and inside the Web tab button.
+  let web = null;
+  if (driver.webApp) {
+    const ws = readWebService(vmName);
+    if (ws) {
+      web = {
+        active: true,
+        hostPort: ws.hostPort,
+        containerPort: ws.containerPort,
+        label: driver.webApp.label,
+      };
+    }
+  }
+
   return {
     id: vmName,
     name: vmName,
@@ -197,9 +230,12 @@ function buildAgent(vmName, dockerState) {
     workspace_root: agentDir,
     config_root: configRoot,
     data_dir: driver.dataDir,
-    workspace_dir: driver.workspaceDir,
+    workspace_dir: effectiveWsDir,
+    workspace_mount: wsMount,
+    workspace_capability: driver.workspaceCapability || 'fixed',
     default_model: defaultModel,
     default_provider: defaultProvider,
+    web,
     tags: [],
     created_at: null,
     updated_at: null,
