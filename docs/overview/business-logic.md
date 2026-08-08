@@ -1,10 +1,12 @@
 # Business Logic
 
+> Last updated: 2026-08-09
+
 ## PAD Discovery and State
 
 ### Discovery Flow
 
-1. **Filesystem scan**: Read all directories under `instances/` that match `CONTAINER_PREFIX-*` (e.g. `vm-*`)
+1. **Filesystem scan**: Read all directories under `instances/` that match the `CONTAINER_PREFIX-*` pattern (e.g. `pad-*`)
 2. **Meta validation**: Each directory must contain a `meta.env` file with at minimum `AGENT=` line. Without it, the directory is skipped.
 3. **Docker state query**: Run `docker ps -a --format "{{.Names}}\t{{.State}}"` to get running/exited/missing for each discovered PAD
 4. **Agent build**: Merge filesystem metadata + Docker state into an agent object with:
@@ -36,7 +38,13 @@ instances/<name>/
 ```
 AGENT=openclaw
 ROOT_PASSWORD=<pw>
-PORT=<ssh-port>
+PORT=<ssh-host-port>
+SSH_CPORT=<ssh-container-port>     # only when != 22
+NETWORK=<peer-container>           # only when a network override is set
+DOCKER=1                           # only when docker access is enabled
+WORKSPACE_HOST=...                 # custom workspace bind (plan 24), when set
+WORKSPACE_DIR=...
+EXTRA_PORTS=[{"host":8080,"container":8080}]   # JSON array, when set
 ```
 
 This file is **critical**. Without it, the PAD is invisible to the discovery system.
@@ -87,30 +95,36 @@ Workspace files can be viewed and edited in a modal. Editable types are determin
 
 ### Creation Flow (`createVm`)
 
-1. **Validation**: Check agent name doesn't already exist (filesystem + meta.env)
-2. **Port assignment** (SSH): Find first unused port starting from 43817
+1. **Validation**: Check agent name doesn't already exist (filesystem + meta.env); validate custom workspace mount, network target, extra ports/volumes up front (400 on failure, nothing is created)
+2. **Port assignment** (SSH): Find first unused host port starting from 43817 (`autoSshPort`), plus a distinct container port (`SSH_CPORT`, default 22) for peer-shared agents
 3. **Directory setup**: Create `instances/<name>/<agent>/` directory
-4. **Clone mode** (optional): Copy source agent's entire data directory recursively (type-locked — source must be the same agent type; copies the source's `build/` too)
-5. **meta.env**: Write `ROOT_PASSWORD`, `AGENT`, `PORT` to the instance dir
-6. **Seed build dir**: Copy the shared template `src/vm-builds/<type>/` → `instances/<name>/build/` (Dockerfile + start.sh + extras; idempotent, never overwrites existing build files) — each PAD now owns its image source
-7. **Compose file**: Generate `docker-compose.yml` with absolute host paths (fixes bind-mount split-brain), `build.context: instances/<name>/build`, `image: paddock-vm-<name>:latest`, and a generated `build.args:` block from the Dockerfile's `ARG` lines
-8. **Container start**: `docker compose --env-file <build-dir>/build.env -f <compose> up -d`
-9. **Workspace setup**: For OpenClaw/PicoClaw agents, run `openclaw setup --baseline` inside the container (retry up to 15 times with 1s delay)
-10. **Restart**: Restart container after setup
+4. **meta.env**: Write `ROOT_PASSWORD`, `AGENT`, `PORT`, `SSH_CPORT`, `NETWORK`, `DOCKER`, `WORKSPACE_*`, `EXTRA_PORTS` as set
+5. **Seed build dir**: Copy the shared template `src/vm-builds/<type>/` → `instances/<name>/build/` (Dockerfile + start.sh + extras; idempotent, never overwrites existing build files) — each PAD now owns its image source
+6. **Compose file**: Generate `docker-compose.yml` with absolute host paths (fixes bind-mount split-brain), `build.context: instances/<name>/build`, `image: paddock-vm-<name>:latest`, and a generated `build.args:` block from the Dockerfile's `ARG` lines
+7. **Container start**: `docker compose --env-file <build-dir>/build.env -f <compose> up -d`
+8. **Workspace setup**: For OpenClaw/PicoClaw agents, run `openclaw setup --baseline` inside the container (retry up to 15 times with 1s delay)
+9. **Restart**: Restart container after setup
+
+Clone-from-backup mode was **removed** with the generic backup system — creation is always fresh.
 
 ### Start / Stop / Restart
 
-- **Start**: `docker start <name>`. Falls back to `docker compose up -d` if the container doesn't exist anymore.
+- **Start**: `docker start <name>` (falls back to `docker compose up -d` if the container doesn't exist anymore)
 - **Stop**: `docker compose -f <compose> stop`
 - **Restart**: Calls stop then start
 
-All operations are async (fire-and-forget) with HTMX polling for status updates.
+The Paddock buttons also start/stop the socat door **with** the agent
+(`startDoors`/`stopDoors`) so a stopped agent doesn't leave a dead open listener.
+CLI `docker stop` from the host stops just the agent; the door keeps running.
+The frontend polls agent state — no HTMX.
 
 ### Deletion Flow (`removeVm`)
 
-1. `docker rm -f <name>` (ignore error if not running)
-2. `rm -rf instances/<name>/` (recursive delete)
-3. SQLite metadata remains (orphaned agents are cleaned up on next discovery)
+1. `docker rm -f <name>`
+2. `docker rm -f <name>-door` (and the legacy `<name>-web`) — frees the host ports
+3. `docker network rm <name>_default` (error-swallowed) — frees the compose subnet
+4. `rm -rf instances/<name>/` (recursive delete)
+5. `registry.removeAgentFromDb(name)` — deletes the `agents` row plus its activity/sessions rows
 
 ### Reset Flow (`resetVm`)
 
@@ -169,29 +183,29 @@ Full user management and owner-based scoping docs: [`backend/user-management.md`
 - Sessions use `express-session` with a random `SESSION_SECRET` (auto-generated if not set)
 - Session cookie name: `vmf.sid`
 - Cookie config: `httpOnly: true`, `sameSite: 'lax'`, `maxAge: 24 hours`
-- Login: validate username + password against `users` table, set `session.userId` and `session.role`
+- Login: validate username + password against `users` table, set `session.authenticated`, `session.userId`, and `session.role`
 - Logout: destroy session, redirect to `/login`
-- Sessions stored in SQLite (`user_sessions` table) — survive server restarts
+- Session store is **in-memory** (`MemoryStore`) — a webui restart wipes sessions (the `ensureAutoLogin` middleware re-establishes the admin session on the next request when `AUTO_LOGIN=true`)
 
 ### Multi-User Model
 
 - `users` table stores credentials and roles (`admin` / `user`)
 - On first startup, `admin`/`admin` is seeded automatically
 - Admin creates all users (no public registration)
-- Every resource (agents, backups) has an `owner_id` referencing `users(id)`
+- Every resource (agents) has an `owner_id` referencing `users(id)`
 - Admin sees all resources; regular users see only their own
 - Vault items (`vault_items` in SQLite) are encrypted and **not** owner-scoped; the vault is always locked behind a 4–6 digit PIN (per-op, no global unlock state)
 
 ### Auth Bypass Rules
 
 - `GET /api/session` — React SPA checks this to determine if user is logged in
-- Route-level: `/api/*` and `/ws/*` paths bypass the `requireAuth` middleware (the React SPA handles 401 responses client-side)
-- If `AUTH_PASSWORD` is empty, auth is completely disabled
+- `AUTO_LOGIN=true` (default) — an `ensureAutoLogin` middleware logs every request in as the first admin, and the auth gate is skipped entirely. Set it to anything else to enable real login
+- With real auth, `/api/*` and `/ws/*` requests from unauthenticated sessions get a 401 JSON (the React SPA handles it client-side); page loads redirect to `/login`
 
 ### CSRF Protection
 
 - Each session gets a CSRF token (`crypto.randomBytes(32)`) on first request
-- Token sent to client via `res.locals.csrfToken` and in EJS templates
+- Token set on `req.session.csrfToken` and exposed via `/api/session`
 - React SPA includes it in `x-csrf-token` header on all POST requests
 - Server validates: token from header/body must match session token
 - GET/HEAD/OPTIONS requests are exempt
@@ -286,13 +300,16 @@ recreate, host reboot).
 ### The socat door (network peer case)
 
 Agents with `network_mode: container:<peer>` can't publish host ports (Docker
-refuses) and the peer's firewall may drop host-LAN inbound. A **door service**
-(`<name>-web`, alpine/socat) joins the peer's docker bridge, publishes the host
-port on its own, and forwards to the peer **by name** per connection — survives
-peer recreates with no changes of its own. `getPeerNetworkName(peer)` inspects
-the peer's `NetworkSettings.Networks`; a peer on `network_mode: host` gets a
-host-mode door forwarding to `127.0.0.1:<containerPort>`. Unpublish/rollback:
-`docker rm -f <name>-web` after the compose is regenerated without the door.
+refuses) and the peer's firewall may drop host-LAN inbound. A **door container**
+(`<name>-door`, alpine/socat) joins the peer's docker bridge, publishes the host
+ports on its own, and forwards to the peer **by name** per connection — survives
+peer recreates with no changes of its own. The door carries **all** of the
+agent's host bindings in peer mode: the published web app, SSH, and any extra
+ports (one `TCP-LISTEN:<hostPort>,fork,reuseaddr TCP:<peer>:<containerPort>`
+process per mapping). `getPeerNetworkName(peer)` inspects the peer's
+`NetworkSettings.Networks`; a peer on `network_mode: host` gets a host-mode door
+forwarding to `127.0.0.1:<containerPort>`. Unpublish/rollback:
+`docker rm -f <name>-door` after the compose is regenerated without the door.
 
 ### Network switch keeps the binding
 
@@ -309,25 +326,24 @@ re-execs the boot hook, and re-verifies the server.
 
 ## MCP Server Management
 
-### List Flow
+MCP servers for an agent are managed in the **Commands pane** — chips show each
+server's status (ok/error/configured) via a read-only GET, and every action
+**pastes an `openclaw mcp …` command into the docked terminal** (`run(cmd)`):
 
-1. Read the agent's config file (`driver.configFile` — e.g. `openclaw.json`)
-2. Extract `mcp.servers` block
-3. For each server, map to enhanced object with name, enabled, transport, command/args/url, status, issues
-4. Return to frontend
+- **Add**: `openclaw mcp add <name> [--no-probe] --url <u> --transport <t>` (HTTP) or `openclaw mcp add <name> --command <c>` (stdio). The add form has a "Test MCP connection" checkbox (default on = probe runs; unchecked appends `--no-probe`)
+- **Probe**: `openclaw mcp probe <name> --json` → tool list + diagnostics modal
+- **Remove**: `openclaw mcp unset <name>`
 
-### Add Flow
+The old backend action routes (`POST /api/agents/:name/mcp/add`, …) still exist
+in app.js but the frontend does **not** use them — they bypass the visible
+terminal and are a trap. Read-only GETs (server chips) stay API-backed.
 
-1. Build `openclaw mcp add --no-probe <name>` command
-2. For stdio: append `--command <cmd> --arg <a> --arg <b> [--cwd <dir>]`
-3. For HTTP: append `--url <url> --transport streamable-http`
-4. Run via `docker exec` inside the container
+### The paddock's own `/mcp` server
 
-### Probe Flow
-
-1. Run `openclaw mcp probe <name> --json` inside container
-2. Parse JSON output for tools, diagnostics, status
-3. Return to frontend for display in modal
+Separate from per-agent MCP servers: the webui itself exposes 17 tools over
+`/mcp` (Streamable HTTP) so opencode/Claude Code can manage the fleet. Bearer
+API keys per user; tools reuse the REST ownership rule. See
+`backend/services.md` — API Keys and the section below.
 
 ---
 
@@ -371,28 +387,18 @@ Code don't do cookies).
 
 ## Skills Management
 
-### List Flow
+Skills are managed in the **Commands pane** the same way as MCP: a read-only
+`GET /api/agents/:name/skills` lists skills + check state (30s cache), and
+actions **paste `openclaw skills …` commands into the docked terminal**:
 
-1. Run `openclaw skills list --json` and `openclaw skills check --json` inside the container
-2. Merge results into `{ skills[], check }` response
-3. Cache for 30 seconds (per agent)
+- **Install**: `openclaw skills install @owner/slug` (ClawHub), `openclaw skills install git:owner/repo` (Git), or `openclaw skills install ./path` (Local); optional `--as <name>` / `--force`
+- **Verify**: `openclaw skills verify --json`
+- **Update**: `openclaw skills update [--all]`
+- **Remove**: there's no `openclaw skills uninstall` — removal is filesystem-based: `rm -rf /root/.openclaw/workspace/skills/<slug>`
 
-### Install Flow
-
-1. Based on source type:
-   - ClawHub: `openclaw skills install @owner/slug`
-   - Git: `openclaw skills install git:owner/repo`
-   - Local: `openclaw skills install ./path`
-2. Optional flags: `--as <name>`, `--force`
-3. Run via `docker exec`
-4. Invalidate skills cache
-
-### Remove Flow
-
-There's no `openclaw skills uninstall` command. Removal is filesystem-based:
-```bash
-rm -rf /root/.openclaw/workspace/skills/<slug>
-```
+The backend action routes (`/api/agents/:name/skills/install`, …) still exist
+but the frontend no longer calls them — paste-through-terminal is the rule
+(see `tabs/terminal.md` — Command flow).
 
 ---
 

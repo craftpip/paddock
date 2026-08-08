@@ -2,6 +2,8 @@
 
 Live Docker resource usage visible in the sidebar of any PAD detail page. Not a separate tab.
 
+> Last updated: 2026-08-09
+
 ## What's shown
 
 - **CPU** — percentage, always visible
@@ -12,11 +14,18 @@ Live Docker resource usage visible in the sidebar of any PAD detail page. Not a 
 ## Data source
 
 ```
-docker stats --no-stream --format "{{json .}}"
+docker stats <runtime_ref> --no-stream --format "{{json .}}"
 ```
 
-Fetched via `GET /api/agents/:name/stats` every 3 seconds while the agent is running. Stops polling when agent is not running.
+Fetched via `GET /api/agents/:name/stats` every 3 seconds while the agent is
+running. Stops polling when the agent is not running. The response is the raw
+`docker stats` JSON object (`{ CPUPerc, MemUsage, NetIO, BlockIO, ... }`).
+
+`GET /api/agents/stats/fleet` returns the same for all running project
+containers (`{ stats }`) — currently unused by the SPA.
 
 ## Component
 
-File: `src/client/src/pages/AgentDetail.jsx` — `SidebarStatus` function, stats section (lines 69-94). Hover tooltip for network + disk I/O (lines 82-93).
+File: `src/client/src/pages/AgentDetail.jsx` — `SidebarStats` (stats state,
+3s poll, CPU/MEM lines, hover tooltip for network + disk I/O). Runs on the
+sidebar, not inside a tab.

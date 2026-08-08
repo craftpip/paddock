@@ -11,14 +11,21 @@ When the user says "remember" or "write this down in AGENTS.md", or whenever you
 
 Append new entries under the relevant section or add a new section. Keep it concise but actionable so future PAD sessions benefit.
 
+### "learn" — Where It Goes (rule)
+
+When the user says "learn" about something, save it in one of two places:
+
+1. **`docs/` — the code and why it exists.** If the learning is about the code — its logic, its purpose, the reason a piece of code is there, how the system works, business rules, architecture, routes, data model, behavioral contracts — write it in the `docs/` folder. Pick the matching subfolder (`overview/`, `backend/`, `tabs/`, `pages/`, `components/`, `operations/`) or the `README.md` index, following the structure in the "Architecture Documentation" section below. Prefer `docs/` whenever the learning is about the code/system, since `docs/` is the source of truth for business logic.
+2. **`AGENTS.md` — the agent's behavior.** If the learning is about the agent's (my) behavior, workflow, conventions, commands, gotchas, or preferences — how the agent should act or operate — write it here in AGENTS.md instead.
+
+Rule of thumb: **code logic and the reason the code is there → `docs/`; agent behavior and operational workflow → AGENTS.md.**
+
 ## Project Structure
 
-- **`docker-compose.yml`** defines services.
-- **`docker-compose.override.yml`** adds additional services.
-- **`src/`** — Management dashboard container. Runs Node.js/Express on port 5050. **This is the control plane** — it manages all other containers via `/var/run/docker.sock`.
-- **`vm_openclaw/`** Docker image builds from `ghcr.io/openclaw/openclaw:latest`.
-- **`instances/<pad>/openclaw/`** is bind-mounted to `/root/.openclaw` inside each container.
-- **`scripts/`** — Kept external scripts: `daily-commit.sh`, `record-usage.sh`, `usage-budget*.sh`
+- **`docker-compose.yml`** defines the webui service (`webui`, container `paddock`, image `paddock-webui:latest`).
+- **`src/`** — Management dashboard container. Runs Node.js/Express on port **6789**. **This is the control plane** — it manages all other containers via `/var/run/docker.sock`.
+- **`src/vm-builds/<type>/`** — per-agent-type Dockerfile + start.sh (openclaw, opencode, picoclaw, hermes, codex, monitor). Images tag `paddock-vm-<type>:latest`.
+- **`instances/<pad>/<agent>/`** — bind-mounted to the driver's data dir (`/root/.openclaw`, `/root/.picoclaw`, `/opt/data`, etc.) inside each container.
 - **`backups/`** — stores timestamped backup archives per PAD.
 
 ### React SPA (root `/` since 2026-07-23)
@@ -91,8 +98,12 @@ The `npm/` folder is OpenClaw's internal plugin cache (not project dependencies)
 
 ## Daily Commit
 
-- `scripts/daily-commit.sh` runs at 18:00 daily via crontab.
-- Does `sudo git add -A && sudo git commit -m "auto: daily commit" && sudo git push`.
+> **STALE (2026-08-09):** `scripts/daily-commit.sh` no longer exists — there is
+> **no `scripts/` dir and no crontab** on this host anymore (verified). The
+> daily `sudo git add -A && sudo git commit -m "auto: daily commit"` push
+> (historically `scripts/daily-commit.sh` at 18:00 via crontab) is not running.
+> If a daily commit is wanted again, re-create it (agent-driven or crontab) and
+> record the new mechanism here.
 
 ## Onboard Bot Script
 
@@ -241,45 +252,30 @@ tini forwards SIGTERM to its bash child, bash dies, tini exits → clean stop in
 - Verify PID 1 is `tini` via `docker exec <pad> ps -o pid,ppid,comm`, then `time docker stop <pad>` should be well under a second.
 - `AGENT-*` legacy images (`sleep infinity` / `opencode web` as PID 1) have the same class of problem; not migrated.
 
-## Backup & Restore (save_backups.sh)
+## Backup & Restore
 
-**Path:** `./manage_backups.sh`
+> **STALE (2026-08-09):** The old generic tar flow is **gone**. `manage_backups.sh`
+> no longer exists (no `scripts/` dir, no top-level script). `src/services/backup-manager.js`
+> is now a **stub** — `backupAgent()` / `restoreAgent()` throw `UNAVAILABLE`
+> ("Generic backups were removed. Native backups are not available yet.") with
+> no callers in `src/`. Backups are being redesigned as **native per-driver**
+> backup/import (`openclaw backup create`, `hermes backup`/`hermes import`, …)
+> under `plans/26-backup-and-restore.md`. Nothing below describes current code.
 
-A self-aware script that discovers PADs from `instances/` and uses `openclaw backup create` inside each running container.
+**Historical (what the removed generic flow did):** a self-aware script that
+discovered PADs from `instances/` and used `openclaw backup create` inside each
+running container.
 
-**Commands:**
+- Backup flow: `openclaw backup create --output /tmp/{name}_{timestamp}.tar.gz`
+  inside the container → copy archive to `backups/` → clean up.
+- Restore flow: find latest `backups/{pad}_*.tar.gz` → copy in, extract to the
+  data dir → restart container.
+- Clone: backup source → create fresh target → stop → restore → start.
+- Known issues: large workspaces slow the command; backup copies SQLite state.
 
-- `sudo ./manage_backups.sh backup [pad]` — backup all PADs or a specific one.
-- `sudo ./manage_backups.sh restore <pad>` — restore from the latest backup in `backups/`.
-
-**Backup flow:**
-1. Run `openclaw backup create --output /tmp/{name}_{timestamp}.tar.gz` inside the container.
-2. Copy archive from container to host `backups/` dir.
-3. Clean up temp file.
-
-**Restore flow:**
-1. Find latest `backups/{pad}_*.tar.gz`.
-2. Copy into container, extract to `/root/.openclaw`.
-3. Restart container.
-
-**Bot Clone / Copy flow:**
-To clone an existing bot into a new one:
-1. Clone directly: `sudo bash add-vm.sh <new-pad> --clone <source-pad>` (this handles backup + copy in one step)
-2. Optionally onboard for Telegram with `sudo bash scripts/onboard-bot.sh <new-pad> ...`
-
-**Alternative (manual) flow:**
-1. Backup source: `sudo ./manage_backups.sh backup <source-pad>`
-2. Create target: `sudo bash add-vm.sh <new-pad> --fresh`
-3. Stop target: `sudo docker compose stop <new-pad>`
-4. Restore into target: `sudo ./manage_backups.sh restore <new-pad>` (after renaming backup to match target name)
-5. Start target: `sudo docker compose up -d <new-pad>`
-6. Optionally onboard for Telegram with `sudo bash scripts/onboard-bot.sh <new-pad> ...`
-
-**Do NOT** use manual `tar -xzf` extraction when `manage_backups.sh restore` exists.
-
-**Known issues:**
-- Large workspaces can make the backup command slow.
-- Backup copies the full state including SQLite databases (cron, auth, session store).
+**Current state:** backups live only as old archives in `backups/`
+(plus `backup-meta.json`). There is no working backup/restore path until
+plan 26 is implemented.
 
 ## Project Learnings
 
@@ -340,6 +336,11 @@ docker compose ps <pad>`, `docker exec <pad> openclaw --version`, `docker exec <
 
 ## Node.js/Express Rewrite (src/ 2026-07-18)
 
+> **HISTORICAL (2026-08-09):** describes the Flask→Express + EJS era. The EJS
+> views were replaced by the React SPA (2026-07-23, see "React SPA" above) —
+> `src/views/` and `routes/agents.js` are dead code. The WebSocket/terminal
+> notes and the EJS pitfall list below are kept as history only.
+
 ### Why
 - Python Flask + gunicorn had persistent WebSocket issues (terminal blocked workers).
 - Node.js/Express handles WebSocket natively without workarounds.
@@ -374,7 +375,7 @@ docker compose ps <pad>`, `docker exec <pad> openclaw --version`, `docker exec <
 
 ### Deploy
 ```bash
-docker compose build paddock-webui && docker compose up -d --no-deps --force-recreate paddock-webui
+docker compose build webui && docker compose up -d --no-deps --force-recreate webui
 ```
 
 ### Common EJS Template Mistakes
@@ -394,6 +395,11 @@ docker.stdin.write(data.toString().replace(/\r/g, '\n'));
 **Verify:** Send a command ending with `\r` via WebSocket — the shell should execute it immediately.
 
 ## PAD Management System (v2 — 2026-07-18)
+
+> **HISTORICAL (2026-08-09):** the EJS + HTMX architecture described below
+> (directory tree, `views/`, `routes/agents.js`, HTMX partials, VMF) was
+> replaced by the React SPA. Keep for context; the current layout is in the
+> "React SPA" and "Driver Framework" sections above.
 
 ### Architecture
 
@@ -451,8 +457,11 @@ src/
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `AUTH_PASSWORD` | Yes | Password for session-based login |
+| `AUTO_LOGIN` | No | `true` (default) auto-logs every request in as the admin user — no login screen. Set to anything else to enable real auth (`/login`, `/api/setup`) |
 | `SESSION_SECRET` | No | Auto-generated if not set. Set for persistence across restarts |
+
+`AUTH_PASSWORD` is **gone** — auth is now a multi-user system (users table +
+password hashes in `src/data/app.db`), see `docs/backend/user-management.md`.
 
 ### Workspace Mount Guards (`GUARD_*`)
 
@@ -479,9 +488,25 @@ mid-process, but the webui restart picks up new `.env` values.
 
 ### Testing
 
+**Run the test files individually — never the whole suite at once.** The
+combined `node --test test/` run always hangs past the tool timeout (the
+suite is huge; known issue). Run each file separately:
+
 ```bash
-docker exec paddock-webui node --test test/
+timeout 60 docker exec paddock node --test test/vm-manager.test.js   # 34/34
+timeout 60 docker exec paddock node --test test/mcp.test.js          # 7/7
+timeout 60 docker exec paddock node --test test/auth.test.js
+timeout 60 docker exec paddock node --test test/db.test.js
+timeout 60 docker exec paddock node --test test/registry.test.js
+timeout 60 docker exec paddock node --test test/workspace.test.js
 ```
+
+Notes:
+- `vm-manager.test.js` asserts the `GUARD_*` defaults, which `.env` disables —
+  run it with the guard envs cleared:
+  `docker exec -e GUARD_PROJECT_ROOT= -e GUARD_INSTANCES_PARENT= -e GUARD_AGENT_DATA= paddock node --test test/vm-manager.test.js`
+- Some suites (e.g. `mcp.test.js`) need real Docker state — running them from
+  inside the container against the live host socket is expected.
 
 ## Development Workflow — Live Editing without Rebuild
 
@@ -501,7 +526,7 @@ Two mounts only: project root (for PAD discovery, instances, scripts) and `src/`
 ### node_modules
 `node_modules` must exist on the host for the bind mount to work (the image's `/app/node_modules` is hidden by the mount). Copy it once:
 ```bash
-docker cp paddock-webui:/app/node_modules /workspace/src/node_modules
+docker cp paddock:/app/node_modules /workspace/src/node_modules
 ```
 And **`.gitignore`** must keep `**/node_modules/` (already done).
 
@@ -511,26 +536,29 @@ And **`.gitignore`** must keep `**/node_modules/` (already done).
 
 ### Restart Command (no rebuild needed)
 ```bash
-docker compose up -d --no-deps --force-recreate paddock-webui
+docker compose up -d --no-deps --force-recreate webui
 ```
+
+Note: the compose service is named `webui` (container `paddock`). A plain
+`docker restart paddock` also works when nothing in the image changed.
 
 ### Vite Dev Server (HMR for React SPA)
 
 For React frontend development with hot reload, run Vite dev server inside the container:
 
 ```bash
-docker exec -d paddock-webui sh -c 'cd /app/client && npm run dev'
+docker exec -d paddock sh -c 'cd /app/client && npm run dev'
 ```
 
 - Vite runs on **port 5173** (already mapped in `docker-compose.yml`).
-- **Access the app at `http://10.69.1.164:5173` during development** (NOT port 5051).
-- Port 5051 also works — it serves the **built** SPA from `public/` via Express, but requires `cd client && npm run build` to see changes.
-- In dev, use 5173 for instant HMR. In prod/demo, use 5051.
-- Vite's config proxies `/api` and `/ws` to Express on port 5050.
+- **Access the app at `http://10.69.1.164:5173` during development** (NOT port 6789).
+- Port 6789 also works — it serves the **built** SPA from `public/` via Express, but requires `cd client && npm run build` to see changes.
+- In dev, use 5173 for instant HMR. In prod/demo, use 6789.
+- Vite's config proxies `/api` and `/ws` to Express on port 6789.
 - Express backend changes still use the bind mount (no rebuild needed).
-- To stop: `docker exec paddock-webui sh -c "kill \$(lsof -ti:5173)"`
+- To stop: `docker exec paddock sh -c "kill \$(lsof -ti:5173)"`
 
-**Default workflow for me:** When doing frontend development, I must start the Vite dev server first (if not already running) and test on port 5173. No rebuild needed. Only use port 5051 for production/demo verification.
+**Default workflow for me:** When doing frontend development, I must start the Vite dev server first (if not already running) and test on port 5173. No rebuild needed. Only use port 6789 for production/demo verification.
 
 ### Nav Items (current order)
 Dashboard, +PAD, Vault, Backups
@@ -542,6 +570,9 @@ Dashboard, +PAD, Vault, Backups
 
 
 ## PAD Dashboard — HTMX Action Buttons (2026-07-18)
+
+> **HISTORICAL (2026-08-09):** HTMX was removed in the React SPA migration —
+> this and the duplicate section below describe the dead EJS-era pattern.
 
 ### Pattern: Inline Start/Stop/Restart on Dashboard Cards
 - Dashboard now has compact SVG icon buttons (play/stop/restart) per PAD card using **HTMX** (, , ).
@@ -566,6 +597,8 @@ Dashboard, +PAD, Vault, Backups
 
 
 ## PAD Dashboard — HTMX Action Buttons (2026-07-18)
+
+> **HISTORICAL (2026-08-09):** HTMX was removed in the React SPA migration.
 
 ### Pattern: Inline Start/Stop/Restart on Dashboard Cards
 - Dashboard now has compact SVG icon buttons (play/stop/restart) per PAD card using **HTMX** (`hx-post`, `hx-target`, `hx-swap`).
@@ -610,6 +643,9 @@ All bash/Python scripts that were external to src/ have been absorbed into Node.
 - `scripts/record-usage.sh` — usage tracking
 - `scripts/usage-budget-compact.sh` / `scripts/usage-budget.sh` — budget reports
 
+> **STALE (2026-08-09):** none of these exist anymore — `scripts/` is gone from
+> the repo (verified: no `scripts/` dir, no crontab). See "Daily Commit" above.
+
 ### Key Files Created
 - `src/services/vm-manager.js` — createVm, removeVm, resetVm, docker-compose override YAML generation, config patching
 - `src/services/backup-manager.js` — backupAgent, restoreAgent via docker exec + docker cp
@@ -621,11 +657,11 @@ All bash/Python scripts that were external to src/ have been absorbed into Node.
 ## MCP Browser Testing (2026-07-18)
 
 ### Accessing the WebUI from Browser MCP
-- Browser MCP runs on the host, so it accesses the webui at `http://10.69.1.164:5051` (local network IP, production SPA build).
-- Vite dev server (HMR) runs on port 5173+ inside the container — use `http://10.69.1.164:5176` (or whichever port Vite picks) for live dev.
-- `localhost:5050` does **NOT** work from browser MCP — it connects to a different network context.
+- Browser MCP runs on the host, so it accesses the webui at `http://10.69.1.164:6789` (local network IP, production SPA build).
+- Vite dev server (HMR) runs on port 5173+ inside the container — use `http://10.69.1.164:5173` for live dev.
+- `localhost:6789` does **NOT** work from browser MCP — it connects to a different network context.
 - `172.19.0.1` (Docker gateway IP) does **NOT** work from browser MCP — use `10.69.1.164` instead.
-- Quick restart (no rebuild): `docker restart paddock-webui`
+- Quick restart (no rebuild): `docker restart paddock`
 
 ### MCP Config
 - Created `/workspace/opencode.json` with MCP browser config pointing at `http://localhost:3000/mcp`.
@@ -1119,12 +1155,17 @@ fine (the still-running door just resumes forwarding). Verified live on aic:
 Paddock stop → agent Exited + door Exited + port 000; Paddock start → both Up +
 port 200; CLI-stop-then-Paddock-start → agent Up, door never went down, port 200.
 
-## MCP Server /mcp — Shared-Function Rule (plan 30 — 2026-08-09)
+## MCP Server /mcp — Shared-Function Rule (2026-08-09; plan 30 absorbed — see docs/backend/services.md "MCP Tools")
 
-- `src/mcp.js` exposes 12 tools over the `/mcp` Streamable HTTP endpoint: `list_agents`,
-  `get_agent`, `agent_logs`, `config_get`, `workspace_list`,
-  `workspace_read`, `workspace_write`, `start_agent`,
-  `stop_agent`, `restart_agent`, `delete_agent`, `exec`.
+- `src/mcp.js` exposes **17 tools** over the `/mcp` Streamable HTTP endpoint:
+  `list_agents`, `get_agent`, `agent_logs`, `config_get`, **`settings_get`**,
+  **`health`** (→ `containerHealth.checkContainerHealth(name)`, the same checkup
+  as the Settings tab), `workspace_list`, `workspace_read`, `workspace_write`,
+  **`create_agent`** (→ `vm.createAgent`: validate + build image + seed config +
+  setup steps; caller becomes owner), `start_agent`, `stop_agent`,
+  `restart_agent`, **`recreate`** (the ONE mutation
+  "gun" — every settings/web option is an optional arg), `update` (alias for
+  `recreate {pull:true}`), `delete_agent`, `exec`.
 - **Tool names carry NO `paddock_` prefix** — the consuming MCP client already namespaces the
   server's tools itself, so a prefixed name would double-prefix. Keep new tools unprefixed.
 - **Business logic lives in `src/services/`; REST routes (app.js) AND MCP tools (mcp.js) are thin
@@ -1132,24 +1173,69 @@ port 200; CLI-stop-then-Paddock-start → agent Up, door never went down, port 2
   config read → `vm.readAgentConfig(agent)` (driver-aware configFile/configFormat, redacts JSON
   secrets); start/stop/restart → `vm.startAgent`/`stopAgent`/`restartAgent` (these also start/stop
   the socat door with the agent — the CLI-only `docker start/stop` does NOT touch the door);
-  delete → `vm.removeVm` + `registry.removeAgentFromDb`.
+  delete → `vm.removeVm` + `registry.removeAgentFromDb`; create (REST + MCP) →
+  **`vm.validateAgentCreate(name, opts)`** (pre-flight: name/agent type, network peer running,
+  extra volumes/ports, SSH container port, workspace mount, cross-agent host-port availability —
+  throws before anything is created) then **`vm.createAgent(name, opts)`** (normalizes
+  port/sshCport/workspaceHost/workspaceDir + `createVm`). Both `POST /api/agents/create` and the
+  MCP `create_agent` go through these — the route kept only the 409 exists-check and the
+  admin `assign_to` owner override, which now uses `registry.assignOwner(name, userId)`;
+  settings/web/ports POST and MCP `recreate` → **`vm.applyAgentChanges(name, opts, {onLog, onStep})`** (the consolidated flow);
+  settings GET → `vm.readSettings(name)`; container-info GET → `vm.containerInfo(name)`.
+- `vm-manager.js` now exports `VM_NAME_RE` and `hostPortInUse` (both were duplicated in app.js;
+  the app.js copies are deleted). `create_agent` (MCP) takes a **bare** name and builds the full
+  prefixed one (`createNameFor` — strips an already-present prefix); every other MCP tool takes
+  the full name. MCP `create_agent` requires `confirm: true` (heavy — image build + new fleet
+  member); the REST create route never required confirm and still doesn't.
+- **`vm-manager.js` runCmd contract differs from app.js's**: it REJECTS on non-zero exit and
+  resolves `{ stdout, stderr }` with **NO `code` field** (app.js's resolves `{ stdout, stderr, code }`).
+  Any vm-manager code copied from app.js that checks `r.code !== 0` / `r.code === 0` is always
+  wrong. Fix: try/await/catch; `/no such (object|container)/i` for "not found" (this bit
+  `containerInfo` and `imageHasDockerCli`/`imageHasSshPortSupport` — see below).
 - MCP auth: `Authorization: Bearer <api key>` or `x-api-key`. Keys are created in the webui Vault /
   API keys page; the raw key is shown once (`api-keys.create`), only the hash is stored.
 - `get_agent` accepts an optional `logs` param (tail N ≤ 500) and includes recent container
   logs via `logStore.capture` + `readLogs`. `agent_logs` is the standalone equivalent.
 - `delete_agent` requires `confirm: true` — destructive, no undo (removes container, door,
-  network, instance dir). Keep that guard.
+  network, instance dir). Keep that guard. `recreate` requires `confirm: true` only when
+  `reset: true` (wipes the data dir). `create_agent` requires `confirm: true` too.
 - Testing MCP over HTTP: `docker exec -e MCP_KEY=<key> paddock node -e '…http POST /mcp…'` — responses
   are SSE (`event: message` + `data: {...}` lines), parse the `data:` lines. The `/mcp` endpoint
-  refuses without a valid key.
-- Tests: `timeout 60 docker exec paddock node --test test/mcp.test.js` (5 tests; the combined
+  refuses without a valid key, and returns 406 unless the client sends
+  `Accept: application/json, text/event-stream`.
+- Tests: `timeout 60 docker exec paddock node --test test/mcp.test.js` (8 tests; the combined
   `node --test test/` run hangs, known issue — run mcp.test individually).
+
+### vm-manager tests inside the paddock container: unset the GUARD_* envs
+
+The `.env` deliberately sets `GUARD_PROJECT_ROOT=0`, `GUARD_INSTANCES_PARENT=0`,
+`GUARD_AGENT_DATA=0` (so a pad may mount the project root). `vm-manager.test.js`
+asserts the guards work by DEFAULT, so running the suite inside the container
+fails 1 test unless you override them empty:
+```bash
+docker exec -e GUARD_PROJECT_ROOT= -e GUARD_INSTANCES_PARENT= -e GUARD_AGENT_DATA= \
+  paddock node --test test/vm-manager.test.js   # 34/34 pass
+```
 
 ## Architecture Documentation
 
+- **Read order:** when a task touches docs or you need the system's shape, first read `docs/README.md` (index + map of folders), then the relevant `docs/` pages. Before **writing or editing** any doc, read `docs/STYLE-GUIDE.md` and follow it — it is the single authority for format, skeleton, voice, and terminology. A doc that disagrees with the style guide gets fixed.
 - `docs/` — **Source of truth** for business logic, system architecture, page descriptions, routes, data model, security model, and all behavioral contracts. Split by area: `overview/` (architecture, business-logic, react-migration), `backend/` (services, middleware, user-management), `tabs/` (per-tab behavior), `pages/`, `components/`, `operations/`.
 - Rule: If code and docs disagree, fix the code.
 - AGENTS.md remains the place for operational learnings, bug fixes, commands, and PAD session context.
+
+### Main documentation files (paths)
+
+- `docs/README.md` — index + folder map (read first)
+- `docs/STYLE-GUIDE.md` — the style guide: format, skeleton, voice, terminology (read before writing/editing docs)
+- `docs/overview/architecture.md` — system architecture, containers, data flow
+- `docs/overview/business-logic.md` — detailed workflows: discovery, workspace, lifecycle, backup, auth, terminal, MCP, skills, OAuth, config
+- `docs/backend/services.md` — all backend services with functions, schemas, business logic
+- `docs/backend/user-management.md` — multi-user system, owner-based scoping
+- `docs/tabs/terminal.md` — the docked interactive shell (tmux + xterm)
+- `docs/tabs/web.md` — web publishing + the socat door
+- `docs/tabs/settings.md` — container settings: update, health, docker, network, delete
+- `docs/operations/overview.md` — agent lifecycle, dev workflow, git workflow
 
 ## User Preferences
 

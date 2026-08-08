@@ -1,5 +1,7 @@
 # Tabs Overview
 
+> Last updated: 2026-08-09
+
 The agent detail page is a **terminal emulator with a GUI command picker**:
 one docked terminal that lives the whole time you're on the page, plus a few
 GUI modes that genuinely need a GUI. Modes are defined inline in
@@ -10,9 +12,8 @@ const MODES = [
   { id: 'commands', label: 'Commands' },   // default landing mode
   { id: 'workspace', label: 'Workspace' },
   { id: 'config', label: 'Config' },
-  { id: 'web', label: 'Web' },
+  { id: 'web', label: 'Web & Ports' },
   { id: 'logs', label: 'Logs' },
-  { id: 'sessions', label: 'Sessions' },
   { id: 'activity', label: 'Activity' },
   { id: 'settings', label: 'Settings' },
 ]
@@ -60,19 +61,21 @@ create-file, folder, upload, download, move).
 ## Config
 
 Raw editor for the agent's config file — the driver's `configFile`
-(`openclaw.json` for openclaw, `opencode.json`, `config.json` for picoclaw).
+(`openclaw.json` for openclaw, `opencode.json`, `config.json` for picoclaw,
+`config.yaml` for hermes, `config.toml` for codex).
 For `configFormat: 'json'` drivers the backend parses + redacts secrets and the
 frontend validates JSON before save; for `yaml`/`toml`/verbatim formats
 (hermes, codex) the file is served/written verbatim and the tab skips JSON
 validation. Full config in a textarea, Save with validation, unsaved-changes
 indicator, restart note after save.
 
-## Web
+## Web & Ports
 
-Publishes the agent's built-in web app on a host port. Driver-driven form
-(container port, host port, per-driver auth) + live-status pill; the Apply
-button streams the recreate in a Console popup. Agents with no built-in web app
-(codex/claude) show a read-only empty state. See [web.md](web.md).
+Publishes the agent's built-in web app on a host port, exposes SSH, and maps
+extra TCP ports — all driver-driven with a live-status pill; the Apply button
+streams the recreate in a Console popup. In peer-mode networks every published
+port rides the `<name>-door` socat container. Agents with no built-in web app
+show a read-only empty state. See [web.md](web.md).
 
 ## Logs
 
@@ -83,13 +86,6 @@ recreates).
 **Features:** tail-count selector, auto-scroll toggle, log-level filter
 (All/Info/Warn/Error), text search, timestamp toggle, streaming dot indicator.
 
-## Sessions
-
-Lists chat sessions from the SQLite metadata store (`sessions` table).
-
-**Columns:** ID (truncated), Kind, Status (active/inactive), Model,
-Tokens In/Out. Empty state: "No sessions recorded yet."
-
 ## Activity
 
 Event timeline from the SQLite activity log (`activity_events` table).
@@ -97,14 +93,14 @@ Event timeline from the SQLite activity log (`activity_events` table).
 **Columns:** Action (with color), Details, Timestamp. Status dot: green for ok,
 red for error. Empty state: "No activity recorded yet."
 
-Events tracked: start, stop, restart, create, delete, config updates, workspace
-operations, backup create/restore, web publish/unpublish.
+Events tracked: lifecycle (start/stop/restart/create/delete/update), settings
+(recreate), web publish/unpublish, ports update.
 
 ## Settings
 
 Container-level operations: image refresh (update), health checkup, docker
-access, network routing, web binding carryover, and delete. See
-[settings.md](settings.md).
+access, network routing, workspace + volumes mounts, web binding carryover,
+and delete. See [settings.md](settings.md).
 
 ## API Endpoints (app.js)
 

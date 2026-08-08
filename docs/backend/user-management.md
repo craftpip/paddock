@@ -1,5 +1,7 @@
 # User Management
 
+> Last updated: 2026-08-09
+
 Multi-user system with owner-based scoping. Every resource in Paddock belongs to a user. Admins see everything and manage users. Regular users only see what they own.
 
 ```
@@ -52,7 +54,11 @@ CREATE TABLE users (
 
 ### User Sessions
 
-`user_sessions` table backs the SQLite session store. Sessions survive server restarts.
+Sessions are **in-memory** (`express-session` `MemoryStore`, cookie `vmf.sid`) —
+a webui restart wipes them. With `AUTO_LOGIN=true` (default) the `ensureAutoLogin`
+middleware logs the next request in as the first admin automatically, so the SPA
+never notices. A legacy `user_sessions` SQLite table is referenced by the
+delete-user cleanup but the active store does not use it.
 
 ### Seed
 
@@ -73,11 +79,12 @@ On fresh install: first startup seeds admin/admin → user logs in → can chang
 
 ## Auth Middleware (`src/middleware/auth.js`)
 
-- **`requireAuth()`** — checks `req.session.userId`. API/XHR: returns 401 JSON. Page loads: redirects to `/login` with `returnTo` saved. Bypassed if `AUTH_PASSWORD` is empty.
+- **`requireAuth()`** — checks `req.session.authenticated`. API/XHR: returns 401 JSON. Page loads: redirects to `/login` with `returnTo` saved. Bypassed entirely when `AUTO_LOGIN=true`.
 - **`requireAdmin()`** — checks `req.session.role === 'admin'`. Returns 403 if not admin.
 - **`checkNeedsSetup()`** — redirects to `/setup` when no users exist (first-run flow).
 - **CSRF** — token on every session, validated on all non-GET routes via `x-csrf-token` header.
-- **Session store** — SQLite-backed (`user_sessions` table), persists across restarts. Cookie: `vmf.sid`, httpOnly, sameSite lax, 24h expiry.
+- **Owner scoping** — `app.param('name', …)` gates every `/api/agents/:name/*` route (and the terminal WebSocket inline): non-admin callers must own the agent.
+- **Session store** — in-memory (`MemoryStore`); cookie `vmf.sid`, httpOnly, sameSite lax, 24h expiry. `AUTO_LOGIN=true` re-establishes the admin session after a restart.
 
 ## Backend Routes
 
@@ -129,26 +136,26 @@ On create, `owner_id` is set to `req.session.userId`. Admin can override by pass
 
 ### Agent Detail / Activity / Sessions — Scoped
 
-All routes that read agent data check ownership:
+All routes that read agent data check ownership (via `app.param('name', …)` for
+`/api/agents/:name/*`; the terminal WebSocket checks inline):
 
 ```js
 function requireAgentAccess(req, res, next) {
-  const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(req.params.id);
-  if (!agent) return res.status(404).json({ error: 'Agent not found' });
-  if (req.session.role !== 'admin' && agent.owner_id !== req.session.userId) {
+  if (req.session.role === 'admin') return next();
+  const row = db.prepare('SELECT owner_id FROM agents WHERE name = ?').get(req.params.name);
+  if (!row || row.owner_id !== req.session.userId) {
     return res.status(403).json({ error: 'Access denied' });
   }
-  req.agent = agent;
   next();
 }
 ```
 
 Applied to all agent endpoints: start, stop, restart, delete, config, logs, activity, sessions, reset.
 
-**Terminal WebSocket** (`/ws/terminal/:vmName`) checks ownership inline on connect (runs before Express middleware):
+**Terminal WebSocket** (`/ws/terminal/:name`) checks ownership inline on connect (runs before Express middleware):
 
 ```js
-const agent = db.prepare('SELECT * FROM agents WHERE name = ?').get(vmName);
+const agent = db.prepare('SELECT * FROM agents WHERE name = ?').get(name);
 if (!agent || (role !== 'admin' && agent.owner_id !== userId)) {
   ws.close(4003, 'Access denied');
   return;
@@ -170,30 +177,16 @@ only list/revoke their own keys. Each key inherits its owner's role when used
 on `/mcp`: admin keys → full fleet, user keys → only owned agents. Only the
 sha256 hash is stored; the raw `pk_live_…` key is shown once at creation.
 
-### Backups — Scoped by Owner
+### Backups — Removed
 
-Backups inherit owner from the agent. A `backups` table in SQLite stores:
-
-```sql
-CREATE TABLE IF NOT EXISTS backups (
-  id TEXT PRIMARY KEY,
-  agent_id TEXT NOT NULL REFERENCES agents(id),
-  owner_id TEXT REFERENCES users(id),
-  filename TEXT NOT NULL,
-  size_bytes INTEGER,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-```
-
-`owner_id` is denormalized for fast querying but always matches the agent's owner.
-
-`listBackups(userId, role)` filters:
-- Admin: returns all backups
-- User: returns only backups of agents where `owner_id = self`
+The generic archive system is gone (2026-08-09): `backup-manager.js` is a stub
+and the `backups` table no longer exists in `db.js`. Native per-driver
+backup/import is planned (plan 26). When it lands, backups will inherit the
+agent's `owner_id` and be scoped exactly like agents.
 
 ### Dashboard — Scoped Stats
 
-Fleet stats (total agents, running, stopped, backups) are filtered by role and userId. Admin sees orphan count. Regular users see only their own numbers.
+Fleet stats (total agents, running, stopped) are filtered by role and userId. Admin sees orphan count. Regular users see only their own numbers.
 
 ### Agent Registry Sync — Preserve Owners
 
@@ -232,11 +225,12 @@ Agents discovered from the filesystem without an `owner_id` are orphans. They ex
 2. User deleted but their agents remain
 3. Agent created via CLI directly (outside Paddock)
 
-**Admin UI:** Orphan count shown on dashboard. Filtered view at `/admin/orphans` with `[Assign]` button per agent.
+**Admin UI:** Orphan count shown on the dashboard; the fleet list filters to
+orphans and has an `[Assign]` action per agent.
 
 **API:**
 - `GET /api/agents?orphans=true` — returns NULL-owner agents (admin only)
-- `POST /api/agents/:id/assign` — body: `{ owner_id: "user_..." }`
+- `POST /api/agents/:name/assign` — body: `{ owner_id: "user_..." }`
 
 ### User Deletion
 
@@ -285,7 +279,6 @@ If the last admin is somehow deleted (e.g., direct DB manipulation), the system 
 | `src/app.js` | All user/session/profile API routes |
 | `src/services/agent-registry.js` | Owner scoping in getAgents(), preserve owner in sync |
 | `src/services/vm-manager.js` | Set owner_id on agent creation |
-| `src/services/backup-manager.js` | Backup scoping by owner |
 | `src/services/vault.js` | Encrypted Vault (not owner-scoped) |
 | `src/client/src/pages/Login.jsx` | Login form |
 | `src/client/src/pages/Setup.jsx` | First-run admin creation |

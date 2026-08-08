@@ -1,12 +1,14 @@
 # Pages
 
+> Last updated: 2026-08-09
+
 All pages are React components served from `src/client/src/pages/`. The built SPA lives at `src/public/` and is served by Express at the root path.
 
 ## Login (`/login`)
 
 File: `Login.jsx`
 
-Simple login form with password input. Submit calls `POST /api/login`. On success redirects to `/agents`. On error shows error message. If the server has no AUTH_PASSWORD set, redirects immediately.
+Simple login form with username + password input. Submit calls `POST /api/login`. On success redirects to `/agents`. On error shows error message. With `AUTO_LOGIN=true` (default) the app skips login entirely.
 
 ## Profile (`/profile`)
 
@@ -55,8 +57,7 @@ Implemented enhancements for user experience and functionality:
 - **Sidebar status/badge alignment** — status badge and action buttons (Stop, Restart) on the same line with compact icon buttons.
 - **Hover stats alignment** — hover panel (Net I/O, Disk I/O) uses CSS grid with short labels.
 - **Resource stats placeholder** — CPU and MEM lines show `&ndash;%` / `&ndash;` placeholders while loading.
-- **Tab order** — Core tools first, then configuration, then Settings. Sessions and Activity tabs removed.
-- **Activity merged into Overview** — full activity table shown in Overview tab below quick links.
+- **Tab order** — Commands (default), then Workspace/Config/Web & Ports/Logs/Activity, then Settings. The old Sessions tab is removed.
 
 ### Workspace Tab
 
@@ -112,43 +113,35 @@ Form to create a new PAD, laid out in three rows:
 │  Create PAD                                       │
 │                                                     │
 │  ┌─────────────────────────────────────────────┐    │
-│  │ vm-  [openclaw ▼]  -  [my-PAD           ] │    │
-│  └─────────────────────────────────────────────┘    │
-│                                                     │
-│  Clone from backup (optional)                       │
-│  ┌─────────────────────────────────────────────┐    │
-│  │ [No clone — Fresh install              ▼]   │    │
+│  │ pad-  [openclaw ▼]  -  [my-PAD           ] │    │
 │  └─────────────────────────────────────────────┘    │
 │                                                     │
 │  ┌─────────────────────────────────────────────┐    │
-│  │         Create vm-openclaw-my-PAD         │    │
+│  │  [ Create pad-my-PAD                     ]  │    │
 │  └─────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────┘
 ```
 
-- **Row 1** — Prefix (from CONTAINER_PREFIX), PAD type dropdown (openclaw/picoclaw/hermes), name input (alphanumeric + hyphens)
-- **Row 2** — Clone from backup dropdown (filtered by selected PAD type — only matching backup types shown). First option: "No clone — Fresh install". Replaces the old clone-from-running-PAD approach.
-- **Row 3** — Create button shows the full name being created (e.g. "Create vm-openclaw-my-PAD")
+- **Row 1** — Prefix (from CONTAINER_PREFIX, e.g. `pad`), PAD type dropdown (openclaw/opencode/picoclaw/hermes/codex), name input (alphanumeric + hyphens). Toggles for SSH expose (host + container port + password), custom workspace mount, docker access, and network routing.
+- **Row 2** — Create button shows the full name being created (e.g. "Create pad-my-PAD")
 
 **Creation flow (live streaming):**
 1. Form submits via fetch — POST `/api/agents/create` returns `202` immediately and a background job starts
 2. The form is replaced by a live log pane (the shared `Console.jsx` component) that streams the **real command output** over SSE — no fake spinner steps
-3. Steps appear as labeled command lines as they start: **build** → **up** → **setup** (fresh OpenClaw/PicoClaw) or **restore** (clone from backup) → **done**
-4. **Clone path:** success banner, then auto-navigates to the agent detail after ~1.8s
-5. **Fresh path:** success banner + prominent "Go to Agents" button — no auto-navigation, so the user can scroll the logs
-6. **Failure:** red banner + error tail in the log pane; "back to form" or retry — never navigates
+3. Steps appear as labeled command lines as they start: **build** → **up** → **setup** (fresh OpenClaw/PicoClaw) → **done**
+4. **Success:** banner + prominent "Go to Agents" button — no auto-navigation, so the user can scroll the logs
+5. **Failure:** red banner + error tail in the log pane; "back to form" or retry — never navigates
 
 The SSE stream reconnects with `Last-Event-ID` on drop; polling `/create-status` is the fallback.
 
 **What was removed:**
-- No more clone-from-running-PAD dropdown
-- No separate progress page that broke layout
+- No clone-from-backup dropdown (the generic backup system is gone)
 
 ## Agent Detail (`/agents/:id`)
 
 File: `AgentDetail.jsx`
 
-Layout shell with a sidebar, 8 mode tabs, and a docked terminal. See `tabs/`
+Layout shell with a sidebar, 7 mode tabs, and a docked terminal. See `tabs/`
 docs for each mode.
 
 Sidebar:
@@ -156,7 +149,7 @@ Sidebar:
 - Status badge with pulse animation for transitions
 - Live CPU/MEM stats on running agents (hover for Network/Disk I/O)
 - Start/Stop/Restart buttons
-- Mode navigation (8 tabs)
+- Mode navigation (7 tabs)
 
 Modes are defined in the `MODES` array in AgentDetail.jsx:
 | Mode | Component | Feature |
@@ -164,11 +157,10 @@ Modes are defined in the `MODES` array in AgentDetail.jsx:
 | commands | CommandsPane.jsx | Command pill flow + Run TUI + Vault dropdown (default landing mode) |
 | workspace | — | File browser, editor, upload |
 | config | — | Editor for the driver's config file (openclaw.json / opencode.json / config.yaml / config.toml) |
-| web | WebTab.jsx | Publish the agent's built-in web app on a host port |
+| web | WebTab.jsx | "Web & Ports" — publish the web app, expose SSH, map extra TCP ports |
 | logs | — | Container logs viewer (persistent log store) |
-| sessions | — | Chat session list |
 | activity | — | Event timeline |
-| settings | SettingsTab.jsx | Update, health checkup, docker, network, delete |
+| settings | SettingsTab.jsx | Update, health checkup, docker, network, workspace, volumes, delete |
 
 The terminal is docked at the bottom of every mode — always mounted, one per
 agent, auto-collapsed outside Commands. See [tabs/terminal.md](../tabs/terminal.md).
@@ -184,13 +176,10 @@ SSE-streamed background jobs with a Console popup. See
 
 File: `GlobalBackups.jsx`
 
-Global listing of all backup archives from the `backups/` folder. Features:
-
-- **Quick Backup** — one button per running PAD, each with a status dot indicator
-- **Table columns** — File Name (actual `.tar.gz` filename), Agent (with amber dot + "orphan" tag for deleted PADs), Type badge (OpenClaw/PicoClaw), Created (date, time, and relative time), Size, Actions (Download / Delete)
-- **Download** — direct link to the archive
-- **Delete** — with confirmation dialog
-- **Empty state** — icon with message when no backups exist
+**Maintenance empty state** — the generic archive system was removed (2026-08-09);
+the page shows "The generic archive system was removed. Native driver backups are
+coming soon." Legacy archives stay in `backups/` but are not restorable until
+plan 26 (native per-driver backup/import) lands.
 
 ## Vault (`/vault`)
 
@@ -292,8 +281,11 @@ masterKey (random 32B) ──► AES-GCM ──► enc_value (per item)
 - `src/services/db.js` — `vault_items` table in `migrate()`
 - `src/app.js` — vault API routes
 
-## Onboard (`/onboard/:name`)
+## Onboard (`/agents/:agentId/onboard`)
 
 File: `Onboard.jsx`
 
-Wizard for setting up a new PAD: Telegram bot token, channel config, API keys.
+Wizard for setting up a running PAD: Telegram bot token, channel user ID, and a
+model-provider API key. Submits to `POST /api/agents/:name/onboard` (the flow
+that was formerly `scripts/onboard-bot.sh`, absorbed into app.js route handlers
+and `vm-manager.js` config patching). Secrets live in the Vault, not a JSON file.

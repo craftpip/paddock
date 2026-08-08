@@ -32,6 +32,17 @@ function safeVmName(name) {
   return name && VM_NAME_RE.test(name) ? name : null;
 }
 
+/** Build the full (prefixed) container name for a create request. Accepts a
+ *  bare name (`blog-bot`) or an already-prefixed one (`pad-blog-bot`); the
+ *  caller-typed version is used when the two differ. Returns null if the
+ *  result does not match the valid name pattern. */
+function createNameFor(bare) {
+  const n = String(bare || '').trim();
+  if (!n) return null;
+  const full = n.startsWith(PREFIX + '-') ? n : `${PREFIX}-${n}`;
+  return VM_NAME_RE.test(full) ? full : null;
+}
+
 function runCmd(cmd, args, options = {}) {
   const { timeout = 30000, check = false } = options;
   return new Promise((resolve, reject) => {
@@ -100,7 +111,7 @@ function registerTools(server) {
     'list_agents',
     {
       title: 'List PADs',
-      description: 'List all PAD agents managed by paddock. Returns name, status, agent type, and default model. Admins see the full fleet; regular users see only the agents they own.',
+      description: 'List all PAD agents managed by paddock. Returns name, status, agent type, and container ref. Admins see the full fleet; regular users see only the agents they own.',
       inputSchema: {},
     },
     async (args) => {
@@ -113,8 +124,6 @@ function registerTools(server) {
           display_name: a.display_name,
           agent_type: a.agent_type,
           runtime_ref: a.runtime_ref,
-          default_model: a.default_model,
-          default_provider: a.default_provider,
         }));
       return textResult({ agents });
     }
@@ -169,6 +178,39 @@ function registerTools(server) {
       requireAccess(currentUser(), name);
       const agent = requireAgent(name);
       return textResult({ name, ...vm.readAgentConfig(agent) });
+    }
+  );
+
+  server.registerTool(
+    'settings_get',
+    {
+      title: 'Get PAD settings + published-web state',
+      description: 'The single read tool for a PAD — the full picture before a `recreate`. Returns allowDocker, network peer, SSH (host + container port), custom workspace mount, extra volumes/ports, image/version, networkHealth, the available network-peer containers, AND the published-web state (active, webService, networkMode, passwordConfigured, startCommand, actualPorts).',
+      inputSchema: { name: z.string().describe('PAD name') },
+    },
+    async ({ name }) => {
+      requireAccess(currentUser(), name);
+      requireAgent(name);
+      const [settings, availableNetworks] = await Promise.all([
+        vm.readSettings(name),
+        vm.listContainers(),
+      ]);
+      return textResult({ name, ...settings, availableNetworks });
+    }
+  );
+
+  server.registerTool(
+    'health',
+    {
+      title: 'Run PAD health checkup',
+      description: 'Run the same Docker-level health checkup as the Settings tab. Diffs the declared compose file against the live container and reports each check — container status, docker /healthz probe, restart policy, image, network mode/peer, bind mounts, docker socket, published ports, env keys — as { key, label, status, expected, actual, hint }, plus an overall status and ok/warn/error counts. Works on stopped containers (reports why they are down).',
+      inputSchema: { name: z.string().describe('PAD name') },
+    },
+    async ({ name }) => {
+      requireAccess(currentUser(), name);
+      requireAgent(name);
+      const report = await containerHealth.checkContainerHealth(name);
+      return textResult(report);
     }
   );
 
@@ -284,6 +326,75 @@ function registerTools(server) {
   );
 
   server.registerTool(
+    'create_agent',
+    {
+      title: 'Create a PAD agent',
+      description: 'Create a new PAD: validate, seed the per-instance build, write meta + compose, build the per-instance image, start the container, and run the driver\'s setup steps — the full create flow from the web UI. The `name` is the bare agent name (the container prefix is added for you, e.g. `blog-bot` → `pad-blog-bot`). Agent type defaults to openclaw. Requires `confirm: true` — it is heavy (image build) and adds a new agent to the fleet. The API key user becomes the agent owner. Returns the created agent + a log of what happened.',
+      inputSchema: {
+        name: z.string().describe('Agent name without the container prefix (e.g. "blog-bot" → pad-blog-bot)'),
+        agent: z.enum(['openclaw', 'opencode', 'picoclaw', 'hermes', 'codex']).optional().describe('Agent type (default openclaw)'),
+        confirm: z.boolean().describe('Must be true to create — heavy and adds a new agent to the fleet'),
+        allowDocker: z.boolean().optional().describe('Mount the host docker socket + CLI into the container'),
+        network: z.string().optional().describe('Network peer container to route through'),
+        sshEnabled: z.boolean().optional().describe('Expose OpenSSH'),
+        sshPort: z.number().int().min(1).max(65535).optional().describe('SSH host port (empty auto-allocates)'),
+        sshContainerPort: z.number().int().min(1).max(65535).optional().describe('SSH container port — the port sshd listens on inside the container (default 22; unique per peer-shared agent)'),
+        sshPassword: z.string().optional().describe('Root/SSH password (defaults to the name)'),
+        workspaceHost: z.string().optional().describe('Custom workspace host source — both-or-neither with workspaceDir'),
+        workspaceDir: z.string().optional().describe('Custom workspace container path — both-or-neither with workspaceHost'),
+        extraVolumes: z.array(z.object({
+          host: z.string().describe('Host source path'),
+          container: z.string().describe('Container destination path'),
+          readonly: z.boolean().optional().describe('Mount read-only'),
+        })).optional().describe('Additional volumes'),
+        extraPorts: z.array(z.object({
+          host: z.number().int().min(1).max(65535),
+          container: z.number().int().min(1).max(65535),
+        })).optional().describe('Additional published ports'),
+      },
+    },
+    async (args) => {
+      const user = currentUser();
+      if (args.confirm !== true) {
+        throw new McpError(ErrorCode.InvalidRequest, 'Refusing to create without confirm: true (creates a new agent and builds an image).');
+      }
+      const fullName = createNameFor(args.name);
+      if (!fullName) {
+        throw new McpError(ErrorCode.InvalidRequest, `Invalid agent name: ${args.name}`);
+      }
+      const log = [];
+      try {
+        await vm.createAgent(fullName, {
+          agent: args.agent || 'openclaw',
+          allowDocker: !!args.allowDocker,
+          network: args.network || '',
+          sshEnabled: !!args.sshEnabled,
+          port: args.sshPort !== undefined ? String(args.sshPort) : '',
+          sshContainerPort: args.sshContainerPort !== undefined ? String(args.sshContainerPort) : '',
+          password: typeof args.sshPassword === 'string' ? args.sshPassword : '',
+          workspaceHost: args.workspaceHost || '',
+          workspaceDir: args.workspaceDir || '',
+          extraVolumes: args.extraVolumes,
+          extraPorts: args.extraPorts,
+          onLog: (type, msg) => log.push(`[${type}] ${msg}`),
+          onStep: () => {},
+        });
+      } catch (e) {
+        registry.dockerPsList(true);
+        registry.discoverAgents();
+        throw new McpError(ErrorCode.InvalidRequest, `Create failed: ${e.message}`);
+      }
+      registry.dockerPsList(true);
+      registry.discoverAgents();
+      const ownerId = user ? user.userId : null;
+      registry.assignOwner(fullName, ownerId);
+      registry.recordActivity(fullName, 'lifecycle', 'create', 'ok', `Agent created via MCP (type=${args.agent || 'openclaw'})`);
+      const agent = registry.getAgent(fullName);
+      return textResult({ ok: true, name: fullName, status: agent ? agent.status : 'created', ownerId, log });
+    }
+  );
+
+  server.registerTool(
     'delete_agent',
     {
       title: 'Delete PAD',
@@ -309,25 +420,53 @@ function registerTools(server) {
   server.registerTool(
     'recreate',
     {
-      title: 'Recreate PAD container',
-      description: 'Recreate a PAD container (force-recreate via its compose file). All persisted bindings (network peer, docker socket, published web app + door, workspace mount, extra volumes/ports) are preserved. `pull: true` re-downloads the base image and rebuilds first (i.e. "update to latest image"). `reset: true` wipes the ENTIRE data dir (config, sessions, sqlite, workspace) before recreating — destructive, requires confirm.',
+      title: 'Recreate PAD container — single mutation tool',
+      description: 'The one "gun" for every change that recreates the container: Settings-tab options (allowDocker, network peer, extraVolumes, custom workspace) AND Web-tab options (web publish, SSH expose, extraPorts). Only the options you SPECIFY change; everything unspecified is left untouched. Pass `[]` / `\'\'` / `false` to explicitly clear something. `pull: true` updates to the latest base image (rebuild + recreate). `reset: true` wipes the ENTIRE data dir before recreating (requires confirm: true).',
       inputSchema: {
         name: z.string().describe('PAD name'),
         pull: z.boolean().optional().describe('Pull the base image + rebuild before recreating (update to latest)'),
         reset: z.boolean().optional().describe('Wipe the data dir and start fresh (requires confirm: true)'),
         confirm: z.boolean().optional().describe('Required when reset: true — destructive, no undo'),
+        allowDocker: z.boolean().optional().describe('Mount the host docker socket + CLI into the container (Settings tab)'),
+        network: z.string().optional().describe('Network peer container to route through (empty string clears to the default network)'),
+        extraVolumes: z.array(z.object({
+          host: z.string().describe('Host source path'),
+          container: z.string().describe('Container destination path'),
+          readonly: z.boolean().optional().describe('Mount read-only'),
+        })).optional().describe('Additional volumes (full replace list)'),
+        workspaceHost: z.string().optional().describe('Custom workspace host source — both-or-neither with workspaceDir'),
+        workspaceDir: z.string().optional().describe('Custom workspace container path — both-or-neither with workspaceHost'),
+        sshEnabled: z.boolean().optional().describe('Enable/disable Expose OpenSSH'),
+        sshPort: z.number().int().min(1).max(65535).optional().describe('SSH host port (empty auto-allocates)'),
+        sshContainerPort: z.number().int().min(1).max(65535).optional().describe('SSH container port — the port sshd listens on inside the container (default 22; unique per peer-shared agent)'),
+        sshPassword: z.string().optional().describe('Set the root/SSH password (write-only; empty = keep current)'),
+        extraPorts: z.array(z.object({
+          host: z.number().int().min(1).max(65535),
+          container: z.number().int().min(1).max(65535),
+        })).optional().describe('Additional published ports (full replace list)'),
+        web: z.object({
+          active: z.boolean().describe('Publish (true) or unpublish (false) the web app'),
+          hostPort: z.number().int().min(1).max(65535).optional().describe('Host port'),
+          containerPort: z.number().int().min(1).max(65535).optional().describe('Container port the app listens on (unique per agent when peers share a network namespace)'),
+          password: z.string().optional().describe('Web app password (write-only; empty = keep current)'),
+        }).optional().describe('Web app publish/unpublish'),
       },
     },
-    async ({ name, pull, reset, confirm }) => {
+    async (args) => {
+      const { name } = args;
       requireAccess(currentUser(), name);
       requireAgent(name);
-      if (reset && confirm !== true) {
+      if (args.reset && args.confirm !== true) {
         throw new McpError(ErrorCode.InvalidRequest, 'Refusing to reset without confirm: true (wipes the data dir).');
       }
-      await vm.recreateAgent(name, { pull: !!pull, reset: !!reset });
+      const log = [];
+      const result = await vm.applyAgentChanges(name, args, {
+        onLog: (type, msg) => log.push(`[${type}] ${msg}`),
+        onStep: () => {},
+      });
       registry.dockerPsList(true);
       registry.discoverAgents();
-      return textResult({ ok: true, name, action: reset ? 'recreated-with-reset' : pull ? 'recreated-with-pull' : 'recreated' });
+      return textResult({ ...result, log });
     }
   );
 
@@ -335,7 +474,7 @@ function registerTools(server) {
     'update',
     {
       title: 'Update PAD to latest image',
-      description: 'Pull the base image for a PAD, rebuild its image and force-recreate the container (same as the Settings tab "Update" flow). Config/data live in bind mounts, so they survive. The old container stays up through the build and is only swapped at recreate.',
+      description: 'Convenience alias for `recreate {pull: true}` — pull the base image, rebuild and force-recreate the container (same as the Settings tab "Update" flow). Config/data live in bind mounts, so they survive. The old container stays up through the build and is only swapped at recreate.',
       inputSchema: { name: z.string().describe('PAD name') },
     },
     async ({ name }) => {

@@ -1,5 +1,7 @@
 # React Migration
 
+> Last updated: 2026-08-09
+
 The PAD Friends Web UI was migrated from EJS + HTMX + Tailwind CDN to a React SPA with Vite, Zustand, and Tailwind PostCSS.
 
 ## Stack
@@ -18,16 +20,17 @@ The PAD Friends Web UI was migrated from EJS + HTMX + Tailwind CDN to a React SP
 ```
 src/
 ├── app.js                 API server (no EJS)
-├── routes/agents.js       JSON-only API
-├── services/              Docker, workspace, VM, backup
+├── mcp.js                 Paddock's own /mcp server (Streamable HTTP, 17 tools)
+├── routes/agents.js       DEAD CODE — legacy EJS routes, not mounted
+├── services/              Docker, workspace, VM, drivers, health, log-store, vault, backups (stub)
 ├── middleware/             Auth, rate limit
 ├── client/                React SPA
 │   ├── src/
 │   │   ├── pages/         Page components
-│   │   ├── components/    Reusable (Navbar, Toast, Modal, Card, FileTable)
+│   │   ├── components/    Reusable (Navbar, Toast, Modal, Terminal, HealthCheckModal, ...)
 │   │   ├── hooks/         useApi, useAuth, useInterval, useWebSocket
 │   │   ├── stores/        Zustand: auth, agents, flash
-│   │   ├── lib/           apiClient, helpers
+│   │   ├── lib/           apiClient, helpers, web, theme
 │   │   ├── App.jsx
 │   │   └── main.jsx
 │   ├── index.html
@@ -51,7 +54,7 @@ src/
 | `/vault` | VaultPage | `pages/Vault.jsx` |
 | `/profile` | ProfilePage | `pages/Profile.jsx` |
 
-AgentDetail tabs: Overview, Workspace, Terminal, Logs, Sessions, Config, MCP, Skills, Models, Messaging, Backups, Health, Activity.
+AgentDetail modes: Commands, Workspace, Config, Web & Ports, Logs, Activity, Settings — plus a docked terminal on every mode (see `tabs/overview.md`).
 
 ## Dev
 
@@ -59,7 +62,7 @@ AgentDetail tabs: Overview, Workspace, Terminal, Logs, Sessions, Config, MCP, Sk
 cd src/client && npm run dev
 ```
 
-Vite dev server on port 5173, proxies `/api` and `/ws` to Express on 5050.
+Vite dev server on port 5173, proxies `/api` and `/ws` to Express on 6789.
 
 ## Prod
 

@@ -1,5 +1,7 @@
 # Backend Services
 
+> Last updated: 2026-08-09
+
 ## PAD Discovery (agent-registry.js)
 
 Business logic: See `overview/business-logic.md` — PAD Discovery and State.
@@ -50,27 +52,35 @@ and its own image tag (`paddock-vm-<name>:latest`). See
 `services/instance-image.js` below.
 
 **Functions:**
-- `createVm(name, { agent, mode, skipSetup, onLog, onStep })` — full streaming creation flow with SSH port allocation. Emits steps via `onStep('build'|'up'|'setup', 'start'|'end'|'error')` and feeds command output through `onLog(stream, text)`. `skipSetup` skips the `openclaw setup --baseline` + restart block (used on the clone/restore path). Seeds the instance build dir from the shared template (`seedBuildDir`). Clone mode is type-locked (source must be the same agent type) and copies the source's `build/` too.
-- `removeVm(name)` — force remove container + delete instance dir
+- `createVm(name, { agent, mode, skipSetup, workspaceHost, workspaceDir, allowDocker, network, sshEnabled, port, sshCport, password, extraVolumes, extraPorts, onLog, onStep })` — full streaming creation flow with SSH host/container port allocation. Emits steps via `onStep('build'|'up'|'setup', 'start'|'end'|'error')` and feeds command output through `onLog(stream, text)`. Seeds the instance build dir from the shared template (`seedBuildDir`). `mode: 'fresh'` only — clone-from-backup was removed with the generic backup system.
+- `validateAgentCreate(name, opts)` — the shared create **pre-flight**: name/agent-type, network peer exists+running, extra volumes/ports, SSH container port, workspace mount, and the async cross-agent host-port sweep all abort (throw) before anything is created. Returns `{ sshHostPort, sshCport, wsMount }` normalized for `createVm`.
+- `createAgent(name, opts)` — `validateAgentCreate` then `createVm` (mode `fresh`, port/sshCport/workspace normalized). The single create path behind both `POST /api/agents/create` and the MCP `create_agent` tool.
+- `removeVm(name)` — `docker rm -f` the agent **and** its door (`<name>-door`/`<name>-web`), remove the compose network (`<name>_default`), delete the instance dir
 - `resetVm(name)` — remove container + wipe data + recreate + compose up
-- `startAgent(name)` — docker start with compose fallback
-- `generateInstanceCompose(name, agent, password, port, { allowDocker, network, webService, webPeerNetwork })` — builds the compose as a structured JS object and serializes it with `JSON.stringify(..., null, 2)` (JSON is valid YAML) — never hand-concatenated YAML. `allowDocker` adds the `/var/run/docker.sock` volume, `network` adds `network_mode: container:<name>`. Builds from `instances/<name>/build` with `image: paddock-vm-<name>:latest`; the `build.args:` block is generated from the instance Dockerfile's `ARG` lines (values interpolated from the instance `build.env`).
+- `startAgent(name)` / `stopAgent(name)` / `restartAgent(name)` — docker lifecycle; also start/stop the socat door with the agent (`startDoors`/`stopDoors`)
+- `generateInstanceCompose(name, agent, password, port, { allowDocker, network, sshCport, workspaceHost, workspaceDir, extraVolumes, extraPorts, webService, webPeerNetwork })` — builds the compose as a structured JS object and serializes it with `JSON.stringify(..., null, 2)` (JSON is valid YAML) — never hand-concatenated YAML. `allowDocker` adds the `/var/run/docker.sock` volume, `network` adds `network_mode: container:<name>`, `extraPorts`/`webService`/`sshCport` produce `ports:` bindings (or door mappings in peer mode), `workspaceHost`/`workspaceDir` add a second volume line. Builds from `instances/<name>/build` with `image: paddock-vm-<name>:latest`; the `build.args:` block is generated from the instance Dockerfile's `ARG` lines (values interpolated from the instance `build.env`).
 - `writeInstanceCompose(name, agent, password, port, opts)` — write the serialized compose to disk (passes the options through)
-- `applySettings(name, { allowDocker, network })` — regenerates compose + writes `DOCKER=1|0` and `NETWORK=<name>` (or empty) to `meta.env`; returns `{ allowDocker, network, image, agent }`. **Async** — reads the active `web.json` binding itself and regenerates with `webService` + the resolved `webPeerNetwork` for the new network, so a network/docker-toggle change never drops a published web app.
+- `applySettings(name, { allowDocker, network, sshPort, sshCport, workspaceHost, workspaceDir, extraVolumes, extraPorts, password })` — regenerates compose + writes the changed `meta.env` keys (`DOCKER`, `NETWORK`, `PORT`, `SSH_CPORT`, `ROOT_PASSWORD`, `WORKSPACE_*`, `EXTRA_PORTS`); returns the new state. **Async** — reads the active `web.json` binding itself and regenerates with `webService` + the resolved `webPeerNetwork` for the new network, so a network/docker-toggle change never drops a published web app.
+- `applyAgentChanges(name, opts, { onLog, onStep })` — the **consolidated mutation flow**: settings POST, web/ports POST, and the MCP `recreate` tool all funnel through it (stop → regen → reconcile door → up → boot hooks → verify → rollback on failure)
 - `updateAgent(name, { onLog, onStep })` — streams `docker compose --env-file <instance>/build/build.env -f <compose> build --pull <name>` (900s) then `up -d --no-deps --force-recreate <name>` (300s); steps `build`/`recreate`. No forced build args — the image is per-PAD, so the rebuild reads the instance Dockerfile + `build.env` directly.
-- `readWebService(name)` / `webServicePath(name)` — reads/`web.json` path (per-agent published web binding `{ containerPort, hostPort }`; null when absent)
+- `readSettings(name)` — the full settings + published-web + ports picture shared by `GET /api/agents/:name/settings` and the MCP `settings_get` tool (`{ allowDocker, network, sshPort, sshContainerPort, image, version, networkHealth, workspaceMount, extraVolumes, extraPorts, web }`)
+- `containerInfo(name)` — live `docker inspect` detail for the Container Info popup (mounts, published ports, env keys, raw JSON)
+- `readWebService(name)` / `webServicePath(name)` — read/`web.json` path (per-agent published web binding `{ containerPort, hostPort }`; null when absent)
 - `applyWebServices(name, webService)` — **async**. Set (truthy) or clear (`null`) the published web app: writes `web.json`, regenerates the compose with the `ports:` binding — or the socat door service when the agent routes through a network peer (see `tabs/web.md`). Returns `{ agent, webService }`. Does NOT stop/recreate — the route does that as an SSE job.
-- `webDoorName(name)` — `<name>-web`, the socat door container name in peer mode
+- `doorName(name)` — `<name>-door`, the socat door container name; `doorNameRe(name)` matches both `<name>-door` and the legacy `<name>-web`. `startDoors(name)`/`stopDoors(name)` start/stop it with the agent; `cleanOrphanDoors()` sweeps `<x>-door`/`<x>-web` containers whose agent is gone (runs at boot)
 - `webHookPath(name, agent)` / `writeWebStartHook` / `removeWebStartHook` — the per-instance boot hook at `<dataDir>/start-web.sh`, sourced by the image `start.sh` so the web app survives recreates
 - `getNetworkHealth(name)` — resolves the compose `network_mode: container:<peer>` against live docker state → `none` / `ok` / `stale` (peer recreated, recorded ID dead) / `peer-stopped`
-- `setMetaFlag(name, key, value)` — writes/clears a `KEY=VALUE` line in `meta.env` preserving other lines
+- `validateWorkspaceMount(name, agent, host, dir)` — the single authority for custom workspace binds (plan 24); returns `{ host, container, webuiVisible, hostBrowsable }` or throws
+- `autoSshPort()` — next free host port starting at 43817 (scans web/extra/ssh host ports)
+- `readSshCport(name)` — persisted SSH container port (meta `SSH_CPORT`, default `22`); `ensureSshStartBlock(name)` — backfills the `SSH_PORT` block into an old instance's own `build/start.sh` (idempotent)
+- `readExtraPorts(name)` / `readExtraVolumes(name)` / `validateExtraPorts(...)` / `validateExtraVolumes(...)` — extra TCP port + volume management (plan 28)
+- `setMetaFlag(name, key, value)` — writes/clears a `KEY=VALUE` line in `meta.env` preserving other lines (empty value **removes** the line)
 - `seedBuildDir(name, agent, { installDocker })` — idempotently copies `src/vm-builds/<type>/` → `instances/<name>/build/`, seeds `extras/.gitkeep` + `build.env`; never overwrites existing build files
 - `composeCommand(name, ...args)` — `docker compose --env-file <instance>/build/build.env -f <compose> ...` prefix used by every per-instance compose invocation (skips the env-file when the build dir is missing)
 - `validateInstanceCompose(name)` — pre-flight gate: runs `docker compose ... config --quiet` (parse + schema + interpolation, no side effects) and throws with the parser output on failure. Call **before** stopping/recreating a PAD so a malformed document aborts with the container still running.
 - `runCompose(name, args, opts)` — validates via `validateInstanceCompose` then runs the compose `build`/`up` command. Every per-instance compose action goes through it (or an explicit early `validateInstanceCompose` in the settings/ports/web/recreate routes), so a bad document never reaches `docker compose up`.
 - `ensureInstanceBuilds()` — one-time migration: seeds build dirs, retags `paddock-vm-<type>:latest` → `paddock-vm-<name>:latest`, regenerates compose + force-recreates running containers. Idempotent; runs on webui boot and via `GET /api/admin/migrate-builds`.
 - `setBuildEnv(name, kv)` / `readBuildEnv(name)` — read/write `instances/<name>/build/build.env` (K=V, `#` comments preserved)
-- `getNetworkHealth(name)` — resolves the compose `network_mode: container:<peer>` against live docker state → `none` / `ok` / `stale` (peer recreated, recorded ID dead) / `peer-stopped`
 - `existingServices()` — scan instances/ for existing compose files
 - `instanceComposePath(name)`, `getComposePath(name)` — path helpers
 
@@ -94,8 +104,9 @@ Image/tag/version lookups no longer live here — they go through
 
 ## Driver Registry (services/drivers/)
 
-One module per agent type (`openclaw.js`, `opencode.js`, `picoclaw.js`),
-registered in `index.js`. Every type is an equal citizen.
+One module per agent type — `openclaw.js`, `opencode.js`, `picoclaw.js`,
+`hermes.js`, `codex.js` — registered in `index.js`. Every type is an equal
+citizen.
 
 **Functions:**
 - `getDriver(type)` — returns the driver for a type, **falls back to the
@@ -109,13 +120,16 @@ registered in `index.js`. Every type is an equal citizen.
 | `type` / `label` | agent type id + human label |
 | `templateDir` | shared build template path (`../../src/vm-builds/<type>`) — the create-time copy source (the per-instance copy lives at `instances/<name>/build/`) |
 | `baseImage` | upstream image the Dockerfile starts from |
-| `dataDir` | in-container data directory (`/root/.openclaw`, `/root/.picoclaw`, …) |
-| `workspaceDir` | workspace root inside the container |
-| `configFile` | config filename in `dataDir` (openclaw.json / opencode.json / config.json) |
-| `setupSteps` | commands run right after `compose up` during create |
-| `backupTypeMarker` | filename sniff used by backup-manager for cli vs legacy type |
+| `dataDir` | in-container data directory (`/root/.openclaw`, `/root/.picoclaw`, `/opt/data`, …) |
+| `workspaceDir` | workspace root inside the container (hermes: the data dir itself) |
+| `configFile` / `configFormat` | config filename in `dataDir` + format (`json` for openclaw/picoclaw/opencode, `yaml` for hermes, `toml` for codex). Non-`json` = config served/written verbatim, no secret redaction |
+| `setupSteps` | commands run right after `compose up` during create (empty for codex) |
+| `backupTypeMarker` | filename sniff for backup-type detection (generic backups are removed; kept for plan 26) |
+| `webApp` | built-in web app descriptor (`label`, `docs`, `containerPort`, `auth`, `startCommand`) — only opencode has one today |
+| `startWebCommand` | shell command to (re)start the web app in the container |
+| `installDockerBuildArg` | whether the image installs the docker CLI via the `INSTALL_DOCKER` build arg |
 | `currentVersion(name)` | live version inside the container (regex-parsed; picoclaw prints a heavy ANSI banner) |
-| `availableVersion()` | upstream available version (cached 5 min) |
+| `availableVersion()` | upstream available version (cached 5 min; empty where inapplicable) |
 | `commands` | Command groups (Status/Auth/Cron/Skills/Other) for the CommandsPane |
 
 Per-instance image tags (`paddock-vm-<name>:latest`) come from
@@ -146,6 +160,27 @@ Each check: `{ key, label, status: 'ok'|'warn'|'error', expected, actual, hint }
 
 Driver-aware app-level checks are planned — see `plans/20-health-check-driver-aware.md`.
 
+## Log Store (log-store.js)
+
+Persistent container logs. `docker logs` dies with the container (docker rm
+removes the log file), so a recreated PAD's Logs tab would start empty. The log
+store captures each container's logs into a rolling file at
+`instances/<name>/logs/container.log`:
+
+- `capture(name)` — runs `docker logs --timestamps`, parses each line's
+  RFC3339Nano timestamp, appends only lines newer than the last captured one
+  (`meta.json` stores `lastTs`) — a recreated container's logs naturally append
+  with no dupes/gaps. File is trimmed past 8MB/20k lines.
+- `captureAll(containerNames)` — the 30s `setInterval` sweep in app.js over all
+  `safeVmName` containers.
+- `readLogs(name, tail)` — read the captured file (used by the Logs tab and the
+  MCP `agent_logs` tool).
+- `logFile(name)` — the log file path.
+
+Capture triggers: every `/api/agents/:name/logs` fetch, the 30s sweep, and the
+start of each backend recreate/delete/update/settings job (final lines survive
+the sweep window).
+
 ## Job Log (job-log.js)
 
 In-memory event store for long-running operations (create agent, …). Holds an ordered event list per job plus SSE subscriber response objects; lines are fanned out immediately, late/reconnecting subscribers get a replay via the `since` index. Jobs are cleaned up 5 minutes after finishing (only if no subscriber is attached).
@@ -158,13 +193,14 @@ In-memory is fine for a single-user panel: a create in flight during a server re
 
 ## Backup Manager (backup-manager.js)
 
-Business logic: See `overview/business-logic.md` — Backup and Restore.
+**STUB — generic backups removed (2026-08-09).** `backupAgent()` /
+`restoreAgent()` throw `UNAVAILABLE` ("Generic backups were removed. Native
+backups are not available yet.") with no callers in `src/`. Native per-driver
+backup/import (`openclaw backup create`, `hermes backup`/`import`, …) is planned
+in `plans/26-backup-and-restore.md`; until then the Backups page shows a
+maintenance empty state and legacy archives in `backups/` are not restorable.
 
-**Functions:**
-- `backupAgent(agentName)` — tar.gz inside container → copy to host → clean up → save meta
-- `restoreAgent(agentName, archiveFile)` — copy into container → extract → clean up → restart
-- `getBackupType(filename)` — cli vs legacy detection
-- `loadMeta()` / `saveMeta(meta)` — read/write `backups/backup-meta.json`
+Business logic: See `overview/business-logic.md` — Backup and Restore.
 
 ## Database (db.js)
 
@@ -230,6 +266,88 @@ Auth in `src/mcp.js`: `authenticateRequest(req)` reads `Authorization: Bearer`,
 `last_used_at`, and sets `req.mcpIdentity = { keyId, userId, keyName, scopes, role }`.
 Missing/invalid key → 401 JSON-RPC error (`-32001 Unauthorized`). Tools enforce
 the same owner-scoping as the REST API: admin → all agents, user → owned agents.
+
+## MCP Tools (mcp.js)
+
+`src/mcp.js` mounts the paddock's own MCP server at `/mcp` (Streamable HTTP). It
+exposes 17 tools. Every tool is a thin adapter over the same `src/services/`
+functions the REST API uses — behavior lives in the services, never in the tool
+handlers (no duplication between REST and MCP).
+
+| Tool | Purpose | Backed by |
+|------|---------|-----------|
+| `list_agents` | List PADs (owner-scoped) | `registry.discoverAgents()` |
+| `get_agent` | Details + optional `logs` tail (≤500) | `registry` + `logStore` |
+| `agent_logs` | Container logs tail (≤5000) | `logStore.capture/readLogs` |
+| `config_get` | Driver config file (JSON redacted; yaml/toml verbatim) | `vm.readAgentConfig(agent)` |
+| `settings_get` | Full read picture before a `recreate` | `vm.readSettings(name)` + `vm.listContainers()` |
+| `health` | Docker-level health checkup (same as the Settings tab) | `containerHealth.checkContainerHealth(name)` |
+| `workspace_list` | List a workspace dir | `workspace.listDir` |
+| `workspace_read` | Read a text file (≤256KB) | `workspace.statFile/readFile` |
+| `workspace_write` | Write a file | `workspace.writeFile` |
+| `create_agent` | Create a PAD (full create flow); needs `confirm: true` | `vm.validateAgentCreate` + `vm.createAgent` |
+| `start_agent` | Start container + socat door | `vm.startAgent(name)` |
+| `stop_agent` | Stop container + door | `vm.stopAgent(name)` |
+| `restart_agent` | Restart container + door | `vm.restartAgent(name)` |
+| `recreate` | The one mutation tool — see below | `vm.applyAgentChanges(name, opts)` |
+| `update` | Alias for `recreate {pull: true}` | `vm.updateAgent(name, { pull: true })` |
+| `delete_agent` | Delete PAD; needs `confirm: true` | `vm.removeVm` + `registry.removeAgentFromDb` |
+| `exec` | Run a shell command in the PAD | `docker exec` |
+
+Rules:
+
+- Tool names carry no `paddock_` prefix — the consuming MCP client namespaces
+  the server's tools itself.
+- `create_agent` is the only tool that takes a *bare* agent name (`createNameFor`
+  adds the container prefix); every other tool takes the full name. It needs
+  `confirm: true` (image build + new fleet member) and the creating API-key user
+  becomes the owner (`registry.assignOwner`). It shares `validateAgentCreate` +
+  `createAgent` with `POST /api/agents/create` — the REST route kept only the
+  409 exists-check and the admin `assign_to` owner override.
+- Mutations go through one gun: `recreate` accepts every Settings/Web option
+  (`allowDocker`, `network`, `extraVolumes`, `workspaceHost`/`workspaceDir`,
+  `sshEnabled`/`sshPort`/`sshContainerPort`/`sshPassword`, `extraPorts`, `web`)
+  plus `pull` and `reset`. Only the options you specify change; pass `[]`,
+  `''` or `false` to explicitly clear. `reset: true` wipes the data dir and
+  requires `confirm: true`. `recreate` returns `{ ok, name, action, changed,
+  summary, webService, log }`.
+- `settings_get` is the paired read: one call returns allowDocker, network
+  peer, SSH, workspace mount, volumes/ports, image/version, networkHealth, the
+  available peer containers, AND the published-web state.
+- Destructive tools require a guard: `delete_agent` needs `confirm: true`
+  (and `create_agent` too — it adds fleet members).
+- Secrets are write-only in the tools (`sshPassword`, `web.password`): empty
+  means "keep current", never echo a stored secret back.
+- The endpoint requires a bearer API key (`Authorization: Bearer` or
+  `x-api-key`) and returns 406 unless the client sends
+  `Accept: application/json, text/event-stream`. Responses are SSE
+  (`event: message` + `data:` JSON lines).
+
+### Design decisions (settled — do not add tools without re-checking the user)
+
+These four rules and the fold decisions below were set when the `/mcp` surface
+was built. Adding a tool that breaks them needs a re-check first.
+
+- **One mutation gun, one read tool.** Mutations go through `recreate`; reads
+  fold into `settings_get`. The web app (`web_get`), container info
+  (`container_info`) and network list (`list_networks`) are **not** standalone
+  tools — their reads are `settings_get` fields, their mutations are `recreate`
+  args. **Exception: `health` is a standalone tool** (user request — run the
+  Settings-tab checkup on demand). `list_agents` sends no model.
+- **Terminal-command tools stay terminal-driven.** Actions that exist as
+  `openclaw …` commands (MCP add/remove, skills install) are **not** mirrored
+  as API-backed MCP tools — the frontend pastes the command into the docked
+  terminal instead (see CommandsPane rule). Only genuinely headless operations
+  get MCP tools.
+- **`config_set` is deliberately absent** — an agent self-editing its own
+  config can break itself (destroy agents config, auth, plugins). If ever
+  added it must be admin-role scoped or confirm-gated. Default is **no**.
+- **`backup` / `restore` tools are a standing candidate** (wrap
+  `backup-manager.js`), not built yet — the backup service is a stub until
+  native per-driver backups land (plan 26).
+- **`update` is kept as a convenience alias** for `recreate {pull: true}` — the
+  friendliest form of the common "update to latest" flow; dropping it is not on
+  the table while it reads as `recreate {pull:true}`.
 
 ## Vault (vault.js)
 

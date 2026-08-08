@@ -1,46 +1,59 @@
 # System Architecture
 
-PAD Friends is a Docker-based control plane that manages OpenClaw AI agent containers through a web UI.
+> Last updated: 2026-08-09
+
+PAD Friends is a Docker-based control plane that manages AI agent containers (PADs) through a web UI. The agent program is driver-based: openclaw, opencode, picoclaw, hermes, or codex.
 
 ## High-Level Flow
 
 ```
 Browser → Web UI (React SPA)
               ↓
-         Express API (port 5050)
+         Express API (port 6789)
               ↓
          Docker socket (/var/run/docker.sock)
               ↓
-         PAD containers (OpenClaw agents)
+         PAD containers (driven by one of five drivers)
 ```
 
-The webui container (paddock-webui) manages PAD containers via the host's Docker socket. It discovers PADs from the filesystem, controls their lifecycle, execs commands inside them, and streams logs/terminals.
+The webui container (`paddock`) manages PAD containers via the host's Docker socket. It discovers PADs from the filesystem, controls their lifecycle, execs commands inside them, and streams logs/terminals.
 
 ## Containers
 
 | Container | Image | Purpose |
 |-----------|-------|---------|
-| paddock-webui | Build from src/Dockerfile | Express API + React SPA, manages all PADs |
-| vm-openclaw-* | ghcr.io/openclaw/openclaw:latest | Per-PAD OpenClaw agent |
+| `paddock` (service `webui`) | Build from src/Dockerfile (`paddock-webui`) | Express API + React SPA, manages all PADs |
+| `<prefix>-<name>` | `paddock-vm-<name>:latest` (per-PAD build) | One per PAD; the driver agent runs inside |
+| `<prefix>-<name>-door` | `alpine/socat` | Host-port carrier for peer-networked agents (web, SSH, extra ports) |
+
+Container names use the `CONTAINER_PREFIX` from `.env` (`pad` here) — never hardcode a `vm-` scheme.
 
 ## Services
 
 ```
 src/
 ├── app.js                    Express server, API routes, WebSocket terminal, auth
+├── mcp.js                    The paddock's own /mcp Streamable HTTP server (17 tools)
 ├── middleware/
 │   ├── auth.js               Session-based auth, CSRF tokens, login/logout
 │   └── rateLimit.js          IP-based rate limiter
 ├── services/
 │   ├── agent-registry.js     PAD discovery from instances/ + Docker state
-│   ├── db.js                 SQLite metadata store
+│   ├── db.js                 SQLite metadata store (users, agents, vault, api_keys)
 │   ├── workspace.js          Safe file operations with path traversal protection
-│   ├── vm-manager.js         Create/remove/reset PADs, generate compose files
-│   ├── backup-manager.js     Backup/restore via docker exec
+│   ├── vm-manager.js         Create/remove/reset PADs, compose generation, applySettings,
+│   │                         applyAgentChanges, readSettings, containerInfo, the socat door
+│   ├── drivers/              Per-type adapters: openclaw, opencode, picoclaw, hermes, codex
+│   ├── instance-image.js     Per-PAD image tags + build.env + Dockerfile ARG parsing
+│   ├── container-health.js   Generic Docker-level health checkup (11 checks)
+│   ├── log-store.js          Persistent container log capture (instances/<name>/logs/)
+│   ├── job-log.js            In-memory SSE event store for long-running jobs
+│   ├── backup-manager.js     STUB — generic backups removed (see business-logic.md)
+│   ├── api-keys.js           Per-user bearer keys for /mcp
 │   └── vault.js              Encrypted key-value store (AES-256-GCM)
 ├── client/                   React SPA (see overview/react-migration.md)
 └── routes/
-    └── agents.js             Legacy EJS routes (dead code, kept for reference)
+    └── agents.js             Legacy EJS routes (dead code, not mounted)
 ```
 
 ## Data Flow
@@ -56,6 +69,8 @@ src/
 - POST routes require CSRF token via `x-csrf-token` header
 - Responses are JSON
 - Backend commands use `runCmd()` (execFile wrapper) or `spawn()` for streaming
+- Long-running operations (create, update, settings, web, health) run as background
+  jobs (`setImmediate`) streamed over SSE through `job-log.js`
 
 ### WebSocket Terminal
 
@@ -75,14 +90,15 @@ attached over a real Docker PTY (dockerode hijack stream). See
 6. Output is demuxed (dockerode `demuxStream`) and UTF-8 decoded — no `\r` →
    `\n` conversion, the PTY line discipline handles CR/LF
 
-### Web Publishing
+### Web Publishing, SSH, and extra ports
 
-Agents with a built-in web app (drivers with a `webApp` descriptor) can publish
-it on a host port. `POST /api/agents/:name/web` writes `web.json` + a boot hook
+Agents with a built-in web app (drivers with a `webApp` descriptor) can publish it
+on a host port; peer-networked agents can also expose SSH and extra TCP ports.
+`POST /api/agents/:name/web` writes `web.json` + a boot hook
 (`<dataDir>/start-web.sh`, sourced by the image `start.sh`), regenerates the
 compose with the `ports:` binding, and recreates the container. On a network
-peer (`network_mode: container:`) a **socat door** service carries the host
-port and forwards to the peer by name. See `tabs/web.md`.
+peer (`network_mode: container:`) a **socat door** service (`<name>-door`)
+carries all host ports and forwards to the peer by name. See `tabs/web.md`.
 
 
 ## Key Design Decisions
@@ -91,29 +107,36 @@ port and forwards to the peer by name. See `tabs/web.md`.
 |----------|-----|
 | React SPA at root `/` | All pages migrated from EJS+HTMX |
 | Express serves built SPA from public/ | Simple prod deployment |
+| Driver framework (`services/drivers/`) | Per-type behavior (openclaw/opencode/picoclaw/hermes/codex) via one adapter |
 | No EJS rendering for modern pages | API-only for React |
-| Session-based auth with CSRF | Replaced Basic Auth |
+| Session-based auth with CSRF | Replaced Basic Auth; `AUTO_LOGIN=true` auto-logs in |
 | CSRF on all POST routes | Security |
 | Docker exec for all container commands | No agent-side daemon needed |
+| Per-PAD image `paddock-vm-<name>:latest` | Each PAD owns its build dir (`instances/<name>/build/`) |
 | 3s cache on docker ps | Reduces API latency |
 | Path traversal protection on workspace | Security |
 | Secret redaction in config responses | Don't leak tokens |
+| Socat door for peer-networked agents | Port publishing is impossible on `network_mode: container:` |
 | `HOST_WORKSPACE_ROOT` env var | Fixes bind-mount split-brain |
+| MCP server at `/mcp` (bearer API keys) | opencode/Claude Code manage Paddock over Streamable HTTP |
 
 ## Environment Variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `AUTH_PASSWORD` | Yes | Password for login |
+| `AUTO_LOGIN` | No | `true` (default) auto-logs every request in as the first admin — no login screen. Any other value enables real auth |
 | `SESSION_SECRET` | No | Auto-generated if not set |
-| `CONTAINER_PREFIX` | No | Default: `vm` |
-| `HOST_WORKSPACE_ROOT` | Yes | Real host path to project root |
+| `CONTAINER_PREFIX` | No | Default: `pad` (PAD container name prefix) |
+| `HOST_WORKSPACE_ROOT` | No | Real host path to project root (falls back to `WORKSPACE_ROOT`) |
 | `VAULT_KEY` | No | 32+ bytes for vault encryption (falls back to SESSION_SECRET) |
-| `WEBUI_PASSWORD` | No | Maps to AUTH_PASSWORD |
+| `HOST_NAME` / `HOST_PROTO` | No | Override the base for published web-app links (IP or hostname + `http`/`https`) |
+| `GUARD_*` | No | Workspace-mount safety guards (on by default; set `GUARD_<NAME>=0` to disable) |
+
+`AUTH_PASSWORD` is **gone** — auth is multi-user (users table in `src/data/app.db`), see `backend/user-management.md`.
 
 ## Networking
 
-- webui container maps ports 5051 → 5050 (Express) and 5173 (Vite dev)
-- Access production UI at `http://<host-ip>:5051`
+- webui container maps ports 6789 → 6789 (Express) and 5173 (Vite dev)
+- Access production UI at `http://<host-ip>:6789`
 - Access Vite dev at `http://<host-ip>:5173`
-- Docker gateway IP (172.19.0.x) not accessible from host browser MCP
+- Docker gateway IP (172.19.0.x) not accessible from host browser MCP — use the host LAN IP (e.g. `10.69.1.164`)

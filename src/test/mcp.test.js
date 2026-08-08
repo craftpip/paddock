@@ -42,12 +42,30 @@ describe('MCP Server - Handshake', () => {
     assert.ok(names.includes('recreate'));
     assert.ok(names.includes('update'));
     assert.ok(names.includes('delete_agent'));
+    assert.ok(names.includes('create_agent'));
     assert.ok(names.includes('exec'));
     assert.ok(names.includes('workspace_list'));
     assert.ok(names.includes('workspace_read'));
     assert.ok(names.includes('workspace_write'));
     assert.ok(names.includes('agent_logs'));
     assert.ok(names.includes('config_get'));
+    assert.ok(names.includes('settings_get'), 'has settings_get (the single get tool)');
+    assert.ok(!names.includes('web_get'), 'no standalone web_get tool');
+  });
+
+  it('recreate carries the consolidated settings schema', async () => {
+    const result = await client.listTools();
+    const recreate = result.tools.find((t) => t.name === 'recreate');
+    const props = recreate.inputSchema.properties;
+    for (const key of ['allowDocker', 'network', 'extraVolumes', 'workspaceHost', 'workspaceDir', 'sshEnabled', 'sshPort', 'sshContainerPort', 'sshPassword', 'extraPorts', 'web', 'pull', 'reset', 'confirm']) {
+      assert.ok(props[key], `recreate has ${key}`);
+    }
+  });
+
+  it('settings_get carries a name param', async () => {
+    const result = await client.listTools();
+    const get = result.tools.find((t) => t.name === 'settings_get');
+    assert.ok(get.inputSchema.properties.name, 'settings_get has name param');
   });
 
   it('tool schemas carry name params', async () => {
@@ -55,6 +73,18 @@ describe('MCP Server - Handshake', () => {
     const exec = result.tools.find((t) => t.name === 'exec');
     assert.ok(exec.inputSchema.properties.command, 'exec has command param');
     assert.ok(exec.inputSchema.properties.name, 'exec has name param');
+  });
+
+  it('create_agent carries the full create schema', async () => {
+    const result = await client.listTools();
+    const create = result.tools.find((t) => t.name === 'create_agent');
+    const props = create.inputSchema.properties;
+    assert.ok(props.name, 'create_agent has name');
+    assert.ok(props.confirm, 'create_agent has confirm');
+    assert.ok(props.agent, 'create_agent has agent type enum');
+    for (const key of ['allowDocker', 'network', 'sshEnabled', 'sshPort', 'sshContainerPort', 'sshPassword', 'workspaceHost', 'workspaceDir', 'extraVolumes', 'extraPorts']) {
+      assert.ok(props[key], `create_agent has ${key}`);
+    }
   });
 
   it('get_agent carries an optional logs param', async () => {

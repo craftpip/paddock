@@ -328,6 +328,18 @@ function getOrphanCount() {
   }
 }
 
+/** Assign (or clear) an agent's owner. The create flow calls this after the
+ *  registry sync so the creating user owns the new agent; admins may re-assign
+ *  to any existing user. Silently no-ops on a bad userId / missing row. */
+function assignOwner(name, userId) {
+  if (!userId) return;
+  try {
+    const db = getDb();
+    const user = db.prepare('SELECT id FROM users WHERE id = ?').get(userId);
+    if (user) db.prepare('UPDATE agents SET owner_id = ? WHERE name = ?').run(userId, name);
+  } catch {}
+}
+
 module.exports = {
   discoverAgents,
   getAgent,
@@ -345,6 +357,7 @@ module.exports = {
   removeAgentFromDb,
   setRestarting,
   setLifecycle,
+  assignOwner,
   INSTANCES_DIR, PREFIX,
   VM_NAME_RE,
 };
