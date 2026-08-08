@@ -205,7 +205,9 @@ secret entries — no provider/type structure. Just Name, Description, Value.
 
 ### Data Model
 
-SQLite table `vault_items` in `src/data/app.db`:
+SQLite tables in `src/data/app.db`:
+
+`vault_items`:
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -216,46 +218,70 @@ SQLite table `vault_items` in `src/data/app.db`:
 | `created_at` | TEXT | datetime |
 | `updated_at` | TEXT | datetime |
 
+`vault_meta` (single row `id=1`):
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `pin_set` | INTEGER | 0/1 |
+| `pin_salt` | TEXT | salt for the PIN-derived key |
+| `master_wrapped` | TEXT | master key wrapped by `pinKey` (AES-GCM) |
+| `pin_set_at` | TEXT | datetime |
+
 Value is **never stored plaintext**. The old `credentials.json` is not touched — this is a separate store.
 
 ### Encryption
 
 Service: `src/services/vault.js` (Node built-in `crypto`, no new deps).
 
-- **Algorithm:** AES-256-GCM, random 12-byte IV per item, auth tag stored with ciphertext.
-- **Key source:** `VAULT_KEY` env var (32+ bytes). Falls back to deriving a stable 32-byte key from `SESSION_SECRET` via scrypt (works out of the box, with a warning logged).
-- **Format stored:** `iv:tag:data` all base64 — self-contained per row.
+Envelope encryption:
+
+```
+scrypt(pin, salt) ──► pinKey ──► AES-GCM ──► masterWrapped  (vault_meta)
+masterKey (random 32B) ──► AES-GCM ──► enc_value (per item)
+```
+
+- **Algorithm:** AES-256-GCM, random 12-byte IV per item, auth tag stored with ciphertext. Format stored: `iv:tag:data` all base64.
+- **Always locked (2026-08-07):** no module state, no unlock/lock. Every op (add/edit/delete/paste) supplies the PIN at that moment; `resolveMaster(pin)` unwraps the master key for the single op and discards it. Wrong PIN → GCM tag mismatch → `Wrong PIN`.
+- **No PIN set:** master key falls back to `VAULT_KEY` (32+ bytes) or a stable scrypt derivation from `SESSION_SECRET` (works out of the box, with a warning logged).
+- **PIN set:** `scrypt(pin, salt)` wraps a fresh random 32-byte master key into `vault_meta.master_wrapped`. PIN must be 4 or 6 digits.
 - **Decrypt** only inside the service. The API layer never returns plaintext in list responses.
 
 ### API
 
 | Method | Path | Body | Returns |
 |--------|------|------|---------|
-| GET | `/api/vault` | — | `{ items: [{ id, name, description, updated_at }] }` — **no value** |
-| POST | `/api/vault` | `{ name, description?, value }` | `{ ok: true, item: {...} }` |
-| PUT | `/api/vault/:id` | `{ name?, description?, value? }` — empty `value` = keep existing | `{ ok: true, item: {...} }` |
-| DELETE | `/api/vault/:id` | — | `{ ok: true }` |
-| GET | `/api/vault/:id/decrypt` | — | `{ value }` — admin only, for terminal-paste integration |
+| GET | `/api/vault` | — | `{ items: [...], meta: { pinSet, locked } }` — **no value**; `locked = !!pinSet` |
+| POST | `/api/vault/pin` | `{ pin, reset?, oldPin?, password? }` | `{ ok: true, meta }` — reset requires the logged-in user's `password` (401 if wrong) then `oldPin` (400 `Wrong PIN`), then wipes items |
+| POST | `/api/vault` | `{ name, description?, value, pin }` | `{ ok: true, item: {...} }` |
+| PUT | `/api/vault/:id` | `{ name?, description?, value?, pin }` — empty `value` = keep existing | `{ ok: true, item: {...} }` |
+| DELETE | `/api/vault/:id` | `{ pin }` | `{ ok: true }` |
+| GET | `/api/vault/:id/decrypt` | `?pin=` query param | `{ value }` — admin only, for terminal-paste integration |
 
-- POST rejects duplicate names (409).
+- POST rejects duplicate names (409). Wrong PIN → 400 `Wrong PIN`.
 - List responses never include plaintext or masked hints — UI always shows `••••••••••`.
 - All routes behind `requireAuth` + CSRF (`csrfCheck` for mutating methods).
+- There is no `/unlock` or `/lock` route — the vault is always locked by design.
 
 ### UI
 
 - Table: Name | Description | Value | Updated | actions
-- Value cell: always `••••••••••` (fixed, no first-4-last-4 mask — user said never display it again)
-- Add form: inline row above table — Name (required), Description (optional), Value (`type=password`, required)
-- Edit: inline form with name/description populated, value blank with placeholder "leave blank to keep existing value". Save does PUT.
-- Delete: `confirm()` dialog, then DELETE, row removed.
+- Value cell: always `••••••••••` with a small lock icon (fixed, no first-4-last-4 mask — user said never display it again).
+- A small `locked` pill in the header while a PIN is set. No persistent banner.
+- **PIN on every action:** add/edit/delete ask for the PIN via a modal/inline form. Wrong PIN keeps the prompt open and shows `Wrong PIN` in place.
+- Add form: inline row above table — Name (required), Description (optional), Value (`type=password`, required). First-time setup (no PIN + zero items) opens a "Set PIN" modal; otherwise the add row opens directly and the PIN is asked on save.
+- Edit: inline form with name/description populated, value blank with placeholder "leave blank to keep existing value". Save does PUT + PIN prompt.
+- Delete: custom confirm dialog, then PIN prompt, then DELETE.
+- **CommandsPane (agent detail):** Vault dropdown shows a lock banner while locked, with inline PIN forms for paste (`Unlock & paste`) and add (`Unlock & add`).
 - Add/edit/delete use the existing `api()` helper — CSRF handled automatically.
 
 ### Security
 
-- Value encrypted at rest; DB leak alone does not reveal secrets without `VAULT_KEY`.
+- **Always-locked PIN (4–6 digits):** backend is stateless; the PIN is required per operation. Note: a short PIN is brute-forceable offline if the DB leaks — acceptable for a local tool.
+- Value encrypted at rest; DB leak alone does not reveal secrets without the PIN (or `VAULT_KEY` when no PIN is set).
 - Value never travels back to the browser in list/read responses.
 - `/decrypt` is admin-only and intended for server-side paste flows, never for display.
-- If `VAULT_KEY` is lost, values are unrecoverable — nothing plaintext is ever stored.
+- Resetting the PIN verifies the user's password + old PIN, then wipes every item (old master key unrecoverable) — the UI warns loudly.
+- If the PIN/`VAULT_KEY` is lost, values are unrecoverable — nothing plaintext is ever stored.
 
 ### Future Integration (not built now)
 

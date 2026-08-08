@@ -13,6 +13,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
+const { buildEnvPath } = require('./instance-image');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const HOST_WORKSPACE = process.env.HOST_WORKSPACE_ROOT || WORKSPACE;
@@ -54,7 +55,12 @@ async function inspectContainer(name) {
 /** Resolved compose service definition (from `docker compose config`). */
 async function resolveCompose(name) {
   try {
-    const r = await runCmd('docker', ['compose', '-f', composePath(name), 'config', '--format', 'json'], { timeout: 20000 });
+    const args = ['compose'];
+    // Resolve the generated build.args interpolation from the instance build.env
+    // (skip when the legacy agent has no build dir yet — defaults still apply).
+    if (fs.existsSync(buildEnvPath(name))) args.push('--env-file', buildEnvPath(name));
+    args.push('-f', composePath(name), 'config', '--format', 'json');
+    const r = await runCmd('docker', args, { timeout: 20000 });
     const data = JSON.parse(r.stdout);
     return (data.services && data.services[name]) || null;
   } catch {

@@ -1,4 +1,5 @@
 const { execFile } = require('child_process');
+const { imageFor } = require('../instance-image');
 
 function runCmd(cmd, args, options = {}) {
   const { timeout = 120000 } = options;
@@ -23,13 +24,11 @@ const BASE_VERSION_CACHE_TTL = 5 * 60 * 1000;
 const OPENCLAW = {
   type: 'openclaw',
   label: 'OpenClaw',
-  buildImage: 'paddock-vm-openclaw:latest',
-  buildRel: '../../src/vm-builds/openclaw',
+  templateDir: '../../src/vm-builds/openclaw',
   baseImage: 'ghcr.io/openclaw/openclaw:latest',
   dataDir: '/root/.openclaw',
   workspaceDir: '/root/.openclaw/workspace',
   configFile: 'openclaw.json',
-  installDockerBuildArg: 'INSTALL_DOCKER=1',
   tuiCommand: 'openclaw',
   backupTypeMarker: '_openclaw-backup-cli_',
 
@@ -85,7 +84,7 @@ const OPENCLAW = {
       if (v) return v;
     } catch {}
     try {
-      const r = await runCmd('docker', ['run', '--rm', '--entrypoint', 'openclaw', OPENCLAW.buildImage, '--version'], { timeout: 60000 });
+      const r = await runCmd('docker', ['run', '--rm', '--entrypoint', 'openclaw', imageFor(name), '--version'], { timeout: 60000 });
       return parseVersion(r.stdout);
     } catch {}
     return '';

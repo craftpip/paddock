@@ -12,7 +12,7 @@ docs/
 │   ├── business-logic.md             ← detailed workflows: discovery, workspace, lifecycle, backup, auth, terminal, MCP, skills, OAuth, config
 │   └── react-migration.md            ← React migration details, stack, routes
 ├── backend/                          ← server-side modules
-│   ├── services.md                   ← all 7 services with functions, schemas, business logic
+│   ├── services.md                   ← all services with functions, schemas, business logic
 │   ├── middleware.md                  ← auth + CSRF + rate limiter internals
 │   └── user-management.md            ← multi-user system, owner-based scoping, data access rules
 ├── pages/                            ← top-level page docs
@@ -24,7 +24,8 @@ docs/
 │   ├── skills.md                     ← skill listing and management
 │   └── settings.md                   ← container settings: update, health checkup, docker, network, delete
 ├── components/                       ← shared/reusable UI pieces
-│   └── stats.md                      ← sidebar Docker stats
+│   ├── stats.md                      ← sidebar Docker stats
+│   └── theme.md                      ← design guidelines: horse-brown palette, tokens, light/dark
 └── operations/                       ← operational workflows
     └── overview.md                   ← agent lifecycle, dev workflow, git workflow
 ```

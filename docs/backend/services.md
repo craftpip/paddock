@@ -45,19 +45,42 @@ All functions take `(agentId, relativePath)` and internally:
 
 Business logic: See `overview/business-logic.md` — Agent Lifecycle, Bind-Mount Split-Brain.
 
+Per-instance build model: every PAD owns its build files (`instances/<name>/build/`)
+and its own image tag (`paddock-vm-<name>:latest`). See
+`services/instance-image.js` below.
+
 **Functions:**
-- `createVm(name, { agent, mode, skipSetup, onLog, onStep })` — full streaming creation flow with SSH port allocation. Emits steps via `onStep('build'|'up'|'setup', 'start'|'end'|'error')` and feeds command output through `onLog(stream, text)`. `skipSetup` skips the `openclaw setup --baseline` + restart block (used on the clone/restore path).
+- `createVm(name, { agent, mode, skipSetup, onLog, onStep })` — full streaming creation flow with SSH port allocation. Emits steps via `onStep('build'|'up'|'setup', 'start'|'end'|'error')` and feeds command output through `onLog(stream, text)`. `skipSetup` skips the `openclaw setup --baseline` + restart block (used on the clone/restore path). Seeds the instance build dir from the shared template (`seedBuildDir`). Clone mode is type-locked (source must be the same agent type) and copies the source's `build/` too.
 - `removeVm(name)` — force remove container + delete instance dir
 - `resetVm(name)` — remove container + wipe data + recreate + compose up
 - `startAgent(name)` — docker start with compose fallback
-- `generateInstanceCompose(name, agent, password, port, { allowDocker, network })` — YAML generator using absolute host paths; `allowDocker` adds the `/var/run/docker.sock` volume, `network` adds `network_mode: container:<name>`
+- `generateInstanceCompose(name, agent, password, port, { allowDocker, network })` — YAML generator using absolute host paths; `allowDocker` adds the `/var/run/docker.sock` volume, `network` adds `network_mode: container:<name>`. Builds from `instances/<name>/build` with `image: paddock-vm-<name>:latest`; the `build.args:` block is generated from the instance Dockerfile's `ARG` lines (values interpolated from the instance `build.env`).
 - `writeInstanceCompose(name, agent, password, port, opts)` — write YAML to disk (passes the options through)
 - `applySettings(name, { allowDocker, network })` — regenerates compose + writes `DOCKER=1|0` and `NETWORK=<name>` (or empty) to `meta.env`; returns `{ allowDocker, network, image, agent }`
-- `updateAgent(name, { onLog, onStep })` — streams `docker compose -f <compose> build --pull <name>` (900s) then `up -d --no-deps --force-recreate <name>` (300s); steps `build`/`recreate`
+- `updateAgent(name, { onLog, onStep })` — streams `docker compose --env-file <instance>/build/build.env -f <compose> build --pull <name>` (900s) then `up -d --no-deps --force-recreate <name>` (300s); steps `build`/`recreate`. No forced build args — the image is per-PAD, so the rebuild reads the instance Dockerfile + `build.env` directly.
 - `setMetaFlag(name, key, value)` — writes/clears a `KEY=VALUE` line in `meta.env` preserving other lines
+- `seedBuildDir(name, agent, { installDocker })` — idempotently copies `src/vm-builds/<type>/` → `instances/<name>/build/`, seeds `extras/.gitkeep` + `build.env`; never overwrites existing build files
+- `composeCommand(name, ...args)` — `docker compose --env-file <instance>/build/build.env -f <compose> ...` prefix used by every per-instance compose invocation (skips the env-file when the build dir is missing)
+- `ensureInstanceBuilds()` — one-time migration: seeds build dirs, retags `paddock-vm-<type>:latest` → `paddock-vm-<name>:latest`, regenerates compose + force-recreates running containers. Idempotent; runs on webui boot and via `GET /api/admin/migrate-builds`.
+- `setBuildEnv(name, kv)` / `readBuildEnv(name)` — read/write `instances/<name>/build/build.env` (K=V, `#` comments preserved)
 - `getNetworkHealth(name)` — resolves the compose `network_mode: container:<peer>` against live docker state → `none` / `ok` / `stale` (peer recreated, recorded ID dead) / `peer-stopped`
 - `existingServices()` — scan instances/ for existing compose files
 - `instanceComposePath(name)`, `getComposePath(name)` — path helpers
+
+## Instance Image & Build Files (services/instance-image.js)
+
+Small dependency-free module (drivers, vm-manager and app.js all derive the same
+tags/paths from it). No vm-manager/drivers imports — safe to require anywhere.
+
+**Exports:**
+- `imageFor(name)` — `paddock-vm-<name>:latest` (stable per-instance tag)
+- `legacySharedImage(agent)` — `paddock-vm-<type>:latest` (migration retag source)
+- `buildDir(name)` — `instances/<name>/build`
+- `buildEnvPath(name)` — `instances/<name>/build/build.env`
+- `readBuildEnv(name)` / `setBuildEnv(name, kv)` — parse / update the env file
+  (preserves comments + other keys)
+- `argsFromDockerfile(path)` — extract `ARG NAME[=default]` lines (commented
+  ARGs skipped) → feeds the generated compose `build.args:` block
 
 Image/tag/version lookups no longer live here — they go through
 `getDriver(agent)` from `services/drivers/` (see below).
@@ -77,18 +100,21 @@ registered in `index.js`. Every type is an equal citizen.
 | Field | Purpose |
 |-------|---------|
 | `type` / `label` | agent type id + human label |
-| `buildImage` | `paddock-vm-<type>:latest` |
-| `buildRel` | path to the per-type Dockerfile (`../../src/vm-builds/<type>`) |
+| `templateDir` | shared build template path (`../../src/vm-builds/<type>`) — the create-time copy source (the per-instance copy lives at `instances/<name>/build/`) |
 | `baseImage` | upstream image the Dockerfile starts from |
 | `dataDir` | in-container data directory (`/root/.openclaw`, `/root/.picoclaw`, …) |
 | `workspaceDir` | workspace root inside the container |
 | `configFile` | config filename in `dataDir` (openclaw.json / opencode.json / config.json) |
 | `setupSteps` | commands run right after `compose up` during create |
 | `backupTypeMarker` | filename sniff used by backup-manager for cli vs legacy type |
-| `installDockerBuildArg` | build arg that installs docker CLI (`INSTALL_DOCKER=1`) |
 | `currentVersion(name)` | live version inside the container (regex-parsed; picoclaw prints a heavy ANSI banner) |
 | `availableVersion()` | upstream available version (cached 5 min) |
 | `commands` | Command groups (Status/Auth/Cron/Skills/Other) for the CommandsPane |
+
+Per-instance image tags (`paddock-vm-<name>:latest`) come from
+`instance-image.imageFor(name)` — drivers no longer hardcode `buildImage`;
+`currentVersion` falls back to reading the version from `imageFor(name)` when
+the container is down.
 
 Config GET/POST, agent-registry model extraction, and workspace/config root
 resolution all derive paths from `driver.configFile` / `driver.workspaceDir` /
@@ -162,8 +188,61 @@ CREATE TABLE sessions (
 );
 ```
 
+## API Keys (api-keys.js)
+
+Per-user bearer keys for the paddock MCP server (`/mcp`). Replaces the
+one-shared-`MCP_TOKEN` idea — one auth path, per-identity, revocable.
+
+**Key format:** `pk_live_<base64url-24-random-bytes>` (~192 bits entropy).
+Only `sha256(key)` is stored in `api_keys`; the raw key is shown once at
+creation, never again. `prefix` (`pk_live_…`) is stored for display in the list.
+
+**Functions:**
+- `generate()` — raw key. `hash(key)` — sha256 hex.
+- `create(userId, name, scopes)` — inserts hash + prefix, returns
+  `{ key: raw, row: { id, prefix, … } }` (key is the only chance to see it).
+- `listForUser(userId)` / `getForUser(id, userId)` — owner-scoped reads.
+- `remove(id, userId)` — revoke (hard delete, instant).
+- `authenticate(token)` — regex-validates `pk_live_` shape, hashes, looks up
+  by `key_hash`, rejects missing/revoked. Returns `{ keyId, userId, name, scopes }`.
+- `touchLastUsed(keyId)` — throttled to once per minute per key (no write per
+  MCP request).
+
+**Schema** (`api_keys` table in `db.js`, FKs to `users(id)`, indexed on
+`user_id` and `key_hash`):
+
+```
+id TEXT PK, user_id TEXT NOT NULL, name TEXT NOT NULL,
+key_hash TEXT UNIQUE NOT NULL, prefix TEXT NOT NULL,
+scopes TEXT DEFAULT 'default', created_at DATETIME,
+last_used_at DATETIME, revoked_at DATETIME
+```
+
+Auth in `src/mcp.js`: `authenticateRequest(req)` reads `Authorization: Bearer`,
+`x-api-key`, or `?token=`, calls `apiKeys.authenticate()`, touches
+`last_used_at`, and sets `req.mcpIdentity = { keyId, userId, keyName, scopes, role }`.
+Missing/invalid key → 401 JSON-RPC error (`-32001 Unauthorized`). Tools enforce
+the same owner-scoping as the REST API: admin → all agents, user → owned agents.
+
 ## Vault (vault.js)
 
 Encrypted secret store replacing the old `creds.js` credential manager. Items
-live in `src/data/vault.json`, AES-256-GCM encrypted with the `VAULT_KEY`
-environment variable. Routes: `GET/POST /api/vault`, `DELETE /api/vault/:id`.
+live in the SQLite `vault_items` table in `src/data/app.db` (plus `vault_meta`
+holding the PIN salt + wrapped master key), AES-256-GCM encrypted.
+
+**PIN (2026-08-07):** The vault is **always locked** — no module state, no
+`unlock()`/`lock()`/`isLocked()`. Each operation (create/update/delete/decrypt)
+takes a `pin` in the request body and calls `resolveMaster(pin)` to unwrap the
+master key for that single operation, then discards it. Wrong PIN → GCM tag
+mismatch → throws `Wrong PIN`. Without a PIN set, the master key falls back to
+`VAULT_KEY` (or a scrypt derivation of `SESSION_SECRET`).
+
+Envelope encryption: `scrypt(pin, salt) → pinKey → AES-GCM → masterWrapped`
+(stored in `vault_meta`), with a random 32-byte `masterKey` per item via
+AES-GCM (`enc_value`). `setPin(pin, { reset, oldPin })` — reset verifies
+`oldPin` before wiping items (old master key unrecoverable). The item list is
+public; only values are protected.
+
+Routes: `GET /api/vault`, `POST /api/vault`, `PUT /api/vault/:id`,
+`DELETE /api/vault/:id`, `GET /api/vault/:id/decrypt`, `POST /api/vault/pin`.
+All mutating routes take `pin` in the body (decrypt takes it as a query param).

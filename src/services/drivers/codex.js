@@ -1,4 +1,5 @@
 const { execFile } = require('child_process');
+const { imageFor } = require('../instance-image');
 
 function runCmd(cmd, args, options = {}) {
   const { timeout = 120000 } = options;
@@ -19,14 +20,12 @@ function parseVersion(output) {
 const CODEX = {
   type: 'codex',
   label: 'Codex',
-  buildImage: 'paddock-vm-codex:latest',
-  buildRel: '../../src/vm-builds/codex',
+  templateDir: '../../src/vm-builds/codex',
   baseImage: 'node:20-slim',
   dataDir: '/root/.codex',
   workspaceDir: '/root/.codex/workspace',
   configFile: 'config.toml',
   configFormat: 'toml',
-  installDockerBuildArg: 'INSTALL_DOCKER=1',
   tuiCommand: 'codex',
   backupTypeMarker: '',
 
@@ -59,7 +58,7 @@ const CODEX = {
       if (v) return v;
     } catch {}
     try {
-      const r = await runCmd('docker', ['run', '--rm', '--entrypoint', 'codex', CODEX.buildImage, '--version'], { timeout: 60000 });
+      const r = await runCmd('docker', ['run', '--rm', '--entrypoint', 'codex', imageFor(name), '--version'], { timeout: 60000 });
       return parseVersion(r.stdout || r.stderr);
     } catch {}
     return '';

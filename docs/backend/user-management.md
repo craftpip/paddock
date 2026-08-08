@@ -95,13 +95,16 @@ On fresh install: first startup seeds admin/admin → user logs in → can chang
 | `GET` | `/api/profile` | Auth | Own profile |
 | `PATCH` | `/api/profile` | Auth | Update email |
 | `POST` | `/api/profile/change-password` | Auth | Change own password |
+| `GET` | `/api/profile/keys` | Auth | List own API keys (no hashes/raw keys) |
+| `POST` | `/api/profile/keys` | Auth | Create an API key → `{ key: 'pk_live_…', row }` (raw key shown once) |
+| `DELETE` | `/api/profile/keys/:id` | Auth | Revoke own key (owner-scoped; unknown id → 404) |
 
 ## Frontend Components
 
 - **Login.jsx** — username + password form, redirects to `/setup` if no admin
 - **Setup.jsx** — first-run admin creation form
 - **Users.jsx** — admin user management page with create / reset-password / delete
-- **Profile.jsx** — email update, change password
+- **Profile.jsx** — email update, change password, API Keys card (list / create / revoke, one-time raw-key reveal modal with Copy + ready client configs)
 - **DashboardLayout.jsx** — nav with Users link (admin only), profile link (username + avatar)
 - **stores/auth.js** — `username`, `role`, `userId`, `isAdmin()`
 
@@ -154,9 +157,18 @@ if (!agent || (role !== 'admin' && agent.owner_id !== userId)) {
 
 ### Vault — Not Owner-Scoped
 
-Vault items (`src/data/vault.json`) are encrypted at rest and shared by all
+Vault items (`vault_items` in SQLite) are encrypted at rest and shared by all
 authenticated users. They are **not** owner-scoped — the Vault replaced the old
-owner-scoped credentials system, which has been removed.
+owner-scoped credentials system, which has been removed. The vault is always
+locked behind a 4–6 digit PIN: every operation requires the PIN (backend is
+stateless, no global unlock), and the item list stays visible while locked.
+
+### API Keys — Scoped by Owner
+
+API keys (`api_keys` table) belong to the user who created them — a user can
+only list/revoke their own keys. Each key inherits its owner's role when used
+on `/mcp`: admin keys → full fleet, user keys → only owned agents. Only the
+sha256 hash is stored; the raw `pk_live_…` key is shown once at creation.
 
 ### Backups — Scoped by Owner
 

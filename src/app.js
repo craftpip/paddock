@@ -803,7 +803,7 @@ app.post('/api/agents/:name/start', async (req, res) => {
       // Stale network peer (e.g. gluetun was rebuilt) — `docker start` can't
       // rejoin the old `container:<id>` namespace. Recreate via compose so the
       // peer re-resolves by name to the current container.
-      await runCmd('docker', ['compose', '-f', vm.instanceComposePath(name), 'up', '-d', '--no-deps', '--force-recreate', name], { timeout: 180000 });
+      await runCmd('docker', vm.composeCommand(name, 'up', '-d', '--no-deps', '--force-recreate', name), { timeout: 180000 });
     }
   } finally {
     registry.setLifecycle(name, null);
@@ -882,7 +882,7 @@ app.get('/api/agents/:name/settings', async (req, res) => {
     if (!meta.AGENT && !meta.ROOT_PASSWORD) return res.status(404).json({ error: 'Agent not found' });
     const agentType = meta.AGENT || 'openclaw';
     const driver = drivers.getDriver(agentType);
-    const image = driver.buildImage;
+    const image = vm.imageFor(name);
     let version = meta.OPENCLAW_VERSION || '';
     try {
       version = (await driver.currentVersion(name)) || version;
@@ -962,17 +962,25 @@ app.post('/api/agents/:name/settings', async (req, res) => {
     }
 
     const agentType = meta.AGENT || 'openclaw';
-    const image = drivers.getDriver(agentType).buildImage;
+    const image = vm.imageFor(name);
     const dockerChanged = newAllow !== oldAllow;
     const networkChanged = newNetwork !== oldNetwork;
     if (!dockerChanged && !networkChanged) {
       return res.json({ allowDocker: newAllow, network: newNetwork, image });
     }
 
+    // Persist the requested docker state in the instance build.env — the toggle
+    // is now self-describing: the next rebuild reads INSTALL_DOCKER from the
+    // env-file, no ad-hoc --build-arg needed. Turning docker off writes
+    // INSTALL_DOCKER=0 for the next rebuild (the CLI stays in the current image
+    // until then, matching past behavior); the socket mount is controlled
+    // immediately by the compose regen below.
+    vm.setBuildEnv(name, { INSTALL_DOCKER: newAllow ? '1' : '0' });
+
     // Any change that needs a recreate runs as an SSE job (like Update) so the
     // frontend can stream the live command output in a popup console.
     // Enabling docker on an image without the CLI additionally rebuilds the
-    // image with INSTALL_DOCKER=1 — base images ship without the CLI on purpose.
+    // image — base images ship without the CLI on purpose.
     const needRebuild = newAllow && !oldAllow && !(await imageHasDockerCli(name, image, wasRunning));
 
     const jobKey = 'update:' + name;
@@ -1025,7 +1033,7 @@ app.post('/api/agents/:name/settings', async (req, res) => {
           // silently ignore the compose change. Recreate so the new config
           // actually applies.
           step('recreate', 'start');
-          await runCmdStream('docker', ['compose', '-f', vm.instanceComposePath(name), 'up', '-d', '--no-deps', '--force-recreate', name], { onLog: log, timeout: 300000 });
+          await runCmdStream('docker', vm.composeCommand(name, 'up', '-d', '--no-deps', '--force-recreate', name), { onLog: log, timeout: 300000 });
           step('recreate', 'end');
         }
 
@@ -1037,7 +1045,7 @@ app.post('/api/agents/:name/settings', async (req, res) => {
         // restarts it inside the new namespace.
         if (webService) {
           if (newNetwork) {
-            const doorArgs = ['compose', '-f', vm.instanceComposePath(name), 'up', '-d', '--no-deps'];
+            const doorArgs = vm.composeCommand(name, 'up', '-d', '--no-deps');
             if (networkChanged) doorArgs.push('--force-recreate');
             doorArgs.push(vm.webDoorName(name));
             await runCmdStream('docker', doorArgs, { onLog: log, timeout: 180000 });
@@ -1089,7 +1097,7 @@ app.post('/api/agents/:name/settings', async (req, res) => {
           if (wasRunning) {
             const rollbackSvc = [name];
             if (webService && oldNetwork) rollbackSvc.push(vm.webDoorName(name));
-            await runCmdStream('docker', ['compose', '-f', vm.instanceComposePath(name), 'up', '-d', '--no-deps', '--force-recreate', ...rollbackSvc], { onLog: log, timeout: 180000 });
+            await runCmdStream('docker', vm.composeCommand(name, 'up', '-d', '--no-deps', '--force-recreate', ...rollbackSvc), { onLog: log, timeout: 180000 });
           }
           registry.dockerPsList(true);
         } catch {}
@@ -1324,7 +1332,7 @@ app.post('/api/agents/:name/web', async (req, res) => {
         // (alpine/socat) is auto-pulled by compose on first use.
         const upServices = [name];
         if (turningOn && currentNetworkPeer(name)) upServices.push(vm.webDoorName(name));
-        await runCmdStream('docker', ['compose', '-f', vm.instanceComposePath(name), 'up', '-d', '--no-deps', '--force-recreate', ...upServices], { onLog: log, timeout: 300000 });
+        await runCmdStream('docker', vm.composeCommand(name, 'up', '-d', '--no-deps', '--force-recreate', ...upServices), { onLog: log, timeout: 300000 });
         step('recreate', 'end');
 
         if (!turningOn) {
@@ -1373,7 +1381,7 @@ app.post('/api/agents/:name/web', async (req, res) => {
           await vm.applyWebServices(name, oldWeb);
           await runCmd('docker', ['rm', '-f', vm.webDoorName(name)], { timeout: 30000 }).catch(() => {});
           if (wasRunning) {
-            await runCmd('docker', ['compose', '-f', vm.instanceComposePath(name), 'up', '-d', '--no-deps', '--force-recreate', name], { timeout: 180000 });
+            await runCmd('docker', vm.composeCommand(name, 'up', '-d', '--no-deps', '--force-recreate', name), { timeout: 180000 });
           }
           registry.dockerPsList(true);
         } catch {}
@@ -1419,7 +1427,7 @@ app.post('/api/agents/:name/recreate', async (req, res) => {
         }
         log('system', 'Recreating container to re-resolve the network peer…');
         step('recreate', 'start');
-        await runCmdStream('docker', ['compose', '-f', vm.instanceComposePath(name), 'up', '-d', '--no-deps', '--force-recreate', name], { onLog: log, timeout: 300000 });
+        await runCmdStream('docker', vm.composeCommand(name, 'up', '-d', '--no-deps', '--force-recreate', name), { onLog: log, timeout: 300000 });
         step('recreate', 'end');
         if (!wasRunning) {
           try { await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 }); } catch {}
@@ -2533,6 +2541,18 @@ app.post('/api/agents/:name/exec', async (req, res) => {
   }
 });
 
+// ─── One-time migration: per-instance build files + image tags ─
+
+/** Run the build-file migration manually (also runs on boot). Idempotent. */
+app.get('/api/admin/migrate-builds', requireAdmin, async (req, res) => {
+  try {
+    const results = await vm.ensureInstanceBuilds({ onLog: (stream, text) => console.log(text) });
+    res.json(results);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── SPA Catch-all — serve index.html for client-side routing ─
 
 // Redirect /new/* to /* (legacy compat)
@@ -2577,6 +2597,20 @@ const server = app.listen(6789, () => console.log('VM WebUI listening on port 67
     await logStore.captureAll(Object.keys(containers).filter((n) => safeVmName(n)));
   } catch {}
   setTimeout(logSweep, 30000);
+})();
+
+// One-time migration to per-instance build files (plan 25). Runs in the
+// background so the webui is up immediately; existing PADs get a build dir,
+// their image retagged to `paddock-vm-<name>:latest` and their compose
+// regenerated/recreated. Idempotent — every later boot skips straight past it.
+(async function migrateBuilds() {
+  try {
+    const results = await vm.ensureInstanceBuilds({ onLog: (stream, text) => console.log(text) });
+    console.log(`[migrate-builds] seeded=${results.seeded.length} skipped=${results.skipped.length} errors=${results.errors.length}`);
+    for (const e of results.errors) console.error('[migrate-builds] error:', e.name, e.error);
+  } catch (e) {
+    console.error('[migrate-builds] failed:', e.message);
+  }
 })();
 
 const wss = new WebSocketServer({ server });

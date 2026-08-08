@@ -49,6 +49,7 @@ src/
 | `/agents/:id` | AgentDetailPage | `pages/AgentDetail.jsx` |
 | `/backups` | GlobalBackupsPage | `pages/Backups.jsx` |
 | `/vault` | VaultPage | `pages/Vault.jsx` |
+| `/profile` | ProfilePage | `pages/Profile.jsx` |
 
 AgentDetail tabs: Overview, Workspace, Terminal, Logs, Sessions, Config, MCP, Skills, Models, Messaging, Backups, Health, Activity.
 

@@ -90,12 +90,13 @@ Workspace files can be viewed and edited in a modal. Editable types are determin
 1. **Validation**: Check agent name doesn't already exist (filesystem + meta.env)
 2. **Port assignment** (SSH): Find first unused port starting from 43817
 3. **Directory setup**: Create `instances/<name>/<agent>/` directory
-4. **Clone mode** (optional): Copy source agent's entire data directory recursively
+4. **Clone mode** (optional): Copy source agent's entire data directory recursively (type-locked — source must be the same agent type; copies the source's `build/` too)
 5. **meta.env**: Write `ROOT_PASSWORD`, `AGENT`, `PORT` to the instance dir
-6. **Compose file**: Generate `docker-compose.yml` with absolute host paths (fixes bind-mount split-brain)
-7. **Container start**: `docker compose -f <compose> up -d`
-8. **Workspace setup**: For OpenClaw/PicoClaw agents, run `openclaw setup --baseline` inside the container (retry up to 15 times with 1s delay)
-9. **Restart**: Restart container after setup
+6. **Seed build dir**: Copy the shared template `src/vm-builds/<type>/` → `instances/<name>/build/` (Dockerfile + start.sh + extras; idempotent, never overwrites existing build files) — each PAD now owns its image source
+7. **Compose file**: Generate `docker-compose.yml` with absolute host paths (fixes bind-mount split-brain), `build.context: instances/<name>/build`, `image: paddock-vm-<name>:latest`, and a generated `build.args:` block from the Dockerfile's `ARG` lines
+8. **Container start**: `docker compose --env-file <build-dir>/build.env -f <compose> up -d`
+9. **Workspace setup**: For OpenClaw/PicoClaw agents, run `openclaw setup --baseline` inside the container (retry up to 15 times with 1s delay)
+10. **Restart**: Restart container after setup
 
 ### Start / Stop / Restart
 
@@ -186,7 +187,7 @@ Full user management and owner-based scoping docs: [`backend/user-management.md`
 - Admin creates all users (no public registration)
 - Every resource (agents, backups) has an `owner_id` referencing `users(id)`
 - Admin sees all resources; regular users see only their own
-- Vault items (`src/data/vault.json`) are encrypted and **not** owner-scoped
+- Vault items (`vault_items` in SQLite) are encrypted and **not** owner-scoped; the vault is always locked behind a 4–6 digit PIN (per-op, no global unlock state)
 
 ### Auth Bypass Rules
 
@@ -249,6 +250,44 @@ When the xterm.js terminal is resized (via ResizeObserver), the frontend sends `
 1. Run `openclaw mcp probe <name> --json` inside container
 2. Parse JSON output for tools, diagnostics, status
 3. Return to frontend for display in modal
+
+---
+
+## Paddock MCP Server Auth (API Keys)
+
+The paddock's own MCP server (`/mcp`, mounted in `app.js` via
+`require('./mcp').mountMcp(app)`) is **closed by default** — it requires a
+per-user bearer API key. No cookie sessions (MCP clients like opencode/Claude
+Code don't do cookies).
+
+### Auth flow
+
+1. Client sends `Authorization: Bearer pk_live_…` (also accepts `x-api-key`
+   header or `?token=` for simple clients).
+2. `apiKeys.authenticate(token)` regex-validates the `pk_live_` shape, sha256s
+   it, looks up `api_keys.key_hash`. Missing or revoked → 401 JSON-RPC error.
+3. On success: `last_used_at` touched (throttled to 1/min), identity set as
+   `{ userId, role, scopes }`, tools run in an AsyncLocalStorage context.
+4. Tools reuse the REST ownership rule: admin → all agents, user → owned
+   agents only (`owner_id` match). A non-admin key gets a 403-style tool error
+   on agents it doesn't own.
+
+### Key lifecycle
+
+- **Create** — Profile page "API Keys" card (or `POST /api/profile/keys`).
+  Raw key shown exactly once, with copy-ready opencode/Claude Code configs.
+- **List** — prefix + name + created + last used + revoked; never the raw key
+  or hash.
+- **Revoke** — `DELETE /api/profile/keys/:id` (owner-scoped). Instant: the
+  hash lookup fails on the next `/mcp` request.
+
+### Security properties
+
+- Only `sha256(key)` + a display prefix are stored — a leaked DB doesn't leak
+  usable keys.
+- Revocation is instant (hard delete).
+- A short PIN-style secret is not involved here; keys are 192-bit random —
+  unbruteable.
 
 ---
 

@@ -287,3 +287,90 @@ describe('vm-manager - applySettings keeps a published web app alive', () => {
     fs.rmSync(TMP, { recursive: true, force: true });
   });
 });
+
+describe('vm-manager - per-instance build files (plan 25)', () => {
+  const TMP = '/tmp/insttest-' + Date.now();
+  process.env.WORKSPACE_ROOT = TMP;
+  process.env.HOST_WORKSPACE_ROOT = TMP;
+  delete require.cache[require.resolve('../services/instance-image')];
+  delete require.cache[require.resolve('../services/vm-manager')];
+  const vm = require('../services/vm-manager');
+
+  const instDir = path.join(TMP, 'instances', 'pad-t1');
+  const buildDir = path.join(instDir, 'build');
+
+  it('imageFor derives a stable per-instance tag', () => {
+    assert.strictEqual(vm.imageFor('pad-t1'), 'paddock-vm-pad-t1:latest');
+    assert.strictEqual(vm.imageFor('pad-OPENCODE-YO'), 'paddock-vm-pad-opencode-yo:latest');
+  });
+
+  it('argsFromDockerfile extracts ARG lines (defaults + commented skip)', () => {
+    fs.mkdirSync(buildDir, { recursive: true });
+    fs.writeFileSync(path.join(buildDir, 'Dockerfile'),
+      'FROM base:latest\n' +
+      'ARG INSTALL_DOCKER=0\n' +
+      '# ARG INSTALL_TMUX=1\n' +
+      'ARG INSTALL_TMUX=1\n' +
+      'ARG NO_DEFAULT\n');
+    const args = vm.argsFromDockerfile(path.join(buildDir, 'Dockerfile'));
+    assert.deepStrictEqual(args, [
+      { name: 'INSTALL_DOCKER', default: '0' },
+      { name: 'INSTALL_TMUX', default: '1' },
+      { name: 'NO_DEFAULT', default: '' },
+    ]);
+  });
+
+  it('compose uses the per-instance build context, image and generated args', () => {
+    const yaml = vm.generateInstanceCompose('pad-t1', 'openclaw', 'pw', '22001');
+    assert.ok(yaml.includes(`context: ${path.join(TMP, 'instances', 'pad-t1', 'build')}`), 'per-instance build context');
+    assert.ok(!yaml.includes('vm-builds'), 'no shared build dir referenced');
+    assert.ok(yaml.includes('image: paddock-vm-pad-t1:latest'), 'per-instance image tag');
+    assert.ok(yaml.includes('INSTALL_DOCKER: ${INSTALL_DOCKER:-0}'), 'args block from Dockerfile ARG lines');
+    assert.ok(yaml.includes('INSTALL_TMUX: ${INSTALL_TMUX:-1}'), 'args block includes non-default ARG');
+    assert.ok(yaml.includes('NO_DEFAULT: ${NO_DEFAULT}'), 'ARG without default emits bare interpolation');
+  });
+
+  it('setBuildEnv/readBuildEnv round-trip preserving comments and other keys', () => {
+    vm.setBuildEnv('pad-t1', { INSTALL_DOCKER: '1' });
+    vm.setBuildEnv('pad-t1', { INSTALL_TMUX: '0' });
+    let env = vm.readBuildEnv('pad-t1');
+    assert.strictEqual(env.INSTALL_DOCKER, '1');
+    assert.strictEqual(env.INSTALL_TMUX, '0');
+    // Existing keys are updated, not duplicated; comments survive.
+    vm.setBuildEnv('pad-t1', { INSTALL_DOCKER: '0' });
+    const content = fs.readFileSync(path.join(buildDir, 'build.env'), 'utf8');
+    assert.strictEqual((content.match(/^INSTALL_DOCKER=/gm) || []).length, 1, 'key updated in place');
+    assert.ok(content.includes('# Per-instance build args'), 'header comment preserved');
+    env = vm.readBuildEnv('pad-t1');
+    assert.strictEqual(env.INSTALL_DOCKER, '0');
+    assert.strictEqual(env.INSTALL_TMUX, '0');
+  });
+
+  it('seedBuildDir copies the template with extras/ + build.env invariants', () => {
+    fs.mkdirSync(path.join(TMP, 'instances', 'pad-seed'), { recursive: true });
+    const dir = vm.seedBuildDir('pad-seed', 'opencode');
+    assert.ok(fs.existsSync(path.join(dir, 'Dockerfile')), 'Dockerfile copied from template');
+    assert.ok(fs.existsSync(path.join(dir, 'start.sh')), 'start.sh copied from template');
+    assert.ok(fs.existsSync(path.join(dir, 'extras', '.gitkeep')), 'extras/.gitkeep seeded');
+    assert.ok(fs.existsSync(path.join(dir, 'build.env')), 'build.env created');
+    // Idempotent: seeding again does not overwrite an edited Dockerfile.
+    fs.writeFileSync(path.join(dir, 'Dockerfile'), 'EDITED\n');
+    vm.seedBuildDir('pad-seed', 'opencode');
+    assert.strictEqual(fs.readFileSync(path.join(dir, 'Dockerfile'), 'utf8'), 'EDITED\n', 'existing build files untouched');
+    // installDocker seeds a FRESH build.env with INSTALL_DOCKER=1 (idempotent
+    // seeding never overwrites an existing build.env).
+    fs.mkdirSync(path.join(TMP, 'instances', 'pad-seed2'), { recursive: true });
+    vm.seedBuildDir('pad-seed2', 'openclaw', { installDocker: true });
+    assert.strictEqual(vm.readBuildEnv('pad-seed2').INSTALL_DOCKER, '1');
+  });
+
+  it('composeCommand prefixes --env-file with the instance build.env', () => {
+    const args = vm.composeCommand('pad-t1', 'build');
+    assert.deepStrictEqual(args[0], 'compose');
+    assert.deepStrictEqual(args[1], '--env-file');
+    assert.strictEqual(args[2], path.join(buildDir, 'build.env'));
+    assert.strictEqual(args[3], '-f');
+    assert.ok(args.includes('build'));
+    fs.rmSync(TMP, { recursive: true, force: true });
+  });
+});

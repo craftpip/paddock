@@ -1,4 +1,5 @@
 const { execFile } = require('child_process');
+const { imageFor } = require('../instance-image');
 
 function runCmd(cmd, args, options = {}) {
   const { timeout = 120000 } = options;
@@ -19,13 +20,11 @@ function parseVersion(output) {
 const OPENCODE = {
   type: 'opencode',
   label: 'Opencode',
-  buildImage: 'paddock-vm-opencode:latest',
-  buildRel: '../../src/vm-builds/opencode',
+  templateDir: '../../src/vm-builds/opencode',
   baseImage: '',
   dataDir: '/root/.opencode',
   workspaceDir: '/root/.opencode/workspace',
   configFile: 'opencode.json',
-  installDockerBuildArg: 'INSTALL_DOCKER=1',
   tuiCommand: 'opencode',
   backupTypeMarker: '',
 
@@ -105,7 +104,7 @@ const OPENCODE = {
       if (v) return v;
     } catch {}
     try {
-      const r = await runCmd('docker', ['run', '--rm', '--entrypoint', 'opencode', OPENCODE.buildImage, '--version'], { timeout: 60000 });
+      const r = await runCmd('docker', ['run', '--rm', '--entrypoint', 'opencode', imageFor(name), '--version'], { timeout: 60000 });
       return parseVersion(r.stdout || r.stderr);
     } catch {}
     return '';

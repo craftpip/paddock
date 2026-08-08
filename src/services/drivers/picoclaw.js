@@ -1,4 +1,5 @@
 const { execFile } = require('child_process');
+const { imageFor } = require('../instance-image');
 
 function runCmd(cmd, args, options = {}) {
   const { timeout = 120000 } = options;
@@ -19,13 +20,11 @@ function parseVersion(output) {
 const PICOCLAW = {
   type: 'picoclaw',
   label: 'Picoclaw',
-  buildImage: 'paddock-vm-picoclaw:latest',
-  buildRel: '../../src/vm-builds/picoclaw',
+  templateDir: '../../src/vm-builds/picoclaw',
   baseImage: 'sipeed/picoclaw:v0.2.5-launcher',
   dataDir: '/root/.picoclaw',
   workspaceDir: '/root/.picoclaw/workspace',
   configFile: 'config.json',
-  installDockerBuildArg: 'INSTALL_DOCKER=1',
   tuiCommand: 'picoclaw agent',
   backupTypeMarker: '',
 
@@ -90,7 +89,7 @@ const PICOCLAW = {
       if (v) return v;
     } catch {}
     try {
-      const r = await runCmd('docker', ['run', '--rm', '--entrypoint', 'picoclaw', PICOCLAW.buildImage, 'version'], { timeout: 60000 });
+      const r = await runCmd('docker', ['run', '--rm', '--entrypoint', 'picoclaw', imageFor(name), 'version'], { timeout: 60000 });
       return parseVersion(r.stdout || r.stderr);
     } catch {}
     return '';

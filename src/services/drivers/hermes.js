@@ -1,4 +1,5 @@
 const { execFile } = require('child_process');
+const { imageFor } = require('../instance-image');
 
 function runCmd(cmd, args, options = {}) {
   const { timeout = 120000 } = options;
@@ -19,14 +20,12 @@ function parseVersion(output) {
 const HERMES = {
   type: 'hermes',
   label: 'Hermes',
-  buildImage: 'paddock-vm-hermes:latest',
-  buildRel: '../../src/vm-builds/hermes',
+  templateDir: '../../src/vm-builds/hermes',
   baseImage: 'nousresearch/hermes-agent:latest',
   dataDir: '/opt/data',
   workspaceDir: '/opt/data',
   configFile: 'config.yaml',
   configFormat: 'yaml',
-  installDockerBuildArg: 'INSTALL_DOCKER=1',
   tuiCommand: 'hermes',
   backupTypeMarker: '',
 
@@ -120,7 +119,7 @@ const HERMES = {
       if (v) return v;
     } catch {}
     try {
-      const r = await runCmd('docker', ['run', '--rm', '--entrypoint', 'hermes', HERMES.buildImage, 'version'], { timeout: 60000 });
+      const r = await runCmd('docker', ['run', '--rm', '--entrypoint', 'hermes', imageFor(name), 'version'], { timeout: 60000 });
       return parseVersion(r.stdout || r.stderr);
     } catch {}
     return '';

@@ -8,14 +8,14 @@ File: `src/client/src/pages/agent/SettingsTab.jsx`. Wired into `AgentDetail.jsx`
 
 ### 1. Container Info (read-only)
 
-Name, agent type, runtime, status, and image. Image comes from `getDriver(agent).buildImage` in `src/services/drivers/` (`paddock-vm-openclaw:latest`, `paddock-vm-picoclaw:latest`, etc.).
+Name, agent type, runtime, status, and image. Image comes from `instance-image.imageFor(name)` (`paddock-vm-<name>:latest` — one tag per PAD, not per type).
 
 ### 2. Update (image refresh)
 
-Redownloads the base image (`--pull`), rebuilds it, and recreates the container — the recreate restarts it automatically. Runs as a background job; output streams into a console pane (the same `Console` component used by Create Agent).
+Redownloads the base image (`--pull`), rebuilds the **per-instance image** from `instances/<name>/build/`, and recreates the container — the recreate restarts it automatically. Runs as a background job; output streams into a console pane (the same `Console` component used by Create Agent).
 
 - POST returns `202 { ok: true, job: "update:<name>", streaming: true }`, the job runs in `setImmediate`
-- Two steps, streamed as `step` events: **build** (`docker compose -f <instance-compose> build --pull <name>`, 900s timeout), then **recreate** (`docker compose -f <instance-compose> up -d --no-deps --force-recreate <name>`, 300s timeout)
+- Two steps, streamed as `step` events: **build** (`docker compose --env-file <build-dir>/build.env -f <instance-compose> build --pull <name>`, 900s timeout), then **recreate** (`docker compose ... up -d --no-deps --force-recreate <name>`, 300s timeout)
 - A `system` line "Done — container recreated" ends the run, then the tab refetches agent state
 - On failure the console keeps the error tail, the old container is left running (recreate is the last step), and a **Retry** button shows. The tab never navigates away.
 
@@ -25,7 +25,7 @@ Raw docker (docker CLI + host socket). Toggling mounts `/var/run/docker.sock:/va
 
 - Toggle-on runs stop → regenerate compose → start; same for off
 - Confirm popup warns the docker socket is **host-root equivalent** (the agent could control the entire host)
-- Guard rail: if the image has no docker CLI (`docker exec <name> sh -lc 'command -v docker'` fails while the container runs), the toggle errors with "The image has no docker CLI — rebuild the image to enable docker access". Drivers set `installDockerBuildArg` (`INSTALL_DOCKER=1`) — when the CLI is missing the settings route rebuilds the image with that arg automatically. Most agent images don't ship the CLI by default.
+- Guard rail: if the image has no docker CLI (`docker exec <name> sh -lc 'command -v docker'` fails while the container runs), the toggle errors with "The image has no docker CLI — rebuild the image to enable docker access". The toggle writes `INSTALL_DOCKER=1` to the instance `build.env` and rebuilds the per-instance image with that arg automatically. Most agent images don't ship the CLI by default.
 - The "Install Paddock MCP" toggle is intentionally **not implemented** — see docs/tabs/mcp.md / plans/06; the two were split by decision on 2026-08-04.
 
 ### 4. Container Health Checkup
@@ -59,7 +59,7 @@ Wires the existing `POST /api/agents/:name/delete` (stop + remove container, del
 | Method | Route | Description |
 |--------|-------|-------------|
 | GET | `/api/containers` | All containers as `{ name, image, state }` (for the network dropdown) |
-| GET | `/api/agents/:name/settings` | `{ allowDocker, network, networkHealth, image, version }` from `meta.env` (`DOCKER`, `NETWORK`) + `getDriver(agent).buildImage`; `networkHealth` = `getNetworkHealth(name)` (`none\|ok\|stale\|peer-stopped`) |
+| GET | `/api/agents/:name/settings` | `{ allowDocker, network, networkHealth, image, version }` from `meta.env` (`DOCKER`, `NETWORK`) + `instance-image.imageFor(name)`; `networkHealth` = `getNetworkHealth(name)` (`none\|ok\|stale\|peer-stopped`) |
 | POST | `/api/agents/:name/settings` | Apply `{ allowDocker?, network? }` — validates network target + docker-CLI guard, stop → regenerate compose → start, records `settings/update` activity |
 | POST | `/api/agents/:name/update` | 202 + background job `update:<name>`: `build --pull` then `--force-recreate` |
 | GET | `/api/agents/:name/update-log` | SSE stream of `step`/`line`/`done`/`error` events, replays after `since`/`Last-Event-ID` (same shape as `create-log`) |
@@ -76,7 +76,7 @@ Wires the existing `POST /api/agents/:name/delete` (stop + remove container, del
 - `updateAgent(name, { onLog, onStep })` — streams `build --pull` then `up -d --no-deps --force-recreate` (built on `runCmdStream()`)
 - `setMetaFlag(name, key, value)` — writes/clears a `KEY=VALUE` line in `meta.env` preserving other lines
 - `getNetworkHealth(name)` — resolves the compose `network_mode: container:<peer>` against the live docker state: `none` (no override) / `ok` (peer running + bound) / `stale` (peer container was recreated — recorded ID dead, start fails with "No such container") / `peer-stopped` (peer exists but not running)
-- Image/tag lookups live in `src/services/drivers/` (`getDriver(agent).buildImage` / `.buildRel`) — vm-manager no longer exports `AGENT_IMAGES` / `AGENT_BUILD_REL`
+- Image/tag lookups live in `instance-image.js` (`imageFor(name)` → `paddock-vm-<name>:latest`); the shared template the instance build dir is copied from lives in `src/vm-builds/<type>/` (driver `templateDir`). vm-manager no longer exports `AGENT_IMAGES` / `AGENT_BUILD_REL`.
 
 ## Notes
 

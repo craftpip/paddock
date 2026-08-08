@@ -3,12 +3,17 @@ const path = require('path');
 const { execFile } = require('child_process');
 const { runCmdStream } = require('./cmd');
 const { getDriver } = require('./drivers');
+const { imageFor, legacySharedImage, buildDir, buildEnvPath, readBuildEnv, setBuildEnv, argsFromDockerfile } = require('./instance-image');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const HOST_WORKSPACE = process.env.HOST_WORKSPACE_ROOT || WORKSPACE;
 const INSTANCES_DIR = path.join(WORKSPACE, 'instances');
 const PREFIX = process.env.CONTAINER_PREFIX || 'vm';
 const PREFIX_RE = new RegExp('^' + PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-');
+
+// Shared build-template root (`src/vm-builds/<type>/`). Read-only template
+// source: copied into `instances/<name>/build/` at create/clone/migrate time.
+const BUILD_TEMPLATES_DIR = path.join(__dirname, '..', 'vm-builds');
 
 function runCmd(cmd, args, options = {}) {
   const { timeout = 120000 } = options;
@@ -37,6 +42,55 @@ function readMeta(vmDir) {
 
 function instanceComposePath(name) {
   return path.join(INSTANCES_DIR, name, 'docker-compose.yml');
+}
+
+/** Shared build-template dir for an agent type (`src/vm-builds/<type>`). */
+function buildTemplateDir(agent) {
+  return path.join(BUILD_TEMPLATES_DIR, agent);
+}
+
+/** Seed (or top up) an instance's build dir from the shared template:
+ *  `instances/<name>/build/{Dockerfile,start.sh,build.env,extras/}`. Idempotent
+ *  — never overwrites an existing build file. `extras/` must exist because the
+ *  Dockerfile template `COPY`s it (an empty dir breaks the build), and
+ *  `build.env` is written with INSTALL_DOCKER when the agent has docker on. */
+function seedBuildDir(name, agent, opts = {}) {
+  const { installDocker = false } = opts;
+  const dir = buildDir(name);
+  const tpl = buildTemplateDir(agent);
+  if (fs.existsSync(dir)) {
+    // Already seeded (create/clone/migrate) — just ensure the invariants.
+    fs.mkdirSync(path.join(dir, 'extras'), { recursive: true });
+    const keep = path.join(dir, 'extras', '.gitkeep');
+    if (!fs.existsSync(keep)) fs.writeFileSync(keep, '');
+    if (!fs.existsSync(buildEnvPath(name))) {
+      setBuildEnv(name, installDocker ? { INSTALL_DOCKER: '1' } : {});
+    }
+    return dir;
+  }
+  if (fs.existsSync(tpl)) {
+    fs.cpSync(tpl, dir, { recursive: true });
+  } else {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  fs.mkdirSync(path.join(dir, 'extras'), { recursive: true });
+  const keep = path.join(dir, 'extras', '.gitkeep');
+  if (!fs.existsSync(keep)) fs.writeFileSync(keep, '');
+  if (!fs.existsSync(buildEnvPath(name))) {
+    setBuildEnv(name, installDocker ? { INSTALL_DOCKER: '1' } : {});
+  }
+  return dir;
+}
+
+/** Compose command prefix for an instance. Every per-instance `docker compose`
+ *  invocation passes its `build.env` as an env-file so compose resolves the
+ *  generated `build.args:` interpolation consistently. Skips the env-file when
+ *  the instance has no build dir yet (e.g. an un-migrated legacy agent). */
+function composeCommand(name, ...args) {
+  const cmd = ['compose'];
+  if (fs.existsSync(buildEnvPath(name))) cmd.push('--env-file', buildEnvPath(name));
+  cmd.push('-f', instanceComposePath(name), ...args);
+  return cmd;
 }
 
 /** Health of an agent's network_mode. When an agent routes through another
@@ -84,16 +138,27 @@ async function getNetworkHealth(name) {
 function generateInstanceCompose(name, agent, password, port, opts = {}) {
   const { allowDocker = false, network = '', webService = null, webPeerNetwork = '' } = opts;
   const driver = getDriver(agent);
-  const image = driver.buildImage;
-  const build = driver.buildRel;
+  const image = imageFor(name);
   const dataDir = driver.dataDir;
 
   let yaml = 'services:\n';
   yaml += `  ${name}:\n`;
   yaml += `    build:\n`;
   // Build context must be resolvable by the docker CLI, which runs INSIDE the
-  // webui container → use WORKSPACE (the container's /workspace view).
-  yaml += `      context: ${path.resolve(WORKSPACE, 'instances', name, build)}\n`;
+  // webui container → use WORKSPACE (the container's /workspace view). Each
+  // PAD builds from its OWN build dir — nothing is shared between PADs.
+  yaml += `      context: ${path.resolve(WORKSPACE, 'instances', name, 'build')}\n`;
+  // The compose `build.args:` block is generated from the instance Dockerfile's
+  // `ARG` lines so build-file edits are self-describing: add/remove an ARG in
+  // the Dockerfile → next compose regen picks it up; change its value in
+  // build.env → next build applies it with zero compose regeneration.
+  const args = argsFromDockerfile(path.join(INSTANCES_DIR, name, 'build', 'Dockerfile'));
+  if (args.length) {
+    yaml += `      args:\n`;
+    for (const a of args) {
+      yaml += `        ${a.name}: ${a.default ? `\${${a.name}:-${a.default}}` : `\${${a.name}}`}\n`;
+    }
+  }
   yaml += `    image: ${image}\n`;
   yaml += `    container_name: ${name}\n`;
   yaml += `    restart: unless-stopped\n`;
@@ -182,6 +247,8 @@ async function applySettings(name, opts = {}) {
   const network = opts.network || '';
   const webService = readWebService(name);
 
+  seedBuildDir(name, agent, { installDocker: allowDocker });
+
   let webPeerNetwork = '';
   if (webService && network) {
     webPeerNetwork = await getPeerNetworkName(network);
@@ -194,7 +261,7 @@ async function applySettings(name, opts = {}) {
   return {
     allowDocker,
     network,
-    image: getDriver(agent).buildImage,
+    image: imageFor(name),
     agent,
   };
 }
@@ -232,6 +299,8 @@ async function applyWebServices(name, webService) {
   const port = meta.PORT || '';
   const allowDocker = meta.DOCKER === '1';
   const network = meta.NETWORK || '';
+
+  seedBuildDir(name, agent, { installDocker: allowDocker });
 
   const p = webServicePath(name);
   if (webService) {
@@ -288,25 +357,19 @@ function removeWebStartHook(name, agent) {
 
 /** Rebuild the image (--pull to redownload the base) and recreate the
  *  container. The recreate restarts it automatically when it's done.
- *  `buildArgs` are passed as `--build-arg K=V` (e.g. INSTALL_DOCKER=1).
- *  Set `pull: false` to skip redownloading the base image. */
+ *  `buildArgs` are passed as `--build-arg K=V` (ad-hoc overrides; the instance
+ *  build.env is the preferred place for ARG values). Set `pull: false` to skip
+ *  redownloading the base image. */
 async function updateAgent(name, { onLog = () => {}, onStep = () => {}, buildArgs = [], pull = true } = {}) {
-  const composePath = instanceComposePath(name);
-  const args = ['compose', '-f', composePath, 'build'];
-  if (pull) args.push('--pull');
-  // The built image is SHARED across all PADs of an agent type. The docker CLI
-  // is baked into that image, so every rebuild must keep installing it —
-  // otherwise an Update (or any other-pad rebuild) silently strips docker from
-  // every PAD that enabled it. The socket mount stays per-PAD in the compose
-  // file, so the CLI alone grants no access.
   const meta = readMeta(path.join(INSTANCES_DIR, name));
   const agent = meta.AGENT || 'openclaw';
-  const dockerArg = getDriver(agent).installDockerBuildArg;
-  const bargs = [...buildArgs];
-  if (dockerArg && !bargs.some((a) => a.startsWith(dockerArg.split('=')[0] + '='))) {
-    bargs.push(dockerArg);
-  }
-  for (const ba of bargs) args.push('--build-arg', ba);
+  // Each PAD owns its build dir + image tag — no shared-image bookkeeping, so
+  // nothing is force-appended to the build args anymore. The rebuild reads the
+  // instance Dockerfile + build.env (via the compose env-file) directly.
+  seedBuildDir(name, agent, { installDocker: meta.DOCKER === '1' });
+  const args = composeCommand(name, 'build');
+  if (pull) args.push('--pull');
+  for (const ba of buildArgs) args.push('--build-arg', ba);
   args.push(name);
   onStep('build', 'start');
   try {
@@ -319,7 +382,7 @@ async function updateAgent(name, { onLog = () => {}, onStep = () => {}, buildArg
 
   onStep('recreate', 'start');
   try {
-    await runCmdStream('docker', ['compose', '-f', composePath, 'up', '-d', '--no-deps', '--force-recreate', name], { onLog, timeout: 300000 });
+    await runCmdStream('docker', composeCommand(name, 'up', '-d', '--no-deps', '--force-recreate', name), { onLog, timeout: 300000 });
   } catch (e) {
     onStep('recreate', 'error');
     throw e;
@@ -383,15 +446,24 @@ async function createVm(name, options = {}) {
   onLog('system', `Created instance directory: ${instDir}`);
 
   if (mode === 'clone') {
-    const sources = fs.readdirSync(INSTANCES_DIR, { withFileTypes: true })
+    // Clone is type-locked: a clone inherits the source's build files + data
+    // dir, so it must be the SAME agent type. When no source is given, pick the
+    // most recent same-type instance instead of blindly taking the latest.
+    const candidates = fs.readdirSync(INSTANCES_DIR, { withFileTypes: true })
       .filter(e => e.isDirectory())
       .map(e => e.name)
       .filter(n => n.startsWith(PREFIX + '-'))
       .sort().reverse();
-    const src = cloneSource || sources[0] || '';
-    if (!src) throw new Error('No source VM available to clone');
+    let src = cloneSource || '';
+    if (!src) {
+      src = candidates.find((n) => (readMeta(path.join(INSTANCES_DIR, n)).AGENT || 'openclaw') === agent) || '';
+    }
+    if (!src) throw new Error(`No '${agent}' source VM available to clone`);
     const srcMeta = readMeta(path.join(INSTANCES_DIR, src));
     const srcAgent = srcMeta.AGENT || 'openclaw';
+    if (srcAgent !== agent) {
+      throw new Error(`Cannot clone '${src}' (type=${srcAgent}) into '${name}' (type=${agent}) — clones must share the same agent type`);
+    }
     const srcDir = path.join(INSTANCES_DIR, src, srcAgent);
     if (fs.existsSync(srcDir)) {
       onLog('system', `Cloning workspace from ${src}…`);
@@ -408,6 +480,15 @@ async function createVm(name, options = {}) {
     } else {
       throw new Error(`Source workspace for '${src}' not found`);
     }
+    // Same-type clones inherit the source's build files (customizations too) —
+    // they still get their OWN image tag via imageFor(name).
+    const srcBuildDir = buildDir(src);
+    if (fs.existsSync(srcBuildDir)) {
+      fs.cpSync(srcBuildDir, buildDir(name), { recursive: true });
+      onLog('system', `Cloned build files from ${src}`);
+    }
+  } else {
+    seedBuildDir(name, agent);
   }
 
   let metaTxt = `ROOT_PASSWORD=${pw}\nAGENT=${agent}\n`;
@@ -420,7 +501,7 @@ async function createVm(name, options = {}) {
 
   onStep('build', 'start');
   try {
-    await runCmdStream('docker', ['compose', '-f', composePath, 'build'], { onLog, timeout: 900000 });
+    await runCmdStream('docker', composeCommand(name, 'build'), { onLog, timeout: 900000 });
   } catch (e) {
     onStep('build', 'error');
     throw e;
@@ -429,7 +510,7 @@ async function createVm(name, options = {}) {
 
   onStep('up', 'start');
   try {
-    await runCmdStream('docker', ['compose', '-f', composePath, 'up', '-d'], { onLog, timeout: 300000 });
+    await runCmdStream('docker', composeCommand(name, 'up', '-d'), { onLog, timeout: 300000 });
   } catch (e) {
     onStep('up', 'error');
     throw e;
@@ -475,6 +556,9 @@ async function removeVm(name) {
   try { await runCmd('docker', ['network', 'rm', `${name}_default`], { timeout: 30000 }); } catch {}
   const instDir = path.join(INSTANCES_DIR, name);
   if (fs.existsSync(instDir)) fs.rmSync(instDir, { recursive: true, force: true });
+  // The per-instance image is this PAD's own tag — drop it too, otherwise every
+  // create/delete cycle leaks a paddock-vm-<name>:latest image.
+  try { await runCmd('docker', ['rmi', imageFor(name)], { timeout: 30000 }); } catch {}
 }
 
 async function resetVm(name) {
@@ -491,10 +575,11 @@ async function resetVm(name) {
 
   const pw = meta.ROOT_PASSWORD || name.replace(PREFIX_RE, '');
   const port = meta.PORT || '';
+  seedBuildDir(name, agent, { installDocker: meta.DOCKER === '1' });
   writeInstanceCompose(name, agent, pw, port);
 
   const composePath = instanceComposePath(name);
-  await runCmd('docker', ['compose', '-f', composePath, 'up', '-d'], { timeout: 120000 });
+  await runCmd('docker', composeCommand(name, 'up', '-d'), { timeout: 120000 });
 }
 
 function getComposePath(name) {
@@ -506,8 +591,72 @@ async function startAgent(name) {
   try {
     await runCmd('docker', ['start', name], { timeout: 30000 });
   } catch {
-    await runCmd('docker', ['compose', '-f', composePath, 'up', '-d'], { timeout: 180000 });
+    await runCmd('docker', composeCommand(name, 'up', '-d'), { timeout: 180000 });
   }
+}
+
+/** One-time migration for PADs created before per-instance build files. Each
+ *  instance missing a `build/` dir gets: build dir seeded from the shared
+ *  template, the running image retagged into its per-instance tag (no rebuild),
+ *  and its compose regenerated + recreated so the container now runs under its
+ *  own tag. Idempotent: instances with a build dir are skipped, and the whole
+ *  thing re-runs safely (a partially-migrated PAD just continues). */
+async function ensureInstanceBuilds({ onLog = () => {} } = {}) {
+  const results = { seeded: [], skipped: [], errors: [] };
+  if (!fs.existsSync(INSTANCES_DIR)) return results;
+  for (const entry of fs.readdirSync(INSTANCES_DIR, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const name = entry.name;
+    const instDir = path.join(INSTANCES_DIR, name);
+    const meta = readMeta(instDir);
+    const agent = meta.AGENT || 'openclaw';
+    if (!fs.existsSync(buildTemplateDir(agent))) {
+      results.skipped.push(`${name} (no template for '${agent}')`);
+      continue;
+    }
+    if (fs.existsSync(buildDir(name))) {
+      results.skipped.push(name);
+      continue;
+    }
+    try {
+      const allowDocker = meta.DOCKER === '1';
+      seedBuildDir(name, agent, { installDocker: allowDocker });
+      onLog('system', `[migrate] seeded build dir for ${name}`);
+
+      // Retag, don't rebuild — the running image is preserved instantly.
+      try {
+        await runCmd('docker', ['tag', legacySharedImage(agent), imageFor(name)], { timeout: 30000 });
+        onLog('system', `[migrate] retagged ${legacySharedImage(agent)} → ${imageFor(name)}`);
+      } catch (e) {
+        onLog('system', `[migrate] retag skipped for ${name} (${e.message})`);
+      }
+
+      // Regenerate the compose with the per-instance context + image + args,
+      // preserving the network peer, web binding and SSH port.
+      const pw = meta.ROOT_PASSWORD || name.replace(PREFIX_RE, '');
+      const port = meta.PORT || '';
+      const network = meta.NETWORK || '';
+      const webService = readWebService(name);
+      let webPeerNetwork = '';
+      if (webService && network) webPeerNetwork = await getPeerNetworkName(network);
+      writeInstanceCompose(name, agent, pw, port, { allowDocker, network, webService, webPeerNetwork });
+
+      // Recreate only when the container exists; leave stopped agents stopped.
+      let running = false;
+      try {
+        const r = await runCmd('docker', ['inspect', name, '--format', '{{.State.Status}}'], { timeout: 15000 });
+        running = (r.stdout || '').trim() === 'running';
+      } catch {}
+      if (running) {
+        await runCmdStream('docker', composeCommand(name, 'up', '-d', '--no-deps', '--force-recreate', name), { onLog, timeout: 180000 });
+        onLog('system', `[migrate] recreated ${name} under ${imageFor(name)}`);
+      }
+      results.seeded.push(name);
+    } catch (e) {
+      results.errors.push({ name, error: e.message });
+    }
+  }
+  return results;
 }
 
 module.exports = {
@@ -519,5 +668,9 @@ module.exports = {
   existingServices, startAgent,
   readWebService, applyWebServices, webHookPath,
   writeWebStartHook, removeWebStartHook, webDoorName,
+  imageFor, seedBuildDir, buildDir, buildEnvPath,
+  readBuildEnv, setBuildEnv,
+  argsFromDockerfile,
+  composeCommand, ensureInstanceBuilds,
   INSTANCES_DIR, PREFIX, PREFIX_RE,
 };
