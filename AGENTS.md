@@ -1010,6 +1010,66 @@ ports/door vanished even though `web.json` still said active — the Web pill sh
   the running process silently keeps the old (buggy) code. A user-reported "doesn't
   work" on a code change that was never restarted is the classic symptom.
 
+### Multiple agents on the SAME peer collide on the published port (2026-08-08)
+
+**Symptom:** Every published web URL for several agents shows the SAME app (e.g. all
+opencode agents showed "only paddock directory available"). It looked like the web
+publish was "always sending to one container".
+
+**Root cause:** All agents used `network_mode: container:gluetun-nord`, so they ALL
+share gluetun-nord's network namespace. Each agent's web app was published with the
+DEFAULT container port (8080 for opencode). In a shared namespace only ONE process
+can bind `0.0.0.0:8080` — the first starter wins (paddock-dev). The losers'
+`start-web.sh` idempotency probe (`/dev/tcp/127.0.0.1/<port>`, app.js:1113) sees the
+port already listening **in the shared namespace** and silently skips starting their
+own server. Every socat door forwards to `peer:<containerPort>`, so every published
+URL reached the ONE process that owned the socket.
+
+**Fix:** Publish each agent on a **unique container port** when they share a peer
+(8080, 8081, 8082…). Each `opencode web --port 808X` binds its own port in the shared
+namespace and its door (`TCP-LISTEN:<cport>,fork,reuseaddr TCP:<peer>:<cport>`)
+reaches the right app. Re-publish via the Web tab with the container-port field set.
+
+**Gotchas hit while fixing:**
+- **The Web tab's container-port field defaults to the driver's port (8080).** A
+  re-publish from the Web tab that leaves that field untouched silently REVERTS the
+  unique-port fix: the door goes back to `peer:8080` and the agent's own server never
+  starts (probe sees the peer holder's socket). Always set an explicit unique
+  container port for every peer-shared agent, on every publish.
+- `hostPortInUse` (app.js:1131) does NOT exclude the agent's own door container
+  (`<name>-web`), so re-publishing on the SAME host port fails with "already in use
+  by another agent" while the old door holds it. Use a fresh host port, or unpublish
+  first then republish.
+- Deleted agents leave orphan door containers (`<name>-web`) holding their host port
+  — the instance dir is gone so nothing cleans them up. `docker rm -f <name>-web`
+  frees the port (verified: removed `pad-opencode-ai-company-web`, freed 3456).
+- Verify the fix: door cmd must say `TCP:<peer>:<newPort>`, the agent's own process
+  must be running `opencode web --port <newPort>` with cwd = its workspace, and the
+  old port must be refused (HTTP 000).
+
+### Live fix on pad-opencode-aic (2026-08-08)
+
+- aic collided with `pad-opencode-paddock-dev` on 8080 in the gluetun-nord namespace
+  (paddock-dev won the bind). aic's `start-web.sh` probe saw 8080 busy and silently
+  skipped its own server, and its door forwarded to paddock-dev's app — every request
+  to aic's URL "failed" by hitting the wrong workspace.
+- Re-published aic via a node script mirroring `POST /api/agents/:name/web` with
+  `{ containerPort: 8081, hostPort: 3457 }` (script: write hook → applyWebServices →
+  validateInstanceCompose → stop → compose up agent+door → exec start-web.sh →
+  verify reachable). Door now `TCP-LISTEN:8081 → TCP:gluetun-nord:8081`, aic runs
+  `opencode web --port 8081`, cwd=/www2/ai-company, old port 3456 refused.
+- **socat is raw TCP — WebSockets pass through fine.** The user suspected the
+  forwarder; it wasn't the problem. Full proof through the door:
+  1. `POST /pty` (auth: `Authorization: Basic base64("opencode:<pass>")` +
+     `x-opencode-ticket: 1`) → `{id:"pty_..."}` (ptyID must start with `pty`).
+  2. `POST /pty/<id>/connect-token?directory=<cwd>` → `{ticket, expires_in:60}`.
+  3. `ws://host:port/pty/<id>/connect?directory=...&cursor=0&ticket=<t>`
+     → 101, real shell prompt + cursor frames.
+  - A WS upgrade on the wrong path (`/` or legacy `/api/pty/.../connect`) with valid
+    basic auth HANGS (000, server never replies) instead of erroring — don't
+    misread that as a forwarding failure. The v1 `/pty/.../connect` path responds
+    401/400 correctly, proving the handshake reaches the app.
+
 ## Architecture Documentation
 
 - `docs/` — **Source of truth** for business logic, system architecture, page descriptions, routes, data model, security model, and all behavioral contracts. Split by area: `overview/` (architecture, business-logic, react-migration), `backend/` (services, middleware, user-management), `tabs/` (per-tab behavior), `pages/`, `components/`, `operations/`.
