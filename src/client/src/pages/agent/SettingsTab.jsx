@@ -596,7 +596,7 @@ export default function SettingsTab({ agent }) {
                 </div>
               )}
               <p className="text-xs text-ink-dim">
-                A custom workspace is a separate bind mount and is <strong>not</strong> included in agent-data backups.
+                A custom workspace is a separate bind mount, outside the agent's data folder.
               </p>
               <button
                 onClick={handleWorkspaceSave}

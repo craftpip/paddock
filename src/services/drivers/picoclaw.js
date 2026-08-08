@@ -27,7 +27,6 @@ const PICOCLAW = {
   workspaceCapability: 'fixed',
   configFile: 'config.json',
   tuiCommand: 'picoclaw agent',
-  backupTypeMarker: '',
 
   /** picoclaw has no gateway daemon flow — `onboard` writes config.json +
    *  workspace non-interactively (verified: no TTY needed). */

@@ -27,7 +27,6 @@ const OPENCODE = {
   workspaceCapability: 'editable',
   configFile: 'opencode.json',
   tuiCommand: 'opencode',
-  backupTypeMarker: '',
 
   /** No gateway/onboard flow — opencode config is created on first run. */
   setupSteps: [],

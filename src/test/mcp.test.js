@@ -45,8 +45,6 @@ describe('MCP Server - Handshake', () => {
     assert.ok(names.includes('paddock_workspace_write'));
     assert.ok(names.includes('paddock_agent_logs'));
     assert.ok(names.includes('paddock_config_get'));
-    assert.ok(names.includes('paddock_backup_list'));
-    assert.ok(names.includes('paddock_backup_create'));
   });
 
   it('tool schemas carry name params', async () => {

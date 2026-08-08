@@ -6,7 +6,6 @@ import Console from '../components/Console'
 const STEP_COMMANDS = {
   build: (name) => `docker compose -f instances/${name}/docker-compose.yml build`,
   up: (name) => `docker compose -f instances/${name}/docker-compose.yml up -d`,
-  restore: (name) => `Restoring backup into ${name}…`,
   setup: (name) => `docker exec ${name} openclaw setup --baseline`,
 }
 
@@ -29,8 +28,6 @@ export default function CreateAgent() {
   const [name, setName] = useState('')
   const [agentType, setAgentType] = useState('openclaw')
   const [agentTypes, setAgentTypes] = useState([])
-  const [backupFile, setBackupFile] = useState('')
-  const [backups, setBackups] = useState([])
   const [prefix, setPrefix] = useState('vm')
   const [hostWorkspaceRoot, setHostWorkspaceRoot] = useState('')
   const [wsEnabled, setWsEnabled] = useState(false)
@@ -50,7 +47,6 @@ export default function CreateAgent() {
       if (cfg.containerPrefix) setPrefix(cfg.containerPrefix)
       if (cfg.hostWorkspaceRoot) setHostWorkspaceRoot(cfg.hostWorkspaceRoot)
     }).catch(() => {})
-    api('/api/backups').then(setBackups).catch(() => {})
     api('/api/agent-types').then(d => {
       if (d.types?.length) setAgentTypes(d.types)
     }).catch(() => {})
@@ -81,16 +77,9 @@ export default function CreateAgent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlName])
 
-  const filteredBackups = backups.filter(b => {
-    if (!b.agentType) return true
-    return b.agentType === agentType
-  })
-
   const currentType = agentTypes.find((t) => t.type === agentType)
-  const hasSetup = !!currentType && currentType.setupSteps.length > 0
 
   const fullName = `${prefix}-${agentType}-${name || '...'}`
-  const isClone = !!backupFile
 
   // ─── Custom workspace (plan 24) ────────────────────────────
   const wsCapability = currentType?.workspaceCapability || 'fixed'
@@ -197,9 +186,6 @@ export default function CreateAgent() {
       closeStream()
       setRunningCmd('')
       setPhase('done')
-      if (isClone) {
-        setTimeout(() => navigate('/agents/' + job), 1800)
-      }
     })
 
     // Server-sent error event (has data) vs connection loss (no data — the
@@ -233,9 +219,8 @@ export default function CreateAgent() {
         body: {
           name: `${prefix}-${agentType}-${name}`,
           agent: agentType,
-          backup_file: backupFile || '',
-          workspace_host: !isClone && wsEnabled ? (wsHost.trim() || defaultWsHost) : '',
-          workspace_dir: !isClone && wsEnabled ? wsDir.trim() : '',
+          workspace_host: wsEnabled ? (wsHost.trim() || defaultWsHost) : '',
+          workspace_dir: wsEnabled ? wsDir.trim() : '',
         },
       })
       setPhase('creating')
@@ -284,26 +269,13 @@ export default function CreateAgent() {
           </div>
 
           <div className="bg-panel/60 border border-line rounded-xl p-5">
-            <label className="block text-xs font-medium text-ink-faint mb-2 uppercase tracking-wider">Clone from backup (optional)</label>
-            <select value={backupFile} onChange={(e) => setBackupFile(e.target.value)}
-                    className="w-full bg-raised border border-line-faint rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line">
-              <option value="">No clone — Fresh install</option>
-              {filteredBackups.map((b) => (
-                <option key={b.file} value={b.file}>
-                  {b.vm} — {b.displayDate} {b.displayTime} ({b.size_hr})
-                </option>
-              ))}
-            </select>
-            {!isClone && (
-              <p className="text-xs text-ink-dim mt-2">
-                {hasSetup
-                  ? <>Fresh installs run <code className="text-ink-faint">{currentType.setupSteps.map((s) => s.cmd).join(', ')}</code> as part of creation.</>
-                  : 'Fresh installs skip any setup step — the container just boots.'}
-              </p>
-            )}
+            <label className="block text-xs font-medium text-ink-faint mb-2 uppercase tracking-wider">Setup</label>
+            {currentType?.setupSteps?.length > 0
+              ? <p className="text-xs text-ink-dim">Fresh installs run <code className="text-ink-faint">{currentType.setupSteps.map((s) => s.cmd).join(', ')}</code> as part of creation.</p>
+              : <p className="text-xs text-ink-dim">Fresh installs skip any setup step — the container just boots.</p>}
           </div>
 
-          {!wsHidden && !isClone && (
+          {!wsHidden && (
             <div className="bg-panel/60 border border-line rounded-xl p-5">
               <label className="flex items-center gap-2 cursor-pointer select-none">
                 <input type="checkbox" checked={wsEnabled} onChange={(e) => toggleWs(e.target.checked)}
@@ -350,7 +322,7 @@ export default function CreateAgent() {
                     </div>
                   )}
                   <p className="text-xs text-ink-dim">
-                    A custom workspace is a separate bind mount and is <strong>not</strong> included in agent-data backups.
+                    A custom workspace is a separate bind mount, outside the agent's data folder.
                   </p>
                 </div>
               )}
@@ -374,7 +346,7 @@ export default function CreateAgent() {
               )}
               {phase === 'done' && (
                 <span className="text-success font-medium">
-                  {isClone ? 'Agent created! Taking you to the dashboard…' : 'Agent created! Setup complete.'}
+                  Agent created! Setup complete.
                 </span>
               )}
               {phase === 'failed' && (
@@ -401,7 +373,7 @@ export default function CreateAgent() {
             className="h-[60vh]"
           />
 
-          {phase === 'done' && !isClone && (
+          {phase === 'done' && (
             <button onClick={() => navigate('/agents/' + jobName)}
                     className="w-full bg-gradient-to-r from-accent to-accent-deep hover:from-accent-hover hover:to-accent-deep text-accent-ink font-semibold py-3.5 rounded-xl transition-all duration-200 shadow-lg shadow-accent/25">
               Go to {jobName}

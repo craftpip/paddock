@@ -44,6 +44,13 @@ The current project drivers are exactly `openclaw`, `hermes`, `opencode`,
 
 ## Pre-plan - Remove The Existing Generic Backup System
 
+**Status: DONE (2026-08-08).** The generic tar backup system is fully removed.
+Create PAD has no clone/`backup_file` path, no live code executes `tar` or
+archive extraction, the Backups pages show a maintenance empty state, all
+generic backup API/MCP routes return 404, legacy archives in the project
+`backups/` folder are untouched, and tests/build pass. Goal 0 (shared
+`/backup` folder + manifest plumbing + Backups tab) can now proceed.
+
 Complete this removal before adding the fixed `/backup` mount, driver
 capabilities, or the new Backups tab.
 
@@ -82,14 +89,24 @@ behavior remains after this pre-plan.
 ### Completion checks
 
 1. Create PAD has no clone-from-backup controls and its request contains no
-   `backup_file` field.
+   `backup_file` field. **Done** — browser-verified; `/api/agents/create`
+   no longer reads `backup_file`; built bundle has no backup refs.
 2. No active source path executes `tar` or archive extraction for a PAD backup
-   or restore.
+   or restore. **Done** — `backup-manager.js` stubbed (throws unavailable);
+   repo sweep clean.
 3. Existing Backups pages no longer expose generic backup actions; a temporary
    empty/maintenance state is acceptable until Goal 0 provides the new tab.
+   **Done** — `GlobalBackups.jsx`, `views/backups.ejs`,
+   `views/agents/backups.ejs`, `views/agents/detail.ejs` all show maintenance
+   state.
 4. Legacy archive files remain on disk and are not served as restorable data.
+   **Done** — `backups/` folder untouched; all old backup routes removed
+   (live-verified 404).
 5. Remove or update tests that assert the deleted generic backup behavior, then
-   run the relevant backend and SPA test/build checks.
+   run the relevant backend and SPA test/build checks. **Done** —
+   `mcp.test.js` updated; backend suites pass (db 3, registry 4, vm-manager
+   15, workspace 11, auth 3, mcp 4); SPA built; webui restarted and
+   browser-verified.
 
 ## Goal 0 - Shared Backup Folder And UI Plumbing
 

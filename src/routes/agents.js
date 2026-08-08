@@ -6,12 +6,10 @@ const multer = require('multer');
 const registry = require('../services/agent-registry');
 const workspace = require('../services/workspace');
 const vm = require('../services/vm-manager');
-const backup = require('../services/backup-manager');
 const { getDb } = require('../services/db');
 const { csrfCheck } = require('../middleware/auth');
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const PREFIX = process.env.CONTAINER_PREFIX || 'vm';
-const BACKUPS_DIR = path.join(WORKSPACE, 'backups');
 
 const router = express.Router();
 
@@ -149,12 +147,11 @@ router.get('/create-status/:name', (req, res) => {
 router.get('/:agentId', validateAgent, (req, res) => {
   const agent = req.agent;
   const activity = registry.getActivity(agent.name, 20);
-  const backups = getBackups(agent.name);
   const config = readAgentConfig(agent);
   const flash = req.session.flash || null;
   delete req.session.flash;
   res.locals.fullHeight = true;
-  res.render('agents/detail', { agent, activity, backups, config, flash, workspacePath: req.query.workspacePath || null });
+  res.render('agents/detail', { agent, activity, config, flash, workspacePath: req.query.workspacePath || null });
 });
 
 // ─── Runtime Actions ────────────────────────────────────────────────────────
@@ -706,65 +703,6 @@ router.get('/:agentId/activity', validateAgent, (req, res) => {
   res.render('agents/activity', { agent: req.agent, activity });
 });
 
-// ─── Backups ────────────────────────────────────────────────────────────────
-
-router.get('/:agentId/backups', validateAgent, (req, res) => {
-  const backups = getBackups(req.agent.name);
-  res.render('agents/backups', { agent: req.agent, backups });
-});
-
-router.post('/:agentId/backups/create', validateAgent, csrfCheck, async (req, res) => {
-  try {
-    await backup.backupAgent(req.agent.name);
-    audit(req.agent.name, 'backup', 'create', 'ok', 'Backup created');
-    console.error('BACKUP CREATE: setting flash, sessID:', req.sessionID);
-    req.session.flash = { type: 'success', message: 'Backup created.' };
-    req.session.save(() => {
-      console.error('BACKUP CREATE: save callback, redirecting');
-      res.redirect(`/agents/${req.agent.name}#backups`);
-    });
-  } catch (err) {
-    audit(req.agent.name, 'backup', 'create', 'error', err.message);
-    req.session.flash = { type: 'error', message: `Backup failed: ${err.message}` };
-    req.session.save(() => res.redirect(`/agents/${req.agent.name}#backups`));
-  }
-});
-
-router.post('/:agentId/backups/restore', validateAgent, csrfCheck, async (req, res) => {
-  try {
-    await backup.restoreAgent(req.agent.name);
-    audit(req.agent.name, 'backup', 'restore', 'ok', 'Backup restored');
-    req.session.flash = { type: 'success', message: 'Backup restored. Container will restart.' };
-    req.session.save(() => res.redirect(`/agents/${req.agent.name}#backups`));
-  } catch (err) {
-    audit(req.agent.name, 'backup', 'restore', 'error', err.message);
-    req.session.flash = { type: 'error', message: `Restore failed: ${err.message}` };
-    req.session.save(() => res.redirect(`/agents/${req.agent.name}#backups`));
-  }
-});
-
-router.get('/:agentId/backups/download', validateAgent, (req, res) => {
-  const file = req.query.file;
-  if (!file) return res.status(400).send('file required');
-  const safeName = path.basename(file);
-  const backupPath = path.join(BACKUPS_DIR, safeName);
-  if (!fs.existsSync(backupPath)) return res.status(404).send('Not found');
-  res.download(backupPath);
-});
-
-router.post('/:agentId/backups/delete', validateAgent, csrfCheck, (req, res) => {
-  const file = req.body.file;
-  if (!file) return res.status(400).send('file required');
-  const safeName = path.basename(file);
-  const backupPath = path.join(BACKUPS_DIR, safeName);
-  if (fs.existsSync(backupPath)) {
-    fs.unlinkSync(backupPath);
-    audit(req.agent.name, 'backup', 'delete', 'ok', `Deleted backup ${safeName}`);
-  }
-  req.session.flash = { type: 'success', message: 'Backup deleted.' };
-  res.redirect(`/agents/${req.agent.name}#backups`);
-});
-
 // ─── Sessions ───────────────────────────────────────────────────────────────
 
 router.get('/:agentId/sessions', validateAgent, (req, res) => {
@@ -812,17 +750,6 @@ function readAgentConfig(agent) {
   } catch {
     return null;
   }
-}
-
-function getBackups(vmName) {
-  if (!fs.existsSync(BACKUPS_DIR)) return [];
-  return fs.readdirSync(BACKUPS_DIR)
-    .filter(f => f.startsWith(vmName + '_') && f.endsWith('.tar.gz'))
-    .map(f => {
-      const stat = fs.statSync(path.join(BACKUPS_DIR, f));
-      return { name: f, size: stat.size, created: stat.mtime.toISOString() };
-    })
-    .sort((a, b) => new Date(b.created) - new Date(a.created));
 }
 
 function dockerLogs(vmName, tail = 100) {

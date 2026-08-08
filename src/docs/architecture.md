@@ -15,7 +15,6 @@ VM Friends is a **self-hosted AI agent management platform**. It manages a fleet
 - Provide a WebSocket-based terminal to each agent
 - Manage `openclaw.json` configuration files
 - Manage secrets via the encrypted Vault (`/vault`, AES-256-GCM)
-- Create and restore agent state backups
 - Track model providers (OpenAI, OpenRouter, Ollama Cloud, etc.)
 - Track session and activity history per agent
 - Support OAuth and API-key-based model provider auth
@@ -94,7 +93,7 @@ VM Friends is a **self-hosted AI agent management platform**. It manages a fleet
 │   ├── services/
 │   │   ├── agent-registry.js       # Agent discovery from filesystem + Docker
 │   │   ├── vm-manager.js           # createVm, removeVm, resetVm, compose generation
-│   │   ├── backup-manager.js       # backupAgent, restoreAgent via docker exec
+ │   │   ├── backup-manager.js       # Removed — stub until native backups (plan 26)
 │   │   ├── workspace.js            # Safe file operations with path traversal protection
 │   │   └── db.js                   # SQLite CRUD + schema migration
 │   ├── views/
@@ -143,8 +142,7 @@ VM Friends is a **self-hosted AI agent management platform**. It manages a fleet
 ├── vm_hermes/                      # Docker build context for Hermes
 ├── vm_nanobot/                     # Docker build context for Nanobot
 │
-├── backups/
-│   └── <agent>_<timestamp>.tar.gz  # Agent backups
+├── backups/                         # Legacy generic archives (untouched, not restorable)
 │
 ├── scripts/
 │   ├── daily-commit.sh             # Auto git commit (cron)
@@ -258,13 +256,9 @@ When an HTMX request is detected (`req.headers['hx-request']`), the middleware a
 | POST | `/vm/:name/start\|stop\|restart` | Direct | Docker lifecycle |
 | POST | `/vm/:name/remove\|reset` | `vm-manager.js` | Remove/reset |
 | GET | `/vm/:name/meta\|config\|logs` | Direct | Read data |
-| GET | `/backups` | Direct | Global backup list |
-| POST | `/backups/:name/create\|restore` | `backup-manager.js` | Backup operations |
-| POST | `/backups/:file/delete` | Direct | Delete backup |
-| GET | `/backups/:file/download` | Direct | Download backup |
 | GET | `/onboard/:name` | Direct | Onboard form |
 | POST | `/onboard/:name/run` | Direct | Execute onboard |
-| GET | `/api/vms\|backups\|user-ids\|api-keys` | Direct | JSON APIs |
+| GET | `/api/vms\|user-ids\|api-keys` | Direct | JSON APIs |
 | GET | `/api/profile/keys` | Direct | List own MCP API keys (prefix only, no raw key) |
 | POST | `/api/profile/keys` | Direct | Create an MCP API key (raw key returned once) |
 | DELETE | `/api/profile/keys/:id` | Direct | Revoke own MCP API key |
@@ -305,8 +299,6 @@ When an HTMX request is detected (`req.headers['hx-request']`), the middleware a
 **`dockerLogs(vmName, tail)`** — Gets the last N log lines from a container: `docker logs --tail N <vmName>`.
 
 **`safeVmName(name)`** — Validates VM name against `VM_NAME_RE`, returns `null` if invalid.
-
-**`safeBackupPath(fileParam)`** — Resolves a backup file path, ensures it stays within `backups/` directory. Prevents path traversal.
 
 **`stripSensitiveMeta(meta)`** — Removes `ROOT_PASSWORD` from meta objects.
 
@@ -430,33 +422,15 @@ lifecycleCmdBg('start', agentName, runtimeRef, auditFn)
 
 ## 8. Backup System (`src/services/backup-manager.js`)
 
-### 8.1 Backup Agent (`backupAgent(agentName)`)
+**Removed (plan 26 pre-plan).** The generic archive system is gone: Paddock no
+longer runs `tar` over a driver's `dataDir`, extracts archives over the live
+data directory, or clones a PAD from an archive at create time.
+`backup-manager.js` is a stub that refuses every operation.
 
-1. Ensure `backups/` directory exists
-2. Generate timestamp: `YYYYMMDD_HHMMSS`
-3. Inside container: `openclaw backup create --output /tmp/<name>_<timestamp>.tar.gz`
-4. Copy to host: `docker cp <name>:/tmp/<file> backups/`
-5. Remove temp file inside container
-6. Detect agent type and save to `backups/backup-meta.json`
-
-### 8.2 Restore Agent (`restoreAgent(agentName, [backupFile]))`
-
-1. Find latest backup for agent (or use specified file)
-2. Validate backup type matches container type (type mismatch → error)
-3. Copy backup into container: `docker cp <backup> <name>:/tmp/restore.tar.gz`
-4. Extract inside container: `tar -xzf /tmp/restore.tar.gz -C /root/.openclaw`
-5. Remove temp archive
-6. Restart the container: `docker compose restart <name>`
-
-### 8.3 Type Detection
-
-Agent type is stored in `backup-meta.json` alongside each backup. If the meta file is missing, type is detected by parsing `meta.env` from the source `instances/` directory.
-
-### 8.4 Backup File Naming
-
-Format: `<vm-name>_<YYYYMMDD>_<HHMMSS>.tar.gz`
-
-Example: `vm-test_20260719_143022.tar.gz`
+Native per-driver backup/restore capabilities replace it in plan 26 Goal 0
+(OpenClaw archive create, Hermes full backup/import, session export for OpenCode,
+unsupported for PicoClaw/Codex). The Backups routes and MCP tools were removed
+with the generic system and are reintroduced only in Goal 0.
 
 ---
 
@@ -814,16 +788,9 @@ function filterAgents(query) {
 
 ### 11.13 Backups (per-agent) (`agents/backups.ejs`)
 
-**Route:** `GET /agents/:agentId/backups`
-
-**Rendered by:** HTMX lazy load from detail page
-
-**Components:**
-- "Create Backup" button
-- Backup table: File name, Size (hidden mobile), Created, Actions:
-  - Download link
-  - Restore (confirmation modal, full page reload after)
-  - Delete (confirmation modal, inline removal)
+**Removed (plan 26 pre-plan).** The per-agent backup tab no longer exposes
+Create/Restore/Download/Delete actions. It shows a maintenance empty state until
+plan 26 Goal 0 ships the native Backups tab.
 
 ### 11.14 Sessions (`agents/sessions.ejs`)
 
@@ -847,20 +814,14 @@ function filterAgents(query) {
 - Status badges: ok (green) / err (red)
 - Empty state: "No activity recorded yet"
 
-**Activity categories:** lifecycle (create/start/stop/restart), config (update/set-primary/set-fallback/remove-provider), backup (create/restore/delete), workspace (upload/save/rename/delete/create_folder/create_file)
+**Activity categories:** lifecycle (create/start/stop/restart), config (update/set-primary/set-fallback/remove-provider), workspace (upload/save/rename/delete/create_folder/create_file)
 
 ### 11.16 Global Backups Page (`views/backups.ejs`)
 
-**Route:** `GET /backups`
-
-**Content:**
-- Quick Backup buttons: one per agent, colored by status
-- Global backup table:
-  - Agent name (amber dot and "orphan" tag if VM no longer exists)
-  - Type badge (OpenClaw/PicoClaw)
-  - Created (date + time + relative time)
-  - Size
-  - Actions: Download, Delete
+**Removed (plan 26 pre-plan).** The global Backups page (`/backups`) no longer
+lists generic archives or offers Quick Backup / Download / Delete actions. It
+shows a maintenance empty state until plan 26 Goal 0 replaces it with a
+manifest-backed list.
 
 ### 11.17 Vault Page (`/vault`)
 
@@ -928,11 +889,6 @@ All defined in `src/routes/agents.js`.
 | POST | `/agents/:agentId/models/oauth-cancel` | Cancel OAuth flow |
 | GET | `/agents/:agentId/activity` | Activity timeline |
 | GET | `/agents/:agentId/sessions` | Session history |
-| GET | `/agents/:agentId/backups` | Backup list |
-| POST | `/agents/:agentId/backups/create` | Create backup |
-| POST | `/agents/:agentId/backups/restore` | Restore from latest backup |
-| GET | `/agents/:agentId/backups/download` | Download backup file |
-| POST | `/agents/:agentId/backups/delete` | Delete backup |
 
 ---
 
@@ -1070,7 +1026,7 @@ Database file: `src/data/app.db`
 |--------|------|-------|
 | `id` | INTEGER PK AUTO | |
 | `agent_id` | TEXT FK→agents | |
-| `category` | TEXT | `lifecycle`, `config`, `backup`, `workspace` |
+| `category` | TEXT | `lifecycle`, `config`, `workspace` |
 | `action` | TEXT | `create`, `start`, `stop`, `restart`, `update`, etc. |
 | `actor` | TEXT | Default: `system` |
 | `status` | TEXT | `ok`, `error` |
@@ -1149,7 +1105,6 @@ The full raw config (including secrets) is only sent to the Config and Messaging
 
 - `workspace.resolveSafePath()` (see section 9.1)
 - `safeVmName()` — validates VM name format
-- `safeBackupPath()` — restricts backup file access to `backups/` directory
 - Multer file filter — blocks dangerous extensions
 
 ### 15.6 API Keys (MCP bearer tokens) — `src/services/api-keys.js`
@@ -1323,7 +1278,6 @@ All significant actions are logged to the `activity_events` table via `registry.
 |----------|---------|
 | `lifecycle` | create, start, stop, restart |
 | `config` | update, set-primary, set-fallback, remove-provider |
-| `backup` | create, restore, delete |
 | `workspace` | upload, save, rename, delete, create_folder, create_file, move |
 
 Each event records: agent_id, category, action, status (ok/error), details (human-readable), and timestamp.
@@ -1413,8 +1367,6 @@ Flash is consumed on the next page render and cleared from session.
 All destructive actions use `VMF.confirm()`:
 - Stop agent (dashboard card only)
 - Remove provider (models tab)
-- Restore backup
-- Delete backup
 - Delete file (workspace)
 
 ---
@@ -1439,7 +1391,7 @@ For backward compatibility, the following routes still work (but redirect to the
 2. **A VM without `meta.env` is invisible** — no agent is created for it
 3. **Docker state is authoritative** for running/stopped status; filesystem state is authoritative for existence
 4. **Docker cache TTL is 3 seconds** — always force-refresh after mutations
-5. **Backups are agent-type-aware** — you cannot restore a PicoClaw backup into an OpenClaw container
+5. **Generic backups are removed** — no tar archives, no restore-from-archive, no create-time clone (plan 26 pre-plan)
 6. **paste-api-key destroys config** — always save and merge
 7. **Files starting with `.` are hidden** in the workspace browser
 8. **Terminals are real PTYs via Docker Engine API** — `Tty: true` allocates a PTY, so no `\r` → `\n` conversion is needed (see section 13 / `src/docs/terminal.md`)
@@ -1450,7 +1402,7 @@ For backward compatibility, the following routes still work (but redirect to the
 
 ## 25. MCP Server (`src/mcp.js`)
 
-The webui exposes its own MCP server (Streamable HTTP transport) at **`/mcp`** so external MCP clients — opencode, Claude Code, Cursor, Claude Desktop, or another OpenClaw instance — can connect **in** and manage PADs (list, start/stop, exec, workspace, logs, config, backups).
+The webui exposes its own MCP server (Streamable HTTP transport) at **`/mcp`** so external MCP clients — opencode, Claude Code, Cursor, Claude Desktop, or another OpenClaw instance — can connect **in** and manage PADs (list, start/stop, exec, workspace, logs, config).
 
 Today MCP also goes the other way: each PAD connects **out** to third-party MCP servers (the MCP tab in `AgentDetail.jsx` / `openclaw mcp add`). This endpoint is the reverse: paddock exposes its own tools.
 
@@ -1495,8 +1447,6 @@ Every tool returns `{ content: [{ type: 'text', text: <JSON> }] }` where `<JSON>
 | `paddock_workspace_list` | `name`, `path?` (default `/`) | directory listing via `services/workspace.listDir` |
 | `paddock_workspace_read` | `name`, `path` | `{ name, path, size, modified, content }` — text only, files > 256 KB rejected |
 | `paddock_workspace_write` | `name`, `path`, `content` | `{ name, path, size, modified }` — creates or overwrites |
-| `paddock_backup_list` | `name?` (filter) | `{ backups: [{ file, size, type, agentType, created }] }` — users without a filter get only their agents' backups |
-| `paddock_backup_create` | `name` | `{ name, archive }` via `backup-manager.backupAgent` (long-running) |
 | `paddock_start_agent` | `name` | `{ ok, name, status }` |
 | `paddock_stop_agent` | `name` | `{ ok, name, status }` |
 | `paddock_restart_agent` | `name` | `{ ok, name, status }` |

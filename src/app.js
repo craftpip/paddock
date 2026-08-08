@@ -15,7 +15,6 @@ const dockerClient = new Docker({ socketPath: '/var/run/docker.sock' });
 const vault = require('./services/vault');
 const registry = require('./services/agent-registry');
 const vm = require('./services/vm-manager');
-const backup = require('./services/backup-manager');
 const drivers = require('./services/drivers');
 const jobLog = require('./services/job-log');
 const apiKeys = require('./services/api-keys');
@@ -27,7 +26,6 @@ const { setupSession, getSessionFromCookie, requireAuth, requireAdmin, csrfToken
 const { rateLimit } = require('./middleware/rateLimit');
 
 const WORKSPACE = '/workspace';
-const BACKUPS_DIR = path.join(WORKSPACE, 'backups');
 const INSTANCES_DIR = path.join(WORKSPACE, 'instances');
 const SCRIPTS_DIR = path.join(WORKSPACE, 'scripts');
 const ENV_FILE = path.join(WORKSPACE, '.env');
@@ -39,12 +37,6 @@ const PREFIX_DASH = PREFIX + '-';
 function safeVmName(name) {
   if (!name || !VM_NAME_RE.test(name)) return null;
   return name;
-}
-
-function safeBackupPath(fileParam) {
-  const resolved = path.resolve(path.join(BACKUPS_DIR, path.basename(fileParam)));
-  if (!resolved.startsWith(BACKUPS_DIR)) return null;
-  return resolved;
 }
 
 /** Recursively replace secret-looking values with '[REDACTED]' in a config
@@ -221,86 +213,6 @@ async function getAllVms() {
     });
   }
   return vms;
-}
-
-function getBackups(vmName, userId, role) {
-  if (!fs.existsSync(BACKUPS_DIR)) return [];
-  let all = fs.readdirSync(BACKUPS_DIR).filter(f => f.endsWith('.tar.gz'));
-  let files = vmName ? all.filter(f => f.startsWith(vmName + '_')) : all;
-
-  if (role !== 'admin' && userId && !vmName) {
-    const db = getDb();
-    const myAgents = db.prepare('SELECT name FROM agents WHERE owner_id = ?').all(userId).map(r => r.name);
-    files = files.filter(f => myAgents.some(name => f.startsWith(name + '_')));
-  }
-  files.sort().reverse();
-  const meta = backup.loadMeta();
-  return files.map(f => {
-    const p = path.join(BACKUPS_DIR, f);
-    const parts = f.split('_');
-    const vm = parts[0];
-    const ts = parts.slice(1, 3).join('_').replace('.tar.gz', '');
-    const stat = fs.statSync(p);
-    const type = backup.getBackupType(f);
-    const containerExists = fs.existsSync(path.join(INSTANCES_DIR, vm));
-    const formatted = formatBackupTimestamp(ts);
-    const metaEntry = meta[f] || {};
-    return {
-      file: f,
-      path: p,
-      vm,
-      timestamp: ts,
-      displayDate: formatted.date,
-      displayTime: formatted.time,
-      relativeTime: formatted.relative,
-      size: stat.size,
-      size_hr: fmtSize(stat.size),
-      type,
-      containerExists,
-      agentType: metaEntry.agentType || metaEntry.type || '',
-    };
-  });
-}
-
-function fmtSize(size) {
-  for (const unit of ['B', 'KB', 'MB', 'GB']) {
-    if (size < 1024) return `${size.toFixed(1)}${unit}`;
-    size /= 1024;
-  }
-  return `${size.toFixed(1)}TB`;
-}
-
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-
-function formatBackupTimestamp(ts) {
-  const nums = ts.match(/\d+/g);
-  if (!nums || nums.length < 6) return { date: 'unknown', time: '', relative: '' };
-  const y = parseInt(nums[0]);
-  const mo = parseInt(nums[1]) - 1;
-  const d = parseInt(nums[2]);
-  const h = parseInt(nums[3] || 0);
-  const mi = parseInt(nums[4] || 0);
-  const s = parseInt(nums[5] || 0);
-  const ampm = h >= 12 ? 'PM' : 'AM';
-  const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
-  const pad = n => String(n).padStart(2, '0');
-  const date = new Date(y, mo, d, h, mi, s);
-  const now = new Date();
-  const diffMs = now - date;
-  const mins = Math.floor(diffMs / 60000);
-  const hours = Math.floor(diffMs / 3600000);
-  const days = Math.floor(diffMs / 86400000);
-  let relative;
-  if (mins < 1) relative = 'just now';
-  else if (mins < 60) relative = `${mins}m ago`;
-  else if (hours < 24) relative = `${hours}h ago`;
-  else if (days < 30) relative = `${days}d ago`;
-  else relative = `${Math.floor(days / 30)}mo ago`;
-  return {
-    date: `${MONTHS[mo]} ${d}, ${y}`,
-    time: `${h12}:${pad(mi)}:${pad(s)} ${ampm}`,
-    relative,
-  };
 }
 
 async function dockerExec(vmName, cmd, timeout = 30000) {
@@ -1650,10 +1562,6 @@ app.get('/api/agent-types/:type/commands', (req, res) => {
   res.json({ type: driver.type, commands: driver.commands, tuiCommand: driver.tuiCommand || 'openclaw' });
 });
 
-app.get('/api/backups', (req, res) => {
-  res.json(getBackups(null, req.session.userId, req.session.role));
-});
-
 // ─── Agent API ──────────────────────────────────────────────
 
 app.get('/api/agents/:name', (req, res) => {
@@ -2264,51 +2172,6 @@ app.delete('/api/agents/:name/terminal-sessions/:id', async (req, res) => {
   }
 });
 
-app.get('/api/agents/:name/backups', (req, res) => {
-  const backups = getBackups(req.params.name);
-  res.json({ backups });
-});
-
-app.post('/api/agents/:name/backups/create', async (req, res) => {
-  try {
-    await backup.backupAgent(req.params.name);
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/api/agents/:name/backups/download', (req, res) => {
-  const file = req.query.file;
-  if (!file) return res.status(400).json({ error: 'file required' });
-  const safeName = path.basename(file);
-  const filePath = path.join(BACKUPS_DIR, safeName);
-  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'file not found' });
-  res.download(filePath, safeName);
-});
-
-app.post('/api/agents/:name/backups/restore', async (req, res) => {
-  try {
-    const { file } = req.body;
-    if (!file) return res.status(400).json({ error: 'file required' });
-    await backup.restoreAgent(req.params.name, file);
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/agents/:name/backups/delete', (req, res) => {
-  const file = req.body.file;
-  if (!file) return res.status(400).json({ error: 'file required' });
-  const safeName = path.basename(file);
-  const backupPath = path.join(BACKUPS_DIR, safeName);
-  if (fs.existsSync(backupPath)) {
-    fs.unlinkSync(backupPath);
-  }
-  res.json({ ok: true });
-});
-
 // ─── API: Vault (encrypted key-value store) ────────────────
 
 app.get('/api/vault', (req, res) => {
@@ -2380,18 +2243,15 @@ app.get('/api/vault/:id/decrypt', requireAdmin, (req, res) => {
 // ─── API: Create Agent ──────────────────────────────────────
 
 app.post('/api/agents/create', async (req, res) => {
-  const { name, agent, backup_file, assign_to, workspace_host, workspace_dir } = req.body;
+  const { name, agent, assign_to, workspace_host, workspace_dir } = req.body;
   if (!name) return res.status(400).json({ error: 'Name is required' });
   if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
   if (registry.getAgent(name)) return res.status(409).json({ error: 'Agent already exists' });
-  if (backup_file && !safeBackupPath(backup_file)) return res.status(400).json({ error: 'Invalid backup file' });
 
   // Custom workspace bind (plan 24): validate BEFORE the 202 response so a bad
-  // mount aborts with 400 and nothing is created. Clone-from-backup never seeds
-  // a custom workspace — it is a restore flow, not an agent clone.
-  const isClone = !!backup_file;
+  // mount aborts with 400 and nothing is created.
   let wsMount = null;
-  if (!isClone && (workspace_host || workspace_dir)) {
+  if (workspace_host || workspace_dir) {
     try {
       wsMount = vm.validateWorkspaceMount(name, agent || 'openclaw', workspace_host, workspace_dir);
     } catch (e) {
@@ -2412,7 +2272,6 @@ app.post('/api/agents/create', async (req, res) => {
       await vm.createVm(name, {
         agent: agent || 'openclaw',
         mode: 'fresh',
-        skipSetup: isClone,
         workspaceHost: wsMount ? wsMount.host : '',
         workspaceDir: wsMount ? wsMount.container : '',
         onLog: log,
@@ -2432,13 +2291,6 @@ app.post('/api/agents/create', async (req, res) => {
           db.prepare('UPDATE agents SET owner_id = ? WHERE name = ?').run(ownerId, name);
         }
       } catch {}
-
-      // Clone from backup: import the archive into the container
-      if (isClone) {
-        step('restore', 'start');
-        await backup.restoreAgent(name, backup_file, log);
-        step('restore', 'end');
-      }
 
       registry.recordActivity(name, 'lifecycle', 'create', 'ok', `Agent created (type=${agent || 'openclaw'})`);
       jobLog.finish(job, true);

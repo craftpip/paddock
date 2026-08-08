@@ -10,13 +10,11 @@ const { z } = require('zod');
 
 const apiKeys = require('./services/api-keys');
 const registry = require('./services/agent-registry');
-const backup = require('./services/backup-manager');
 const workspace = require('./services/workspace');
 const logStore = require('./services/log-store');
 const { getDb } = require('./services/db');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
-const BACKUPS_DIR = path.join(WORKSPACE, 'backups');
 const PREFIX = process.env.CONTAINER_PREFIX || 'vm';
 const VM_NAME_RE = new RegExp('^' + PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-[a-zA-Z0-9][a-zA-Z0-9_-]*$');
 const MAX_READ_BYTES = 256 * 1024;
@@ -244,44 +242,6 @@ function registerTools(server) {
   );
 
   server.registerTool(
-    'paddock_backup_list',
-    {
-      title: 'List PAD backups',
-      description: 'List available backup archives. Admins see all backups; regular users see only their agents\' backups.',
-      inputSchema: {
-        name: z.string().optional().describe('PAD name to filter by'),
-      },
-    },
-    async ({ name }) => {
-      const user = currentUser();
-      if (name) {
-        requireAccess(user, name);
-      } else if (user.role !== 'admin') {
-        const myAgents = getDb().prepare('SELECT name FROM agents WHERE owner_id = ?').all(user.userId).map((r) => r.name);
-        return textResult({ backups: listBackups(myAgents) });
-      }
-      return textResult({ backups: listBackups(null) });
-    }
-  );
-
-  server.registerTool(
-    'paddock_backup_create',
-    {
-      title: 'Create PAD backup',
-      description: 'Create a new backup archive of a PAD and return the archive filename.',
-      inputSchema: { name: z.string().describe('PAD name') },
-    },
-    async ({ name }) => {
-      requireAccess(currentUser(), name);
-      requireAgent(name);
-      const archive = await backup.backupAgent(name);
-      return textResult({ name, archive });
-    }
-  );
-
-  // ─── Control ────────────────────────────────────────────────
-
-  server.registerTool(
     'paddock_start_agent',
     {
       title: 'Start PAD',
@@ -354,27 +314,6 @@ function registerTools(server) {
       return textResult({ name, stdout: r.stdout, stderr: r.stderr });
     }
   );
-}
-
-function listBackups(filterAgents) {
-  if (!fs.existsSync(BACKUPS_DIR)) return [];
-  let files = fs.readdirSync(BACKUPS_DIR).filter((f) => f.endsWith('.tar.gz'));
-  if (filterAgents) {
-    files = files.filter((f) => filterAgents.some((agentName) => f.startsWith(agentName + '_')));
-  }
-  files.sort().reverse();
-  const meta = backup.loadMeta();
-  return files.map((f) => {
-    const stat = fs.statSync(path.join(BACKUPS_DIR, f));
-    const metaEntry = meta[f] || {};
-    return {
-      file: f,
-      size: stat.size,
-      type: backup.getBackupType(f),
-      agentType: metaEntry.agentType || metaEntry.type || '',
-      created: metaEntry.created || null,
-    };
-  });
 }
 
 function authenticateRequest(req) {

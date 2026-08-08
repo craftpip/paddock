@@ -28,7 +28,6 @@ const CODEX = {
   configFile: 'config.toml',
   configFormat: 'toml',
   tuiCommand: 'codex',
-  backupTypeMarker: '',
 
   /** No gateway/onboard flow — codex config is created on first run. */
   setupSteps: [],

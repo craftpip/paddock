@@ -34,7 +34,6 @@ const OPENCLAW = {
   workspaceCapability: 'fixed',
   configFile: 'openclaw.json',
   tuiCommand: 'openclaw',
-  backupTypeMarker: '_openclaw-backup-cli_',
 
   /** Steps run (docker exec) after the container comes up at create time. */
   setupSteps: [

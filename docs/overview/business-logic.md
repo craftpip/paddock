@@ -124,23 +124,16 @@ All operations are async (fire-and-forget) with HTMX polling for status updates.
 
 ## Backup and Restore
 
-### Backup Flow (`backupAgent`)
+The generic archive system was **removed** (plan 26 pre-plan). Paddock no longer
+tars an agent's `dataDir`, extracts archives over the live data directory, or
+clones a PAD from an archive during creation. `backup-manager.js` is a stub that
+refuses every operation.
 
-1. `docker exec <name> tar -czf /tmp/<archive> -C <dataDir> .` — create tar.gz of the entire agent data directory from inside the container
-2. `docker cp <name>:/tmp/<archive> backups/<archive>` — copy to host
-3. `docker exec <name> rm /tmp/<archive>` — clean up temp file
-4. Save metadata to `backups/backup-meta.json`
-
-**File naming**: `<agentName>_<ISOtimestamp>.tar.gz`
-
-### Restore Flow (`restoreAgent`)
-
-1. `docker cp backups/<archive> <name>:/tmp/<archive>` — copy into container
-2. `docker exec <name> tar -xzf /tmp/<archive> -C <dataDir>` — extract
-3. `docker exec <name> rm /tmp/<archive>` — clean up
-4. `docker restart <name>` — restart container to pick up changes
-
-**Backup type detection**: `getBackupType()` checks if the filename contains `_openclaw-backup-cli_` (CLI backup) or not (legacy).
+Native per-driver backup/restore capabilities replace it in plan 26 Goal 0
+(OpenClaw archive create, Hermes full backup/import, session export for OpenCode,
+unsupported for PicoClaw/Codex). Until then the Backups pages show a maintenance
+empty state. Legacy archives in `backups/` stay on disk but are not served as
+restorable data.
 
 ---
 

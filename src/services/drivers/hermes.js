@@ -28,7 +28,6 @@ const HERMES = {
   configFile: 'config.yaml',
   configFormat: 'yaml',
   tuiCommand: 'hermes',
-  backupTypeMarker: '',
 
   /** `hermes setup --non-interactive` bootstraps the data dir (SOUL.md,
    *  cron/hooks/memories/sessions/skills) without a TTY. Verified: runs

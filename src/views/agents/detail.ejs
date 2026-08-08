@@ -141,11 +141,9 @@
   </div>
 
   <div id="tab-backups" class="tab-panel hidden">
-    <div hx-get="/agents/<%= agent.name %>/backups" hx-trigger="load" hx-swap="innerHTML">
-      <div class="space-y-3">
-        <div class="skeleton h-12 w-full"></div>
-        <div class="skeleton h-12 w-full"></div>
-      </div>
+    <div class="text-center py-12 text-slate-500">
+      <svg class="w-8 h-8 mx-auto mb-2 text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"/></svg>
+      <p class="text-sm">Backups are being rebuilt. Native driver backups are coming soon.</p>
     </div>
   </div>
 
