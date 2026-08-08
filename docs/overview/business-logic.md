@@ -200,25 +200,110 @@ Full user management and owner-based scoping docs: [`backend/user-management.md`
 
 ## WebSocket Terminal
 
+The terminal is the agent page's one interactive shell: a **persistent tmux
+session** inside the PAD container, attached over a real Docker PTY and shown
+with xterm.js. Sessions survive page reloads, mode switches, and webui
+restarts; only stopping the PAD kills them. See [`tabs/terminal.md`](../tabs/terminal.md) for the
+full write-up.
+
 ### Connection Flow
 
-1. Client opens WebSocket to `/ws/terminal/:name?cols=&rows=`
-2. Server verifies the container exists and is running (checks Docker state from cache)
-3. Server spawns `docker exec -i <name> sh` (note: `-i` without `-t` — no PTY)
-4. On connection, server sends container identity info
-5. Two-way piping:
-   - Client → Server: `ws.on('message')` → `docker.stdin.write(data)`
-   - Server → Client: `docker.stdout.on('data')` → `ws.send(data)`
+1. Client opens WebSocket to `/ws/terminal/:name?session=<id>&cols=&rows=` (`session` optional → `main`)
+2. Server resolves the session cookie and requires a valid authenticated session (admin, or owner of the PAD) **before** any Docker inspection or exec — skipped only when `AUTO_LOGIN=true`
+3. `ensureTmuxSession()` — idempotent per connect: lazy tmux install on old images (`apt-get install -y tmux`, cached in a `tmuxReady` set), run the session with `bash` when the image has it (falls back to the default shell), hook colored PS1 into `/root/.bashrc`, write `/root/.tmux.conf` (`smcup@:rmcup@` so output accumulates on the normal screen), create the session if missing (`tmux new-session -d`), bump `history-limit` to 10000
+4. Attach via dockerode: `container.exec({ Tty: true, Env: ['TERM=xterm-256color', 'LANG=C.UTF-8'], Cmd: ['tmux', 'attach-session', '-t', <id>] })` → `exec.start({ hijack: true })`. Docker allocates a **real PTY**
+5. Fresh connections first replay the pane history (`tmux capture-pane -t <session> -p -e -S -10000`, LF → CRLF) so scrollback survives refresh
+6. Two-way piping:
+   - Client → Server: raw keystroke bytes; resize arrives as a double-NUL-framed JSON control frame (`\x00\x00{type:'resize',cols,rows}`) — no `JSON.parse` on keystrokes
+   - Server → Client: demuxed PTY output (`dockerClient.modem.demuxStream`), UTF-8 decoded via `StringDecoder`
 
-### Non-PTY Quirk
+### Non-PTY quirk (solved by the real PTY)
 
-Without a PTY, there's no terminal line discipline to convert `\r` (carriage return, sent by xterm.js on Enter) to `\n` (newline). The shell hangs waiting for a recognized command terminator.
+The old implementation ran `docker exec -i <name> sh` without a PTY, so there
+was no terminal line discipline to convert `\r` to `\n` — xterm.js sends `\r`
+on Enter and the shell hung. The dockerode PTY + tmux path has no such issue:
+no `\r` → `\n` conversion is performed anywhere.
 
-**Fix**: All incoming WebSocket messages have `\r` replaced with `\n` before writing to docker stdin.
+### Sessions & single-client policy
 
-### Resize
+- Each terminal session = one tmux session in the container. `GET/DELETE
+  /api/agents/:name/terminal-sessions[/:id]` lists, switches, creates, and
+  kills them; names validate against `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`
+- Selection persists per agent in `localStorage` (`pad-term-session-<name>`)
+- Exactly **one attached client per session**: the newest connection wins,
+  older ones are kicked with close code 4001; `sweepStaleAttaches()` runs on
+  connect and close so orphaned `tmux attach-session` processes never pile up
+- Command log: `POST /api/agents/:name/command-log` `{ cmd, status, ts }` powers
+  the Activity tab
 
-When the xterm.js terminal is resized (via ResizeObserver), the frontend sends `docker exec resize` command to update the terminal dimensions inside the container.
+### Docked layout & CommandsPane
+
+- The dock is **always mounted** on the agent page, one per agent, at the
+  bottom of every mode. Commands is the default landing mode and takes the full
+  remaining height; other modes auto-collapse the dock to its header (session
+  stays alive). A drag handle resizes it and a header button fullscreens it.
+- Command pills in CommandsPane inject CLI commands into the terminal via
+  `run(cmd)` — **buttons paste commands, not APIs** (the Vault dropdown is the
+  deliberate exception; secrets live server-side). Tracked commands append a
+  `__PAD_DONE_<id>__` sentinel so `onCommandDone` fires when the command
+  actually finishes.
+
+---
+
+## Web Publishing
+
+Agents whose driver carries a `webApp` descriptor can publish their built-in
+web app on a host port. See [`tabs/web.md`](../tabs/web.md) for the full write-up and per-driver
+auth.
+
+### Publish flow (`POST /api/agents/:name/web`)
+
+1. Validate: `containerPort`/`hostPort` 1–65535; host port must not collide
+   with the agent's ssh port (`meta.env` `PORT`) or any other agent's published
+   port (`hostPortInUse()` scans instance compose files + live `docker ps`)
+2. 202 + SSE job (`update:<name>`, streamed into the Console popup):
+   - stop if running (`logStore.capture` first),
+   - write the boot hook `<dataDir>/start-web.sh` (removed when deactivating),
+   - `vm.applyWebServices(name, webService)` — writes `web.json`, regenerates
+     the compose with the `ports:` binding (or the socat door in peer mode),
+   - `docker compose up -d --no-deps --force-recreate` (+ the door service in
+     peer mode),
+   - exec the boot hook inside the container so the server is up immediately,
+   - poll the container port until it answers (fail → rollback),
+   - `recordActivity(name, 'web', 'publish'|'unpublish', 'ok'|'error', …)`
+3. On failure: restore old `web.json` + hook + compose, remove the door,
+   start the container again
+
+### The boot hook (why the service survives recreates)
+
+`--force-recreate` kills the container; only what the image entrypoint starts
+comes back. opencode's entrypoint is `tail -f /dev/null`, so a manually-started
+`opencode web` would be lost. The webui writes `start-web.sh` into the bind
+mount and the image `start.sh` sources it when present — so the web app
+auto-restarts on **every** recreate (Settings toggle, Update, network-fix
+recreate, host reboot).
+
+### The socat door (network peer case)
+
+Agents with `network_mode: container:<peer>` can't publish host ports (Docker
+refuses) and the peer's firewall may drop host-LAN inbound. A **door service**
+(`<name>-web`, alpine/socat) joins the peer's docker bridge, publishes the host
+port on its own, and forwards to the peer **by name** per connection — survives
+peer recreates with no changes of its own. `getPeerNetworkName(peer)` inspects
+the peer's `NetworkSettings.Networks`; a peer on `network_mode: host` gets a
+host-mode door forwarding to `127.0.0.1:<containerPort>`. Unpublish/rollback:
+`docker rm -f <name>-web` after the compose is regenerated without the door.
+
+### Network switch keeps the binding
+
+`vm.applySettings()` is async and reads the active `web.json` itself,
+regenerating the compose with `webService` + the resolved `webPeerNetwork` for
+the NEW network — it never drops a published web app on a network or
+docker-toggle change. The settings route re-applies the binding: force-recreates
+the door on a network change, drops it when leaving peer mode (BEFORE the agent
+recreate, so the new `ports:` bind doesn't hit "port already allocated"),
+re-execs the boot hook, and re-verifies the server.
+
 
 ---
 

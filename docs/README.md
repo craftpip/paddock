@@ -16,9 +16,11 @@ docs/
 │   ├── middleware.md                  ← auth + CSRF + rate limiter internals
 │   └── user-management.md            ← multi-user system, owner-based scoping, data access rules
 ├── pages/                            ← top-level page docs
-│   └── overview.md                   ← all 7 pages described
+│   └── overview.md                   ← all 8 pages described
 ├── tabs/                             ← Agent Detail page tabs
-│   ├── overview.md                   ← all 13 tabs described
+│   ├── overview.md                   ← all tabs described
+│   ├── terminal.md                   ← the docked interactive shell (tmux + xterm)
+│   ├── web.md                        ← publishing an agent's built-in web app on a host port
 │   ├── health.md                     ← diagnostic toolbox
 │   ├── mcp.md                        ← MCP server management
 │   ├── skills.md                     ← skill listing and management

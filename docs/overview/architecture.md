@@ -58,12 +58,32 @@ src/
 - Backend commands use `runCmd()` (execFile wrapper) or `spawn()` for streaming
 
 ### WebSocket Terminal
-1. Client opens WS to `/ws/terminal/:name`
-2. Server verifies container is running
-3. Spawns `docker exec -i :name sh` (no PTY)
-4. Client stdin → WebSocket → docker stdin
-5. Docker stdout → WebSocket → client terminal
-6. `\r` converted to `\n` on input (no terminal line discipline)
+
+The terminal is a persistent **tmux session** inside the PAD container,
+attached over a real Docker PTY (dockerode hijack stream). See
+`tabs/terminal.md` for the full write-up.
+
+1. Client opens WS to `/ws/terminal/:name?session=<id>`
+2. Server verifies auth + container state, `ensureTmuxSession()` (lazy tmux
+   install, PS1, tmux.conf, history-limit 10000)
+3. Attaches via `tmux attach-session -t <session>` with `Tty: true` — Docker
+   allocates a real PTY; closing the WS detaches but the session survives
+4. Fresh connections replay the pane history (`tmux capture-pane -S -10000`,
+   LF → CRLF) before attaching, so scrollback survives refresh
+5. Client keystrokes → WebSocket → docker stdin; resize sent as
+   double-NUL-framed JSON control frames
+6. Output is demuxed (dockerode `demuxStream`) and UTF-8 decoded — no `\r` →
+   `\n` conversion, the PTY line discipline handles CR/LF
+
+### Web Publishing
+
+Agents with a built-in web app (drivers with a `webApp` descriptor) can publish
+it on a host port. `POST /api/agents/:name/web` writes `web.json` + a boot hook
+(`<dataDir>/start-web.sh`, sourced by the image `start.sh`), regenerates the
+compose with the `ports:` binding, and recreates the container. On a network
+peer (`network_mode: container:`) a **socat door** service carries the host
+port and forwards to the peer by name. See `tabs/web.md`.
+
 
 ## Key Design Decisions
 

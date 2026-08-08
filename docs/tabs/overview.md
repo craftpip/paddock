@@ -1,145 +1,113 @@
 # Tabs Overview
 
-All tabs are defined inline in `src/client/src/pages/AgentDetail.jsx`. Each renders conditionally based on `currentTab` state from the URL hash.
+The agent detail page is a **terminal emulator with a GUI command picker**:
+one docked terminal that lives the whole time you're on the page, plus a few
+GUI modes that genuinely need a GUI. Modes are defined inline in
+`src/client/src/pages/AgentDetail.jsx` as the `MODES` array (order matters):
 
-## Overview Tab
+```js
+const MODES = [
+  { id: 'commands', label: 'Commands' },   // default landing mode
+  { id: 'workspace', label: 'Workspace' },
+  { id: 'config', label: 'Config' },
+  { id: 'web', label: 'Web' },
+  { id: 'logs', label: 'Logs' },
+  { id: 'sessions', label: 'Sessions' },
+  { id: 'activity', label: 'Activity' },
+  { id: 'settings', label: 'Settings' },
+]
+```
 
-File: `AgentDetail.jsx` — `OverviewTab` function (lines 334-375)
+`Commands` is the default landing mode — no hash, or an unknown hash, falls
+back to it. Mode content renders above a terminal dock that is **always
+mounted** (auto-collapses to its header outside Commands; the session stays
+alive). See [terminal.md](terminal.md) for the dock and shell.
 
-Shows:
-- Stat boxes: Type (openclaw/picoclaw/hermes), Runtime (agent type), Default Model
-- Quick links to Workspace and Terminal tabs
-- Recent activity (last 5 events)
+## Commands (default)
 
-## Workspace Tab
+File: `src/client/src/pages/agent/CommandsPane.jsx`.
 
-File: `AgentDetail.jsx` — `WorkspaceTab` function (lines 547-882)
+One wrapped flow of command pills grouped by area (Messaging, Models, MCP,
+Skills, Memory, Config, Other, Security, Doctor, Diagnostics), with a search
+box, a **Run TUI** button, and a right-aligned **Vault dropdown**. Clicking a
+pill injects the CLI command into the docked terminal via `run(cmd)` — buttons
+paste commands, not APIs (Vault is the deliberate exception). Groups + pills
+are hardcoded in `CommandsPane.jsx`, not a config file.
 
-Full file browser rooted at the agent's openclaw directory, defaults into `/workspace` subfolder.
+Per-driver command groups come from the driver `commands` field — see
+`/api/agent-types/<type>/commands`.
+
+## Workspace
+
+File: `AgentDetail.jsx` — workspace content.
+
+Full file browser rooted at the agent's data directory, defaults into the
+driver's `workspaceDir` (`/workspace` subfolder for openclaw).
 
 **Features:**
-- Breadcrumb navigation (openclaw / workspace / ...)
+- Breadcrumb navigation
 - Create file / create folder inline forms
 - Upload with drag-and-drop + progress bar
 - File table with name, size, modified, actions (DL, MV, RM)
-- Up button to go to parent directory
 - File viewer/editor modal:
-  - Syntax-aware editing for .json, .md, .js, .py, .sh, etc.
-  - JSON validation before save
+  - Syntax-aware editing, JSON validation before save
   - Unsaved changes indicator + Escape to close
-  - Download button
 - SessionStorage persists the last-visited path per agent
 
-**API:** `/api/agents/:name/workspace/*` (list, file, save, rename, delete, create-file, folder, upload, download, move)
+**API:** `/api/agents/:name/workspace/*` (list, file, save, rename, delete,
+create-file, folder, upload, download, move).
 
-## Terminal Tab
+## Config
 
-File: `AgentDetail.jsx` — `TerminalTab` function (lines 412-543)
+Raw editor for the agent's config file — the driver's `configFile`
+(`openclaw.json` for openclaw, `opencode.json`, `config.json` for picoclaw).
+For `configFormat: 'json'` drivers the backend parses + redacts secrets and the
+frontend validates JSON before save; for `yaml`/`toml`/verbatim formats
+(hermes, codex) the file is served/written verbatim and the tab skips JSON
+validation. Full config in a textarea, Save with validation, unsaved-changes
+indicator, restart note after save.
 
-Full xterm.js terminal connected via WebSocket to `docker exec -i :name sh`.
+## Web
 
-**Features:**
-- Connection status indicator
-- Font size controls (A- / A+)
-- Clear and Reconnect buttons
-- Dark theme with cyan cursor
-- 10000-line scrollback
-- Auto-fit on mount and resize (ResizeObserver)
-- `\r` → `\n` conversion for non-PTY docker exec
+Publishes the agent's built-in web app on a host port. Driver-driven form
+(container port, host port, per-driver auth) + live-status pill; the Apply
+button streams the recreate in a Console popup. Agents with no built-in web app
+(codex/claude) show a read-only empty state. See [web.md](web.md).
 
-## Logs Tab
+## Logs
 
-File: `AgentDetail.jsx` — `LogsTab` function (lines 886-919)
+Container logs viewer, streamed through the persistent log store
+(`instances/<name>/logs/container.log`, appended incrementally across
+recreates).
 
-Container logs viewer.
+**Features:** tail-count selector, auto-scroll toggle, log-level filter
+(All/Info/Warn/Error), text search, timestamp toggle, streaming dot indicator.
 
-**Features:**
-- Tail count selector (50, 100, 500, 1000)
-- Auto-scroll toggle
-- Streaming dot indicator
-- Monospace dark display
+## Sessions
 
-## Sessions Tab
+Lists chat sessions from the SQLite metadata store (`sessions` table).
 
-File: `AgentDetail.jsx` — `SessionsTab` function (lines 923-961)
+**Columns:** ID (truncated), Kind, Status (active/inactive), Model,
+Tokens In/Out. Empty state: "No sessions recorded yet."
 
-Lists chat sessions from SQLite metadata store.
+## Activity
 
-**Columns:** ID (truncated), Kind, Status (active/inactive), Model, Tokens In/Out.
+Event timeline from the SQLite activity log (`activity_events` table).
 
-Empty state: "No sessions recorded yet."
+**Columns:** Action (with color), Details, Timestamp. Status dot: green for ok,
+red for error. Empty state: "No activity recorded yet."
 
-## Config Tab
+Events tracked: start, stop, restart, create, delete, config updates, workspace
+operations, backup create/restore, web publish/unpublish.
 
-File: `AgentDetail.jsx` — `ConfigTab` function (lines 1256-1297)
+## Settings
 
-Raw JSON editor for the agent's config file — the driver's `configFile` (`openclaw.json` for openclaw, `opencode.json`, `config.json` for picoclaw). The filename comes from `GET /api/agents/:name/config` (`configFile` field).
+Container-level operations: image refresh (update), health checkup, docker
+access, network routing, web binding carryover, and delete. See
+[settings.md](settings.md).
 
-**Features:**
-- Full config in textarea
-- Save button with JSON validation
-- Unsaved changes indicator
-- Agent restart note after save
+## API Endpoints (app.js)
 
-## Models Tab
-
-File: `AgentDetail.jsx` — `ModelsTab` function (lines 1379-1458)
-
-Model provider management.
-
-**Features:**
-- Primary model display + set button (★)
-- Fallback model display + set button (⤵)
-- Provider list with models table
-- Per-model ★ Primary and ⤵ Fallback action buttons
-- Remove provider with confirmation
-- OAuth login flow for OpenAI, Google, GitHub Copilot
-
-**API:** set-primary, set-fallback, remove-provider, oauth-login, oauth-status, oauth-cancel
-
-## Messaging Tab
-
-File: `AgentDetail.jsx` — `MessagingTab` function (lines 1462-1507)
-
-Channel configuration viewer.
-
-**Features:**
-- Telegram channel display: bot token (masked), DM policy, allowlist
-- Raw config editor for channel config
-- Save button
-
-## Backups Tab
-
-File: `AgentDetail.jsx` — `BackupsTab` function (lines 1301-1375)
-
-Per-agent backup management.
-
-**Features:**
-- Create Backup button
-- Restore Latest button (with confirmation)
-- Backup file list with Delete
-- Status messages for operations
-
-**API:** create, restore, delete (via docker exec inside container)
-
-## Activity Tab
-
-File: `AgentDetail.jsx` — `ActivityTab` function (lines 965-1005)
-
-Event timeline from SQLite activity log.
-
-**Columns:** Action (with color), Details, Timestamp.
-Status dot: green for ok, red for error.
-Empty state: "No activity recorded yet."
-
-Events tracked: start, stop, restart, create, delete, config updates, workspace operations, backup create/restore.
-
-## Settings Tab
-
-File: `src/client/src/pages/agent/SettingsTab.jsx`
-
-Container-level operations: image refresh, health checkup, docker access, network routing, delete. See [settings.md](settings.md).
-
-**Cards:** Container Info, Update (SSE console, `build --pull` + force-recreate), Container Health Checkup (11 Docker-level checks, live SSE popup, status pill, stale network-peer banner), Allow docker toggle (host socket + CLI), Network dropdown (`network_mode: container:<name>`), Danger Zone delete.
-
-**API:** `GET /api/containers`, `GET/POST /api/agents/:name/settings`, `POST /api/agents/:name/update`, `GET /api/agents/:name/update-log` (SSE), `GET /api/agents/:name/health`, `POST /api/agents/:name/health-check`, `GET /api/agents/:name/health-log` (SSE), `POST /api/agents/:name/recreate`.
+All modern endpoints live under `/api/agents/:name/*` in `src/app.js`; POST
+routes require a CSRF token (`x-csrf-token` header). See the dedicated tab docs
+for per-tab routes.

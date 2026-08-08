@@ -1,11 +1,23 @@
-# Terminal — The Interactive Shell
+# Terminal Tab
 
-The terminal is the app's one interactive shell. It runs a **persistent tmux
-session** inside a PAD container and shows it in the browser with xterm.js.
-Everything you type in the pane runs live in that container — Enter, arrows,
-and raw-mode TUI apps (opencode, fzf, htop) behave exactly like a local
+The terminal is the agent page's one interactive shell. It runs a **persistent
+tmux session** inside the PAD container and shows it in the browser with
+xterm.js. Everything typed in the pane runs live in that container — Enter,
+arrows, and raw-mode TUI apps (opencode, fzf, htop) behave exactly like a local
 terminal. The session survives page reloads, mode switches, and even webui
 restarts; the only thing that kills it is stopping the PAD itself.
+
+## Core concept
+
+The agent page is a **terminal emulator with a GUI command picker**. The
+terminal is mounted **once per agent** at the page level and stays alive the
+whole time you're on that agent's page. It is docked at the bottom of every
+mode; Commands mode is the default landing mode and lets the terminal take the
+full remaining height. GUI elements (tables, cards, lists) are for **displaying
+information**; for **entering things, setting things up, configuring** the
+terminal flow takes over — clicking a button types the CLI command into the
+terminal and executes it, so the user sees every command, every output, every
+prompt.
 
 ## Where the code lives
 
@@ -16,7 +28,6 @@ restarts; the only thing that kills it is stopping the PAD itself.
 | Sessions API | `src/app.js` — `GET/DELETE /api/agents/:name/terminal-sessions[/:id]` | List, switch, create, kill tmux sessions. |
 | Command log | `src/app.js` — `POST /api/agents/:name/command-log` | Records run commands for the Activity tab. |
 | Used by | `src/client/src/pages/AgentDetail.jsx` | The agent page — docked terminal, always mounted, one per agent. |
-| Plan | `docs/tabs/terminal.md` | The canonical terminal write-up (absorbed from the removed `plans/10-terminal.md`). |
 
 There is exactly one terminal component in the app. If a page needs a shell,
 use `<Terminal>`. Do not copy the xterm/WebSocket setup elsewhere.
@@ -46,14 +57,17 @@ Setup is idempotent and runs on every connect (`ensureTmuxSession`):
 
 1. **Lazy tmux install** — tmux is in the base image, and installed on demand
    for older images (`apt-get install -y tmux`), cached in a `tmuxReady` set.
-2. **Colored PS1** — appended to `/root/.bashrc` (idempotent) because
+2. **Shell choice** — `tmux new-session` runs `bash` when the image has it,
+   falling back to the default shell otherwise (busybox-ash emits a doubled
+   blank line on Ctrl+C; bash does not).
+3. **Colored PS1** — appended to `/root/.bashrc` (idempotent) because
    tmux-created shells inherit the tmux server env, not the attach exec env.
-3. **`/root/.tmux.conf`** — `set -ga terminal-overrides ',xterm-256color:smcup@:rmcup@'`
+4. **`/root/.tmux.conf`** — `set -ga terminal-overrides ',xterm-256color:smcup@:rmcup@'`
    strips the alternate-screen enter/exit from the attach terminal, so output
    lands on the normal screen and accumulates in the scrollback instead of
    being discarded.
-4. **Create if missing** — `tmux new-session -d -s <session> -x <cols> -y <rows>`.
-5. **history-limit** — bumped to **10000** (`TMUX_HISTORY`) so the pane
+5. **Create if missing** — `tmux new-session -d -s <session> -x <cols> -y <rows>`.
+6. **history-limit** — bumped to **10000** (`TMUX_HISTORY`) so the pane
    history matches xterm's scrollback.
 
 Then it attaches with a real PTY allocated by Docker:
@@ -129,7 +143,8 @@ be multiplexed (e.g. TTY-only streams).
 
 The WS handler resolves the session cookie and requires a valid authenticated
 session **before** any container inspection or Docker exec. Non-admin users
-must own the PAD. Skipped only when `AUTO_LOGIN=true`.
+must own the PAD. Skipped only when `AUTO_LOGIN=true`. Anonymous WS connections
+get `ws.close(1008)`.
 
 ## Frontend — `<Terminal>` component
 
@@ -142,6 +157,9 @@ Props (current — see `Terminal.jsx` header for the full table):
 | `height` | string | `'70vh'` | CSS height of the terminal area. |
 | `minHeight` | string | `'480px'` | CSS min-height of the terminal area. |
 | `collapsed` | boolean | `false` | Hide the body; only the header bar shows. Session stays alive. |
+| `showCollapse` | boolean | `true` | Show the collapse chevron (needs `onToggleCollapse`). |
+| `onToggleCollapse` | fn | — | Fired when the chevron is clicked. |
+| `onCommandStart` / `onCommandDone` | fn | — | Fired when a tracked/locked injected command starts/finishes. |
 | `onConnChange` | fn | — | Called `true`/`false` as the WS connects/disconnects. AgentDetail gates every command button on it. |
 | `disabled` | boolean | `false` | Lock input from outside. Injected commands still run. |
 
@@ -172,7 +190,8 @@ The header dropdown lists the PAD's active tmux sessions (`GET
 ("+ New session" → next free `term-N`), or close (DELETE) a session. The
 selected session is persisted in `localStorage` (`pad-term-session-<name>`), so
 a page reload returns to the same session. Closing the current session falls
-back to `main`.
+back to `main`. Session names are validated against
+`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$` (`safeSessionName`).
 
 ## WebSocket protocol
 
@@ -183,7 +202,8 @@ Endpoint: `ws://<host>/ws/terminal/<name>?session=<id>&cols=<n>&rows=<n>`
   double-NUL prefix — `\x00\x00{ type: 'resize', cols, rows }`. The prefix
   can't be typed or pasted, so it never collides with shell input. The server
   only parses JSON after the prefix; everything else goes to the shell as raw
-  bytes (no `JSON.parse` on keystrokes).
+  bytes (no `JSON.parse` on keystrokes). A pasted value that merely *looks like*
+  a resize frame reaches the shell.
 - **Server → client:** raw PTY output as text frames (rendered verbatim by
   xterm.js), prefixed on a fresh connection by the tmux scrollback replay.
 
@@ -273,6 +293,31 @@ it finishes, the terminal auto-locks.
 >   termRef.current?.runCommand('git pull');
 > }}>
 > ```
+
+## Command flow (CommandsPane.jsx)
+
+Buttons are hardcoded per group in `src/client/src/pages/agent/CommandsPane.jsx`
+— not a config file. Every group's pills sit inline on one wrapped float-left
+flow; group labels are small chips, live data (primary/fallback model, MCP
+servers, skills) shows as neutral chips, and a search box filters all pills.
+Pill properties: `cmd`, `label`, `desc`, `confirm`, `danger`, plus dynamic
+`click()` handlers.
+
+- **Run TUI** — runs bare `openclaw` in the terminal.
+- **Prompt modal** (`usePrompt`) — for buttons that need an argument (logout
+  profile id, set model, MCP tools, skill search, etc.). Input + hint text,
+  confirm, then the command is injected.
+- **Vault dropdown** — right-aligned. Lists vault item names (`/api/vault`); on
+  click it fetches the decrypted value (`/api/vault/:id/decrypt`) and
+  `term.write()`s it into the terminal **without a newline** — the user presses
+  Enter. No echo, no timer, not logged.
+
+**Rule: action buttons paste commands, not APIs.** Every action button in the
+Commands pane runs an `openclaw ...` (or per-driver CLI) command through the
+terminal via `run(cmd)`. It must NOT call a backend action API — the terminal
+is the interface. Read-only GETs are fine (MCP server chips,
+`/agent-types/:type/commands` button groups). The Vault dropdown is the
+exception on purpose (secrets live server-side).
 
 ## Verifying it works
 

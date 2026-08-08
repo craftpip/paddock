@@ -12,7 +12,7 @@ import { useConfirm } from '../lib/confirm'
  *
  * This is the SINGLE source of truth for interactive shells in the app. If you
  * need a shell somewhere, import this component. Do NOT copy the xterm/WebSocket
- * setup anywhere else (see `plans/terminal.md` and `src/docs/terminal.md`).
+ * setup anywhere else (see `docs/tabs/terminal.md`).
  *
  * ─────────────────────────────────────────────────────────────────────────────
  *  Props
@@ -63,7 +63,7 @@ import { useConfirm } from '../lib/confirm'
  *
  * ─────────────────────────────────────────────────────────────────────────────
  *  Backend contract (see src/app.js — "Terminal WebSocket", and
- *  src/docs/terminal.md for the full write-up)
+ *  docs/tabs/terminal.md for the full write-up)
  * ─────────────────────────────────────────────────────────────────────────────
  *  - Connect:  ws://<host>/ws/terminal/<name>?session=<id>&cols=<n>&rows=<n>
  *  - Each session is a persistent **tmux session** inside the PAD container.

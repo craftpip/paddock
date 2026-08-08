@@ -454,6 +454,29 @@ src/
 | `AUTH_PASSWORD` | Yes | Password for session-based login |
 | `SESSION_SECRET` | No | Auto-generated if not set. Set for persistence across restarts |
 
+### Workspace Mount Guards (`GUARD_*`)
+
+Every safety check in `vm.validateWorkspaceMount()` (src/services/vm-manager.js) is a
+named guard, ON by default. Set `GUARD_<NAME>=0` in `.env` to disable that single
+check, then recreate the webui (`docker compose up -d --force-recreate paddock`).
+Guard names: `SYSTEM_DIRS`, `PROJECT_ROOT`, `APP_DIR`, `SRC_DIR`, `INSTANCES_PARENT`,
+`INSTANCE_DIR`, `AGENT_DATA`, `OTHER_AGENT`, `SYMLINK_ESCAPE`, `CONTAINER_PROTECTED`,
+`DATA_DIR_SWALLOW`, `CRITICAL_STATE`, `FIXED_WORKSPACE`.
+
+To let one agent mount the whole project root (`/www2/paddock`) as its workspace
+source (e.g. a "develop Paddock itself" agent), disable three guards — mounting the
+root triggers them in order:
+```bash
+GUARD_PROJECT_ROOT=0        # "The project root cannot be the workspace source"
+GUARD_INSTANCES_PARENT=0    # root contains instances/
+GUARD_AGENT_DATA=0          # root swallows instances/<pad>/<agent>
+```
+Remember what you're buying: that agent then has read/write over `src/`, `instances/`
+(every PAD's sessions/configs), `backups/`, and `.env` (VAULT_KEY, AUTH_PASSWORD,
+SESSION_SECRET). Guards are read from `process.env` at call time — no reload needed
+mid-process, but the webui restart picks up new `.env` values.
+
+
 ### Testing
 
 ```bash
@@ -975,6 +998,7 @@ ports/door vanished even though `web.json` still said active — the Web pill sh
 ## User Preferences
 
 - Planning/ideas files go in `/workspace/plans/` as separate `.md` files. When the user says they want to plan something or save an idea, write a new `.md` file in that folder.
+- **Remove a plan file after absorbing it.** Once a plan's implementation is done (features built, verified, learnings recorded in AGENTS.md), delete the `.md` plan file — don't leave stale "future work" docs around. `rm plans/<file>` (sudo if needed). If a plan is only partially absorbed, keep it and update it to reflect what's left.
 - Messaging page plan: `/workspace/plans/messaging-auth-panel.md` — terminal + credential panel for messaging setup (Telegram, Signal, GChat). Uses `openclaw channels add/login/remove` commands.
 - Model provider plan: `/workspace/plans/model-provider-panel.md` — terminal + API key panel for model provider setup. Uses `openclaw models auth paste-api-key/login/list` commands.
 - Backups page plan: `/workspace/plans/backups-page.md` — global backup listing; add File Name column to the table.
@@ -1115,3 +1139,34 @@ used to show URL only for HTTP transports and command only for stdio).
 ### Do Not Do (SPA rebuild gotcha)
 
 - **JSX/CSS edits need `cd src/client && npm run build` + `docker restart paddock`** — the bind mount serves the BUILT bundle from `src/public/`, so editing a `.jsx` file alone does nothing until rebuilt. Symptom: new className never appears in the DOM (computed styles unchanged). Always verify the class string made it into `src/public/assets/index-*.js` before browser-testing.
+
+## Custom Workspace Mount (plan 24 — 2026-08-08)
+
+- Create/Settings now offer a custom workspace bind: host source (`WORKSPACE_HOST`)
+  + container path (`WORKSPACE_DIR`), persisted in `meta.env`. Default (toggle
+  off) keeps the workspace as the `workspace/` subfolder of the data mount —
+  nothing moves.
+- `vm.validateWorkspaceMount(name, agent, host, dir)` (vm-manager.js:103) is the
+  single authority. Returns normalized `{ host, container, webuiVisible,
+  hostBrowsable }` or throws. Both-or-neither, relative must start with
+  `instances/`, absolute must not be a protected/system dir or swallow the data
+  mount or another agent's dir. For fixed-path drivers (openclaw, picoclaw) the
+  container destination must equal the driver's `workspaceDir`; opencode/codex
+  allow an editable container path; **hermes is excluded** (its data dir IS the
+  workspace — reject any workspace input).
+- `generateInstanceCompose()` reads `WORKSPACE_*` from meta and emits a second
+  volume line — so settings regen, web publish, reset, update, and the
+  `ensureInstanceBuilds` migration all preserve the mount with zero caller
+  changes. `createVm` must write the meta flags **before** `writeInstanceCompose`
+  (and mkdir the host source only when webui-visible; Docker auto-creates
+  invisible sources).
+- Host file browser availability keys off `hostBrowsable` (mount under
+  `workspace_root`), not merely on being under the project root. Non-browsable
+  mounts: Host scope hidden with a note; container scope works while running,
+  container-down shows a "start the agent to browse" empty state.
+- Settings GET carries `workspaceMount`; POST accepts `workspaceHost`/
+  `workspaceDir` (empty clears). Changing/clearing a mount never moves/deletes
+  files — new folder starts empty, old folder left on disk.
+- `removeVm()` removes the workspace dir only when `WORKSPACE_HOST` lies under
+  the project root. Backup/restore and "Clone from backup" do NOT include an
+  external workspace (documented limitation in the UI).

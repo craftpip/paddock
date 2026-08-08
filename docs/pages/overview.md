@@ -8,6 +8,30 @@ File: `Login.jsx`
 
 Simple login form with password input. Submit calls `POST /api/login`. On success redirects to `/agents`. On error shows error message. If the server has no AUTH_PASSWORD set, redirects immediately.
 
+## Profile (`/profile`)
+
+File: `Profile.jsx`
+
+Three cards: **Email**, **Change Password**, and **API Keys**.
+
+### API Keys card
+
+Per-user bearer keys for the paddock MCP server (`/mcp`). Keys inherit the
+user's webui role (admin → full fleet, user → owned agents only). See
+`backend/services.md` — API Keys and `overview/business-logic.md` — Paddock MCP
+Server Auth.
+
+- **Create**: inline form (name input + Create). On success a modal shows the
+  raw key **once** with a Copy button, plus copy-ready client configs (opencode
+  / Claude Code snippets with the real key filled in).
+- **List**: table of prefix (`pk_live_…`), name, created, last used (or
+  "never"), Revoke button.
+- **Revoke**: `DELETE /api/profile/keys/:id` (owner-scoped, confirm()).
+  Instant — the hash lookup fails on the next `/mcp` request.
+
+API: `GET/POST /api/profile/keys`, `DELETE /api/profile/keys/:id`
+(session + CSRF protected; always scoped to the caller's own keys).
+
 ## Dashboard (`/agents`)
 
 File: `Dashboard.jsx`
@@ -124,65 +148,37 @@ The SSE stream reconnects with `Last-Event-ID` on drop; polling `/create-status`
 
 File: `AgentDetail.jsx`
 
-Layout shell with sidebar and tabbed content. See `tabs/` docs for each tab.
+Layout shell with a sidebar, 8 mode tabs, and a docked terminal. See `tabs/`
+docs for each mode.
 
 Sidebar:
 - Agent avatar + name + display name
 - Status badge with pulse animation for transitions
 - Live CPU/MEM stats on running agents (hover for Network/Disk I/O)
 - Start/Stop/Restart buttons
-- Tab navigation list (13 tabs)
+- Mode navigation (8 tabs)
 
-Tabs are all defined inline in AgentDetail.jsx:
-| Tab | Component | Feature |
-|-----|-----------|---------|
-| overview | OverviewTab | Agent info, quick links, recent activity |
-| workspace | WorkspaceTab | File browser, editor, upload |
-| terminal | TerminalTab | xterm.js terminal |
-| logs | LogsTab | Container logs viewer |
-| sessions | SessionsTab | Chat session list |
-| config | ConfigTab | editor for the driver's config file (openclaw.json / opencode.json / config.json) |
-| mcp | McpTab | MCP server management |
-| skills | SkillsTab | Skill list, install, manage |
-| models | ModelsTab | Provider + model config |
-| messaging | MessagingTab | Telegram/channel config |
-| settings | SettingsTab | PAD info, backups (create/restore/delete), delete PAD |
-| health | HealthTab | Diagnostic command toolbox |
-| activity | ActivityTab | Event timeline |
+Modes are defined in the `MODES` array in AgentDetail.jsx:
+| Mode | Component | Feature |
+|------|-----------|---------|
+| commands | CommandsPane.jsx | Command pill flow + Run TUI + Vault dropdown (default landing mode) |
+| workspace | — | File browser, editor, upload |
+| config | — | Editor for the driver's config file (openclaw.json / opencode.json / config.yaml / config.toml) |
+| web | WebTab.jsx | Publish the agent's built-in web app on a host port |
+| logs | — | Container logs viewer (persistent log store) |
+| sessions | — | Chat session list |
+| activity | — | Event timeline |
+| settings | SettingsTab.jsx | Update, health checkup, docker, network, delete |
+
+The terminal is docked at the bottom of every mode — always mounted, one per
+agent, auto-collapsed outside Commands. See [tabs/terminal.md](../tabs/terminal.md).
 
 ## Settings Tab (per-PAD)
 
-Replaces the old Backups tab. Contains three sections:
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│  Settings — ozden                                          │
-│                                                               │
-│  PAD Info                                                   │
-│  ┌──────────────────────────────────────────────────────┐    │
-│  │  Name:    ozden                                    │    │
-│  │  Type:    openclaw                                    │    │
-│  │  Status:  running                                     │    │
-│  └──────────────────────────────────────────────────────┘    │
-│                                                               │
-│  Backups                                     [Create Backup]  │
-│                                             [Restore Latest]  │
-│  ┌──────────────────────────────────────────────────────┐    │
-│  │  ramsey_20260719_004959.tar.gz    1.2 GB  [×]    │    │
-│  │  ramsey_20260719_033154.tar.gz    850 MB  [×]    │    │
-│  └──────────────────────────────────────────────────────┘    │
-│                                                               │
-│  ┌─ Danger Zone ─────────────────────────────────────────┐    │
-│  │                                                        │    │
-│  │  [ Delete PAD ]                                      │    │
-│  │  Deletes the container and all its data permanently.   │    │
-│  └────────────────────────────────────────────────────────┘    │
-└──────────────────────────────────────────────────────────────┘
-```
-
-- **PAD Info** — name, type, status summary
-- **Backups** — Create Backup button, Restore Latest, list of archives with Download/Restore/Delete per row
-- **Danger Zone** — Delete PAD button with confirmation warning
+Container-level operations on the agent detail page: image refresh (Update),
+container health checkup, docker access, network routing, and delete. Runs as
+SSE-streamed background jobs with a Console popup. See
+[tabs/settings.md](../tabs/settings.md) for the full contract.
 
 ## Global Backups (`/backups`)
 

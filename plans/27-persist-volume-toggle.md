@@ -1,5 +1,32 @@
 # Persistent Container Storage Toggle (plan 27)
 
+> ## ⛔ BLOCKED — cannot work (2026-08-08) — plan dropped
+>
+> **The core mechanism is impossible in Docker.** The container's root
+> filesystem *is* the writable layer — there is no place a volume can sit
+> "under" `/`. Docker has no way to overlay a volume on top of the rootfs, so
+> "installs and `/etc` survive a recreate" cannot be done with a volume mounted
+> at `/`.
+>
+> **Verified live** on `pad-opencode-test3`: flag wrote, compose regenerated,
+> and the recreate failed at exactly the volume mount. The rollback behaved
+> correctly (PERSIST reverted, container back Up, no config damage); the only
+> artifact was an orphaned `pad-opencode-test3_root` volume, which was removed.
+>
+> **Decision:** per the user's instruction, the plan is dropped and **all
+> implementation was reverted** (meta flag, compose emission, applySettings /
+> rollback, health-check skip, Settings tab toggle + dialogs, CreateAgent
+> checkbox, tests, docs — all rolled back; only the unrelated `GUARD_*`
+> workspace-mount guards, a separate change, remain). The checkbox list below is
+> left as-is for historical reference.
+>
+> **Alternative considered (rejected):** `docker commit <pad> paddock-persist-<pad>`
+> into a per-agent image and point the compose `image:` at it (toggle off →
+> back to `paddock-vm-<type>:latest`; reset → delete the image; re-commit to
+> capture later changes). It genuinely preserves OS-layer state, at the cost of a
+> stored image per PAD. Not pursued — the app data dir already persists via bind
+> mounts, and OS-layer persistence wasn't worth the image-snapshot model.
+
 ## Goal
 
 A per-agent **toggle** in the Settings tab that makes *all* container changes

@@ -1126,7 +1126,7 @@ Endpoints (session + CSRF protected):
 | POST | `/api/profile/keys` | Create a key `{ name, scopes? }` → returns `{ key: 'pk_live_…', … }`, the only time the raw key is visible |
 | DELETE | `/api/profile/keys/:id` | Revoke (delete) an own key; 404 for unknown/foreign ids |
 
-Created 2026-08-04, plan `plans/11-mcp-api-keys.md`.
+Created 2026-08-04, plan `plans/11-mcp-api-keys.md`. Absorbed into `docs/backend/services.md` — API Keys and `docs/pages/overview.md` — Profile; the plan file is removed.
 
 ---
 
@@ -1517,7 +1517,7 @@ Claude Code (`~/.claude.json` or project `.mcp.json`):
 }
 ```
 
-API keys are minted per-user in **Profile → API Keys**. See also `plans/11-mcp-api-keys.md` (key lifecycle) — the original implementation plan (formerly `plans/06-paddock-own-mcp.md`) is absorbed into this section.
+API keys are minted per-user in **Profile → API Keys**. Key lifecycle is documented in `docs/backend/services.md` — API Keys and `docs/overview/business-logic.md` — Paddock MCP Server Auth (the plan file is removed).
 
 
 ---
