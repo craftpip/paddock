@@ -31,27 +31,36 @@ describe('MCP Server - Handshake', () => {
     if (server) await server.close();
   });
 
-  it('initializes and lists paddock_* tools', async () => {
+  it('initializes and lists the tools', async () => {
     const result = await client.listTools();
     const names = result.tools.map((t) => t.name);
-    assert.ok(names.includes('paddock_list_agents'), 'has paddock_list_agents');
-    assert.ok(names.includes('paddock_get_agent'));
-    assert.ok(names.includes('paddock_start_agent'));
-    assert.ok(names.includes('paddock_stop_agent'));
-    assert.ok(names.includes('paddock_restart_agent'));
-    assert.ok(names.includes('paddock_exec'));
-    assert.ok(names.includes('paddock_workspace_list'));
-    assert.ok(names.includes('paddock_workspace_read'));
-    assert.ok(names.includes('paddock_workspace_write'));
-    assert.ok(names.includes('paddock_agent_logs'));
-    assert.ok(names.includes('paddock_config_get'));
+    assert.ok(names.includes('list_agents'), 'has list_agents');
+    assert.ok(names.includes('get_agent'));
+    assert.ok(names.includes('start_agent'));
+    assert.ok(names.includes('stop_agent'));
+    assert.ok(names.includes('restart_agent'));
+    assert.ok(names.includes('recreate'));
+    assert.ok(names.includes('update'));
+    assert.ok(names.includes('delete_agent'));
+    assert.ok(names.includes('exec'));
+    assert.ok(names.includes('workspace_list'));
+    assert.ok(names.includes('workspace_read'));
+    assert.ok(names.includes('workspace_write'));
+    assert.ok(names.includes('agent_logs'));
+    assert.ok(names.includes('config_get'));
   });
 
   it('tool schemas carry name params', async () => {
     const result = await client.listTools();
-    const exec = result.tools.find((t) => t.name === 'paddock_exec');
+    const exec = result.tools.find((t) => t.name === 'exec');
     assert.ok(exec.inputSchema.properties.command, 'exec has command param');
     assert.ok(exec.inputSchema.properties.name, 'exec has name param');
+  });
+
+  it('get_agent carries an optional logs param', async () => {
+    const result = await client.listTools();
+    const get = result.tools.find((t) => t.name === 'get_agent');
+    assert.ok(get.inputSchema.properties.logs, 'get_agent has logs param');
   });
 });
 

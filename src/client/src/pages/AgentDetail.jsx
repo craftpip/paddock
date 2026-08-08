@@ -18,7 +18,6 @@ const MODES = [
   { id: 'config', label: 'Config' },
   { id: 'web', label: 'Web & Ports' },
   { id: 'logs', label: 'Logs' },
-  { id: 'sessions', label: 'Sessions' },
   { id: 'activity', label: 'Activity' },
   { id: 'settings', label: 'Settings' },
 ]
@@ -682,7 +681,7 @@ function WorkspaceTab({ agent }) {
                     <td className="px-4 py-2 text-accent-text" colSpan={4}>&larr; Up</td>
                   </tr>
                 )}
-                {listing.entries?.filter((e) => !e.name.startsWith('.')).map((entry) => {
+                {listing.entries?.map((entry) => {
                   const entryPath = path === '/' ? '/' + entry.name : path + '/' + entry.name
                   return (
                     <tr key={entry.name} className="border-b border-line-faint/50 hover:bg-panel/30 group">

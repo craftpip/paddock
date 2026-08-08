@@ -16,12 +16,14 @@ describe('vm-manager - Web door compose generation', () => {
     });
     const compose = JSON.parse(yaml);
     const agentService = compose.services['pad-test'];
-    const door = compose.services['pad-test-web'];
+    const door = compose.services['pad-test-door'];
     assert.ok(!agentService.ports, 'agent has no ports block when peer-networked');
     assert.ok(door, 'door service present');
     assert.strictEqual(door.image, 'alpine/socat');
-    assert.deepStrictEqual(door.ports, ['43818:8080']);
-    assert.ok(door.command.includes('TCP:gluetun-global:8080'));
+    assert.deepStrictEqual(door.ports, ['43818:43818', '22001:22001'], 'identity host:host map');
+    const cmd = door.entrypoint.join(' ');
+    assert.ok(cmd.includes('TCP:gluetun-global:8080'), 'web port forwarded to the peer');
+    assert.ok(cmd.includes('TCP:gluetun-global:22'), 'SSH port forwarded to the peer');
     assert.strictEqual(compose.networks.webbridge.name, 'gluetun_default');
     assert.strictEqual(agentService.network_mode, 'container:gluetun-global');
   });
@@ -32,14 +34,20 @@ describe('vm-manager - Web door compose generation', () => {
     });
     const compose = JSON.parse(yaml);
     assert.deepStrictEqual(compose.services['pad-test'].ports, ['22001:22', '43818:8080']);
-    assert.ok(!compose.services['pad-test-web'], 'no door on the default network');
+    assert.ok(!compose.services['pad-test-door'], 'no door on the default network');
   });
 
-  it('skips SSH port publish when peer-networked (docker constraint)', () => {
+  it('routes the SSH port through the door when peer-networked', () => {
     const yaml = vm.generateInstanceCompose('pad-test', 'opencode', 'pw', '22001', {
       network: 'gluetun-global',
+      webPeerNetwork: 'gluetun_default',
     });
-    assert.ok(!/ports:/.test(yaml));
+    const compose = JSON.parse(yaml);
+    assert.ok(!compose.services['pad-test'].ports, 'agent itself never publishes ports in peer mode');
+    const door = compose.services['pad-test-door'];
+    assert.ok(door, 'door carries the SSH port');
+    assert.deepStrictEqual(door.ports, ['22001:22001']);
+    assert.ok(door.entrypoint.join(' ').includes('TCP:gluetun-global:22'));
   });
 
   it('emits a host-network door when the peer has no docker network', () => {
@@ -48,9 +56,9 @@ describe('vm-manager - Web door compose generation', () => {
       webService: { containerPort: 8080, hostPort: '43818' },
       webPeerNetwork: '',
     });
-    const door = JSON.parse(yaml).services['pad-test-web'];
+    const door = JSON.parse(yaml).services['pad-test-door'];
     assert.strictEqual(door.network_mode, 'host');
-    assert.ok(door.command.includes('TCP:127.0.0.1:8080'));
+    assert.ok(door.entrypoint.join(' ').includes('TCP:127.0.0.1:8080'));
   });
 });
 
@@ -80,16 +88,39 @@ describe('vm-manager - applySettings keeps a published web app alive', () => {
     yaml = fs.readFileSync(path.join(instDir, 'docker-compose.yml'), 'utf8');
     const compose = JSON.parse(yaml);
     assert.ok(!compose.services['pad-x'].ports, 'no ports block in peer mode');
-    assert.ok(compose.services['pad-x-web'], 'door present in peer mode');
-    assert.ok(compose.services['pad-x-web'].command.startsWith('TCP-LISTEN:8080,'), 'door forwards to a TCP target');
+    assert.ok(compose.services['pad-x-door'], 'door present in peer mode');
+    assert.ok(compose.services['pad-x-door'].entrypoint.join(' ').includes('TCP-LISTEN:'), 'door forwards to a TCP target');
   });
 
-  it('regen without an active binding stays doorless', async () => {
+  it('regen without published ports stays doorless', async () => {
     const instDir = path.join(TMP, 'instances', 'pad-x');
     fs.rmSync(path.join(instDir, 'web.json'));
-    await vm.applySettings('pad-x', { allowDocker: false, network: 'gluetun-global' });
+    // Clear the SSH port too so nothing is published — with a published port in
+    // peer mode the door legitimately exists.
+    await vm.applySettings('pad-x', { allowDocker: false, network: 'gluetun-global', sshPort: '' });
     const yaml = fs.readFileSync(path.join(instDir, 'docker-compose.yml'), 'utf8');
-    assert.ok(!yaml.includes('pad-x-web'), 'no door without a web binding');
+    assert.ok(!yaml.includes('pad-x-door'), 'no door without published ports');
+    fs.rmSync(TMP, { recursive: true, force: true });
+  });
+
+  it('updates the SSH host port and persists it in meta.env', async () => {
+    const instDir = path.join(TMP, 'instances', 'pad-x');
+    fs.mkdirSync(instDir, { recursive: true });
+    fs.writeFileSync(path.join(instDir, 'meta.env'), 'AGENT=opencode\nPORT=22001\nROOT_PASSWORD=pass\n');
+    fs.rmSync(path.join(instDir, 'web.json'), { force: true });
+
+    // Change the SSH port (on the default network it's published directly).
+    await vm.applySettings('pad-x', { allowDocker: false, network: '', sshPort: '22222' });
+    let yaml = fs.readFileSync(path.join(instDir, 'docker-compose.yml'), 'utf8');
+    assert.ok(yaml.includes('"22222:22"'), 'new SSH port published');
+    assert.ok(!yaml.includes('"22001:22"'), 'old SSH port gone');
+    assert.ok(fs.readFileSync(path.join(instDir, 'meta.env'), 'utf8').includes('PORT=22222'), 'meta.env PORT updated');
+
+    // Un-expose: the ports block disappears and PORT clears.
+    await vm.applySettings('pad-x', { allowDocker: false, network: '', sshPort: '' });
+    yaml = fs.readFileSync(path.join(instDir, 'docker-compose.yml'), 'utf8');
+    assert.ok(!yaml.includes(':22"'), 'no published SSH port when un-exposed');
+    assert.ok(!fs.readFileSync(path.join(instDir, 'meta.env'), 'utf8').includes('PORT='), 'meta.env PORT cleared');
     fs.rmSync(TMP, { recursive: true, force: true });
   });
 });
@@ -440,10 +471,12 @@ describe('vm-manager - extra volumes & ports (plan 28)', () => {
     });
   });
 
-  it('validateExtraPorts rejects any port while peer-networked', () => {
+  it('validateExtraPorts allows ports while peer-networked (door carries them)', () => {
     withTmp((TMP, vm) => {
-      assert.throws(() => vm.validateExtraPorts([{ host: 9000, container: 80 }], { network: 'gluetun-global' }),
-        /joins gluetun-global's network/);
+      assert.deepStrictEqual(
+        vm.validateExtraPorts([{ host: 9000, container: 80 }], { network: 'gluetun-global' }),
+        [{ host: '9000', container: '80' }],
+        'ports pass validation in peer mode');
       assert.deepStrictEqual(vm.validateExtraPorts([], { network: 'gluetun-global' }), []);
     });
   });
@@ -463,7 +496,7 @@ describe('vm-manager - extra volumes & ports (plan 28)', () => {
     });
   });
 
-  it('peer-networked agents drop all ports (SSH + extras) and mount extras still', () => {
+  it('peer-networked agents publish SSH + extras through the door', () => {
     withTmp((TMP, vm) => {
       const instDir = path.join(TMP, 'instances', 'pad-vp2');
       fs.mkdirSync(instDir, { recursive: true });
@@ -471,11 +504,17 @@ describe('vm-manager - extra volumes & ports (plan 28)', () => {
         'AGENT=opencode\nROOT_PASSWORD=pw\nPORT=22001\nNETWORK=gluetun-global\n' +
         'EXTRA_VOLUMES=[{"host":"/mnt/data","container":"/root/.opencode/data/extra"}]\n' +
         'EXTRA_PORTS=[{"host":"9000","container":"80"}]\n');
-      const yaml = vm.generateInstanceCompose('pad-vp2', 'opencode', 'pw', '22001', { network: 'gluetun-global' });
+      const yaml = vm.generateInstanceCompose('pad-vp2', 'opencode', 'pw', '22001', { network: 'gluetun-global', webPeerNetwork: 'gluetun_default' });
       const compose = JSON.parse(yaml);
-      assert.ok(!compose.services['pad-vp2'].ports, 'no ports in peer mode');
+      assert.ok(!compose.services['pad-vp2'].ports, 'no ports on the agent in peer mode');
       assert.ok(compose.services['pad-vp2'].volumes.includes('/mnt/data:/root/.opencode/data/extra'), 'extra volume kept in peer mode');
       assert.strictEqual(compose.services['pad-vp2'].network_mode, 'container:gluetun-global');
+      const door = compose.services['pad-vp2-door'];
+      assert.ok(door, 'door carries SSH + extra ports');
+      assert.deepStrictEqual(door.ports, ['22001:22001', '9000:9000'], 'identity host:host map');
+      const cmd = door.entrypoint.join(' ');
+      assert.ok(cmd.includes('TCP:gluetun-global:22'), 'SSH forwarded to the peer');
+      assert.ok(cmd.includes('TCP:gluetun-global:80'), 'extra port forwarded to the peer');
     });
   });
 

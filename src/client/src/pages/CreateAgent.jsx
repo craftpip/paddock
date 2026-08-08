@@ -22,6 +22,13 @@ function fmtTime(ts) {
   }
 }
 
+function randomPassword() {
+  const chars = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+  const buf = new Uint32Array(16)
+  crypto.getRandomValues(buf)
+  return Array.from(buf, (n) => chars[n % chars.length]).join('')
+}
+
 export default function CreateAgent() {
   const navigate = useNavigate()
   const { name: urlName } = useParams()
@@ -30,7 +37,6 @@ export default function CreateAgent() {
   const [agentTypes, setAgentTypes] = useState([])
   const [prefix, setPrefix] = useState('vm')
   const [hostWorkspaceRoot, setHostWorkspaceRoot] = useState('')
-  const [wsEnabled, setWsEnabled] = useState(false)
   const [wsHost, setWsHost] = useState('')
   const [wsDir, setWsDir] = useState('')
 
@@ -38,10 +44,16 @@ export default function CreateAgent() {
   const [containers, setContainers] = useState([])
   const [allowDocker, setAllowDocker] = useState(false)
   const [network, setNetwork] = useState('')
-  const [sshEnabled, setSshEnabled] = useState(false)
-  const [sshPort, setSshPort] = useState('')
   const [extraVolumes, setExtraVolumes] = useState([])
   const [extraPorts, setExtraPorts] = useState([])
+  const [showAdvanced, setShowAdvanced] = useState(false)
+
+  // SSH expose
+  const [sshEnabled, setSshEnabled] = useState(false)
+  const [sshPort, setSshPort] = useState('')
+  const [sshCport, setSshCport] = useState('22')
+  const [sshPassword, setSshPassword] = useState('')
+  const [showSshPw, setShowSshPw] = useState(false)
 
   const [phase, setPhase] = useState(() => (urlName ? 'creating' : 'idle')) // idle | creating | done | failed
   const [lines, setLines] = useState([])
@@ -93,6 +105,11 @@ export default function CreateAgent() {
 
   const fullName = `${prefix}-${agentType}-${name || '...'}`
 
+  // Friendly name validation: lowercase letters, digits and dashes only.
+  const nameIssue = name.trim()
+    ? (/^[a-z0-9][a-z0-9-]*$/.test(name.trim()) ? '' : 'Use lowercase letters, numbers and dashes only')
+    : ''
+
   // ─── Custom workspace (plan 24) ────────────────────────────
   const wsCapability = currentType?.workspaceCapability || 'fixed'
   const wsHidden = wsCapability === 'none'
@@ -103,18 +120,6 @@ export default function CreateAgent() {
   // relative `instances/…` form resolves under the project root on submit.
   const defaultWsHost = `instances/${prefix}-${agentType}-${name || '<name>'}/${agentType}/workspace`
   const defaultWsDir = driverWsDir
-
-  function toggleWs(on) {
-    setWsEnabled(on)
-    if (on) {
-      // Host field starts EMPTY — the default path is shown as its placeholder
-      // (live-updating with the typed name), never pre-filled. An empty field
-      // submits the default; a typed value overrides it. This keeps it obvious
-      // whether the user edited the field or not.
-      setWsHost('')
-      setWsDir(defaultWsDir)
-    }
-  }
 
   function wsHostIssue(h) {
     const v = (h || '').trim()
@@ -203,10 +208,22 @@ export default function CreateAgent() {
   // inside this agent's data folder (instances/<name>/<agent>/…). An empty
   // field means the default `instances/…` path is used (resolved on submit).
   const agentDataHost = hostWorkspaceRoot ? `${hostWorkspaceRoot}/instances/${prefix}-${agentType}-${name || ''}/${agentType}` : ''
-  const wsHostEff = wsEnabled ? (wsHost.trim() || defaultWsHost) : ''
+  const wsHostEff = wsHost.trim()
   const wsBrowsable = agentDataHost && wsHostEff.startsWith(agentDataHost + '/')
-  const wsHostErr = wsEnabled ? wsHostIssue(wsHost) : ''
-  const wsDirErr = wsEnabled ? wsDirIssue(wsDir) : ''
+  const wsHostErr = wsHostIssue(wsHost)
+  const wsDirErr = wsDirIssue(wsDir)
+  const wsActive = !!wsHostEff
+
+  // Number of optional settings currently active, shown as a badge on the
+  // disclosure toggle so it's obvious the form isn't empty when collapsed.
+  const advancedCount = [
+    wsActive,
+    allowDocker,
+    network,
+    sshEnabled,
+    extraVolumes.some((v) => v.host && v.container),
+    extraPorts.some((p) => p.host),
+  ].filter(Boolean).length
 
   function closeStream() {
     if (esRef.current) {
@@ -286,6 +303,16 @@ export default function CreateAgent() {
       setError('Fix the highlighted additional volume / port fields before creating')
       return
     }
+    if (sshEnabled) {
+      if (sshPort.trim() && portIssue(sshPort)) {
+        setError(portIssue(sshPort) + ' (SSH host port)')
+        return
+      }
+      if (sshCport.trim() && portIssue(sshCport)) {
+        setError(portIssue(sshCport) + ' (SSH container port)')
+        return
+      }
+    }
     const vols = extraVolumes
       .filter((v) => v.host && v.host.trim() && v.container && v.container.trim())
       .map((v) => ({
@@ -296,6 +323,7 @@ export default function CreateAgent() {
     const ports = extraPorts
       .filter((p) => p.host && p.host.trim())
       .map((p) => ({ host: p.host.trim(), container: p.container.trim() }))
+    const sshCportTrim = sshCport.trim()
 
     try {
       const result = await api('/api/agents/create', {
@@ -303,12 +331,14 @@ export default function CreateAgent() {
         body: {
           name: `${prefix}-${agentType}-${name}`,
           agent: agentType,
-          workspace_host: wsEnabled ? (wsHost.trim() || defaultWsHost) : '',
-          workspace_dir: wsEnabled ? wsDir.trim() : '',
+          workspace_host: wsHost.trim(),
+          workspace_dir: wsHost.trim() ? (wsDir.trim() || defaultWsDir) : '',
           allowDocker,
           network,
           sshEnabled,
-          port: sshEnabled ? (sshPort.trim() || '') : '',
+          port: sshEnabled ? sshPort.trim() : '',
+          sshContainerPort: sshEnabled && sshCportTrim ? sshCportTrim : '',
+          password: sshEnabled ? sshPassword.trim() : '',
           extraVolumes: vols,
           extraPorts: ports,
         },
@@ -338,15 +368,20 @@ export default function CreateAgent() {
         <span className="text-ink">Create Agent</span>
       </nav>
 
-      <h1 className="text-2xl font-bold mb-8">Create Agent</h1>
+      <h1 className="text-2xl font-bold mb-2">Create Agent</h1>
+      <p className="text-sm text-ink-dim mb-8">
+        Only a name is required — everything else is optional and can be changed later from the agent's settings.
+      </p>
 
       {phase === 'idle' ? (
         <form onSubmit={handleSubmit} className="space-y-6">
+          {/* Name */}
           <div className="bg-panel/60 border border-line rounded-xl p-5">
+            <h3 className="text-xs font-medium text-ink-faint uppercase tracking-wider mb-3">Name</h3>
             <div className="flex items-center gap-2">
               <span className="text-sm font-medium text-ink-faint">{prefix}-</span>
               <select value={agentType} onChange={(e) => setAgentType(e.target.value)}
-                      className="bg-raised border border-line-faint rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line w-36">
+                      className="bg-raised border border-line-faint rounded-lg px-3 py-2.5 text-sm text-ink focus:outline-none focus:border-accent-line w-36">
                 {agentTypes.length > 0
                   ? agentTypes.map((t) => <option key={t.type} value={t.type}>{t.type}</option>)
                   : <option value="openclaw">openclaw</option>}
@@ -354,73 +389,112 @@ export default function CreateAgent() {
               <span className="text-sm text-ink-dim">-</span>
               <input type="text" value={name} onChange={(e) => setName(e.target.value)} required
                      placeholder="my-agent"
-                     className="flex-1 bg-raised border border-line-faint rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line focus:ring-1 focus:ring-accent-line placeholder-ink-dim" />
+                     autoFocus
+                     className="flex-1 bg-raised border border-line-faint rounded-lg px-3 py-2.5 text-sm text-ink focus:outline-none focus:border-accent-line focus:ring-1 focus:ring-accent-line placeholder-ink-dim" />
+            </div>
+
+            {nameIssue && <p className="text-xs text-danger mt-2">{nameIssue}</p>}
+
+            <div className="mt-3 flex items-center gap-2 text-xs text-ink-dim">
+              <span className={`inline-block w-2 h-2 rounded-full ${name && !nameIssue ? 'bg-success' : 'bg-line-faint'}`} />
+              {name && !nameIssue ? (
+                <>Looks good — <code className="text-ink-faint font-mono">{fullName}</code> will be your agent's name.</>
+              ) : (
+                <>The container will be named <code className="text-ink-faint font-mono">{fullName}</code>.</>
+              )}
             </div>
           </div>
 
-          <div className="bg-panel/60 border border-line rounded-xl p-5">
-            <label className="block text-xs font-medium text-ink-faint mb-2 uppercase tracking-wider">Setup</label>
-            {currentType?.setupSteps?.length > 0
-              ? <p className="text-xs text-ink-dim">Fresh installs run <code className="text-ink-faint">{currentType.setupSteps.map((s) => s.cmd).join(', ')}</code> as part of creation.</p>
-              : <p className="text-xs text-ink-dim">Fresh installs skip any setup step — the container just boots.</p>}
-          </div>
+          {/* Optional settings — collapsed by default */}
+          <button type="button"
+                  onClick={() => setShowAdvanced(!showAdvanced)}
+                  aria-expanded={showAdvanced}
+                  className={`w-full flex items-center justify-between bg-panel/60 border border-line rounded-xl px-5 py-3.5 text-left hover:border-accent-line transition-colors ${showAdvanced ? 'rounded-b-none border-b-0' : ''}`}>
+            <span className="flex items-center gap-2">
+              <span className="text-sm font-medium text-ink">Optional settings</span>
+              {advancedCount > 0 && (
+                <span className="px-1.5 py-0.5 rounded-full bg-accent/15 text-accent text-xs font-semibold leading-none">
+                  {advancedCount}
+                </span>
+              )}
+            </span>
+            <svg className={`w-4 h-4 text-ink-dim transition-transform ${showAdvanced ? 'rotate-180' : ''}`}
+                 viewBox="0 0 20 20" fill="currentColor">
+              <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
+            </svg>
+          </button>
+          {!showAdvanced && (
+            <p className="text-xs text-ink-dim -mt-3 px-1">
+              Custom workspace, docker access, network routing, SSH expose, extra volumes and ports.
+            </p>
+          )}
 
+          {showAdvanced && (
+            <div className="bg-panel/60 border border-line border-t-0 rounded-b-xl p-5 space-y-4">
+          {/* Workspace — leave both empty to use the default workspace */}
           {!wsHidden && (
-            <div className="bg-panel/60 border border-line rounded-xl p-5">
-              <label className="flex items-center gap-2 cursor-pointer select-none">
-                <input type="checkbox" checked={wsEnabled} onChange={(e) => toggleWs(e.target.checked)}
-                       className="w-4 h-4 accent-accent" />
-                <span className="text-sm font-medium text-ink">Use a custom workspace folder</span>
-              </label>
+            <div className="bg-raised border border-line-faint rounded-xl p-5 space-y-4">
+              <div>
+                <h3 className="text-xs font-medium text-ink-faint uppercase tracking-wider">Workspace</h3>
+                <p className="text-xs text-ink-dim mt-1">
+                  Leave both fields empty to use the default workspace. Point the agent at a folder outside it only if you want it to work on a specific project on this host.
+                </p>
+              </div>
 
-              {wsEnabled && (
-                <div className="mt-4 space-y-4">
-                  <div>
-                    <label className="block text-xs font-medium text-ink-faint mb-1.5 uppercase tracking-wider">
-                      Host workspace source
-                    </label>
-                    <input type="text" value={wsHost}
-                           onChange={(e) => setWsHost(e.target.value)}
-                           placeholder={defaultWsHost}
-                           className="w-full bg-raised border border-line-faint rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line font-mono" />
-                    <p className="text-xs text-ink-dim mt-1">
-                      Absolute path or <code className="text-ink-faint">instances/…</code> (resolved under the project root)
-                    </p>
-                    {wsHostErr && <p className="text-xs text-danger mt-1">{wsHostErr}</p>}
-                  </div>
+              <div>
+                <label className="block text-xs font-medium text-ink-faint mb-1.5 uppercase tracking-wider">
+                  Host workspace source
+                </label>
+                <input type="text" value={wsHost}
+                       onChange={(e) => setWsHost(e.target.value)}
+                       placeholder={defaultWsHost}
+                       className="w-full bg-raised border border-line-faint rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line font-mono" />
+                <p className="text-xs text-ink-dim mt-1">
+                  Absolute path or <code className="text-ink-faint">instances/…</code> (resolved under the project root)
+                </p>
+                {wsHostErr && <p className="text-xs text-danger mt-1">{wsHostErr}</p>}
+              </div>
 
-                  <div>
-                    <label className="block text-xs font-medium text-ink-faint mb-1.5 uppercase tracking-wider">
-                      Container workspace path
-                    </label>
-                    <input type="text" value={wsDir}
-                           onChange={(e) => !wsFixed && setWsDir(e.target.value)}
-                           readOnly={wsFixed}
-                           placeholder="/root/.openclaw/workspace"
-                           className={`w-full bg-raised border border-line-faint rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line font-mono ${wsFixed ? 'opacity-70 cursor-not-allowed' : ''}`} />
-                    {wsFixed && (
-                      <p className="text-xs text-ink-dim mt-1">
-                        Fixed by {agentType} — its CLI requires the workspace at this path
-                      </p>
-                    )}
-                    {wsDirErr && <p className="text-xs text-danger mt-1">{wsDirErr}</p>}
-                  </div>
-
-                  {hostWorkspaceRoot && !wsBrowsable && (
-                    <div className="rounded-lg bg-amber-soft border border-amber-line px-3 py-2 text-xs text-amber">
-                      Custom workspace → the host file browser won't be available for this agent. Use the running container workspace instead.
-                    </div>
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-xs font-medium text-ink-faint uppercase tracking-wider">
+                    Container workspace path
+                  </label>
+                  {wsFixed && (
+                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-sunken border border-line-faint text-ink-dim text-[11px] font-medium">
+                      <svg className="w-3 h-3" viewBox="0 0 20 20" fill="currentColor">
+                        <path fillRule="evenodd" d="M10 1a4.5 4.5 0 00-4.5 4.5V9H5a2 2 0 00-2 2v6a2 2 0 002 2h10a2 2 0 002-2v-6a2 2 0 00-2-2h-.5V5.5A4.5 4.5 0 0010 1zm3 8V5.5a3 3 0 10-6 0V9h6z" clipRule="evenodd" />
+                      </svg>
+                      Fixed
+                    </span>
                   )}
-                  <p className="text-xs text-ink-dim">
-                    A custom workspace is a separate bind mount, outside the agent's data folder.
+                </div>
+                <input type="text" value={wsDir}
+                       onChange={(e) => !wsFixed && setWsDir(e.target.value)}
+                       readOnly={wsFixed}
+                       tabIndex={wsFixed ? -1 : 0}
+                       placeholder={defaultWsDir || '/root/.openclaw/workspace'}
+                       className={`w-full rounded-lg px-3 py-2 text-sm font-mono focus:outline-none ${wsFixed
+                         ? 'bg-sunken border border-dashed border-line-faint text-ink-dim cursor-not-allowed'
+                         : 'bg-raised border border-line-faint text-ink focus:border-accent-line'}`} />
+                {wsFixed && (
+                  <p className="text-xs text-ink-dim mt-1">
+                    <span className="text-ink-faint">Locked —</span> fixed by {agentType}, whose CLI requires the workspace at this path.
                   </p>
+                )}
+                {wsDirErr && <p className="text-xs text-danger mt-1">{wsDirErr}</p>}
+              </div>
+
+              {hostWorkspaceRoot && wsActive && !wsBrowsable && (
+                <div className="rounded-lg bg-amber-soft border border-amber-line px-3 py-2 text-xs text-amber">
+                  Custom workspace → the host file browser won't be available for this agent. Use the running container workspace instead.
                 </div>
               )}
             </div>
           )}
 
-          {/* Plan 28: Container options — docker + network */}
-          <div className="bg-panel/60 border border-line rounded-xl p-5 space-y-5">
+          {/* Container options — docker + network */}
+          <div className="bg-raised border border-line-faint rounded-xl p-5 space-y-5">
             <h3 className="text-xs font-medium text-ink-faint uppercase tracking-wider">Container options</h3>
 
             <div className="flex items-start justify-between gap-4">
@@ -460,22 +534,22 @@ export default function CreateAgent() {
               <p className="text-xs text-ink-dim mt-1.5">
                 Route the agent through another running container by joining its network namespace (e.g. gluetun for VPN).
               </p>
-              {network && extraPorts.length > 0 && (
-                <p className="text-xs text-danger mt-1.5">
-                  ⚠ Docker cannot publish ports while joining {network}'s network — remove the additional ports or clear the network override.
-                </p>
-              )}
+              <p className="text-xs text-ink-dim mt-1.5">
+                In peer mode, published ports (web, additional ports) are forwarded through a socat door on the peer's bridge — no limitation.
+              </p>
             </div>
           </div>
 
-          {/* Plan 28: SSH port */}
-          <div className="bg-panel/60 border border-line rounded-xl p-5 space-y-4">
+          {/* Expose OpenSSH */}
+          <div className="bg-raised border border-line-faint rounded-xl p-5 space-y-5">
             <div className="flex items-start justify-between gap-4">
               <div>
-                <h3 className="text-xs font-medium text-ink-faint uppercase tracking-wider">SSH</h3>
-                <p className="text-sm font-medium text-ink mt-1">Expose OpenSSH on a host port</p>
+                <h3 className="text-sm font-medium text-ink">Expose OpenSSH on a host port</h3>
                 <p className="text-xs text-ink-dim mt-1 max-w-md">
-                  Leave the port empty to auto-allocate one (starting at 43817).
+                  Publishes the container's SSH server on a host port. The container
+                  port defaults to 22 (where sshd listens) — pick a distinct one for
+                  agents that share a network namespace, since they can't ALL bind
+                  port 22. Leave the host port empty to auto-allocate one (starting at 43817).
                 </p>
               </div>
               <button
@@ -490,26 +564,61 @@ export default function CreateAgent() {
             </div>
 
             {sshEnabled && (
-              <div>
-                <label className="block text-xs font-medium text-ink-faint mb-1.5 uppercase tracking-wider">Host port</label>
-                <input
-                  type="number"
-                  min="1"
-                  max="65535"
-                  value={sshPort}
-                  onChange={(e) => setSshPort(e.target.value)}
-                  placeholder="auto (43817+)"
-                  className="w-full sm:w-96 bg-raised border border-line-faint rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line font-mono"
-                />
-                {sshPort && portIssue(sshPort) && (
-                  <p className="text-xs text-danger mt-1">{portIssue(sshPort)}</p>
-                )}
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <label className="block">
+                    <span className="text-xs text-ink-dim">Host port</span>
+                    <input type="number" min="1" max="65535" value={sshPort}
+                           onChange={(e) => setSshPort(e.target.value)}
+                           placeholder="auto (43817+)"
+                           className="mt-1 w-full bg-sunken border border-line rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line font-mono" />
+                    {sshPort.trim() && portIssue(sshPort) && (
+                      <span className="block text-xs text-danger mt-1">{portIssue(sshPort)}</span>
+                    )}
+                  </label>
+                  <label className="block">
+                    <span className="text-xs text-ink-dim">Container port (sshd in the container)</span>
+                    <input type="number" min="1" max="65535" value={sshCport}
+                           onChange={(e) => setSshCport(e.target.value)}
+                           placeholder="22"
+                           className="mt-1 w-full bg-sunken border border-line rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line font-mono" />
+                    {sshCport.trim() && portIssue(sshCport) && (
+                      <p className="text-xs text-danger mt-1">{portIssue(sshCport)}</p>
+                    )}
+                    {!sshCport.trim() && (
+                      <p className="text-xs text-ink-dim mt-1">Empty = 22 (the sshd default).</p>
+                    )}
+                  </label>
+                </div>
+
+                <label className="block">
+                  <span className="text-xs text-ink-dim">Root / SSH password (optional)</span>
+                  <div className="mt-1 flex items-center gap-2">
+                    <input type={showSshPw ? 'text' : 'password'} value={sshPassword}
+                           onChange={(e) => setSshPassword(e.target.value)}
+                           placeholder="Optional — set the root password"
+                           className="w-full bg-sunken border border-line rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line" />
+                    <button type="button" onClick={() => setShowSshPw(!showSshPw)}
+                            className="px-2 py-2 bg-raised hover:bg-raised-hover text-ink rounded-lg text-xs font-medium transition-colors shrink-0"
+                            title={showSshPw ? 'Hide password' : 'Show password'}>
+                      {showSshPw ? 'Hide' : 'Show'}
+                    </button>
+                    <button type="button" onClick={() => setSshPassword(randomPassword())}
+                            className="px-2 py-2 bg-raised hover:bg-raised-hover text-ink rounded-lg text-xs font-medium transition-colors shrink-0"
+                            title="Generate a random password">
+                      Generate
+                    </button>
+                  </div>
+                  <span className="block text-xs text-ink-dim mt-1">
+                    This is the password for <code className="text-ink">root</code> logins via SSH.
+                  </span>
+                </label>
               </div>
             )}
           </div>
 
           {/* Plan 28: Additional volumes */}
-          <div className="bg-panel/60 border border-line rounded-xl p-5 space-y-4">
+          <div className="bg-raised border border-line-faint rounded-xl p-5 space-y-4">
             <div className="flex items-center justify-between">
               <div>
                 <h3 className="text-xs font-medium text-ink-faint uppercase tracking-wider">Additional volumes</h3>
@@ -562,7 +671,7 @@ export default function CreateAgent() {
           </div>
 
           {/* Plan 28: Additional ports */}
-          <div className="bg-panel/60 border border-line rounded-xl p-5 space-y-4">
+          <div className="bg-raised border border-line-faint rounded-xl p-5 space-y-4">
             <div className="flex items-center justify-between">
               <div>
                 <h3 className="text-xs font-medium text-ink-faint uppercase tracking-wider">Additional ports</h3>
@@ -604,11 +713,18 @@ export default function CreateAgent() {
               <p className="text-xs text-danger">Fix the invalid port fields.</p>
             )}
           </div>
+            </div>
+          )}
 
-          <button type="submit" disabled={!name}
+          <button type="submit" disabled={!name || !!nameIssue}
                   className="w-full bg-gradient-to-r from-accent to-accent-deep hover:from-accent-hover hover:to-accent-deep text-accent-ink font-semibold py-3.5 rounded-xl transition-all duration-200 shadow-lg shadow-accent/25 disabled:opacity-50">
-            Create {fullName}
+            {name && !nameIssue ? `Create ${fullName}` : 'Create my agent'}
           </button>
+          <p className="text-xs text-ink-dim text-center -mt-2">
+            {name && !nameIssue
+              ? 'Your agent will be built and booted — this usually takes about a minute.'
+              : 'Pick a name to get started.'}
+          </p>
         </form>
       ) : (
         <div className="space-y-4">

@@ -6,6 +6,7 @@ import { useConfirm } from '../../lib/confirm'
 import { useToast } from '../../lib/toast'
 import CommandModal from '../../components/CommandModal'
 import HealthCheckModal from '../../components/HealthCheckModal'
+import ContainerInfoModal from '../../components/ContainerInfoModal'
 
 export default function SettingsTab({ agent }) {
   const navigate = useNavigate()
@@ -31,8 +32,8 @@ export default function SettingsTab({ agent }) {
   const [wsDir, setWsDir] = useState('')
   const [volDraft, setVolDraft] = useState([])
   const [volDirty, setVolDirty] = useState(false)
-  const [portDraft, setPortDraft] = useState([])
-  const [portDirty, setPortDirty] = useState(false)
+  const [recreateInfo, setRecreateInfo] = useState(null)
+  const [containerInfoModal, setContainerInfoModal] = useState(null)
 
   function refresh() {
     api(`/api/agents/${agent.name}/settings`)
@@ -87,58 +88,77 @@ export default function SettingsTab({ agent }) {
     // Sync the additional volumes draft once (do not clobber while editing).
     setVolDraft((settings.extraVolumes || []).map((v) => ({ ...v })))
     setVolDirty(false)
-    // Sync the additional ports draft once (do not clobber while editing).
-    setPortDraft((settings.extraPorts || []).map((p) => ({ ...p })))
-    setPortDirty(false)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings, driverInfo, agent.name])
 
   function closeModal() {
+    const wasRunning = saving
     setModal(null)
     setSaving(false)
     fetchAgents()
+    refresh()
+    if (wasRunning) {
+      // The modal was closed before the job finished, so its SSE `done` event
+      // (and the onDone → refresh) is lost on unmount and `settings` would
+      // stay stale — e.g. the network select keeps showing the old value
+      // until a page reload. Re-attach a background listener and refresh once
+      // the job finally completes. Replay is safe: subscribe() re-sends
+      // buffered events, so an already-finished job fires `done` immediately.
+      const es = new EventSource(`/api/agents/${agent.name}/update-log`)
+      const finalize = () => {
+        try { es.close() } catch {}
+        refresh()
+        fetchAgents()
+      }
+      es.addEventListener('done', finalize)
+      es.addEventListener('error', finalize)
+      setTimeout(() => { try { es.close() } catch {} }, 120000)
+    }
   }
 
-  // ── Update (image refresh) ────────────────────────────────
+  // ── Recreate Container (update / recreate / full user-data reset) ────
 
-  async function handleUpdate() {
-    setSaving(true)
+  const [recreateOpen, setRecreateOpen] = useState(false)
+  const [recreatePull, setRecreatePull] = useState(false)
+  const [recreateReset, setRecreateReset] = useState(false)
+
+  async function openRecreate() {
     let info = null
     try {
       info = await api(`/api/agents/${agent.name}/update-info`)
     } catch {
       info = null
     }
-    const current = info?.currentVersion || settings?.version || 'unknown'
-    const available = info?.availableVersion || 'unknown'
-    const hasUpdate = info?.updateAvailable
-    const ok = await confirm({
-      title: 'Update container',
-      message: hasUpdate
-        ? `An update is available for ${agent.name}.\n\nCurrent version: ${current}\nAvailable: ${available}\n\nThis will redownload the image, rebuild it, and recreate the container. The container restarts automatically when it's done.`
-        : `No update available — ${agent.name} is already on the latest version (${current}).\n\nRunning update anyway will redownload the image, rebuild it, and recreate the container.`,
-      danger: false,
-      confirmText: 'Update',
-      cancelText: 'Cancel',
-    })
-    if (!ok) {
-      setSaving(false)
-      return
-    }
+    setRecreateInfo(info)
+    setRecreatePull(false)
+    setRecreateReset(false)
+    setRecreateOpen(true)
+  }
+
+  async function runRecreate() {
+    setRecreateOpen(false)
+    setSaving(true)
     if (agent.status === 'running') updateAgentStatus(agent.name, 'restarting')
     try {
-      await api(`/api/agents/${agent.name}/update`, { method: 'POST' })
+      await api(`/api/agents/${agent.name}/recreate`, {
+        method: 'POST',
+        body: { pull: recreatePull, reset: recreateReset },
+      })
       setModal({
-        key: `update-${Date.now()}`,
-        title: `Updating ${agent.name}`,
+        key: `recreate-${Date.now()}`,
+        title: recreateReset
+          ? `Recreating ${agent.name} with fresh user data`
+          : recreatePull
+            ? `Updating & recreating ${agent.name}`
+            : `Recreating ${agent.name}`,
         onDone: () => {
           refresh()
           fetchAgents()
-          toast.success('Container updated and restarted')
+          toast.success(recreateReset ? 'Container recreated — user data reset' : 'Container recreated')
         },
       })
     } catch (err) {
-      toast.error(err.error || err.message || 'Failed to start update')
+      toast.error(err.error || err.message || 'Failed to recreate container')
       setSaving(false)
     }
   }
@@ -471,66 +491,6 @@ export default function SettingsTab({ agent }) {
     }
   }
 
-  // ── Additional ports (plan 28) ────────────────────────────
-
-  function setPort(i, patch) {
-    setPortDraft(prev => prev.map((p, idx) => (idx === i ? { ...p, ...patch } : p)))
-    setPortDirty(true)
-  }
-
-  function portIssue(n) {
-    const v = String(n ?? '').trim()
-    if (!v) return 'Port is required'
-    if (!/^\d+$/.test(v) || +v < 1 || +v > 65535) return 'Must be an integer 1–65535'
-    return ''
-  }
-
-  const portErrors = portDraft.map((p) => ({ host: portIssue(p.host), container: portIssue(p.container) }))
-  const portHasErrors = portErrors.some((e) => e.host || e.container)
-
-  async function handlePortsSave() {
-    if (portHasErrors) {
-      toast.error('Fix the highlighted port fields before saving')
-      return
-    }
-    const ports = portDraft
-      .filter((p) => p.host && String(p.host).trim())
-      .map((p) => ({ host: String(p.host).trim(), container: String(p.container).trim() }))
-    const ok = await confirm({
-      title: 'Apply additional ports',
-      message: ports.length
-        ? `This will stop and recreate ${agent.name} with ${ports.length} additional port mapping${ports.length === 1 ? '' : 's'}.\n\n${ports.map((p) => `${p.host} → ${p.container}`).join('\n')}`
-        : `This will stop and recreate ${agent.name} to remove all additional ports.`,
-      confirmText: 'Apply & recreate',
-      cancelText: 'Cancel',
-    })
-    if (!ok) return
-    setSaving(true)
-    if (agent.status === 'running') updateAgentStatus(agent.name, 'restarting')
-    try {
-      const d = await api(`/api/agents/${agent.name}/ports`, { method: 'POST', body: { extraPorts: ports } })
-      if (d && d.streaming) {
-        setModal({
-          key: `ports-${Date.now()}`,
-          title: `Applying additional ports for ${agent.name}`,
-          onDone: () => {
-            refresh()
-            fetchAgents()
-            toast.success('Additional ports applied')
-          },
-        })
-      } else {
-        setSettings({ ...settings, extraPorts: d.extraPorts })
-        setPortDirty(false)
-        toast.success('Additional ports applied')
-        setSaving(false)
-      }
-    } catch (err) {
-      toast.error(err.error || err.message || 'Failed to update additional ports')
-      setSaving(false)
-    }
-  }
-
   return (
     <div className="max-w-3xl space-y-6">
       {loadError && <p className="text-danger text-sm">{loadError}</p>}
@@ -560,7 +520,17 @@ export default function SettingsTab({ agent }) {
 
       {/* 1. Container Info */}
       <section className="bg-panel/60 border border-line rounded-xl p-5">
-        <h3 className="text-sm font-medium text-ink-muted mb-4">Container Info</h3>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-sm font-medium text-ink-muted">Container Info</h3>
+          <button
+            onClick={() => setContainerInfoModal({ key: `cinfo-${Date.now()}` })}
+            disabled={saving}
+            title="Inspect the live container (network, mounts, ports, raw docker inspect)"
+            className="px-3 py-1.5 bg-raised hover:bg-raised-hover disabled:opacity-50 text-ink rounded-lg text-xs font-medium transition-colors whitespace-nowrap"
+          >
+            Inspect details
+          </button>
+        </div>
         <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm sm:grid-cols-3">
           {[
             ['Name', agent.name],
@@ -578,21 +548,21 @@ export default function SettingsTab({ agent }) {
         </dl>
       </section>
 
-      {/* 2. Update */}
+      {/* 2. Recreate Container (update / recreate / full reset) */}
       <section className="bg-panel/60 border border-line rounded-xl p-5">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h3 className="text-sm font-medium text-ink-muted">Update</h3>
+            <h3 className="text-sm font-medium text-ink-muted">Recreate Container</h3>
             <p className="text-xs text-ink-dim mt-1 max-w-md">
-              Redownloads the image, rebuilds it, and recreates the container. The container restarts automatically when it's done.
+              Recreates the container. Use it to update the image to the latest, to simply recreate the container, or to reset the entire user folder (config, sessions, data) so it starts completely fresh — your bind-mounted workspace folder is preserved.
             </p>
           </div>
           <button
-            onClick={handleUpdate}
+            onClick={openRecreate}
             disabled={saving}
             className="px-3 py-1.5 bg-accent hover:bg-accent-hover disabled:opacity-50 text-accent-ink rounded-lg text-xs font-medium transition-colors whitespace-nowrap"
           >
-            Update
+            Recreate Container
           </button>
         </div>
       </section>
@@ -707,7 +677,7 @@ export default function SettingsTab({ agent }) {
           )}
           {volDraft.map((v, i) => (
             <div key={i} className="space-y-3 rounded-lg bg-sunken border border-line-faint p-3">
-              <div className="flex items-end gap-2">
+              <div className="flex items-center gap-2">
                 <div className="flex-1">
                   <label className="block text-xs text-ink-dim mb-1">Host source</label>
                   <input type="text" value={v.host}
@@ -724,7 +694,7 @@ export default function SettingsTab({ agent }) {
                 </div>
                 <button type="button"
                         onClick={() => { setVolDraft(prev => prev.filter((_, idx) => idx !== i)); setVolDirty(true) }}
-                        className="px-2 py-2 bg-raised hover:bg-raised-hover text-ink-dim rounded-lg text-xs shrink-0"
+                        className="w-9 h-9 grid place-items-center rounded-lg text-ink-dim hover:text-danger hover:bg-raised shrink-0 transition-colors"
                         title="Remove volume">✕</button>
               </div>
               <label className="flex items-center gap-2 text-xs text-ink-dim cursor-pointer select-none">
@@ -757,75 +727,6 @@ export default function SettingsTab({ agent }) {
             </button>
             {volDirty && !saving && (
               <span className="text-xs text-ink-dim">Unsaved volume changes</span>
-            )}
-          </div>
-        </div>
-      </section>
-
-      {/* 5c. Additional ports */}
-      <section className="bg-panel/60 border border-line rounded-xl p-5">
-        <div>
-          <h3 className="text-sm font-medium text-ink-muted">Additional ports</h3>
-          <p className="text-xs text-ink-dim mt-1 max-w-md">
-            Host → container TCP port mappings, independent of the web app and SSH port. Applying changes recreates the container.
-          </p>
-        </div>
-
-        {currentNetwork && portDraft.length > 0 && (
-          <div className="mt-3 rounded-lg bg-warning-soft border border-warning-line/70 px-3 py-2 text-xs text-warning">
-            This agent joins <code className="text-ink">{currentNetwork}</code>'s network — Docker can't publish ports on it. Remove the extra ports or clear the network override above.
-          </div>
-        )}
-
-        <div className="mt-4 space-y-3">
-          {portDraft.length === 0 && (
-            <p className="text-xs text-ink-dim">No additional ports.</p>
-          )}
-          {portDraft.map((p, i) => (
-            <div key={i} className="flex items-end gap-2 rounded-lg bg-sunken border border-line-faint p-3">
-              <div className="w-40">
-                <label className="block text-xs text-ink-dim mb-1">Host port</label>
-                <input type="number" min="1" max="65535" value={p.host}
-                       onChange={(e) => setPort(i, { host: e.target.value })}
-                       className="w-full bg-raised border border-line-faint rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line font-mono" />
-                {portErrors[i].host && <p className="text-xs text-danger mt-1">{portErrors[i].host}</p>}
-              </div>
-              <div className="w-40">
-                <label className="block text-xs text-ink-dim mb-1">Container port</label>
-                <input type="number" min="1" max="65535" value={p.container}
-                       onChange={(e) => setPort(i, { container: e.target.value })}
-                       className="w-full bg-raised border border-line-faint rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line font-mono" />
-                {portErrors[i].container && <p className="text-xs text-danger mt-1">{portErrors[i].container}</p>}
-              </div>
-              <button type="button"
-                      onClick={() => { setPortDraft(prev => prev.filter((_, idx) => idx !== i)); setPortDirty(true) }}
-                      className="px-2 py-2 bg-raised hover:bg-raised-hover text-ink-dim rounded-lg text-xs shrink-0"
-                      title="Remove port">✕</button>
-            </div>
-          ))}
-
-          <button type="button"
-                  onClick={() => { setPortDraft(prev => [...prev, { host: '', container: '' }]); setPortDirty(true) }}
-                  disabled={saving || !!currentNetwork}
-                  className="px-3 py-1.5 bg-raised hover:bg-raised-hover disabled:opacity-50 text-ink rounded-lg text-xs font-medium transition-colors"
-                  title={currentNetwork ? 'Not available while joining a network peer' : 'Add a port'}>
-            + Add port
-          </button>
-
-          {portHasErrors && (
-            <p className="text-xs text-danger">Fix the invalid port fields before saving.</p>
-          )}
-
-          <div className="flex items-center gap-3">
-            <button
-              onClick={handlePortsSave}
-              disabled={saving || !portDirty || portHasErrors || !!currentNetwork}
-              className="px-3 py-1.5 bg-accent hover:bg-accent-hover disabled:opacity-50 text-accent-ink rounded-lg text-xs font-medium transition-colors"
-              title={currentNetwork ? 'Clear the network override above to publish ports' : 'Apply port changes'}>
-              Apply ports & recreate
-            </button>
-            {portDirty && !saving && (
-              <span className="text-xs text-ink-dim">Unsaved port changes</span>
             )}
           </div>
         </div>
@@ -918,6 +819,91 @@ export default function SettingsTab({ agent }) {
         </button>
       </section>
 
+      {recreateOpen && (
+        <div
+          className="fixed inset-0 z-[75] flex items-center justify-center bg-overlay backdrop-blur-sm"
+          onClick={() => setRecreateOpen(false)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            className="bg-panel border border-line rounded-xl shadow-2xl w-full max-w-md mx-4 overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-6 pt-5 pb-3">
+              <h3 className="text-base font-semibold text-ink">Recreate Container</h3>
+              <p className="mt-2 text-sm text-ink-faint leading-relaxed">
+                This recreates {agent.name}'s container. It can update the image, recreate the container as-is, and reset the entire user folder so the container starts completely fresh — tick the options you want.
+              </p>
+
+              {recreateInfo && (
+                <div className="mt-3 text-xs text-ink-dim bg-sunken border border-line-faint rounded-lg px-3 py-2 space-y-0.5">
+                  {recreateInfo.updateAvailable ? (
+                    <p className="text-warning">
+                      Update available: {recreateInfo.currentVersion || 'unknown'} → {recreateInfo.availableVersion || 'latest'}
+                    </p>
+                  ) : (
+                    <p>
+                      Already on the latest image{recreateInfo.currentVersion ? ` (${recreateInfo.currentVersion})` : ''}.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              <label className="mt-4 flex items-start gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={recreatePull}
+                  onChange={(e) => setRecreatePull(e.target.checked)}
+                  className="mt-0.5 accent-accent"
+                />
+                <span className="text-sm text-ink">
+                  <span className="font-medium">Pull latest image update</span>
+                  <span className="block text-xs text-ink-dim mt-0.5">
+                    Re-downloads the base image and rebuilds it (update the container).
+                  </span>
+                </span>
+              </label>
+
+              <label className="mt-3 flex items-start gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={recreateReset}
+                  onChange={(e) => setRecreateReset(e.target.checked)}
+                  className="mt-0.5 accent-accent"
+                />
+                <span className="text-sm text-ink">
+                  <span className="font-medium text-danger">Reset the whole user folder</span>
+                  <span className="block text-xs text-ink-dim mt-0.5">
+                    Deletes the entire user data folder (config, sessions, data) so the container starts fresh. Your workspace is a separate bind-mounted folder and is NOT deleted. This cannot be undone.
+                  </span>
+                </span>
+              </label>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 px-6 pb-5 pt-2">
+              <button
+                onClick={() => setRecreateOpen(false)}
+                className="px-4 py-2 text-sm font-medium text-ink-muted hover:text-ink hover:bg-panel rounded-lg transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={runRecreate}
+                disabled={saving}
+                className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors disabled:opacity-50 ${
+                  recreateReset
+                    ? 'bg-danger hover:bg-danger text-danger-ink'
+                    : 'bg-accent hover:bg-accent-hover text-accent-ink'
+                }`}
+              >
+                Recreate Container
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {modal && (
         <CommandModal
           key={modal.key}
@@ -938,6 +924,15 @@ export default function SettingsTab({ agent }) {
             fetchAgents()
           }}
           onClose={() => setHealthModal(null)}
+        />
+      )}
+
+      {containerInfoModal && (
+        <ContainerInfoModal
+          key={containerInfoModal.key}
+          name={agent.name}
+          title={`Container Info — ${agent.name}`}
+          onClose={() => setContainerInfoModal(null)}
         />
       )}
     </div>

@@ -39,26 +39,6 @@ function safeVmName(name) {
   return name;
 }
 
-/** Recursively replace secret-looking values with '[REDACTED]' in a config
- *  object. Driver-agnostic: covers openclaw/picoclaw/opencode key styles. */
-function redactSecrets(obj, depth = 0) {
-  if (depth > 8) return obj;
-  if (Array.isArray(obj)) return obj.map((v) => redactSecrets(v, depth + 1));
-  if (obj && typeof obj === 'object') {
-    const out = {};
-    for (const [k, v] of Object.entries(obj)) {
-      if (typeof v === 'string' && v &&
-          /^(api[_-]?key|token|bot[_-]?token|secret|client[_-]?secret|app[_-]?secret|private[_-]?key|access[_-]?token)$/i.test(k)) {
-        out[k] = '[REDACTED]';
-      } else {
-        out[k] = redactSecrets(v, depth + 1);
-      }
-    }
-    return out;
-  }
-  return obj;
-}
-
 const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
@@ -709,14 +689,7 @@ app.post('/api/agents/:name/start', async (req, res) => {
   const name = req.params.name;
   registry.setLifecycle(name, 'starting');
   try {
-    try {
-      await runCmd('docker', ['start', name], { timeout: 30000 });
-    } catch {
-      // Stale network peer (e.g. gluetun was rebuilt) — `docker start` can't
-      // rejoin the old `container:<id>` namespace. Recreate via compose so the
-      // peer re-resolves by name to the current container.
-      await vm.runCompose(name, ['up', '-d', '--no-deps', '--force-recreate', name], { timeout: 180000 });
-    }
+    await vm.startAgent(name);
   } finally {
     registry.setLifecycle(name, null);
   }
@@ -729,8 +702,7 @@ app.post('/api/agents/:name/stop', async (req, res) => {
   const name = req.params.name;
   registry.setLifecycle(name, 'stopping');
   try {
-    // -t 30: give the container 30s to stop gracefully before docker SIGKILLs it.
-    await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000, check: false });
+    await vm.stopAgent(name);
   } finally {
     registry.setLifecycle(name, null);
   }
@@ -743,7 +715,7 @@ app.post('/api/agents/:name/restart', async (req, res) => {
   const name = req.params.name;
   registry.setLifecycle(name, 'restarting');
   try {
-    await runCmd('docker', ['restart', '-t', '30', name], { timeout: 60000, check: false });
+    await vm.restartAgent(name);
   } finally {
     registry.setLifecycle(name, null);
   }
@@ -810,12 +782,119 @@ app.get('/api/agents/:name/settings', async (req, res) => {
     res.json({
       allowDocker: meta.DOCKER === '1',
       network: meta.NETWORK || '',
+      sshPort: meta.PORT || '',
+      sshContainerPort: vm.readSshCport(name),
       image,
       version,
       networkHealth,
       workspaceMount,
       extraVolumes: vm.readExtraVolumes(name),
       extraPorts: vm.readExtraPorts(name),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** Lazy-loaded raw container info for the Settings → Container Info popup.
+ *  Runs `docker inspect <name>` on demand (never on page load) and returns a
+ *  summarized view + the (env-redacted) raw inspect object. */
+app.get('/api/agents/:name/container-info', async (req, res) => {
+  const name = safeVmName(req.params.name);
+  if (!name) return res.status(400).json({ error: 'Invalid agent name' });
+  try {
+    const r = await runCmd('docker', ['inspect', name], { timeout: 15000 });
+    if (r.code !== 0) {
+      return res.status(404).json({
+        error: /no such container/i.test(r.stderr || '') ? 'Container not found' : (r.stderr || 'Failed to inspect container'),
+      });
+    }
+    const arr = JSON.parse(r.stdout);
+    const c = Array.isArray(arr) ? arr[0] : null;
+    if (!c) return res.status(404).json({ error: 'Container not found' });
+
+    const netMode = (c.HostConfig && c.HostConfig.NetworkMode) || '';
+    let peerName = '';
+    if (netMode.startsWith('container:')) {
+      const peerId = netMode.slice('container:'.length);
+      try {
+        const p = await runCmd('docker', ['inspect', peerId, '--format', '{{.Name}}'], { timeout: 15000 });
+        peerName = (p.stdout || '').replace(/^\//, '').trim();
+      } catch {}
+    }
+
+    const mounts = (c.Mounts || []).map((m) => ({
+      type: m.Type || '',
+      source: m.Source || '',
+      destination: m.Destination || '',
+      rw: !!m.RW,
+      mode: m.Mode || '',
+      propagation: m.Propagation || '',
+      name: m.Name || '',
+    }));
+    const counts = {
+      total: mounts.length,
+      binds: mounts.filter((m) => m.type === 'bind').length,
+      volumes: mounts.filter((m) => m.type === 'volume').length,
+      tmpfs: mounts.filter((m) => m.type === 'tmpfs').length,
+      readOnly: mounts.filter((m) => !m.rw).length,
+      readWrite: mounts.filter((m) => m.rw).length,
+    };
+
+    const networks = Object.entries((c.NetworkSettings && c.NetworkSettings.Networks) || {}).map(([netName, n]) => ({
+      name: netName,
+      ipAddress: (n && n.IPAddress) || '',
+      gateway: (n && n.Gateway) || '',
+      aliases: ((n && n.Aliases) || []).filter((a) => a && a !== name),
+    }));
+
+    const exposed = Object.keys((c.Config && c.Config.ExposedPorts) || {});
+    const published = [];
+    for (const [cport, bindings] of Object.entries((c.HostConfig && c.HostConfig.PortBindings) || {})) {
+      for (const b of bindings || []) {
+        published.push({ container: cport, host: `${b.HostIp || '0.0.0.0'}:${b.HostPort || ''}` });
+      }
+    }
+
+    const env = (c.Config && c.Config.Env) || [];
+    const envKeys = env.map((line) => (line.includes('=') ? line.slice(0, line.indexOf('=')) : line));
+    const SECRET_RE = /(password|token|secret|key|apikey|auth|creds?)/i;
+    const redact = (arr) => (arr || []).map((line) => {
+      const idx = line.indexOf('=');
+      if (idx < 0) return line;
+      const k = line.slice(0, idx);
+      const v = line.slice(idx + 1);
+      return SECRET_RE.test(k) && v ? `${k}=********` : line;
+    });
+
+    const state = c.State || {};
+    res.json({
+      name: (c.Name || '').replace(/^\//, ''),
+      exists: true,
+      state: {
+        status: state.Status || '',
+        running: !!state.Running,
+        paused: !!state.Paused,
+        restarting: !!state.Restarting,
+        oomKilled: !!state.OOMKilled,
+        exitCode: state.ExitCode,
+        startedAt: state.StartedAt || '',
+        finishedAt: state.FinishedAt || '',
+        restartCount: c.RestartCount || 0,
+      },
+      created: c.Created || '',
+      image: { id: c.Image || '', tag: (c.Config && c.Config.Image) || '' },
+      network: { mode: netMode, peerName, networks },
+      mounts,
+      counts,
+      ports: { exposed, published },
+      restartPolicy: (c.HostConfig && c.HostConfig.RestartPolicy) || { Name: '', MaximumRetryCount: 0 },
+      envCount: envKeys.length,
+      envKeys: envKeys.slice(0, 200),
+      raw: {
+        ...c,
+        Config: c.Config ? { ...c.Config, Env: redact(c.Config.Env) } : c.Config,
+      },
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -854,6 +933,21 @@ async function imageHasDockerCli(name, image, wasRunning) {
   }
 }
 
+/** Whether the baked /usr/local/bin/start.sh knows to honor the SSH_PORT env
+ *  (i.e. the image was built from a start.sh containing the SSH_PORT block).
+ *  Checks the running container when up, else spins a throwaway container from
+ *  the image. */
+async function imageHasSshPortSupport(name, image, wasRunning) {
+  try {
+    const r = wasRunning
+      ? await runCmd('docker', ['exec', name, 'sh', '-lc', 'grep -q SSH_PORT /usr/local/bin/start.sh'], { timeout: 15000 })
+      : await runCmd('docker', ['run', '--rm', '--entrypoint', 'sh', image, '-lc', 'grep -q SSH_PORT /usr/local/bin/start.sh'], { timeout: 30000 });
+    return r.code === 0;
+  } catch {
+    return false;
+  }
+}
+
 app.post('/api/agents/:name/settings', async (req, res) => {
   const name = safeVmName(req.params.name);
   if (!name) return res.status(400).json({ error: 'Invalid agent name' });
@@ -869,6 +963,64 @@ app.post('/api/agents/:name/settings', async (req, res) => {
     const oldNetwork = meta.NETWORK || '';
     const newAllow = allowDocker !== undefined ? !!allowDocker : oldAllow;
     const newNetwork = network !== undefined ? (network || '') : oldNetwork;
+
+    // SSH expose (create parity). sshEnabled === undefined → no change; false →
+    // clear the published port; true → keep, clear, or auto-allocate (43817+).
+    // Also optional: the container port the SSH daemon listens on inside the
+    // container (default 22 — needed when agents share a network namespace and
+    // can't ALL bind 22), and the SSH/root password (empty = keep current).
+    const oldSshPort = meta.PORT || '';
+    let newSshPort = oldSshPort;
+    let sshChanged = false;
+    if (req.body.sshEnabled !== undefined) {
+      newSshPort = '';
+      if (req.body.sshEnabled) {
+        const raw = String(req.body.sshPort ?? '').trim();
+        newSshPort = raw || vm.autoSshPort();
+        if (!/^\d+$/.test(newSshPort) || +newSshPort < 1 || +newSshPort > 65535) {
+          return res.status(400).json({ error: 'SSH host port must be an integer between 1 and 65535' });
+        }
+        if (await hostPortInUse(newSshPort, name)) {
+          return res.status(400).json({ error: `Host port ${newSshPort} is already in use by another agent` });
+        }
+        for (const p of vm.readExtraPorts(name)) {
+          if (String(p.host) === String(newSshPort)) {
+            return res.status(400).json({ error: `Host port ${newSshPort} is already used by an additional port of this agent` });
+          }
+        }
+        const sshWeb = vm.readWebService(name);
+        if (sshWeb && String(sshWeb.hostPort) === String(newSshPort)) {
+          return res.status(400).json({ error: `Host port ${newSshPort} is already the web app host port of this agent` });
+        }
+      }
+      sshChanged = newSshPort !== oldSshPort;
+    }
+
+    // SSH container port (the daemon's port inside the container, default 22).
+    // Validated when the caller sends it; not persisted to meta unless it
+    // differs from the current effective value.
+    const oldSshCport = vm.readSshCport(name);
+    let newSshCport = oldSshCport;
+    let sshCportChanged = false;
+    if (req.body.sshContainerPort !== undefined) {
+      const raw = String(req.body.sshContainerPort || '').trim();
+      if (!/^\d+$/.test(raw) || +raw < 1 || +raw > 65535) {
+        return res.status(400).json({ error: 'SSH container port must be an integer between 1 and 65535' });
+      }
+      newSshCport = raw;
+      sshCportChanged = newSshCport !== oldSshCport;
+    }
+
+    // Optional SSH/root password (updates the ROOT_PASSWORD that start.sh
+    // chpasswd's into the root user for sshd). Empty string means "keep the
+    // current one" — passing nothing never locks you out.
+    const oldRootPw = meta.ROOT_PASSWORD || '';
+    let newRootPw = '';
+    let passwordChanged = false;
+    if (typeof req.body.sshPassword === 'string' && req.body.sshPassword.replace(/[\r\n]/g, '').trim()) {
+      newRootPw = req.body.sshPassword.replace(/[\r\n]/g, '');
+      passwordChanged = newRootPw !== oldRootPw;
+    }
 
     // Custom workspace bind (plan 24). Pre-validate BEFORE the SSE job starts so
     // an invalid mount returns 400 immediately (matching create). When the form
@@ -900,8 +1052,8 @@ app.post('/api/agents/:name/settings', async (req, res) => {
     }
 
     // Network target validation (only on a real change to a non-empty target).
-    // Switching INTO peer mode while extra ports exist is rejected — Docker
-    // cannot publish ports in that mode.
+    // Extra ports are fine in peer mode — they ride the socat door, not the
+    // agent — so no port-ban here.
     if (newNetwork !== oldNetwork && newNetwork) {
       if (newNetwork === name) return res.status(400).json({ error: 'Cannot route an agent through itself' });
       const target = containers[newNetwork];
@@ -909,18 +1061,13 @@ app.post('/api/agents/:name/settings', async (req, res) => {
       if ((target.State || '').toLowerCase() !== 'running') {
         return res.status(400).json({ error: `Container '${newNetwork}' is not running` });
       }
-      if (vm.readExtraPorts(name).length) {
-        return res.status(400).json({
-          error: `Docker cannot publish ports while this agent joins ${newNetwork}'s network — clear the network override or remove the extra ports`,
-        });
-      }
     }
 
     const image = vm.imageFor(name);
     const dockerChanged = newAllow !== oldAllow;
     const networkChanged = newNetwork !== oldNetwork;
-    if (!dockerChanged && !networkChanged && !workspaceChanged && !volumesChanged) {
-      return res.json({ allowDocker: newAllow, network: newNetwork, image, workspaceMount: oldMount, extraVolumes: oldVols });
+if (!dockerChanged && !networkChanged && !workspaceChanged && !volumesChanged && !sshChanged && !sshCportChanged && !passwordChanged) {
+      return res.json({ allowDocker: newAllow, network: newNetwork, sshPort: newSshPort, sshContainerPort: newSshCport, image, workspaceMount: oldMount, extraVolumes: oldVols });
     }
 
     // Persist the requested docker state in the instance build.env — the toggle
@@ -937,12 +1084,25 @@ app.post('/api/agents/:name/settings', async (req, res) => {
     // image — base images ship without the CLI on purpose.
     const needRebuild = newAllow && !oldAllow && !(await imageHasDockerCli(name, image, wasRunning));
 
+    // Custom SSH container ports need the image's start.sh to know how to point
+    // sshd at that port. Images built before the SSH_PORT template update don't
+    // have it — patch THIS instance's build/start.sh and rebuild once (fast:
+    // only the COPY start.sh layer + metadata change). Rebuilds only when a
+    // non-22 container port is actually requested AND the image lacks support.
+    let sshRebuild = false;
+    if (sshCportChanged && newSshCport !== '22' && newSshPort) {
+      if (!(await imageHasSshPortSupport(name, image, wasRunning))) {
+        sshRebuild = vm.ensureSshStartBlock(name);
+      }
+    }
+    const needRebuildFinal = needRebuild || sshRebuild;
+
     const jobKey = 'update:' + name;
     const job = jobLog.getOrCreateJob(jobKey);
     const log = (stream, text) => jobLog.line(job, stream, text);
     const step = (stepName, state) => jobLog.setStep(job, stepName, state);
 
-    const reason = needRebuild ? 'rebuild' : dockerChanged ? 'docker' : networkChanged ? 'network' : 'workspace';
+    const reason = needRebuildFinal ? 'rebuild' : dockerChanged ? 'docker' : networkChanged ? 'network' : (sshChanged || sshCportChanged || passwordChanged) ? 'ssh' : 'workspace';
     res.status(202).json({ ok: true, job: jobKey, streaming: true, reason });
 
     setImmediate(async () => {
@@ -964,6 +1124,9 @@ app.post('/api/agents/:name/settings', async (req, res) => {
         if (networkChanged) summary.push(`network=${newNetwork || 'default'}`);
         if (workspaceChanged) summary.push(wsMount ? `workspace=${wsMount.host} → ${wsMount.container}` : 'workspace=default');
         if (volumesChanged) summary.push(`extraVolumes=${newVols.length} mount(s)`);
+        if (sshChanged) summary.push(newSshPort ? `ssh=${newSshPort}` : 'ssh=off');
+        if (sshCportChanged) summary.push(`ssh container port=${newSshCport}`);
+        if (passwordChanged) summary.push('ssh password set');
         log('system', `Applying settings: ${summary.join(', ')}`);
         if (webService) {
           log('system', `Web app is published (host port ${webService.hostPort}) — keeping it live across the change`);
@@ -978,6 +1141,9 @@ app.post('/api/agents/:name/settings', async (req, res) => {
           workspaceHost: wsMount ? wsMount.host : '',
           workspaceDir: wsMount ? wsMount.container : '',
           ...(volumesChanged ? { extraVolumes: newVols } : {}),
+          ...(sshChanged ? { sshPort: newSshPort } : {}),
+          ...(sshCportChanged ? { sshCport: newSshCport } : {}),
+          ...(passwordChanged ? { sshPassword: newRootPw } : {}),
         });
         await vm.validateInstanceCompose(name);
         registry.dockerPsList(true);
@@ -990,15 +1156,18 @@ app.post('/api/agents/:name/settings', async (req, res) => {
         }
 
         // Leaving peer mode: the socat door is orphaned and still holds the host
-        // port the agent is about to publish — it must go BEFORE the recreate,
-        // or the agent's port bind fails ("port is already allocated").
-        if (webService && !newNetwork) {
-          log('system', `Network is default — removing the ${vm.webDoorName(name)} forwarding door`);
-          await runCmd('docker', ['rm', '-f', vm.webDoorName(name)], { timeout: 30000 }).catch(() => {});
+        // ports the agent is about to publish directly — it must go BEFORE the
+        // recreate, or the agent's port bind fails ("port is already allocated").
+        if (oldNetwork && !newNetwork) {
+          log('system', 'Network is default — removing the forwarding door');
+          await removeDoors(name, log);
         }
 
-        if (needRebuild) {
-          log('system', 'Image has no docker CLI — rebuilding it with the docker CLI, then recreating…');
+        if (needRebuildFinal) {
+          const why = needRebuild
+            ? 'Image has no docker CLI'
+            : 'start.sh must learn the custom SSH container port';
+          log('system', `${why} — rebuilding the image, then recreating…`);
           await vm.updateAgent(name, { pull: false, onLog: log, onStep: step });
         } else {
           // `docker start` reuses the old container config, and network_mode +
@@ -1010,38 +1179,32 @@ app.post('/api/agents/:name/settings', async (req, res) => {
           step('recreate', 'end');
         }
 
-        // A published web app rides the settings change: applySettings kept
-        // web.json in the regenerated compose, so the door/ports now target the
-        // NEW network. Reconcile the socat door (force-recreate on a network
-        // change so it picks up the new peer, plain up otherwise, drop it when
-        // leaving peer mode) and re-verify the server — the boot hook in start.sh
-        // restarts it inside the new namespace.
-        if (webService) {
-          if (newNetwork) {
-            const doorArgs = ['up', '-d', '--no-deps'];
-            if (networkChanged) doorArgs.push('--force-recreate');
-            doorArgs.push(vm.webDoorName(name));
-            await vm.runCompose(name, doorArgs, { stream: true, onLog: log, timeout: 180000 });
-          } else {
-            await runCmd('docker', ['rm', '-f', vm.webDoorName(name)], { timeout: 30000 }).catch(() => {});
-          }
-          if (wasRunning) {
-            step('web-verify', 'start');
-            try {
-              const hookPath = `${drivers.getDriver(agentType).dataDir}/start-web.sh`;
-              await runCmd('docker', ['exec', name, 'bash', hookPath], { timeout: 20000 }).catch(() => {});
-              let up = false;
-              for (let i = 0; i < 20 && !up; i++) {
-                if (await webPortReachable(name, webService.containerPort)) up = true;
-                else await new Promise((r) => setTimeout(r, 1000));
-              }
-              if (up) log('system', `Web app re-verified live at http://10.69.1.164:${webService.hostPort}`);
-              else log('system', `WARNING: web app not up on port ${webService.containerPort} after the change — re-publish from the Web tab if needed`);
-            } catch {
-              log('system', 'WARNING: could not re-verify web app — check the Web tab');
+        // The door (if any) rides the settings change: applySettings kept the
+        // declared ports in the regenerated compose, so it now targets the NEW
+        // network. Reconcile it (force-recreate on a network change so it picks
+        // up the new peer; when leaving peer mode it was already removed above).
+        if (newNetwork) {
+          await syncDoors(name, { forceRecreate: networkChanged, log });
+        }
+
+        // Re-verify a published web server — the boot hook in start.sh restarts
+        // it inside the new namespace.
+        if (webService && wasRunning) {
+          step('web-verify', 'start');
+          try {
+            const hookPath = `${drivers.getDriver(agentType).dataDir}/start-web.sh`;
+            await runCmd('docker', ['exec', name, 'bash', hookPath], { timeout: 20000 }).catch(() => {});
+            let up = false;
+            for (let i = 0; i < 20 && !up; i++) {
+              if (await webPortReachable(name, webService.containerPort)) up = true;
+              else await new Promise((r) => setTimeout(r, 1000));
             }
-            step('web-verify', 'end');
+            if (up) log('system', `Web app re-verified live at http://10.69.1.164:${webService.hostPort}`);
+            else log('system', `WARNING: web app not up on port ${webService.containerPort} after the change — re-publish from the Web tab if needed`);
+          } catch {
+            log('system', 'WARNING: could not re-verify web app — check the Web tab');
           }
+          step('web-verify', 'end');
         }
 
         if (!wasRunning) {
@@ -1068,17 +1231,21 @@ app.post('/api/agents/:name/settings', async (req, res) => {
             workspaceHost: oldMount ? oldMount.host : '',
             workspaceDir: oldMount ? oldMount.container : '',
             ...(volumesChanged ? { extraVolumes: oldVols } : {}),
+            ...(sshChanged ? { sshPort: oldSshPort } : {}),
+            ...(sshCportChanged ? { sshCport: oldSshCport } : {}),
+            ...(passwordChanged ? { sshPassword: oldRootPw } : {}),
           });
           // Same ordering rule as the happy path: the door must be gone before
           // the agent recreate when rolling back to the default network, or the
           // agent's port bind collides with the still-running door.
-          if (webService && !oldNetwork) {
-            await runCmd('docker', ['rm', '-f', vm.webDoorName(name)], { timeout: 30000 }).catch(() => {});
+          if (!oldNetwork) {
+            await removeDoors(name, log);
           }
           if (wasRunning && touched) {
-            const rollbackSvc = [name];
-            if (webService && oldNetwork) rollbackSvc.push(vm.webDoorName(name));
-            await vm.runCompose(name, ['up', '-d', '--no-deps', '--force-recreate', ...rollbackSvc], { stream: true, onLog: log, timeout: 180000 });
+            await vm.runCompose(name, ['up', '-d', '--no-deps', '--force-recreate', name], { stream: true, onLog: log, timeout: 180000 });
+          }
+          if (oldNetwork) {
+            await syncDoors(name, { forceRecreate: true, log });
           }
           registry.dockerPsList(true);
         } catch {}
@@ -1164,6 +1331,73 @@ async function webPortReachable(name, port) {
   }
 }
 
+/** Regex matching the socat door container name(s) of an agent — the current
+ *  `<name>-door` plus the legacy `<name>-web` (renamed in the multi-port door
+ *  refactor; old doors must be treated as this agent's too, or they keep
+ *  holding host ports while the new door fails to bind). Escaped so agent
+ *  names with regex metachars can't misfire. */
+function doorNameRe(name) {
+  const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`^(${esc}-door|${esc}-web)$`);
+}
+
+/** Reconcile the socat door against what the agent currently declares (meta +
+ *  web.json, peer mode only): drop an orphaned door container, then bring up
+ *  the declared one with its full port set. Call AFTER the agent recreate when
+ *  entering/staying in peer mode. The door is idempotent — an already-correct
+ *  door is a no-op, and `forceRecreate` (network change) makes it pick up the
+ *  new peer. */
+async function syncDoors(name, { forceRecreate = false, log = () => {} } = {}) {
+  const declared = vm.desiredDoors(name);
+  const declaredNames = new Set(declared.map((d) => d.service));
+  const re = doorNameRe(name);
+  const all = await dockerPsList();
+  for (const cname of Object.keys(all)) {
+    if (re.test(cname) && !declaredNames.has(cname)) {
+      log('system', `Removing orphaned ${cname} forwarding door`);
+      await runCmd('docker', ['rm', '-f', cname], { timeout: 30000 }).catch(() => {});
+    }
+  }
+  for (const d of declared) {
+    const desc = d.ports.map((p) => `${p.hostPort}→${p.containerPort}`).join(', ');
+    log('system', `Starting ${d.service} forwarding door (${desc})`);
+    const args = ['up', '-d', '--no-deps'];
+    if (forceRecreate) args.push('--force-recreate');
+    args.push(d.service);
+    await vm.runCompose(name, args, { stream: true, onLog: log, timeout: 180000 });
+  }
+}
+
+/** Drop the agent's socat door. Used when LEAVING peer mode: the door still
+ *  holds the host ports the agent is about to publish directly, so it must be
+ *  removed BEFORE the agent recreate or the port bind fails. */
+async function removeDoors(name, log = () => {}) {
+  const re = doorNameRe(name);
+  const all = await dockerPsList();
+  for (const cname of Object.keys(all)) {
+    if (re.test(cname)) {
+      log('system', `Removing ${cname} forwarding door`);
+      await runCmd('docker', ['rm', '-f', cname], { timeout: 30000 }).catch(() => {});
+    }
+  }
+}
+
+/** Boot-time sweep: drop any <name>-door / <name>-web forwarding containers
+ *  whose agent (instances/<name>) no longer exists. Door containers survive
+ *  `removeVm` of the agent in older code, so a deleted agent's door keeps
+ *  holding its host port forever and blocks other agents from reusing it. */
+async function cleanOrphanDoors() {
+  const all = await dockerPsList();
+  for (const cname of Object.keys(all)) {
+    const m = /^(.*)-(door|web)$/.exec(cname);
+    if (!m) continue;
+    const base = m[1];
+    if (fs.existsSync(path.join(INSTANCES_DIR, base))) continue;
+    console.log(`[orphan-door] removing ${cname} (agent ${base} gone)`);
+    await runCmd('docker', ['rm', '-f', cname], { timeout: 30000 }).catch(() => {});
+  }
+}
+
 /** Effective network peer name of an agent — meta.NETWORK, falling back to the
  *  compose file (legacy agents predate the meta flag). Empty = default network. */
 function currentNetworkPeer(name) {
@@ -1189,7 +1423,7 @@ app.get('/api/agents/:name/web', async (req, res) => {
     // Extra Docker ports (plan 28) are independent of the built-in web app and
     // always reported — even for agent types with no web app to publish.
     const extraPorts = vm.readExtraPorts(name);
-    if (!driver.webApp) return res.json({ webApp: null, extraPorts });
+    if (!driver.webApp) return res.json({ webApp: null, extraPorts, sshPort: meta.PORT || '', sshContainerPort: vm.readSshCport(name) });
 
     const webService = vm.readWebService(name);
     const active = !!webService;
@@ -1202,7 +1436,7 @@ app.get('/api/agents/:name/web', async (req, res) => {
     // on the socat door container when the agent routes through a network peer
     // (the agent can't publish ports in that mode).
     const netPeer = currentNetworkPeer(name);
-    const portContainer = netPeer ? vm.webDoorName(name) : name;
+    const portContainer = netPeer ? vm.doorName(name) : name;
     let actualPorts = [];
     try {
       const p = await runCmd('docker', ['inspect', portContainer, '--format', '{{json .NetworkSettings.Ports}}'], { timeout: 15000 });
@@ -1229,6 +1463,8 @@ app.get('/api/agents/:name/web', async (req, res) => {
       startCommand: active ? driver.webApp.startCommand({ password, containerPort: webService.containerPort }) : '',
       actualPorts,
       extraPorts,
+      sshPort: meta.PORT || '',
+      sshContainerPort: vm.readSshCport(name),
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1323,19 +1559,18 @@ app.post('/api/agents/:name/web', async (req, res) => {
         }
 
         step('recreate', 'start');
-        // Peer-networked agents expose the web app through a socat door service
-        // in the same compose file — bring it up alongside the agent. Its image
-        // (alpine/socat) is auto-pulled by compose on first use.
-        const upServices = [name];
-        if (turningOn && currentNetworkPeer(name)) upServices.push(vm.webDoorName(name));
-        await vm.runCompose(name, ['up', '-d', '--no-deps', '--force-recreate', ...upServices], { stream: true, onLog: log, timeout: 300000 });
+        // Recreate the agent only — the socat door (peer mode) is reconciled
+        // right after in one go (a single door container forwards every
+        // published port).
+        await vm.runCompose(name, ['up', '-d', '--no-deps', '--force-recreate', name], { stream: true, onLog: log, timeout: 300000 });
         step('recreate', 'end');
 
-        if (!turningOn) {
-          // The door service is gone from the regenerated compose — drop any
-          // leftover door container.
-          await runCmd('docker', ['rm', '-f', vm.webDoorName(name)], { timeout: 30000 }).catch(() => {});
-        }
+        // Peer-networked agents expose their web app through the socat door
+        // service declared in the same compose file. Bring the door up with its
+        // full port set (web + SSH + extra ports) or drop it when nothing is
+        // published anymore; its image (alpine/socat) is auto-pulled on first
+        // use. forceRecreate on publish so a re-publish picks up the new port.
+        await syncDoors(name, { forceRecreate: turningOn, log });
 
         if (!wasRunning) {
           try { await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 }); } catch {}
@@ -1375,9 +1610,17 @@ app.post('/api/agents/:name/web', async (req, res) => {
           if (turningOn) vm.removeWebStartHook(name, agentType);
           else if (oldWeb) vm.writeWebStartHook(name, agentType, buildWebHook(driver, agentType, oldWeb, readHookPassword(vm.webHookPath(name, agentType)) || ''));
           await vm.applyWebServices(name, oldWeb);
-          await runCmd('docker', ['rm', '-f', vm.webDoorName(name)], { timeout: 30000 }).catch(() => {});
+          const oldPeer = currentNetworkPeer(name);
+          if (!oldPeer) {
+            // Default network: a leftover door holds host ports the agent is
+            // about to publish directly — drop it BEFORE the recreate.
+            await removeDoors(name, log);
+          }
           if (wasRunning && touched) {
             await vm.runCompose(name, ['up', '-d', '--no-deps', '--force-recreate', name], { timeout: 180000 });
+          }
+          if (oldPeer) {
+            await syncDoors(name, { forceRecreate: true, log });
           }
           registry.dockerPsList(true);
         } catch {}
@@ -1412,9 +1655,10 @@ app.post('/api/agents/:name/ports', async (req, res) => {
     const webService = vm.readWebService(name);
     const webHostPort = webService ? webService.hostPort : '';
     const network = meta.NETWORK || '';
-    // Pure validation first (bounds, self-dups, SSH/web conflicts, peer-mode
-    // ban), then the async cross-agent availability check.
-    const ports = vm.validateExtraPorts(extraPorts, { sshPort, webHostPort, network });
+    // Pure validation first (bounds, self-dups, SSH/web conflicts), then the
+    // async cross-agent availability check. Peer mode is fine — extra ports
+    // ride the agent's socat door, not the agent's own ports.
+    const ports = vm.validateExtraPorts(extraPorts, { sshPort, webHostPort });
     for (const p of ports) {
       if (await hostPortInUse(p.host, name)) {
         return res.status(400).json({ error: `Host port ${p.host} is already in use by another agent` });
@@ -1470,6 +1714,11 @@ app.post('/api/agents/:name/ports', async (req, res) => {
         await vm.runCompose(name, ['up', '-d', '--no-deps', '--force-recreate', name], { stream: true, onLog: log, timeout: 300000 });
         step('recreate', 'end');
 
+        // Peer mode: the extra ports live on the socat door — bring it up with
+        // the new port set (compose recreates the door automatically when its
+        // definition changed; it's a no-op otherwise).
+        await syncDoors(name, { log });
+
         if (!wasRunning) {
           try { await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 }); } catch {}
         }
@@ -1492,6 +1741,7 @@ app.post('/api/agents/:name/ports', async (req, res) => {
           if (wasRunning && touched) {
             await vm.runCompose(name, ['up', '-d', '--no-deps', '--force-recreate', name], { stream: true, onLog: log, timeout: 180000 });
           }
+          await syncDoors(name, { forceRecreate: true, log });
           registry.dockerPsList(true);
         } catch {}
         try {
@@ -1510,6 +1760,7 @@ app.post('/api/agents/:name/ports', async (req, res) => {
 app.post('/api/agents/:name/recreate', async (req, res) => {
   const name = safeVmName(req.params.name);
   if (!name) return res.status(400).json({ error: 'Invalid agent name' });
+  const { pull = false, reset = false } = req.body || {};
   try {
     const meta = readMeta(name);
     if (!meta.AGENT && !meta.ROOT_PASSWORD) return res.status(404).json({ error: 'Agent not found' });
@@ -1532,22 +1783,40 @@ app.post('/api/agents/:name/recreate', async (req, res) => {
         // Validate the compose BEFORE stopping — a malformed document aborts
         // with the container still running instead of stranding it stopped.
         await vm.validateInstanceCompose(name);
-        if (wasRunning) {
-          step('stop', 'start');
-          await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 });
-          step('stop', 'end');
-        }
-        log('system', 'Recreating container to re-resolve the network peer…');
-        step('recreate', 'start');
-        await vm.runCompose(name, ['up', '-d', '--no-deps', '--force-recreate', name], { stream: true, onLog: log, timeout: 300000 });
-        step('recreate', 'end');
-        if (!wasRunning) {
-          try { await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 }); } catch {}
+        if (pull || reset) {
+          // Settings "Recreate Container": optional latest-image pull + optional
+          // full user-data wipe, always ending with a force-recreate.
+          await vm.recreateAgent(name, { pull, reset, onLog: log, onStep: step });
+          if (pull) {
+            try {
+              const v = await drivers.getDriver(meta.AGENT || 'openclaw').currentVersion(name);
+              if (v) vm.setMetaFlag(name, 'OPENCLAW_VERSION', v);
+            } catch {}
+          }
+        } else {
+          // Plain recreate (e.g. network peer re-resolve from the health tab).
+          if (wasRunning) {
+            step('stop', 'start');
+            await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 });
+            step('stop', 'end');
+          }
+          log('system', 'Recreating container to re-resolve the network peer…');
+          step('recreate', 'start');
+          await vm.runCompose(name, ['up', '-d', '--no-deps', '--force-recreate', name], { stream: true, onLog: log, timeout: 300000 });
+          step('recreate', 'end');
+          if (!wasRunning) {
+            try { await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 }); } catch {}
+          }
         }
         registry.dockerPsList(true);
         registry.discoverAgents();
         try {
-          registry.recordActivity(name, 'settings', 'recreate', 'ok', 'Container recreated (network peer re-resolved)');
+          const reason = reset
+            ? 'User data reset and container recreated'
+            : pull
+              ? 'Image updated and container recreated'
+              : 'Container recreated (network peer re-resolved)';
+          registry.recordActivity(name, 'settings', 'recreate', 'ok', reason);
         } catch {}
         log('system', 'Done — container recreated');
         jobLog.finish(job, true);
@@ -1708,6 +1977,8 @@ app.get('/api/config', (req, res) => {
     containerPrefix: PREFIX,
     hostWorkspaceRoot: vm.HOST_WORKSPACE || process.env.HOST_WORKSPACE_ROOT || '',
     workspaceRoot: vm.WORKSPACE || process.env.WORKSPACE_ROOT || '/workspace',
+    host: process.env.HOST_NAME || '',
+    hostProtocol: process.env.HOST_PROTO || 'http',
   });
 });
 
@@ -1998,19 +2269,8 @@ app.get('/api/agents/:name/logs', async (req, res) => {
 app.get('/api/agents/:name/config', (req, res) => {
   const agent = registry.getAgent(req.params.name);
   if (!agent) return res.status(404).json({ error: 'Agent not found' });
-  const driver = drivers.getDriver(agent.agent_type);
-  const configPath = path.join(agent.config_root, driver.configFile || 'openclaw.json');
-  if (!fs.existsSync(configPath)) return res.json({ config: null, configFormat: driver.configFormat || 'json', configFile: driver.configFile || 'openclaw.json' });
   try {
-    // YAML/text config files (hermes config.yaml) are served verbatim — the
-    // editor shows raw text; JSON-only parsing/redaction is skipped.
-    if ((driver.configFormat || 'json') !== 'json') {
-      const rawText = fs.readFileSync(configPath, 'utf8');
-      return res.json({ config: null, configRaw: rawText, configFormat: driver.configFormat, configFile: driver.configFile || 'openclaw.json' });
-    }
-    const raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    const redacted = redactSecrets(JSON.parse(JSON.stringify(raw)));
-    res.json({ config: redacted, configRaw: JSON.stringify(raw, null, 2), configFormat: driver.configFormat || 'json', configFile: driver.configFile || 'openclaw.json' });
+    res.json(vm.readAgentConfig(agent));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -2409,7 +2669,7 @@ app.get('/api/vault/:id/decrypt', requireAdmin, (req, res) => {
 // ─── API: Create Agent ──────────────────────────────────────
 
 app.post('/api/agents/create', async (req, res) => {
-  const { name, agent, assign_to, workspace_host, workspace_dir, allowDocker, network, sshEnabled, port, extraVolumes, extraPorts } = req.body;
+  const { name, agent, assign_to, workspace_host, workspace_dir, allowDocker, network, sshEnabled, port, sshContainerPort, password, extraVolumes, extraPorts } = req.body;
   if (!name) return res.status(400).json({ error: 'Name is required' });
   if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
   if (registry.getAgent(name)) return res.status(409).json({ error: 'Agent already exists' });
@@ -2440,6 +2700,13 @@ app.post('/api/agents/create', async (req, res) => {
 
   let sshHostPort = '';
   if (sshEnabled) sshHostPort = port || vm.autoSshPort();
+  const sshCportRaw = String(sshContainerPort || '').trim();
+  const sshCport = (/^\d+$/.test(sshCportRaw) && +sshCportRaw >= 1 && +sshCportRaw <= 65535)
+    ? sshCportRaw
+    : '';
+  if (sshEnabled && sshContainerPort !== undefined && sshContainerPort !== '' && !sshCport) {
+    return res.status(400).json({ error: 'SSH container port must be an integer between 1 and 65535' });
+  }
 
   let extraVols = [];
   try {
@@ -2449,7 +2716,7 @@ app.post('/api/agents/create', async (req, res) => {
   }
   let extraPs = [];
   try {
-    extraPs = vm.validateExtraPorts(extraPorts, { sshPort: sshHostPort, network });
+    extraPs = vm.validateExtraPorts(extraPorts, { sshPort: sshHostPort });
   } catch (e) {
     return res.status(400).json({ error: e.message });
   }
@@ -2483,6 +2750,8 @@ app.post('/api/agents/create', async (req, res) => {
         network: network || '',
         sshEnabled: !!sshEnabled,
         port: sshHostPort,
+        sshCport,
+        password: typeof password === 'string' ? password : '',
         extraVolumes: extraVols,
         extraPorts: extraPs,
         onLog: log,
@@ -2712,6 +2981,11 @@ const server = app.listen(6789, () => console.log('VM WebUI listening on port 67
     await logStore.captureAll(Object.keys(containers).filter((n) => safeVmName(n)));
   } catch {}
   setTimeout(logSweep, 30000);
+})();
+
+// Boot-time cleanup of forwarding-door containers whose agent was deleted.
+(async function orphanDoorSweep() {
+  try { await cleanOrphanDoors(); } catch {}
 })();
 
 // One-time migration to per-instance build files (plan 25). Runs in the

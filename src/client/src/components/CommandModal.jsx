@@ -4,6 +4,7 @@ import Console from './Console'
 const STEP_COMMANDS = {
   stop: (name) => `docker stop ${name}`,
   build: (name) => `docker compose -f instances/${name}/docker-compose.yml build --pull`,
+  reset: (name) => `wipe user data folder (instances/${name}/<agent>)`,
   recreate: (name) => `docker compose -f instances/${name}/docker-compose.yml up -d --no-deps --force-recreate`,
   'web-hook': (name) => `write start-web.sh boot hook`,
   'web-compose': (name) => `update docker-compose.yml (publish port)`,

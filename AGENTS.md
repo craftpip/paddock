@@ -1070,6 +1070,81 @@ reaches the right app. Re-publish via the Web tab with the container-port field 
     misread that as a forwarding failure. The v1 `/pty/.../connect` path responds
     401/400 correctly, proving the handshake reaches the app.
 
+### Door rename: `<name>-web` → `<name>-door`, and all ports ride the door (2026-08-09)
+
+**What changed:** the socat door was renamed from `<name>-web` to `<name>-door`,
+and it no longer exists for web apps only — in peer mode the door now carries
+**web + SSH + extra ports** in one container, one `socat TCP-LISTEN:<hostPort>,fork,reuseaddr TCP:<peer>:<containerPort>`
+process per port (identity `host:host` maps). Peer-networked agents can now expose
+SSH and additional ports via the Settings tab — the old "cannot publish ports in
+peer mode" bans in `validateExtraPorts`/settings/ports/create routes were removed.
+
+**Migration gap:** existing agents' compose files were generated with the old
+`-web` door. The reconcile (`syncDoors`/`removeDoors` in `src/app.js`) originally
+only matched `^<name>-door$`, so a regenerated compose would emit `-door` while
+the stale `-web` container still held the host ports → "port already allocated".
+**Fix:** `doorNameRe(name)` now matches both `^(<name>-door|<name>-web)$`, and
+`removeVm()` drops both suffixes. Live-migrated `pad-opencode-aic` and
+`pad-opencode-paddock-dev` via a ports POST with a real extra port (triggers the
+regen+reconcile; a no-op POST short-circuits at the `!changed` guard and does
+NOT migrate).
+
+**Legacy doors were standalone instance dirs:** the old web-publish flow built a
+per-door IMAGE (`paddock-vm-<name>-web:latest`) from `instances/<name>-web/`
+(with its own compose/build/logs). After migration these `<name>-web` dirs are
+dead — new doors are an `alpine/socat` SERVICE inside the agent's own compose.
+Deleted agents' orphan doors (e.g. `pad-opencode-yo-web` holding 43818) had no
+agent to reconcile them. **Fix:** `cleanOrphanDoors()` runs at webui boot and
+`docker rm -f` any `*-door`/`*-web` container whose `instances/<base>` dir no
+longer exists (safe — only our system creates `<x>-door`/`<x>-web` containers).
+Manually removed `pad-opencode-yo-web` (freed 43818) + stale `-web` dirs for
+`ai-company`, `yo`, `aic`, `paddock-dev`.
+
+**Verified live (aic, gluetun-nord peer):** added extra port 34851→3456 (aic's
+own `opencode web --port 3456`), door grew `TCP-LISTEN:34851→TCP:gluetun-nord:3456`,
+host:34851 → HTTP 200; POST `extraPorts: []` reverted the door to web-only and
+34851 → 000. Same flow on paddock-dev (51234). `hostPortInUse` does NOT exclude
+the agent's own door, so reusing a just-freed host port still errors until the
+door is gone — use a fresh host port or two POSTs.
+
+**Door follows the agent on Paddock Start/Stop/Restart (2026-08-09):** the
+Start/Stop/Restart buttons now start/stop the door **together with** the agent
+(`startDoors`/`stopDoors` in `src/app.js` — `docker start` is a no-op on a
+running door, `docker stop` skips already-stopped doors). Stopping the agent
+inside Paddock stops the door too (it forwards to the agent's ports in the peer
+namespace, so a stopped agent makes it a dead open listener). This ONLY applies
+to the Paddock buttons — `docker stop <name>` from the CLI stops just the agent,
+and the door keeps running; starting the agent again from Paddock then works
+fine (the still-running door just resumes forwarding). Verified live on aic:
+Paddock stop → agent Exited + door Exited + port 000; Paddock start → both Up +
+port 200; CLI-stop-then-Paddock-start → agent Up, door never went down, port 200.
+
+## MCP Server /mcp — Shared-Function Rule (plan 30 — 2026-08-09)
+
+- `src/mcp.js` exposes 12 tools over the `/mcp` Streamable HTTP endpoint: `list_agents`,
+  `get_agent`, `agent_logs`, `config_get`, `workspace_list`,
+  `workspace_read`, `workspace_write`, `start_agent`,
+  `stop_agent`, `restart_agent`, `delete_agent`, `exec`.
+- **Tool names carry NO `paddock_` prefix** — the consuming MCP client already namespaces the
+  server's tools itself, so a prefixed name would double-prefix. Keep new tools unprefixed.
+- **Business logic lives in `src/services/`; REST routes (app.js) AND MCP tools (mcp.js) are thin
+  adapters over the SAME service functions — never duplicate behavior between them.** Examples:
+  config read → `vm.readAgentConfig(agent)` (driver-aware configFile/configFormat, redacts JSON
+  secrets); start/stop/restart → `vm.startAgent`/`stopAgent`/`restartAgent` (these also start/stop
+  the socat door with the agent — the CLI-only `docker start/stop` does NOT touch the door);
+  delete → `vm.removeVm` + `registry.removeAgentFromDb`.
+- MCP auth: `Authorization: Bearer <api key>` or `x-api-key`. Keys are created in the webui Vault /
+  API keys page; the raw key is shown once (`api-keys.create`), only the hash is stored.
+- `get_agent` accepts an optional `logs` param (tail N ≤ 500) and includes recent container
+  logs via `logStore.capture` + `readLogs`. `agent_logs` is the standalone equivalent.
+- `delete_agent` requires `confirm: true` — destructive, no undo (removes container, door,
+  network, instance dir). Keep that guard.
+- Testing MCP over HTTP: `docker exec -e MCP_KEY=<key> paddock node -e '…http POST /mcp…'` — responses
+  are SSE (`event: message` + `data: {...}` lines), parse the `data:` lines. The `/mcp` endpoint
+  refuses without a valid key.
+- Tests: `timeout 60 docker exec paddock node --test test/mcp.test.js` (5 tests; the combined
+  `node --test test/` run hangs, known issue — run mcp.test individually).
+
 ## Architecture Documentation
 
 - `docs/` — **Source of truth** for business logic, system architecture, page descriptions, routes, data model, security model, and all behavioral contracts. Split by area: `overview/` (architecture, business-logic, react-migration), `backend/` (services, middleware, user-management), `tabs/` (per-tab behavior), `pages/`, `components/`, `operations/`.
@@ -1203,12 +1278,20 @@ used to show URL only for HTTP transports and command only for stdio).
 - **Never refer to containers/PADs with a `vm-` prefix.** The naming scheme is not guaranteed. Refer to PADs by their actual name only.
 - **Never use the question tool to ask the user questions during a conversation.** Ask questions directly in text instead. The tool is only for fallback or complex multi-option scenarios when explicitly justified.
 
+## Container Info Popup — `exposed` vs `published` (2026-08-09)
+
+- Settings → Container Info popup (`ContainerInfoModal.jsx` + `GET /api/agents/:name/container-info` in app.js) shows live container detail: network mode + peer, mounts table (type/source/destination/access), published ports, env keys, and a collapsible raw `docker inspect` JSON with env secrets redacted.
+- **Do NOT present `Config.ExposedPorts` as "exposed" ports** — it's pure image/compose metadata, never bound to the host. Every pad image declares `EXPOSE 22` (from the base Dockerfile), so agents show `22/tcp` in ExposedPorts while nothing is reachable. Only `HostConfig.PortBindings` / `NetworkSettings.Ports` are real (published) ports.
+- Ports section renders published ports when any exist; otherwise shows "No host-published ports." plus a warning listing the `EXPOSE`-declared ones as "Not published … nothing is reachable".
+- **Peer-mode agents never publish on their own container** — the host binding lives on the `<name>-door` socat container, so the agent's Ports section is legitimately empty even when the Web tab shows a live URL.
+- Popup is lazy-loaded: the endpoint is called only when the popup opens (not on page load). Live uptime is derived in the frontend from `State.StartedAt` and ticks every second — no backend uptime field.
+
 ## Persistent Container Logs (2026-08-07)
 
 - `docker logs` dies with the container (docker rm removes the log file), so a recreated PAD's Logs tab started empty.
 - `src/services/log-store.js` captures each container's logs into a rolling file at `instances/<name>/logs/container.log` (auto-gitignored — `instances/*` is already ignored). It runs `docker logs --timestamps`, parses each line's RFC3339Nano timestamp, appends only lines newer than the last captured one (`meta.json` stores `lastTs`), so a recreated container's logs naturally append with no dupes/gaps. File is trimmed past 8MB/20k lines.
 - Capture triggers: every `/api/agents/:name/logs` fetch (view is always fresh), a 30s `setInterval` sweep in app.js over all `safeVmName` containers (logs persist even if the page is never opened), and at the start of each backend recreate/delete/update/settings `setImmediate` (final lines survive the sweep window).
-- The MCP `paddock_agent_logs` tool also reads from log-store now.
+- The MCP `agent_logs` tool also reads from log-store now.
 - The old `dockerLogs()` helpers were removed from app.js and mcp.js (dead). `routes/agents.js` still has one — that file is dead code, not mounted.
 
 ## Theme / Logs UI fixes (2026-08-07)
@@ -1284,3 +1367,94 @@ used to show URL only for HTTP transports and command only for stdio).
 - `docker compose config --quiet` does NOT check build-context existence or
   external-network existence — those surface at `build`/`up` time. Its value is
   syntax/schema/interpolation, and it's cheap (~100ms).
+
+## SSH Expose in Settings (2026-08-08)
+
+- The Create page's "Expose OpenSSH" toggle is mirrored in the agent Settings
+  tab (`SettingsTab.jsx` SSH card) — enable/disable + a host port field (empty
+  = auto-allocate 43817+ via `vm.autoSshPort()`), applied through the same
+  SSE settings job as docker/network/workspace (recreate).
+- Backend: `GET /api/agents/:name/settings` returns `sshPort` (meta.PORT).
+  `POST` accepts `sshEnabled` + `sshPort`. `sshEnabled === undefined` → no
+  change; `false` → un-expose; `true` → keep/clear/auto-allocate. Validation:
+  integer 1–65535, `hostPortInUse` against other agents (self excluded),
+  conflict vs this agent's extra ports + web host port. Rollback path restores
+  `oldSshPort`.
+- `vm.applySettings` takes an optional `sshPort` opt (new value wins over
+  `meta.PORT`) and now always writes `PORT` into meta.env.
+- **`setMetaFlag(name, key, '')` now REMOVES the line instead of writing
+  `KEY=`** — matches createVm (only writes `PORT=` when non-empty) and keeps
+  meta.env clean. All readers use falsy checks, so behavior is unchanged for
+  existing empty-value writers (WORKSPACE_*/NETWORK/EXTRA_*).
+- Peer-mode agents (network override) can't publish SSH — the Settings UI
+  disables the toggle with a warning (matches the additional-ports pattern);
+  the compose generator already skips ports in peer mode.
+
+## SSH Expose — container port + password (2026-08-09)
+
+**Why:** the SSH card in the Web tab only asked for a host port. Agents that
+share a network namespace (peer mode) can't ALL bind 22 inside it — exactly
+like the web 8080 collision — so each needs a distinct *container* port, and
+the root/SSH password was never settable from the UI. The SSH card now mirrors
+the web-app publish card: host port + container port (default 22) + an optional
+password (Show/Hide + Generate), plus a "Currently published: host X →
+container Y" line.
+
+- **Container port is real, not cosmetic:** meta `SSH_CPORT` (default `22`,
+  read via `vm.readSshCport(name)`). The compose maps `${host}:${sshCport}`
+  and the door forwards `TCP:<peer>:${sshCport}`. The container's sshd must
+  therefore LISTEN on that port — passed as `SSH_PORT` env (added to
+  `service.environment` only while exposed) and honored by a new block in every
+  `vm-builds/*/start.sh` that `sed`s `Port $SSH_PORT` into sshd_config before
+  launching sshd. Verified live: container port 3022 → sshd listens on 3022 →
+  `sshpass -p … ssh -p 43850 root@host` logs in.
+- **`ensureSshStartBlock(name)`** in vm-manager.js backfills that block into an
+  OLD instance's own `build/start.sh` (idempotent; returns true only when it
+  patched). The baked image's start.sh only changes on REBUILD, so the settings
+  route calls `imageHasSshPortSupport(name, image, wasRunning)` (grep SSH_PORT
+  in the running container's `/usr/local/bin/start.sh`, or throwaway `docker
+  run --rm` of the image) and — when a non-22 container port is requested and
+  the image lacks support — sets `sshRebuild`. `needRebuildFinal` folds it into
+  the existing rebuild path (`vm.updateAgent pull:false`) with a clear log
+  ("start.sh must inform us of the custom SSH container port"). Rebuild is
+  cheap: only the `COPY start.sh` layer + metadata change (npm layer is CACHED).
+- `POST /api/agents/:name/settings` accepts `sshContainerPort` (validated
+  1–65535, `sshCportChanged`), `sshPassword` (string; empty ⇒ keep current;
+  strips CR/LF; `passwordChanged = newPw !== oldRootPw`). applySettings persists
+  `SSH_CPORT` and `ROOT_PASSWORD` meta + returns `sshCport`. Create route +
+  `createVm` take `sshContainerPort`/`password` too (CreateAgent.jsx got the
+  same two-column SSH fields).
+- `autoSshPort()` now scans `/"(\d+):(\d+)"/g` — container ports vary now, and
+  it must collect web/extra host ports too (not just `:22`).
+- **Never echo the stored password** — the Web tab loads the sshPassword field
+  empty and treats a non-empty typed value as "set"; empty stays "keep current".
+
+## Host Override (HOST_NAME / HOST_PROTO) — 2026-08-09
+
+- `.env` can set `HOST_NAME` (IP **or** hostname, e.g. `10.69.1.164` or
+  `paddock.local`) and `HOST_PROTO` (`http`|`https`). These override the base
+  used for **published web-app links** (AgentCard ↗ icon, Web tab access URL).
+- `/api/config` exposes them as `host` + `hostProtocol`.
+- Frontend `src/client/src/lib/web.js`:
+  - `loadWebConfig()` fetches `/api/config` once at app boot (`main.jsx`) and
+    caches it.
+  - `webBase()` uses `config.host` + `config.hostProtocol` when set; otherwise
+    falls back to `window.location` (derive-from-where-loaded is the default).
+- Because `.env` vars are baked in at container **create** (env_file), a
+  `docker restart` is NOT enough — you must **recreate** the paddock container
+  for config changes to take effect.
+- **Recreate gotcha**: the host docker CLI has no compose plugin; running
+  `docker compose` inside a throwaway container resolves relative volume paths
+  (`./src`) against the throwaway container's cwd → the host daemon mounts
+  host-root `/workspace/...` (bind-mount split-brain, empty dirs, app.js
+  MODULE_NOT_FOUND crash loop). Fix: recreate with host-absolute paths:
+  ```bash
+  docker rm -f paddock
+  docker run -d --name paddock --restart unless-stopped \
+    -p 6789:6789 -p 5173:5173 \
+    -v /www2/paddock:/workspace:rw -v /www2/paddock/src:/app:rw \
+    -v /var/run/docker.sock:/var/run/docker.sock:ro \
+    --env-file /www2/paddock/.env paddock-webui:latest
+  ```
+  The compose file's relative mounts work when created from the host's real
+  context only.

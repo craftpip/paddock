@@ -1436,27 +1436,28 @@ Each request creates a **fresh `McpServer` + fresh `StreamableHTTPServerTranspor
 
 ### Tools
 
-Every tool returns `{ content: [{ type: 'text', text: <JSON> }] }` where `<JSON>` is the payload below. Errors are structured MCP errors (`isError: true`), never stack traces. Tool names use the `paddock_` prefix so clients can group them.
+Every tool returns `{ content: [{ type: 'text', text: <JSON> }] }` where `<JSON>` is the payload below. Errors are structured MCP errors (`isError: true`), never stack traces. Tool names carry no `paddock_` prefix — the consuming client namespaces the server's tools itself.
 
 | Tool | Arguments | Returns |
 |------|-----------|---------|
-| `paddock_list_agents` | none | `{ agents: [{ name, status, display_name, agent_type, runtime_ref, default_model, default_provider }] }` — admin sees the full fleet, users only their own |
-| `paddock_get_agent` | `name` | full agent object from `agent-registry.getAgent` |
-| `paddock_agent_logs` | `name`, `tail?` (1–5000, default 100) | `{ name, logs }` (stdout+stderr from `docker logs`) |
-| `paddock_config_get` | `name` | `{ name, config }` from `openclaw.json`, secrets redacted (see below); `config: null` if file missing |
-| `paddock_workspace_list` | `name`, `path?` (default `/`) | directory listing via `services/workspace.listDir` |
-| `paddock_workspace_read` | `name`, `path` | `{ name, path, size, modified, content }` — text only, files > 256 KB rejected |
-| `paddock_workspace_write` | `name`, `path`, `content` | `{ name, path, size, modified }` — creates or overwrites |
-| `paddock_start_agent` | `name` | `{ ok, name, status }` |
-| `paddock_stop_agent` | `name` | `{ ok, name, status }` |
-| `paddock_restart_agent` | `name` | `{ ok, name, status }` |
-| `paddock_exec` | `name`, `command`, `timeout?` (1000–600000 ms, default 30000) | `{ name, stdout, stderr }` — `docker exec -i <pad> sh -lc '<command>'`; container must be running |
+| `list_agents` | none | `{ agents: [{ name, status, display_name, agent_type, runtime_ref, default_model, default_provider }] }` — admin sees the full fleet, users only their own |
+| `get_agent` | `name`, `logs?` (1–500, tail lines) | full agent object from `agent-registry.getAgent`; with `logs` also `{ name, logs }` recent container lines |
+| `agent_logs` | `name`, `tail?` (1–5000, default 100) | `{ name, logs }` (stdout+stderr from `docker logs`) |
+| `config_get` | `name` | driver-aware config read via `vm.readAgentConfig` (JSON parsed + secrets redacted; yaml/toml verbatim) |
+| `workspace_list` | `name`, `path?` (default `/`) | directory listing via `services/workspace.listDir` |
+| `workspace_read` | `name`, `path` | `{ name, path, size, modified, content }` — text only, files > 256 KB rejected |
+| `workspace_write` | `name`, `path`, `content` | `{ name, path, size, modified }` — creates or overwrites |
+| `start_agent` | `name` | `{ ok, name, status }` — starts the socat door too (`vm.startAgent`) |
+| `stop_agent` | `name` | `{ ok, name, status }` — stops the socat door too (`vm.stopAgent`) |
+| `restart_agent` | `name` | `{ ok, name, status }` |
+| `delete_agent` | `name`, `confirm: true` | `{ ok, name, deleted }` — removes container, door, network, instance dir; requires `confirm: true` |
+| `exec` | `name`, `command`, `timeout?` (1000–600000 ms, default 30000) | `{ name, stdout, stderr }` — `docker exec -i <pad> sh -lc '<command>'`; container must be running |
 
 Control tools force a docker-cache refresh after the mutation so the returned status is fresh.
 
 ### Secrets redaction (`redactConfig`)
 
-`paddock_config_get` strips: top-level `api_keys`, `channels.telegram.botToken`, and `plugins.*.key` — each replaced with `'[REDACTED]'`. Same fields the webui config route redacts.
+`config_get` strips secret-looking values (`api_keys`, `bot_token`, plugin keys…) via `redactSecrets` in `vm-manager.js`. Same fields the webui config route redacts.
 
 ### Error mapping / edge cases
 

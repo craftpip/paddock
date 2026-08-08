@@ -390,6 +390,18 @@ function readExtraVolumes(name) {
   }
 }
 
+/** The SSH daemon's port INSIDE the container (default 22). Stored in meta as
+ *  SSH_CPORT when it differs — an explicit field because agents that share a
+ *  network namespace (peer mode) can't ALL bind 22; each must pick a distinct
+ *  one. Falls back to 22 whenever unset/corrupt. */
+const DEFAULT_SSH_CPORT = '22';
+function readSshCport(name) {
+  const meta = readMeta(path.join(INSTANCES_DIR, name)) || {};
+  const raw = String(meta.SSH_CPORT || '').trim();
+  if (/^\d+$/.test(raw) && +raw >= 1 && +raw <= 65535) return raw;
+  return DEFAULT_SSH_CPORT;
+}
+
 /** Read the persisted extra ports from meta (EXTRA_PORTS JSON) or [] when
  *  absent/corrupt. Never throws. */
 function readExtraPorts(name) {
@@ -523,10 +535,11 @@ function validateExtraVolumes(name, agent, list) {
 
 /** Validate a list of extra host→container port mappings. Returns the
  *  normalized `[{ host, container }]` array or throws. Pure checks only: int
- *  bounds, self-duplicates, SSH/web-port conflicts, and the peer-mode ban. The
+ *  bounds, self-duplicates, and SSH/web-port conflicts. Peer mode is fine —
+ *  ports are published through the agent's socat door, not on the agent. The
  *  async cross-agent `hostPortInUse` check lives in the route layer. */
 function validateExtraPorts(ports, opts = {}) {
-  const { sshPort = '', webHostPort = '', network = '' } = opts;
+  const { sshPort = '', webHostPort = '' } = opts;
   if (ports === undefined || ports === null) return [];
   if (!Array.isArray(ports)) throw new Error('Extra ports must be a list');
   const out = [];
@@ -551,14 +564,14 @@ function validateExtraPorts(ports, opts = {}) {
     }
     out.push({ host: String(h), container: String(c) });
   }
-  if (network && out.length) {
-    throw new Error(`Docker cannot publish ports while this agent joins ${network}'s network — clear the network override or remove the extra ports`);
-  }
   return out;
 }
 
 /** Smallest unused SSH host port starting at 43817 (the same scan createVm
- *  uses to auto-allocate an SSH port when "Expose SSH" is on without a port). */
+ *  uses to auto-allocate an SSH port when "Expose SSH" is on without a port).
+ *  Collects every published host port across all instances — SSH (host:container
+ *  where container can vary now), extra ports, and the web app — from the
+ *  generated compose files. */
 function autoSshPort() {
   const used = new Set();
   if (fs.existsSync(INSTANCES_DIR)) {
@@ -566,7 +579,7 @@ function autoSshPort() {
       if (!entry.isDirectory()) continue;
       const composeFile = path.join(INSTANCES_DIR, entry.name, 'docker-compose.yml');
       if (fs.existsSync(composeFile)) {
-        for (const m of fs.readFileSync(composeFile, 'utf8').matchAll(/"(\d+):22"/g)) {
+        for (const m of fs.readFileSync(composeFile, 'utf8').matchAll(/"(\d+):(\d+)"/g)) {
           used.add(parseInt(m[1]));
         }
       }
@@ -588,6 +601,7 @@ function generateInstanceCompose(name, agent, password, port, opts = {}) {
     a.default ? `\${${a.name}:-${a.default}}` : `\${${a.name}}`,
   ]));
   const volumes = [`${HOST_WORKSPACE}/instances/${name}/${agent}:${driver.dataDir}`];
+  const sshCport = readSshCport(name);
   const service = {
     build: {
       // The compose CLI runs in the webui, so the build context uses its view.
@@ -602,7 +616,7 @@ function generateInstanceCompose(name, agent, password, port, opts = {}) {
 
   const ports = [];
   if (!peerMode) {
-    if (port) ports.push(`${port}:22`);
+    if (port) ports.push(`${port}:${sshCport}`);
     if (webService?.hostPort) ports.push(`${webService.hostPort}:${webService.containerPort}`);
     for (const p of readExtraPorts(name)) ports.push(`${p.host}:${p.container}`);
   }
@@ -616,30 +630,55 @@ function generateInstanceCompose(name, agent, password, port, opts = {}) {
     volumes.push(`${v.host}:${v.container}${v.readonly ? ':ro' : ''}`);
   }
   if (network) service.network_mode = `container:${network}`;
-  service.environment = { TZ: 'Asia/Kolkata', ROOT_PASSWORD: password || '' };
+  service.environment = {
+    TZ: 'Asia/Kolkata',
+    ROOT_PASSWORD: password || '',
+    // Only relevant while SSH is exposed: tells the baked start.sh which port
+    // sshd should LISTEN on inside the container (default 22). Agents sharing a
+    // network namespace need distinct container ports, not just distinct host
+    // ports — the host → container mapping alone can't fix that.
+    ...(port ? { SSH_PORT: sshCport } : {}),
+  };
 
   const services = { [name]: service };
   let networks;
-  if (peerMode && webService?.hostPort) {
-    const door = webDoorName(name);
-    if (webPeerNetwork) {
-      services[door] = {
-        image: 'alpine/socat',
-        container_name: door,
-        restart: 'unless-stopped',
-        networks: ['webbridge'],
-        ports: [`${webService.hostPort}:${webService.containerPort}`],
-        command: `TCP-LISTEN:${webService.containerPort},fork,reuseaddr TCP:${network}:${webService.containerPort}`,
-      };
-      networks = { webbridge: { external: true, name: webPeerNetwork } };
-    } else {
-      services[door] = {
-        image: 'alpine/socat',
-        container_name: door,
-        restart: 'unless-stopped',
-        network_mode: 'host',
-        command: `TCP-LISTEN:${webService.hostPort},fork,reuseaddr TCP:127.0.0.1:${webService.containerPort}`,
-      };
+  if (peerMode) {
+    // Peer-networked agents can't publish ports on themselves (Docker rejects
+    // port publishing with `network_mode: container:`). Publish through ONE
+    // socat "door" service on the peer's network that runs a socat process per
+    // published port (web app, SSH, each additional port) and forwards TCP to
+    // the peer by name — a port inside the peer's namespace is the agent's
+    // own, since it shares the peer's network stack. The door listens on the
+    // host port inside the container (host ports are unique per agent), so the
+    // compose port mapping is the identity `host:host`.
+    const doorPorts = [];
+    if (webService?.hostPort) doorPorts.push({ hostPort: String(webService.hostPort), containerPort: String(webService.containerPort) });
+    if (port) doorPorts.push({ hostPort: String(port), containerPort: sshCport });
+    for (const p of readExtraPorts(name)) doorPorts.push({ hostPort: String(p.host), containerPort: String(p.container) });
+    if (doorPorts.length) {
+      const door = doorName(name);
+      const socats = doorPorts
+        .map((d) => `socat TCP-LISTEN:${d.hostPort},fork,reuseaddr TCP:${network}:${d.containerPort}`)
+        .join(' & ') + ' & wait';
+      if (webPeerNetwork) {
+        services[door] = {
+          image: 'alpine/socat',
+          container_name: door,
+          restart: 'unless-stopped',
+          networks: ['webbridge'],
+          ports: doorPorts.map((d) => `${d.hostPort}:${d.hostPort}`),
+          entrypoint: ['sh', '-c', socats],
+        };
+        networks = { webbridge: { external: true, name: webPeerNetwork } };
+      } else {
+        services[door] = {
+          image: 'alpine/socat',
+          container_name: door,
+          restart: 'unless-stopped',
+          network_mode: 'host',
+          entrypoint: ['sh', '-c', doorPorts.map((d) => `socat TCP-LISTEN:${d.hostPort},fork,reuseaddr TCP:127.0.0.1:${d.containerPort}`).join(' & ') + ' & wait'],
+        };
+      }
     }
   }
 
@@ -656,11 +695,20 @@ function writeInstanceCompose(name, agent, password, port, opts = {}) {
   fs.writeFileSync(composePath, yaml);
 }
 
-/** Set or clear one KEY=VALUE line in an instance's meta.env (preserves the rest). */
+/** Set or clear one KEY=VALUE line in an instance's meta.env (preserves the
+ *  rest). An empty value removes the line entirely — the readers treat a
+ *  missing key the same as an empty one. */
 function setMetaFlag(name, key, value) {
   const metaPath = path.join(INSTANCES_DIR, name, 'meta.env');
   let content = fs.existsSync(metaPath) ? fs.readFileSync(metaPath, 'utf8') : '';
   const re = new RegExp(`^${key}=.*$`, 'm');
+  if (value === '') {
+    if (re.test(content)) {
+      content = content.replace(re, '').replace(/\n{3,}/g, '\n\n').trim() + '\n';
+      fs.writeFileSync(metaPath, content);
+    }
+    return;
+  }
   const line = `${key}=${value}`;
   if (re.test(content)) {
     content = content.replace(re, line);
@@ -683,6 +731,9 @@ async function applySettings(name, opts = {}) {
   const agent = meta.AGENT || 'openclaw';
   const pw = meta.ROOT_PASSWORD || name.replace(PREFIX_RE, '');
   const port = meta.PORT || '';
+  // Effective SSH host port for the regenerated compose: the caller's new
+  // value when supplied (even empty = unexpose), else the stored one.
+  const sshPort = opts.sshPort !== undefined ? String(opts.sshPort || '') : port;
   const allowDocker = !!opts.allowDocker;
   const network = opts.network || '';
   const webService = readWebService(name);
@@ -723,24 +774,42 @@ async function applySettings(name, opts = {}) {
   }
   if (opts.extraPorts !== undefined) {
     const ports = validateExtraPorts(opts.extraPorts, {
-      sshPort: meta.PORT || '',
+      sshPort,
       network,
     });
     setMetaFlag(name, 'EXTRA_PORTS', ports.length ? JSON.stringify(ports) : '');
   }
 
   let webPeerNetwork = '';
-  if (webService && network) {
+  if (network) {
+    // Peer mode — the compose needs the peer's bridge network for any socat
+    // door (web app and/or SSH), even when only the SSH port is published.
     webPeerNetwork = await getPeerNetworkName(network);
   }
 
-  writeInstanceCompose(name, agent, pw, port, { allowDocker, network, webService, webPeerNetwork });
+  // SSH container port + root/SSH password (2026-08-09): written BEFORE the
+  // compose regen. The container port is read back from meta by the generator;
+  // the password feeds the `ROOT_PASSWORD` env that start.sh chpasswd's into
+  // the root user for sshd logins. Empty/missing opts leave both untouched.
+  if (opts.sshCport !== undefined) {
+    setMetaFlag(name, 'SSH_CPORT', String(opts.sshCport));
+  }
+  let sshPw = pw;
+  if (opts.sshPassword !== undefined) {
+    sshPw = String(opts.sshPassword).replace(/[\r\n]/g, '');
+    setMetaFlag(name, 'ROOT_PASSWORD', sshPw);
+  }
+
+  writeInstanceCompose(name, agent, sshPw, sshPort, { allowDocker, network, webService, webPeerNetwork });
+  setMetaFlag(name, 'PORT', sshPort);
   setMetaFlag(name, 'DOCKER', allowDocker ? '1' : '0');
   setMetaFlag(name, 'NETWORK', network);
 
   return {
     allowDocker,
     network,
+    sshPort,
+    sshCport: opts.sshCport !== undefined ? String(opts.sshCport) : (readSshCport(name)),
     image: imageFor(name),
     agent,
     workspace: wsMount,
@@ -791,7 +860,7 @@ async function applyWebServices(name, webService) {
   }
 
   let webPeerNetwork = '';
-  if (webService && network) {
+  if (network) {
     webPeerNetwork = await getPeerNetworkName(network);
   }
 
@@ -799,10 +868,43 @@ async function applyWebServices(name, webService) {
   return { agent, webService: webService || null };
 }
 
-/** Container name of the socat "door" that publishes a peer-networked agent's
- *  web app on a host port. */
-function webDoorName(name) {
-  return `${name}-web`;
+/** Container name of the single socat "door" that publishes a peer-networked
+ *  agent's web app, SSH port, and additional ports on host ports. One container
+ *  runs one socat process per published port. */
+function doorName(name) {
+  return `${name}-door`;
+}
+
+/** All host→container TCP ports a peer-networked agent needs forwarded through
+ *  its door: the published web app, the SSH port (container 22), and each
+ *  additional port. Empty when the agent is on the default network. */
+function doorPorts(name) {
+  const meta = readMeta(path.join(INSTANCES_DIR, name)) || {};
+  const ports = [];
+  const webService = readWebService(name);
+  if (webService?.hostPort) {
+    ports.push({ hostPort: String(webService.hostPort), containerPort: String(webService.containerPort || 8080) });
+  }
+  if (meta.PORT) {
+    ports.push({ hostPort: String(meta.PORT), containerPort: readSshCport(name) });
+  }
+  for (const p of readExtraPorts(name)) {
+    ports.push({ hostPort: String(p.host), containerPort: String(p.container) });
+  }
+  return ports;
+}
+
+/** Socat "door" services the agent currently requires (peer mode only). There
+ *  is exactly one door service per agent — it carries every published port.
+ *  Shape: [{ service, ports: [{ hostPort, containerPort }] }], empty in
+ *  default network mode. A port inside the peer's namespace belongs to this
+ *  agent because it shares the peer's network stack. */
+function desiredDoors(name) {
+  const meta = readMeta(path.join(INSTANCES_DIR, name)) || {};
+  if (!meta.NETWORK) return [];
+  const ports = doorPorts(name);
+  if (!ports.length) return [];
+  return [{ service: doorName(name), ports }];
 }
 
 /** Name of the docker network a peer container lives on (the door joins it so
@@ -834,6 +936,37 @@ function writeWebStartHook(name, agent, content) {
 function removeWebStartHook(name, agent) {
   const p = webHookPath(name, agent);
   if (fs.existsSync(p)) fs.rmSync(p);
+}
+
+/** The sshd-listen-port block the start.sh templates now ship. start.sh reads
+ *  the SSH_PORT env (set by the compose while SSH is exposed) and, when it's not
+ *  22, rewrites sshd_config's Port before launching sshd — agents that share a
+ *  network namespace can't ALL bind 22. */
+const SSH_START_MARKER = 'SSH_PORT';
+const SSH_START_BLOCK = `# SSH_PORT (set by the Paddock compose when SSH is exposed) picks a custom
+# sshd listen port — multiple agents sharing a network namespace can't ALL bind
+# 22, so each gets its own.
+if [ -n "$SSH_PORT" ] && [ "$SSH_PORT" != "22" ]; then
+    sed -i "s/^#\\?[[:space:]]*Port .*/Port $SSH_PORT/" /etc/ssh/sshd_config
+fi
+`;
+
+/** Backfill the SSH_PORT block into an instance's OWN build/start.sh (PADs
+ *  created before the template change don't have it). The baked `/usr/local/
+ *  bin/start.sh` only changes after a rebuild, so callers must rebuild the image
+ *  when this returns true. Idempotent: already-patched (or un-patchable) return
+ *  false. */
+function ensureSshStartBlock(name) {
+  const dir = buildDir(name);
+  const p = path.join(dir, 'start.sh');
+  if (!fs.existsSync(p)) return false;
+  let content = fs.readFileSync(p, 'utf8');
+  if (content.includes(SSH_START_MARKER)) return false;
+  const re = /^(\s*\/usr\/sbin\/sshd &.*)$/m;
+  if (!re.test(content)) return false;
+  content = content.replace(re, SSH_START_BLOCK + '$1');
+  fs.writeFileSync(p, content, { mode: 0o755 });
+  return true;
 }
 
 /** Rebuild the image (--pull to redownload the base) and recreate the
@@ -871,6 +1004,58 @@ async function updateAgent(name, { onLog = () => {}, onStep = () => {}, buildArg
   onStep('recreate', 'end');
 }
 
+/** Recreate a container with optional extras (the Settings "Recreate Container"
+ *  card). `pull` re-downloads the base image + rebuilds before recreating;
+ *  `reset` wipes the ENTIRE user data dir (instances/<name>/<agent> — config,
+ *  sessions, sqlite, workspace) so the container starts completely fresh.
+ *  Bindings are preserved: docker socket, network peer, published web app +
+ *  door, custom workspace, extra volumes/ports (all re-read from meta). */
+async function recreateAgent(name, { pull = false, reset = false, onLog = () => {}, onStep = () => {} } = {}) {
+  const instDir = path.join(INSTANCES_DIR, name);
+  const meta = readMeta(instDir);
+  const agent = meta.AGENT || 'openclaw';
+  const pw = meta.ROOT_PASSWORD || name.replace(PREFIX_RE, '');
+  const port = meta.PORT || '';
+  const allowDocker = meta.DOCKER === '1';
+  const network = meta.NETWORK || '';
+
+  if (pull) {
+    seedBuildDir(name, agent, { installDocker: allowDocker });
+    onStep('build', 'start');
+    try {
+      await runCompose(name, ['build', '--pull', name], { stream: true, onLog, timeout: 900000 });
+    } catch (e) {
+      onStep('build', 'error');
+      throw e;
+    }
+    onStep('build', 'end');
+  }
+
+  if (reset) {
+    onStep('reset', 'start');
+    try { await runCmd('docker', ['rm', '-f', name], { timeout: 30000 }); } catch {}
+    const agentDir = path.join(instDir, agent);
+    if (fs.existsSync(agentDir)) fs.rmSync(agentDir, { recursive: true, force: true });
+    fs.mkdirSync(agentDir, { recursive: true });
+    seedBuildDir(name, agent, { installDocker: allowDocker });
+    // Preserve the COMPLETE persisted binding set (mirrors resetVm).
+    const webService = readWebService(name);
+    let webPeerNetwork = '';
+    if (network) webPeerNetwork = await getPeerNetworkName(network);
+    writeInstanceCompose(name, agent, pw, port, { allowDocker, network, webService, webPeerNetwork });
+    onStep('reset', 'end');
+  }
+
+  onStep('recreate', 'start');
+  try {
+    await runCompose(name, ['up', '-d', '--no-deps', '--force-recreate', name], { stream: true, onLog, timeout: 300000 });
+  } catch (e) {
+    onStep('recreate', 'error');
+    throw e;
+  }
+  onStep('recreate', 'end');
+}
+
 function existingServices() {
   const names = new Set();
   if (!fs.existsSync(INSTANCES_DIR)) return names;
@@ -886,7 +1071,7 @@ function existingServices() {
 async function createVm(name, options = {}) {
   const {
     agent = 'openclaw', mode = 'fresh', cloneSource = '',
-    sshEnabled = false, port = '', password = '',
+    sshEnabled = false, port = '', password = '', sshCport = '',
     onLog = () => {}, onStep = () => {}, skipSetup = false,
     workspaceHost = '', workspaceDir = '',
     allowDocker = false, network = '',
@@ -906,6 +1091,10 @@ async function createVm(name, options = {}) {
   if (sshEnabled) {
     finalPort = port || autoSshPort();
   }
+  const sshCportRaw = String(sshCport || '').trim();
+  const finalCport = /^\d+$/.test(sshCportRaw) && +sshCportRaw >= 1 && +sshCportRaw <= 65535
+    ? sshCportRaw
+    : DEFAULT_SSH_CPORT;
 
   // Validate EVERYTHING up front (plan 28) so a bad request aborts with a
   // clear error and leaves nothing behind: network peer must exist and run,
@@ -922,7 +1111,7 @@ async function createVm(name, options = {}) {
     if (!running) throw new Error(`Container '${network}' is not running`);
   }
   const extraVols = validateExtraVolumes(name, agent, extraVolumes);
-  const extraPs = validateExtraPorts(extraPorts, { sshPort: finalPort, network });
+  const extraPs = validateExtraPorts(extraPorts, { sshPort: finalPort });
 
   // Custom workspace bind (plan 24): validate BEFORE writing meta/compose so a
   // bad request aborts with a clear error and leaves nothing behind. `wsMount`
@@ -998,6 +1187,7 @@ async function createVm(name, options = {}) {
 
   let metaTxt = `ROOT_PASSWORD=${pw}\nAGENT=${agent}\n`;
   if (finalPort) metaTxt += `PORT=${finalPort}\n`;
+  if (finalCport !== DEFAULT_SSH_CPORT) metaTxt += `SSH_CPORT=${finalCport}\n`;
   metaTxt += `DOCKER=${allowDocker ? '1' : '0'}\n`;
   if (network) metaTxt += `NETWORK=${network}\n`;
   // Workspace mount flags MUST be written before writeInstanceCompose — the
@@ -1009,7 +1199,15 @@ async function createVm(name, options = {}) {
   if (extraPs.length) metaTxt += `EXTRA_PORTS=${JSON.stringify(extraPs)}\n`;
   fs.writeFileSync(path.join(instDir, 'meta.env'), metaTxt);
 
-  writeInstanceCompose(name, agent, pw, finalPort, { allowDocker, network });
+  // Peer mode: resolve the peer's bridge network so the socat door (SSH + extra
+  // ports) is emitted on the right network — the host-mode door fallback would
+  // forward to 127.0.0.1 and reach nothing for a bridge-networked peer.
+  let webPeerNetwork = '';
+  if (network) {
+    webPeerNetwork = await getPeerNetworkName(network);
+  }
+
+  writeInstanceCompose(name, agent, pw, finalPort, { allowDocker, network, webPeerNetwork });
 
   const composePath = instanceComposePath(name);
 
@@ -1067,6 +1265,12 @@ async function createVm(name, options = {}) {
 
 async function removeVm(name) {
   try { await runCmd('docker', ['rm', '-f', name], { timeout: 30000 }); } catch {}
+  // The socat door container (<name>-door, or the legacy <name>-web) survives
+  // `docker rm` of the agent and would keep holding its host ports forever —
+  // drop both forms.
+  for (const suffix of ['-door', '-web']) {
+    try { await runCmd('docker', ['rm', '-f', name + suffix], { timeout: 30000 }); } catch {}
+  }
   try { await runCmd('docker', ['network', 'rm', `${name}_default`], { timeout: 30000 }); } catch {}
   const instDir = path.join(INSTANCES_DIR, name);
   const meta = readMeta(instDir) || {};
@@ -1114,7 +1318,7 @@ async function resetVm(name) {
   // resetting the data dir must never silently drop a bind.
   const webService = readWebService(name);
   let webPeerNetwork = '';
-  if (webService && network) webPeerNetwork = await getPeerNetworkName(network);
+  if (network) webPeerNetwork = await getPeerNetworkName(network);
   writeInstanceCompose(name, agent, pw, port, { allowDocker, network, webService, webPeerNetwork });
 
   const composePath = instanceComposePath(name);
@@ -1126,12 +1330,97 @@ function getComposePath(name) {
 }
 
 async function startAgent(name) {
-  const composePath = getComposePath(name);
   try {
     await runCmd('docker', ['start', name], { timeout: 30000 });
   } catch {
-    await runCompose(name, ['up', '-d'], { timeout: 180000 });
+    // Stale network peer (e.g. gluetun was rebuilt) — `docker start` can't
+    // rejoin the old `container:<id>` namespace. Recreate via compose so the
+    // peer re-resolves by name to the current container.
+    await runCompose(name, ['up', '-d', '--no-deps', '--force-recreate', name], { timeout: 180000 });
   }
+  await startDoors(name);
+}
+
+/** Stop the agent container and its socat door(s) together. The door only
+ *  forwards to the agent's ports inside the peer namespace, so it is useless
+ *  while the agent is down — stop it so it isn't a stray open listener. No-op
+ *  for already-stopped containers (errors swallowed). */
+async function stopAgent(name) {
+  await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 }).catch(() => {});
+  await stopDoors(name);
+}
+
+/** Restart the agent and bring its socat door(s) back up. */
+async function restartAgent(name) {
+  await runCmd('docker', ['restart', '-t', '30', name], { timeout: 60000 }).catch(() => {});
+  await startDoors(name);
+}
+
+/** Regex matching the socat door container name(s) of an agent — the current
+ *  `<name>-door` plus the legacy `<name>-web` (renamed in the multi-port door
+ *  refactor; old doors must be treated as this agent's too). */
+function doorNameRe(name) {
+  const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`^(${esc}-door|${esc}-web)$`);
+}
+
+/** List the agent's existing door container names (running or stopped). */
+async function listDoors(name) {
+  const re = doorNameRe(name);
+  const r = await runCmd('docker', ['ps', '-a', '--format', '{{.Names}}'], { timeout: 30000 });
+  return (r.stdout || '').split('\n').map((s) => s.trim()).filter((n) => n && re.test(n));
+}
+
+/** Start the agent's socat door(s) alongside the agent (Paddock Start/Restart).
+ *  `docker start` is a no-op on an already-running door. Missing doors (default
+ *  network) are ignored. */
+async function startDoors(name) {
+  for (const cname of await listDoors(name)) {
+    await runCmd('docker', ['start', cname], { timeout: 30000 }).catch(() => {});
+  }
+}
+
+/** Stop the agent's socat door(s) alongside the agent (Paddock Stop). */
+async function stopDoors(name) {
+  for (const cname of await listDoors(name)) {
+    await runCmd('docker', ['stop', '-t', '10', cname], { timeout: 30000 }).catch(() => {});
+  }
+}
+
+/** Recursively replace secret-looking values with '[REDACTED]' in a config
+ *  object. Driver-agnostic: covers openclaw/picoclaw/opencode key styles. */
+function redactSecrets(obj, depth = 0) {
+  if (depth > 8) return obj;
+  if (Array.isArray(obj)) return obj.map((v) => redactSecrets(v, depth + 1));
+  if (obj && typeof obj === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(obj)) {
+      if (typeof v === 'string' && v &&
+          /^(api[_-]?key|token|bot[_-]?token|secret|client[_-]?secret|app[_-]?secret|private[_-]?key|access[_-]?token)$/i.test(k)) {
+        out[k] = '[REDACTED]';
+      } else {
+        out[k] = redactSecrets(v, depth + 1);
+      }
+    }
+    return out;
+  }
+  return obj;
+}
+
+/** Driver-aware config read, shared by the REST config route and the MCP
+ *  `config_get` tool. JSON configs are parsed + secrets redacted;
+ *  yaml/toml/text configs are served verbatim. Returns
+ *  `{ config, configRaw, configFormat, configFile }`. */
+function readAgentConfig(agent) {
+  const driver = getDriver(agent.agent_type);
+  const base = { configFormat: driver.configFormat || 'json', configFile: driver.configFile || 'openclaw.json' };
+  const configPath = path.join(agent.config_root, base.configFile);
+  if (!fs.existsSync(configPath)) return { ...base, config: null, configRaw: null };
+  if (base.configFormat !== 'json') {
+    return { ...base, config: null, configRaw: fs.readFileSync(configPath, 'utf8') };
+  }
+  const raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  return { ...base, config: redactSecrets(JSON.parse(JSON.stringify(raw))), configRaw: JSON.stringify(raw, null, 2) };
 }
 
 /** One-time migration for PADs created before per-instance build files. Each
@@ -1201,15 +1490,16 @@ async function ensureInstanceBuilds({ onLog = () => {} } = {}) {
 module.exports = {
   createVm, removeVm, resetVm, readMeta,
   generateInstanceCompose, writeInstanceCompose,
-  applySettings, updateAgent, setMetaFlag,
+  applySettings, updateAgent, recreateAgent, setMetaFlag,
   instanceComposePath, getComposePath,
   getNetworkHealth,
-  existingServices, startAgent,
+  existingServices, startAgent, stopAgent, restartAgent,
+  readAgentConfig, redactSecrets, listDoors, startDoors, stopDoors,
   readWebService, applyWebServices, webHookPath,
-  writeWebStartHook, removeWebStartHook, webDoorName,
+  writeWebStartHook, removeWebStartHook, doorName, doorPorts, desiredDoors,
   validateWorkspaceMount, workspaceMountInfo, readWorkspaceMount,
   validateExtraVolume, validateExtraVolumes, validateExtraPorts,
-  readExtraVolumes, readExtraPorts, autoSshPort,
+  readExtraVolumes, readExtraPorts, readSshCport, ensureSshStartBlock, autoSshPort,
   imageFor, seedBuildDir, buildDir, buildEnvPath,
   readBuildEnv, setBuildEnv,
   argsFromDockerfile,

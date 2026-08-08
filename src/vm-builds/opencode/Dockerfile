@@ -55,6 +55,17 @@ RUN npm config set fund false && npm config set audit false && npm install -g op
 
 RUN mkdir -p /root/.opencode/workspace
 
+# Default opencode config. opencode reads XDG_CONFIG_HOME/opencode.json
+# (global scope). Edit freely once the agent is running.
+RUN mkdir -p /root/.opencode/config && \
+    cat > /root/.opencode/config/opencode.json << 'EOF'
+{
+  "$schema": "https://opencode.ai/config.json",
+  "autoupdate": false,
+  "snapshot": false
+}
+EOF
+
 # ---- 8. OPTIONAL: extras/ drop-in (delete block if unused) -----
 # Drop files into instances/<name>/build/extras/ then reference them.
 COPY extras/ /opt/extras/

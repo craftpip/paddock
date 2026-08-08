@@ -71,7 +71,7 @@ try{
   const lst=p=>{const stat=st(p);if(!stat)throw new Error('Path not found');if(!stat.isDirectory())throw new Error('Not a directory');
     return fs.readdirSync(p,{withFileTypes:true}).map(e=>{const es=st(path.join(p,e.name))||{};
       return{name:e.name,type:e.isDirectory()?'directory':'file',size:es.size||0,modified:es.mtime?new Date(es.mtime).toISOString():null};})
-      .filter(e=>!e.name.startsWith('.')).sort((a,b)=>a.type!==b.type?(a.type==='directory'?-1:1):a.name.localeCompare(b.name));};
+      .sort((a,b)=>a.type!==b.type?(a.type==='directory'?-1:1):a.name.localeCompare(b.name));};
   switch(q.op){
     case 'list':out={path:p,entries:lst(p)};break;
     case 'read':{const stat=st(p);if(!stat)throw new Error('File not found');if(stat.isDirectory())throw new Error('Cannot read directory');
@@ -133,7 +133,6 @@ function fsList(absPath) {
   if (!stat.isDirectory()) throw new Error('Not a directory');
   const raw = fs.readdirSync(absPath, { withFileTypes: true });
   const entries = raw
-    .filter(e => !e.name.startsWith('.'))
     .map(e => {
       const entryPath = path.join(absPath, e.name);
       let entryStat;

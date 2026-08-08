@@ -202,7 +202,8 @@ async function checkContainerHealth(name, onCheck) {
         });
         continue;
       }
-      if (src && !fs.existsSync(webuiPath(src))) {
+      const webuiCanSee = src && HOST_WORKSPACE && src.startsWith(HOST_WORKSPACE + path.sep);
+      if (src && webuiCanSee && !fs.existsSync(webuiPath(src))) {
         add({
           key: `volume:${dst}`, label, status: 'warn', expected: src, actual: '(missing on host)',
           hint: `Host path '${src}' does not exist. Docker will create it empty — this is usually fine on first boot.`,

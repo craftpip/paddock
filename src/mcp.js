@@ -1,6 +1,4 @@
 const express = require('express');
-const fs = require('fs');
-const path = require('path');
 const { execFile } = require('child_process');
 const { AsyncLocalStorage } = require('async_hooks');
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
@@ -10,8 +8,10 @@ const { z } = require('zod');
 
 const apiKeys = require('./services/api-keys');
 const registry = require('./services/agent-registry');
+const vm = require('./services/vm-manager');
 const workspace = require('./services/workspace');
 const logStore = require('./services/log-store');
+const containerHealth = require('./services/container-health');
 const { getDb } = require('./services/db');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
@@ -89,18 +89,6 @@ function requireAgent(agentName) {
   return agent;
 }
 
-function redactConfig(raw) {
-  const redacted = JSON.parse(JSON.stringify(raw));
-  if (redacted.api_keys) redacted.api_keys = '[REDACTED]';
-  if (redacted.channels?.telegram?.botToken) redacted.channels.telegram.botToken = '[REDACTED]';
-  if (redacted.plugins) {
-    for (const key of Object.keys(redacted.plugins)) {
-      if (redacted.plugins[key]?.key) redacted.plugins[key].key = '[REDACTED]';
-    }
-  }
-  return redacted;
-}
-
 function textResult(obj) {
   return { content: [{ type: 'text', text: JSON.stringify(obj, null, 2) }] };
 }
@@ -109,7 +97,7 @@ function registerTools(server) {
   // ─── Read / inspect ─────────────────────────────────────────
 
   server.registerTool(
-    'paddock_list_agents',
+    'list_agents',
     {
       title: 'List PADs',
       description: 'List all PAD agents managed by paddock. Returns name, status, agent type, and default model. Admins see the full fleet; regular users see only the agents they own.',
@@ -133,20 +121,26 @@ function registerTools(server) {
   );
 
   server.registerTool(
-    'paddock_get_agent',
+    'get_agent',
     {
       title: 'Get PAD details',
-      description: 'Get full details about a single PAD agent.',
-      inputSchema: { name: z.string().describe('PAD name') },
+      description: 'Get full details about a single PAD agent. Pass `logs` (number of tail lines, max 500) to also include recent container logs.',
+      inputSchema: {
+        name: z.string().describe('PAD name'),
+        logs: z.number().int().min(1).max(500).optional().describe('Include the last N container log lines (max 500)'),
+      },
     },
-    async ({ name }) => {
+    async ({ name, logs }) => {
       requireAccess(currentUser(), name);
-      return textResult(requireAgent(name));
+      const agent = requireAgent(name);
+      if (!logs) return textResult(agent);
+      await logStore.capture(agent.name);
+      return textResult({ ...agent, logs: logStore.readLogs(agent.name, logs) });
     }
   );
 
   server.registerTool(
-    'paddock_agent_logs',
+    'agent_logs',
     {
       title: 'PAD container logs',
       description: 'Return the last N lines of a PAD container\'s logs (docker logs).',
@@ -165,24 +159,21 @@ function registerTools(server) {
   );
 
   server.registerTool(
-    'paddock_config_get',
+    'config_get',
     {
       title: 'Read PAD config',
-      description: 'Read a PAD\'s openclaw.json config with secrets redacted (api_keys, telegram bot token, plugin keys).',
+      description: 'Read a PAD\'s driver config file (openclaw.json, opencode.json, config.json, config.yaml, config.toml). JSON configs are parsed with secrets redacted; yaml/toml configs are returned verbatim.',
       inputSchema: { name: z.string().describe('PAD name') },
     },
     async ({ name }) => {
       requireAccess(currentUser(), name);
       const agent = requireAgent(name);
-      const configPath = path.join(agent.config_root, 'openclaw.json');
-      if (!fs.existsSync(configPath)) return textResult({ name, config: null });
-      const raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-      return textResult({ name, config: redactConfig(raw) });
+      return textResult({ name, ...vm.readAgentConfig(agent) });
     }
   );
 
   server.registerTool(
-    'paddock_workspace_list',
+    'workspace_list',
     {
       title: 'List PAD workspace directory',
       description: 'List the contents of a directory inside a PAD\'s workspace. Safe path resolution prevents traversal.',
@@ -200,7 +191,7 @@ function registerTools(server) {
   );
 
   server.registerTool(
-    'paddock_workspace_read',
+    'workspace_read',
     {
       title: 'Read PAD workspace file',
       description: 'Read a text file from a PAD\'s workspace. Text only; files larger than 256KB are rejected.',
@@ -223,7 +214,7 @@ function registerTools(server) {
   );
 
   server.registerTool(
-    'paddock_workspace_write',
+    'workspace_write',
     {
       title: 'Write PAD workspace file',
       description: 'Write text content to a file in a PAD\'s workspace. Creates or overwrites the file.',
@@ -242,16 +233,16 @@ function registerTools(server) {
   );
 
   server.registerTool(
-    'paddock_start_agent',
+    'start_agent',
     {
       title: 'Start PAD',
-      description: 'Start (docker start) a PAD container.',
+      description: 'Start a PAD container and its socat forwarding door (if any). Falls back to a compose recreate when the plain docker start fails (e.g. stale network peer).',
       inputSchema: { name: z.string().describe('PAD name') },
     },
     async ({ name }) => {
       requireAccess(currentUser(), name);
       requireAgent(name);
-      await runCmd('docker', ['start', name], { timeout: 30000, check: false });
+      await vm.startAgent(name);
       registry.dockerPsList(true);
       const agent = registry.getAgent(name);
       return textResult({ ok: true, name, status: agent ? agent.status : 'running' });
@@ -259,16 +250,16 @@ function registerTools(server) {
   );
 
   server.registerTool(
-    'paddock_stop_agent',
+    'stop_agent',
     {
       title: 'Stop PAD',
-      description: 'Stop (docker stop) a PAD container.',
+      description: 'Stop a PAD container together with its socat forwarding door (so it is not a dead open listener).',
       inputSchema: { name: z.string().describe('PAD name') },
     },
     async ({ name }) => {
       requireAccess(currentUser(), name);
       requireAgent(name);
-      await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000, check: false });
+      await vm.stopAgent(name);
       registry.dockerPsList(true);
       const agent = registry.getAgent(name);
       return textResult({ ok: true, name, status: agent ? agent.status : 'exited' });
@@ -276,16 +267,16 @@ function registerTools(server) {
   );
 
   server.registerTool(
-    'paddock_restart_agent',
+    'restart_agent',
     {
       title: 'Restart PAD',
-      description: 'Restart (docker restart) a PAD container.',
+      description: 'Restart a PAD container and bring its socat forwarding door back up.',
       inputSchema: { name: z.string().describe('PAD name') },
     },
     async ({ name }) => {
       requireAccess(currentUser(), name);
       requireAgent(name);
-      await runCmd('docker', ['restart', '-t', '30', name], { timeout: 60000, check: false });
+      await vm.restartAgent(name);
       registry.dockerPsList(true);
       const agent = registry.getAgent(name);
       return textResult({ ok: true, name, status: agent ? agent.status : 'running' });
@@ -293,7 +284,72 @@ function registerTools(server) {
   );
 
   server.registerTool(
-    'paddock_exec',
+    'delete_agent',
+    {
+      title: 'Delete PAD',
+      description: 'Permanently delete a PAD agent: removes its container, socat door, docker network and instance directory (config, data, backups of the data dir). Requires `confirm: true` as a safety guard. There is no undo.',
+      inputSchema: {
+        name: z.string().describe('PAD name'),
+        confirm: z.boolean().describe('Must be true to delete — destructive and irreversible'),
+      },
+    },
+    async ({ name, confirm }) => {
+      requireAccess(currentUser(), name);
+      requireAgent(name);
+      if (confirm !== true) {
+        throw new McpError(ErrorCode.InvalidRequest, 'Refusing to delete without confirm: true (destructive, no undo).');
+      }
+      await vm.removeVm(name);
+      registry.removeAgentFromDb(name);
+      registry.dockerPsList(true);
+      return textResult({ ok: true, name, deleted: true });
+    }
+  );
+
+  server.registerTool(
+    'recreate',
+    {
+      title: 'Recreate PAD container',
+      description: 'Recreate a PAD container (force-recreate via its compose file). All persisted bindings (network peer, docker socket, published web app + door, workspace mount, extra volumes/ports) are preserved. `pull: true` re-downloads the base image and rebuilds first (i.e. "update to latest image"). `reset: true` wipes the ENTIRE data dir (config, sessions, sqlite, workspace) before recreating — destructive, requires confirm.',
+      inputSchema: {
+        name: z.string().describe('PAD name'),
+        pull: z.boolean().optional().describe('Pull the base image + rebuild before recreating (update to latest)'),
+        reset: z.boolean().optional().describe('Wipe the data dir and start fresh (requires confirm: true)'),
+        confirm: z.boolean().optional().describe('Required when reset: true — destructive, no undo'),
+      },
+    },
+    async ({ name, pull, reset, confirm }) => {
+      requireAccess(currentUser(), name);
+      requireAgent(name);
+      if (reset && confirm !== true) {
+        throw new McpError(ErrorCode.InvalidRequest, 'Refusing to reset without confirm: true (wipes the data dir).');
+      }
+      await vm.recreateAgent(name, { pull: !!pull, reset: !!reset });
+      registry.dockerPsList(true);
+      registry.discoverAgents();
+      return textResult({ ok: true, name, action: reset ? 'recreated-with-reset' : pull ? 'recreated-with-pull' : 'recreated' });
+    }
+  );
+
+  server.registerTool(
+    'update',
+    {
+      title: 'Update PAD to latest image',
+      description: 'Pull the base image for a PAD, rebuild its image and force-recreate the container (same as the Settings tab "Update" flow). Config/data live in bind mounts, so they survive. The old container stays up through the build and is only swapped at recreate.',
+      inputSchema: { name: z.string().describe('PAD name') },
+    },
+    async ({ name }) => {
+      requireAccess(currentUser(), name);
+      requireAgent(name);
+      await vm.updateAgent(name, { pull: true });
+      registry.dockerPsList(true);
+      registry.discoverAgents();
+      return textResult({ ok: true, name, action: 'updated' });
+    }
+  );
+
+  server.registerTool(
+    'exec',
     {
       title: 'Run command in PAD',
       description: 'Run a shell command inside a PAD container (docker exec). Returns stdout and stderr. Use for `openclaw ...` and other in-container commands.',

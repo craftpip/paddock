@@ -6,6 +6,12 @@ if [ -n "$TZ" ]; then
     ln -sf /usr/share/zoneinfo/$TZ /etc/localtime
     echo $TZ > /etc/timezone
 fi
+# SSH_PORT (set by the Paddock compose when SSH is exposed) picks a custom
+# sshd listen port — multiple agents sharing a network namespace can't ALL bind
+# 22, so each gets its own.
+if [ -n "$SSH_PORT" ] && [ "$SSH_PORT" != "22" ]; then
+    sed -i "s/^#\?[[:space:]]*Port .*/Port $SSH_PORT/" /etc/ssh/sshd_config
+fi
 /usr/sbin/sshd &
 # codex has no gateway daemon — keep the container alive so the terminal
 # stays usable.

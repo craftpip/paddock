@@ -101,3 +101,103 @@ html {
   0% { background-position: 200% 0; }
   100% { background-position: -200% 0; }
 }
+
+/* ────────────────────────────── Tooltip ─────────────────────────────── */
+
+.tt {
+  position: relative;
+  display: inline-flex;
+}
+
+.tt::after,
+.tt::before {
+  position: absolute;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.08s ease;
+  z-index: 60;
+}
+
+.tt::after {
+  content: attr(data-tip);
+  left: 50%;
+  bottom: calc(100% + 7px);
+  transform: translateX(calc(-50% + var(--tt-shift, 0px)));
+  padding: 5px 9px;
+  max-width: 320px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: var(--t-ink);
+  background: var(--t-raised);
+  border: 1px solid var(--t-line);
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tt::before {
+  content: '';
+  left: 50%;
+  bottom: calc(100% + 2px);
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-top-color: var(--t-raised);
+}
+
+.tt:hover::after,
+.tt:hover::before,
+.tt:focus-visible::after,
+.tt:focus-visible::before {
+  opacity: 1;
+  visibility: visible;
+}
+
+.tt[data-pos='bottom']::after {
+  top: calc(100% + 7px);
+  bottom: auto;
+}
+
+.tt[data-pos='bottom']::before {
+  top: calc(100% + 2px);
+  bottom: auto;
+  border-top-color: transparent;
+  border-bottom-color: var(--t-raised);
+}
+
+.tt[data-pos='left']::after {
+  left: auto;
+  right: calc(100% + 7px);
+  bottom: auto;
+  top: 50%;
+  transform: translateY(calc(-50% + var(--tt-shift, 0px)));
+}
+
+.tt[data-pos='left']::before {
+  left: auto;
+  right: calc(100% + 2px);
+  bottom: auto;
+  top: 50%;
+  transform: translateY(-50%);
+  border-top-color: transparent;
+  border-left-color: var(--t-raised);
+}
+
+.tt[data-pos='right']::after {
+  left: calc(100% + 7px);
+  bottom: auto;
+  top: 50%;
+  transform: translateY(calc(-50% + var(--tt-shift, 0px)));
+}
+
+.tt[data-pos='right']::before {
+  left: calc(100% + 2px);
+  bottom: auto;
+  top: 50%;
+  transform: translateY(-50%);
+  border-top-color: transparent;
+  border-right-color: var(--t-raised);
+}
