@@ -14,23 +14,25 @@ describe('vm-manager - Web door compose generation', () => {
       webService: { containerPort: 8080, hostPort: '43818' },
       webPeerNetwork: 'gluetun_default',
     });
-    const agentBlock = yaml.slice(yaml.indexOf('  pad-test:'), yaml.indexOf('  pad-test-web:'));
-    assert.ok(!agentBlock.includes('ports:'), 'agent has no ports block when peer-networked');
-    assert.ok(yaml.includes('pad-test-web:'), 'door service present');
-    assert.ok(yaml.includes('image: alpine/socat'));
-    assert.ok(yaml.includes('"43818:8080"'));
-    assert.ok(yaml.includes('TCP:gluetun-global:8080'));
-    assert.ok(yaml.includes('name: gluetun_default'));
-    assert.ok(yaml.includes('network_mode: container:gluetun-global'));
+    const compose = JSON.parse(yaml);
+    const agentService = compose.services['pad-test'];
+    const door = compose.services['pad-test-web'];
+    assert.ok(!agentService.ports, 'agent has no ports block when peer-networked');
+    assert.ok(door, 'door service present');
+    assert.strictEqual(door.image, 'alpine/socat');
+    assert.deepStrictEqual(door.ports, ['43818:8080']);
+    assert.ok(door.command.includes('TCP:gluetun-global:8080'));
+    assert.strictEqual(compose.networks.webbridge.name, 'gluetun_default');
+    assert.strictEqual(agentService.network_mode, 'container:gluetun-global');
   });
 
   it('publishes ports directly when on the default network', () => {
     const yaml = vm.generateInstanceCompose('pad-test', 'opencode', 'pw', '22001', {
       webService: { containerPort: 8080, hostPort: '43818' },
     });
-    assert.ok(yaml.includes('"43818:8080"'));
-    assert.ok(yaml.includes('"22001:22"'));
-    assert.ok(!yaml.includes('pad-test-web'), 'no door on the default network');
+    const compose = JSON.parse(yaml);
+    assert.deepStrictEqual(compose.services['pad-test'].ports, ['22001:22', '43818:8080']);
+    assert.ok(!compose.services['pad-test-web'], 'no door on the default network');
   });
 
   it('skips SSH port publish when peer-networked (docker constraint)', () => {
@@ -46,8 +48,9 @@ describe('vm-manager - Web door compose generation', () => {
       webService: { containerPort: 8080, hostPort: '43818' },
       webPeerNetwork: '',
     });
-    assert.ok(yaml.includes('network_mode: host'));
-    assert.ok(yaml.includes('TCP:127.0.0.1:8080'));
+    const door = JSON.parse(yaml).services['pad-test-web'];
+    assert.strictEqual(door.network_mode, 'host');
+    assert.ok(door.command.includes('TCP:127.0.0.1:8080'));
   });
 });
 
@@ -75,10 +78,10 @@ describe('vm-manager - applySettings keeps a published web app alive', () => {
     // host-mode door render, which is still a valid door).
     await vm.applySettings('pad-x', { allowDocker: false, network: 'gluetun-global' });
     yaml = fs.readFileSync(path.join(instDir, 'docker-compose.yml'), 'utf8');
-    const agentBlock = yaml.slice(yaml.indexOf('  pad-x:'), yaml.indexOf('  pad-x-web:'));
-    assert.ok(!agentBlock.includes('ports:'), 'no ports block in peer mode');
-    assert.ok(yaml.includes('pad-x-web:'), 'door present in peer mode');
-    assert.ok(/command: TCP-LISTEN:8080,.* TCP:/.test(yaml), 'door forwards to a TCP target');
+    const compose = JSON.parse(yaml);
+    assert.ok(!compose.services['pad-x'].ports, 'no ports block in peer mode');
+    assert.ok(compose.services['pad-x-web'], 'door present in peer mode');
+    assert.ok(compose.services['pad-x-web'].command.startsWith('TCP-LISTEN:8080,'), 'door forwards to a TCP target');
   });
 
   it('regen without an active binding stays doorless', async () => {
@@ -125,12 +128,14 @@ describe('vm-manager - per-instance build files (plan 25)', () => {
 
   it('compose uses the per-instance build context, image and generated args', () => {
     const yaml = vm.generateInstanceCompose('pad-t1', 'openclaw', 'pw', '22001');
-    assert.ok(yaml.includes(`context: ${path.join(TMP, 'instances', 'pad-t1', 'build')}`), 'per-instance build context');
+    const compose = JSON.parse(yaml);
+    const service = compose.services['pad-t1'];
+    assert.strictEqual(service.build.context, path.join(TMP, 'instances', 'pad-t1', 'build'), 'per-instance build context');
     assert.ok(!yaml.includes('vm-builds'), 'no shared build dir referenced');
-    assert.ok(yaml.includes('image: paddock-vm-pad-t1:latest'), 'per-instance image tag');
-    assert.ok(yaml.includes('INSTALL_DOCKER: ${INSTALL_DOCKER:-0}'), 'args block from Dockerfile ARG lines');
-    assert.ok(yaml.includes('INSTALL_TMUX: ${INSTALL_TMUX:-1}'), 'args block includes non-default ARG');
-    assert.ok(yaml.includes('NO_DEFAULT: ${NO_DEFAULT}'), 'ARG without default emits bare interpolation');
+    assert.strictEqual(service.image, 'paddock-vm-pad-t1:latest', 'per-instance image tag');
+    assert.strictEqual(service.build.args.INSTALL_DOCKER, '${INSTALL_DOCKER:-0}', 'default ARG interpolation preserved');
+    assert.strictEqual(service.build.args.INSTALL_TMUX, '${INSTALL_TMUX:-1}', 'non-default ARG interpolation preserved');
+    assert.strictEqual(service.build.args.NO_DEFAULT, '${NO_DEFAULT}', 'ARG without default emits interpolation');
   });
 
   it('setBuildEnv/readBuildEnv round-trip preserving comments and other keys', () => {
@@ -206,9 +211,10 @@ describe('vm-manager - custom workspace mount compose emission (plan 24)', () =>
       fs.writeFileSync(path.join(instDir, 'meta.env'),
         'AGENT=codex\nROOT_PASSWORD=pw\nWORKSPACE_HOST=/shared-ws\nWORKSPACE_DIR=/codex-ws\n');
       const yaml = vm.generateInstanceCompose('pad-ws', 'codex', 'pw', '');
-      assert.ok(yaml.includes('"/shared-ws:/codex-ws"'), 'custom workspace bind emitted (whole spec quoted)');
-      assert.ok(yaml.includes('working_dir: "/codex-ws"'), 'container starts inside the custom workspace');
-      assert.ok(yaml.includes(`- ${TMP}/instances/pad-ws/codex:/root/.codex`), 'data dir bind intact');
+      const service = JSON.parse(yaml).services['pad-ws'];
+      assert.ok(service.volumes.includes('/shared-ws:/codex-ws'), 'custom workspace bind emitted');
+      assert.strictEqual(service.working_dir, '/codex-ws', 'container starts inside the custom workspace');
+      assert.ok(service.volumes.includes(`${TMP}/instances/pad-ws/codex:/root/.codex`), 'data dir bind intact');
     });
   });
 
@@ -227,6 +233,220 @@ describe('vm-manager - custom workspace mount compose emission (plan 24)', () =>
     withTmp((TMP, vm) => {
       assert.throws(() => vm.validateWorkspaceMount('pad-ws3', 'codex', '/shared-ws', '/root/.codex'),
         /swallow the agent data directory/);
+    });
+  });
+});
+
+describe('vm-manager - workspace mount guards (GUARD_*)', () => {
+  // Runs each test in an isolated env: WORKSPACE_ROOT must point at a dir that
+  // is NOT under a HOST_SYSTEM_DIRS entry (so /tmp is out — use /workspace),
+  // and every require re-reads the env. Env + module cache are restored after
+  // each test so this last suite never leaks into the ones before it.
+  function withGuardTmp(fn) {
+    const TMP = '/workspace/.__vmguard-' + Date.now() + '-' + Math.floor(Math.random() * 1e6);
+    const prevWs = process.env.WORKSPACE_ROOT;
+    const prevHost = process.env.HOST_WORKSPACE_ROOT;
+    process.env.WORKSPACE_ROOT = TMP;
+    process.env.HOST_WORKSPACE_ROOT = TMP;
+    fs.mkdirSync(TMP, { recursive: true });
+    delete require.cache[require.resolve('../services/instance-image')];
+    delete require.cache[require.resolve('../services/vm-manager')];
+    const vm = require('../services/vm-manager');
+    try {
+      fn(TMP, vm);
+    } finally {
+      fs.rmSync(TMP, { recursive: true, force: true });
+      process.env.WORKSPACE_ROOT = prevWs;
+      process.env.HOST_WORKSPACE_ROOT = prevHost;
+      for (const g of ['PROJECT_ROOT', 'INSTANCES_PARENT', 'AGENT_DATA']) delete process.env[`GUARD_${g}`];
+      delete require.cache[require.resolve('../services/instance-image')];
+      delete require.cache[require.resolve('../services/vm-manager')];
+    }
+  }
+
+  it('rejects the project root as a workspace source by default', () => {
+    withGuardTmp((TMP, vm) => {
+      assert.throws(() => vm.validateWorkspaceMount('pad-g', 'opencode', TMP, '/ws'),
+        /project root cannot be the workspace source/);
+    });
+  });
+
+  it('allows the project root when GUARD_PROJECT_ROOT, GUARD_INSTANCES_PARENT and GUARD_AGENT_DATA are off', () => {
+    withGuardTmp((TMP, vm) => {
+      process.env.GUARD_PROJECT_ROOT = '0';
+      process.env.GUARD_INSTANCES_PARENT = '0';
+      process.env.GUARD_AGENT_DATA = '0';
+      const info = vm.validateWorkspaceMount('pad-g', 'opencode', TMP, '/ws');
+      assert.strictEqual(info.host, TMP);
+      assert.strictEqual(info.container, '/ws');
+    });
+  });
+
+  it('still rejects the project root when only GUARD_INSTANCES_PARENT is off', () => {
+    withGuardTmp((TMP, vm) => {
+      process.env.GUARD_PROJECT_ROOT = '1';
+      process.env.GUARD_INSTANCES_PARENT = '0';
+      assert.throws(() => vm.validateWorkspaceMount('pad-g', 'opencode', TMP, '/ws'),
+        /project root cannot be the workspace source/);
+    });
+  });
+
+  it('rejects the project root while GUARD_AGENT_DATA is still on', () => {
+    withGuardTmp((TMP, vm) => {
+      process.env.GUARD_PROJECT_ROOT = '0';
+      process.env.GUARD_INSTANCES_PARENT = '0';
+      assert.throws(() => vm.validateWorkspaceMount('pad-g', 'opencode', TMP, '/ws'),
+        /swallow the agent data folder/);
+    });
+  });
+
+  it('rejects the instances folder by default even with GUARD_PROJECT_ROOT off', () => {
+    withGuardTmp((TMP, vm) => {
+      process.env.GUARD_PROJECT_ROOT = '0';
+      assert.throws(() => vm.validateWorkspaceMount('pad-g', 'opencode', path.join(TMP, 'instances'), '/ws'),
+        /instances folder or a parent of it/);
+    });
+  });
+});
+
+describe('vm-manager - extra volumes & ports (plan 28)', () => {
+  function withTmp(fn) {
+    const TMP = '/tmp/p28test-' + Date.now() + '-' + Math.floor(Math.random() * 1e6);
+    const prevWs = process.env.WORKSPACE_ROOT;
+    const prevHost = process.env.HOST_WORKSPACE_ROOT;
+    process.env.WORKSPACE_ROOT = TMP;
+    process.env.HOST_WORKSPACE_ROOT = TMP;
+    delete require.cache[require.resolve('../services/vm-manager')];
+    const vm = require('../services/vm-manager');
+    try {
+      fn(TMP, vm);
+    } finally {
+      fs.rmSync(TMP, { recursive: true, force: true });
+      process.env.WORKSPACE_ROOT = prevWs;
+      process.env.HOST_WORKSPACE_ROOT = prevHost;
+      delete require.cache[require.resolve('../services/vm-manager')];
+    }
+  }
+
+  it('validateExtraVolume rejects system host sources', () => {
+    withTmp((TMP, vm) => {
+      assert.throws(() => vm.validateExtraVolume('pad-a', 'openclaw', '/etc', '/data/x'), /system directory/i);
+      assert.throws(() => vm.validateExtraVolume('pad-a', 'openclaw', '/proc', '/data/x'), /system directory/i);
+      assert.throws(() => vm.validateExtraVolume('pad-a', 'openclaw', '/usr/lib', '/data/x'), /system directory/i);
+    });
+  });
+
+  it('validateExtraVolume rejects relative host sources and ":" characters', () => {
+    withTmp((TMP, vm) => {
+      assert.throws(() => vm.validateExtraVolume('pad-a', 'openclaw', 'my-folder', '/data/x'), /instances\//);
+      assert.throws(() => vm.validateExtraVolume('pad-a', 'openclaw', '/shared:read', '/data/x'), /cannot contain ":"/);
+    });
+  });
+
+  it('validateExtraVolume rejects protected container paths and data-dir swallows', () => {
+    withTmp((TMP, vm) => {
+      assert.throws(() => vm.validateExtraVolume('pad-a', 'openclaw', '/shared', '/etc'), /system path \/etc/);
+      assert.throws(() => vm.validateExtraVolume('pad-a', 'openclaw', '/shared', '/root/.openclaw'), /swallow the agent data directory/);
+      assert.throws(() => vm.validateExtraVolume('pad-a', 'openclaw', '/shared', '/root'), /swallow the agent data directory/);
+    });
+  });
+
+  it('validateExtraVolume normalizes a valid mount', () => {
+    withTmp((TMP, vm) => {
+      const vol = vm.validateExtraVolume('pad-a', 'openclaw', '/shared/data', '/mnt/extra', true);
+      assert.strictEqual(vol.host, '/shared/data');
+      assert.strictEqual(vol.container, '/mnt/extra');
+      assert.strictEqual(vol.readonly, true);
+    });
+  });
+
+  it('validateExtraVolumes rejects duplicates and skips empty entries', () => {
+    withTmp((TMP, vm) => {
+      const vols = vm.validateExtraVolumes('pad-a', 'openclaw', [{ host: '/shared', container: '/mnt/a' }, {}]);
+      assert.strictEqual(vols.length, 1);
+      assert.throws(() => vm.validateExtraVolumes('pad-a', 'openclaw', 'nope'), /must be a list/);
+      assert.throws(
+        () => vm.validateExtraVolumes('pad-a', 'openclaw', [
+          { host: '/shared', container: '/mnt/a' },
+          { host: '/shared', container: '/mnt/a' },
+        ]),
+        /Duplicate extra volume mount/,
+      );
+    });
+  });
+
+  it('validateExtraPorts enforces bounds, self-dups, SSH and web conflicts', () => {
+    withTmp((TMP, vm) => {
+      assert.throws(() => vm.validateExtraPorts([{ host: 0, container: 80 }]), /between 1 and 65535/);
+      assert.throws(() => vm.validateExtraPorts([{ host: 9000, container: 99999 }]), /between 1 and 65535/);
+      assert.throws(() => vm.validateExtraPorts([{ host: 9000, container: 80 }, { host: 9000, container: 81 }]), /Duplicate host port 9000/);
+      assert.throws(() => vm.validateExtraPorts([{ host: 22001, container: 80 }], { sshPort: '22001' }), /SSH port of this agent/);
+      assert.throws(() => vm.validateExtraPorts([{ host: 43818, container: 80 }], { webHostPort: '43818' }), /web app host port/);
+    });
+  });
+
+  it('validateExtraPorts rejects any port while peer-networked', () => {
+    withTmp((TMP, vm) => {
+      assert.throws(() => vm.validateExtraPorts([{ host: 9000, container: 80 }], { network: 'gluetun-global' }),
+        /joins gluetun-global's network/);
+      assert.deepStrictEqual(vm.validateExtraPorts([], { network: 'gluetun-global' }), []);
+    });
+  });
+
+  it('generateInstanceCompose emits extra volumes and ports from meta', () => {
+    withTmp((TMP, vm) => {
+      const instDir = path.join(TMP, 'instances', 'pad-vp');
+      fs.mkdirSync(instDir, { recursive: true });
+      fs.writeFileSync(path.join(instDir, 'meta.env'),
+        'AGENT=opencode\nROOT_PASSWORD=pw\nPORT=22001\n' +
+        'EXTRA_VOLUMES=[{"host":"/mnt/data","container":"/root/.opencode/data/extra","readonly":true}]\n' +
+        'EXTRA_PORTS=[{"host":"9000","container":"80"}]\n');
+      const yaml = vm.generateInstanceCompose('pad-vp', 'opencode', 'pw', '22001');
+      const service = JSON.parse(yaml).services['pad-vp'];
+      assert.ok(service.volumes.includes('/mnt/data:/root/.opencode/data/extra:ro'), 'extra volume with :ro suffix');
+      assert.deepStrictEqual(service.ports, ['22001:22', '9000:80'], 'SSH + extra ports published');
+    });
+  });
+
+  it('peer-networked agents drop all ports (SSH + extras) and mount extras still', () => {
+    withTmp((TMP, vm) => {
+      const instDir = path.join(TMP, 'instances', 'pad-vp2');
+      fs.mkdirSync(instDir, { recursive: true });
+      fs.writeFileSync(path.join(instDir, 'meta.env'),
+        'AGENT=opencode\nROOT_PASSWORD=pw\nPORT=22001\nNETWORK=gluetun-global\n' +
+        'EXTRA_VOLUMES=[{"host":"/mnt/data","container":"/root/.opencode/data/extra"}]\n' +
+        'EXTRA_PORTS=[{"host":"9000","container":"80"}]\n');
+      const yaml = vm.generateInstanceCompose('pad-vp2', 'opencode', 'pw', '22001', { network: 'gluetun-global' });
+      const compose = JSON.parse(yaml);
+      assert.ok(!compose.services['pad-vp2'].ports, 'no ports in peer mode');
+      assert.ok(compose.services['pad-vp2'].volumes.includes('/mnt/data:/root/.opencode/data/extra'), 'extra volume kept in peer mode');
+      assert.strictEqual(compose.services['pad-vp2'].network_mode, 'container:gluetun-global');
+    });
+  });
+
+  it('readExtraVolumes/readExtraPorts round-trip through meta', () => {
+    withTmp((TMP, vm) => {
+      const instDir = path.join(TMP, 'instances', 'pad-rt');
+      fs.mkdirSync(instDir, { recursive: true });
+      fs.writeFileSync(path.join(instDir, 'meta.env'), 'AGENT=openclaw\n');
+      assert.deepStrictEqual(vm.readExtraVolumes('pad-rt'), []);
+      assert.deepStrictEqual(vm.readExtraPorts('pad-rt'), []);
+      vm.setMetaFlag('pad-rt', 'EXTRA_VOLUMES', JSON.stringify([{ host: '/a', container: '/b', readonly: false }]));
+      vm.setMetaFlag('pad-rt', 'EXTRA_PORTS', JSON.stringify([{ host: '9000', container: '80' }]));
+      assert.deepStrictEqual(vm.readExtraVolumes('pad-rt'), [{ host: '/a', container: '/b', readonly: false }]);
+      assert.deepStrictEqual(vm.readExtraPorts('pad-rt'), [{ host: '9000', container: '80' }]);
+      vm.setMetaFlag('pad-rt', 'EXTRA_VOLUMES', '');
+      assert.deepStrictEqual(vm.readExtraVolumes('pad-rt'), []);
+    });
+  });
+
+  it('autoSshPort scans compose files starting at 43817', () => {
+    withTmp((TMP, vm) => {
+      const instDir = path.join(TMP, 'instances', 'pad-ssh');
+      fs.mkdirSync(instDir, { recursive: true });
+      fs.writeFileSync(path.join(instDir, 'docker-compose.yml'),
+        '{\n  "services": { "pad-ssh": { "ports": ["43817:22"] } }\n}\n');
+      assert.strictEqual(vm.autoSshPort(), '43818');
     });
   });
 });

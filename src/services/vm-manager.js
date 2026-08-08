@@ -53,6 +53,16 @@ const HOST_SYSTEM_DIRS = ['/etc', '/proc', '/sys', '/dev', '/boot', '/bin', '/sb
 // supported driver keeps its data dir below one of them.
 const CONTAINER_PROTECTED = ['/etc', '/proc', '/sys', '/dev', '/var/run', '/usr', '/bin', '/sbin', '/lib', '/boot', '/tmp'];
 
+/** Whether a workspace-mount safety guard is active. Every guard is ON by
+ *  default; set `GUARD_<NAME>` to `0`/`false`/`no`/`off` to disable that
+ *  single check (e.g. `GUARD_PROJECT_ROOT=0` to allow mounting the project
+ *  root as a workspace source). Set in `.env` — the webui loads it via
+ *  `env_file`, then `docker compose up -d --force-recreate paddock`. */
+function guard(name) {
+  const v = String(process.env[`GUARD_${name}`] || '').trim().toLowerCase();
+  return !['0', 'false', 'no', 'off', 'disabled', 'disable'].includes(v);
+}
+
 /** Recompute the visibility flags for a stored workspace mount. hostBrowsable
  *  means the source lives inside this agent's data directory on the host
  *  (`instances/<name>/<agent>`), the only source the host-scope file browser
@@ -131,36 +141,36 @@ function validateWorkspaceMount(name, agent, workspaceHost, workspaceDir) {
   }
 
   for (const sd of HOST_SYSTEM_DIRS) {
-    if (host === sd || host.startsWith(sd + path.sep)) {
+    if (guard('SYSTEM_DIRS') && (host === sd || host.startsWith(sd + path.sep))) {
       throw new Error(`The workspace source cannot be a system directory (${sd})`);
     }
   }
-  if (host === HOST_WORKSPACE) {
+  if (guard('PROJECT_ROOT') && host === HOST_WORKSPACE) {
     throw new Error('The project root cannot be the workspace source');
   }
-  if (host === '/app' || host.startsWith('/app/')) {
+  if (guard('APP_DIR') && (host === '/app' || host.startsWith('/app/'))) {
     throw new Error('The webui code folder (/app) cannot be a workspace source');
   }
   const webuiSrc = path.join(HOST_WORKSPACE, 'src');
-  if (host === webuiSrc || host.startsWith(webuiSrc + path.sep)) {
+  if (guard('SRC_DIR') && (host === webuiSrc || host.startsWith(webuiSrc + path.sep))) {
     throw new Error('The webui source folder (src) cannot be a workspace source');
   }
 
   const instancesHost = path.join(HOST_WORKSPACE, 'instances');
   const ownInstDir = path.join(instancesHost, name);
   const agentDataHost = path.join(ownInstDir, agent);
-  if (isParentOrSelf(host, instancesHost) || host === instancesHost) {
+  if (guard('INSTANCES_PARENT') && (isParentOrSelf(host, instancesHost) || host === instancesHost)) {
     throw new Error('The workspace source cannot be the instances folder or a parent of it');
   }
-  if (host === ownInstDir) {
+  if (guard('INSTANCE_DIR') && host === ownInstDir) {
     throw new Error('The workspace source cannot be the agent instance folder itself');
   }
-  if (host === agentDataHost || isParentOrSelf(host, agentDataHost)) {
+  if (guard('AGENT_DATA') && (host === agentDataHost || isParentOrSelf(host, agentDataHost))) {
     throw new Error('The workspace source would swallow the agent data folder');
   }
   if (host.startsWith(instancesHost + path.sep)) {
     const first = path.relative(instancesHost, host).split(path.sep)[0];
-    if (first !== name) {
+    if (guard('OTHER_AGENT') && first !== name) {
       throw new Error(`The workspace source cannot be inside another agent's folder (instances/${first})`);
     }
   }
@@ -176,7 +186,7 @@ function validateWorkspaceMount(name, agent, workspaceHost, workspaceDir) {
     let probe = containerViewOf(host);
     while (probe && !fs.existsSync(probe)) probe = path.dirname(probe);
     const real = probe ? fs.realpathSync(probe) : '';
-    if (real && real !== WORKSPACE && !real.startsWith(WORKSPACE + path.sep)) {
+    if (guard('SYMLINK_ESCAPE') && real && real !== WORKSPACE && !real.startsWith(WORKSPACE + path.sep)) {
       throw new Error('The workspace source must stay under the project root');
     }
   }
@@ -189,23 +199,23 @@ function validateWorkspaceMount(name, agent, workspaceHost, workspaceDir) {
   if (!dir.startsWith('/')) throw new Error('Container workspace path must be absolute');
   if (dir === '/') throw new Error('Container workspace path cannot be the host root');
   for (const p of CONTAINER_PROTECTED) {
-    if (dir === p || dir.startsWith(p + '/')) {
+    if (guard('CONTAINER_PROTECTED') && (dir === p || dir.startsWith(p + '/'))) {
       throw new Error(`Cannot mount a workspace at the system path ${p}`);
     }
   }
   const dataDir = driver.dataDir;
-  if (dir === dataDir || isParentOrSelf(dir, dataDir)) {
+  if (guard('DATA_DIR_SWALLOW') && (dir === dataDir || isParentOrSelf(dir, dataDir))) {
     throw new Error('Container workspace path would swallow the agent data directory');
   }
   const wsDir = driver.workspaceDir;
   if (isParentOrSelf(dataDir, dir)) {
     // Descendant of dataDir: only the driver's own workspace path is allowed —
     // anything else (…/config, …/sessions, …/agents) shadows critical state.
-    if (dir !== wsDir && !isParentOrSelf(wsDir, dir)) {
+    if (guard('CRITICAL_STATE') && dir !== wsDir && !isParentOrSelf(wsDir, dir)) {
       throw new Error('Container workspace path shadows critical agent state');
     }
   }
-  if (cap === 'fixed' && dir !== wsDir) {
+  if (guard('FIXED_WORKSPACE') && cap === 'fixed' && dir !== wsDir) {
     throw new Error(`${driver.type} requires its workspace at ${wsDir}`);
   }
 
@@ -324,92 +334,283 @@ function readWorkspaceMount(name, agent) {
   }
 }
 
+/** Read the persisted extra volumes from meta (EXTRA_VOLUMES JSON) or [] when
+ *  absent/corrupt. Never throws. Entries are normalized (strings, no bools). */
+function readExtraVolumes(name) {
+  const meta = readMeta(path.join(INSTANCES_DIR, name)) || {};
+  if (!meta.EXTRA_VOLUMES) return [];
+  try {
+    const arr = JSON.parse(meta.EXTRA_VOLUMES);
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .filter((v) => v && v.host && v.container)
+      .map((v) => ({
+        host: path.normalize(String(v.host)),
+        container: path.normalize(String(v.container)),
+        readonly: !!v.readonly,
+      }));
+  } catch {
+    return [];
+  }
+}
+
+/** Read the persisted extra ports from meta (EXTRA_PORTS JSON) or [] when
+ *  absent/corrupt. Never throws. */
+function readExtraPorts(name) {
+  const meta = readMeta(path.join(INSTANCES_DIR, name)) || {};
+  if (!meta.EXTRA_PORTS) return [];
+  try {
+    const arr = JSON.parse(meta.EXTRA_PORTS);
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .filter((p) => p && p.host && p.container)
+      .map((p) => ({ host: String(p.host), container: String(p.container) }));
+  } catch {
+    return [];
+  }
+}
+
+/** Validate ONE extra host→container bind (plan 28). Returns the normalized
+ *  `{ host, container, readonly }` or throws. Mirrors the workspace-mount
+ *  guards: host must not be a system dir / project root / src / instances /
+ *  another agent's folder / a parent-or-self of this agent's data dir; the
+ *  container path must not be a protected system path or a parent-or-self of
+ *  the driver data dir (descendant subfolders ARE allowed). */
+function validateExtraVolume(name, agent, hostPath, container, readonly) {
+  const hostRaw = String(hostPath || '').trim();
+  const dirRaw = String(container || '').trim();
+  if (!hostRaw || !dirRaw) {
+    throw new Error('Both the host source and the container path are required for an extra volume');
+  }
+  if (/[\u0000-\u001f\u007f]/.test(hostRaw) || /[\u0000-\u001f\u007f]/.test(dirRaw)) {
+    throw new Error('Control characters are not allowed in extra volume paths');
+  }
+  if (/['"\\]/.test(hostRaw) || /['"\\]/.test(dirRaw)) {
+    throw new Error('Quotes and backslashes are not allowed in extra volume paths');
+  }
+
+  // ── Host source ──
+  if (hostRaw === '/') throw new Error('An extra volume host source cannot be the host root');
+  if (hostRaw.split('/').some((s) => s === '.' || s === '..')) {
+    throw new Error('"." and ".." path segments are not allowed in the host source');
+  }
+  if (hostRaw.includes(':')) {
+    throw new Error('The host source cannot contain ":"');
+  }
+  let host;
+  if (hostRaw.startsWith('/')) {
+    host = path.normalize(hostRaw.replace(/\/{2,}/g, '/').replace(/\/+$/, ''));
+  } else {
+    if (!hostRaw.startsWith('instances/')) {
+      throw new Error('Host source must be an absolute path or start with "instances/"');
+    }
+    host = path.normalize(path.join(HOST_WORKSPACE, hostRaw));
+  }
+
+  for (const sd of HOST_SYSTEM_DIRS) {
+    if (guard('SYSTEM_DIRS') && (host === sd || host.startsWith(sd + path.sep))) {
+      throw new Error(`The host source cannot be a system directory (${sd})`);
+    }
+  }
+  if (guard('PROJECT_ROOT') && host === HOST_WORKSPACE) {
+    throw new Error('The project root cannot be an extra volume host source');
+  }
+  const webuiSrc = path.join(HOST_WORKSPACE, 'src');
+  if (guard('SRC_DIR') && (host === webuiSrc || host.startsWith(webuiSrc + path.sep))) {
+    throw new Error('The webui source folder (src) cannot be an extra volume host source');
+  }
+  const instancesHost = path.join(HOST_WORKSPACE, 'instances');
+  const ownInstDir = path.join(instancesHost, name);
+  const agentDataHost = path.join(ownInstDir, agent);
+  if (guard('INSTANCES_PARENT') && (host === instancesHost || isParentOrSelf(host, instancesHost))) {
+    throw new Error('The host source cannot be the instances folder or a parent of it');
+  }
+  if (guard('INSTANCE_DIR') && host === ownInstDir) {
+    throw new Error('The host source cannot be the agent instance folder itself');
+  }
+  if (guard('AGENT_DATA') && (host === agentDataHost || isParentOrSelf(host, agentDataHost))) {
+    throw new Error('The host source would swallow the agent data folder');
+  }
+  if (host.startsWith(instancesHost + path.sep)) {
+    const first = path.relative(instancesHost, host).split(path.sep)[0];
+    if (guard('OTHER_AGENT') && first !== name) {
+      throw new Error(`The host source cannot be inside another agent's folder (instances/${first})`);
+    }
+  }
+  const webuiVisible = host === HOST_WORKSPACE || host.startsWith(HOST_WORKSPACE + path.sep);
+  if (webuiVisible) {
+    let probe = containerViewOf(host);
+    while (probe && !fs.existsSync(probe)) probe = path.dirname(probe);
+    const real = probe ? fs.realpathSync(probe) : '';
+    if (guard('SYMLINK_ESCAPE') && real && real !== WORKSPACE && !real.startsWith(WORKSPACE + path.sep)) {
+      throw new Error('The host source must stay under the project root');
+    }
+  }
+  if (fs.existsSync(host) && !fs.statSync(host).isDirectory()) {
+    throw new Error('The host source already exists and is not a directory');
+  }
+
+  // ── Container destination ──
+  const dir = path.normalize(dirRaw.replace(/\/{2,}/g, '/').replace(/\/+$/, ''));
+  if (!dir.startsWith('/')) throw new Error('Container path must be absolute');
+  if (dir === '/') throw new Error('Container path cannot be the host root');
+  for (const p of CONTAINER_PROTECTED) {
+    if (guard('CONTAINER_PROTECTED') && (dir === p || dir.startsWith(p + '/'))) {
+      throw new Error(`Cannot mount an extra volume at the system path ${p}`);
+    }
+  }
+  const dataDir = getDriver(agent).dataDir;
+  if (guard('DATA_DIR_SWALLOW') && (dir === dataDir || isParentOrSelf(dir, dataDir))) {
+    throw new Error('Extra volume container path would swallow the agent data directory');
+  }
+
+  return { host, container: dir, readonly: !!readonly };
+}
+
+/** Validate a list of extra volumes; returns the normalized array or throws.
+ *  `null`/`undefined`/empty → `[]`. */
+function validateExtraVolumes(name, agent, list) {
+  if (list === undefined || list === null) return [];
+  if (!Array.isArray(list)) throw new Error('Extra volumes must be a list');
+  const out = [];
+  const seen = new Set();
+  for (const v of list) {
+    if (!v || (v.host === undefined && v.container === undefined)) continue;
+    const vol = validateExtraVolume(name, agent, v.host, v.container, v.readonly);
+    const key = `${vol.host}\u0000${vol.container}`;
+    if (seen.has(key)) throw new Error(`Duplicate extra volume mount ${vol.host} → ${vol.container}`);
+    seen.add(key);
+    out.push(vol);
+  }
+  return out;
+}
+
+/** Validate a list of extra host→container port mappings. Returns the
+ *  normalized `[{ host, container }]` array or throws. Pure checks only: int
+ *  bounds, self-duplicates, SSH/web-port conflicts, and the peer-mode ban. The
+ *  async cross-agent `hostPortInUse` check lives in the route layer. */
+function validateExtraPorts(ports, opts = {}) {
+  const { sshPort = '', webHostPort = '', network = '' } = opts;
+  if (ports === undefined || ports === null) return [];
+  if (!Array.isArray(ports)) throw new Error('Extra ports must be a list');
+  const out = [];
+  const seen = new Set();
+  for (const p of ports) {
+    if (!p || (p.host === undefined && p.container === undefined)) continue;
+    const h = Number(p.host);
+    const c = Number(p.container);
+    if (!Number.isInteger(h) || h < 1 || h > 65535) {
+      throw new Error('Extra port host must be an integer between 1 and 65535');
+    }
+    if (!Number.isInteger(c) || c < 1 || c > 65535) {
+      throw new Error('Extra port container must be an integer between 1 and 65535');
+    }
+    if (seen.has(h)) throw new Error(`Duplicate host port ${h} in extra ports`);
+    seen.add(h);
+    if (sshPort && String(h) === String(sshPort)) {
+      throw new Error(`Host port ${h} is already the SSH port of this agent`);
+    }
+    if (webHostPort && String(h) === String(webHostPort)) {
+      throw new Error(`Host port ${h} is already the web app host port of this agent`);
+    }
+    out.push({ host: String(h), container: String(c) });
+  }
+  if (network && out.length) {
+    throw new Error(`Docker cannot publish ports while this agent joins ${network}'s network — clear the network override or remove the extra ports`);
+  }
+  return out;
+}
+
+/** Smallest unused SSH host port starting at 43817 (the same scan createVm
+ *  uses to auto-allocate an SSH port when "Expose SSH" is on without a port). */
+function autoSshPort() {
+  const used = new Set();
+  if (fs.existsSync(INSTANCES_DIR)) {
+    for (const entry of fs.readdirSync(INSTANCES_DIR, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const composeFile = path.join(INSTANCES_DIR, entry.name, 'docker-compose.yml');
+      if (fs.existsSync(composeFile)) {
+        for (const m of fs.readFileSync(composeFile, 'utf8').matchAll(/"(\d+):22"/g)) {
+          used.add(parseInt(m[1]));
+        }
+      }
+    }
+  }
+  let p = 43817;
+  while (used.has(p)) p++;
+  return String(p);
+}
+
 function generateInstanceCompose(name, agent, password, port, opts = {}) {
   const { allowDocker = false, network = '', webService = null, webPeerNetwork = '' } = opts;
   const driver = getDriver(agent);
-  const image = imageFor(name);
-  const dataDir = driver.dataDir;
   const wsMount = readWorkspaceMount(name, agent);
-
-  let yaml = 'services:\n';
-  yaml += `  ${name}:\n`;
-  yaml += `    build:\n`;
-  // Build context must be resolvable by the docker CLI, which runs INSIDE the
-  // webui container → use WORKSPACE (the container's /workspace view). Each
-  // PAD builds from its OWN build dir — nothing is shared between PADs.
-  yaml += `      context: ${path.resolve(WORKSPACE, 'instances', name, 'build')}\n`;
-  // The compose `build.args:` block is generated from the instance Dockerfile's
-  // `ARG` lines so build-file edits are self-describing: add/remove an ARG in
-  // the Dockerfile → next compose regen picks it up; change its value in
-  // build.env → next build applies it with zero compose regeneration.
-  const args = argsFromDockerfile(path.join(INSTANCES_DIR, name, 'build', 'Dockerfile'));
-  if (args.length) {
-    yaml += `      args:\n`;
-    for (const a of args) {
-      yaml += `        ${a.name}: ${a.default ? `\${${a.name}:-${a.default}}` : `\${${a.name}}`}\n`;
-    }
-  }
-  yaml += `    image: ${image}\n`;
-  yaml += `    container_name: ${name}\n`;
-  yaml += `    restart: unless-stopped\n`;
-  // Published ports: SSH (hostPort:22) + optional published web app. Docker
-  // CANNOT publish ports while the container shares another container's network
-  // stack (network_mode: container:) — in that case the agent gets no ports:
-  // block and any web app is exposed via the socat "door" service below.
-  const portLines = [];
   const peerMode = !!network;
-  if (!peerMode) {
-    if (port) portLines.push(`      - "${port}:22"`);
-    if (webService && webService.hostPort) {
-      portLines.push(`      - "${webService.hostPort}:${webService.containerPort}"`);
-    }
-  }
-  if (portLines.length) yaml += `    ports:\n${portLines.join('\n')}\n`;
-  // Volume sources are resolved by the Docker DAEMON → use HOST_WORKSPACE
-  // (the daemon's host view, e.g. /www2/paddock).
-  yaml += `    volumes:\n      - ${HOST_WORKSPACE}/instances/${name}/${agent}:${dataDir}\n`;
-  if (wsMount) {
-    // Custom workspace bind (plan 24): an independent host→container mount
-    // replacing the implicit `…/workspace` directory. Values come from meta
-    // flags and were validated before write. The WHOLE `host:container`
-    // string is quoted as one scalar — docker compose splits the volume spec
-    // on the last colon, so quoting the two sides separately would produce a
-    // flow-mapping fragment that yaml rejects.
-    yaml += `      - ${yamlScalar(`${wsMount.host}:${wsMount.container}`)}\n`;
-    // Start the container IN the custom workspace so `docker exec`, the tmux
-    // terminal pane, and any cwd-relative tooling automatically land in the
-    // workspace folder — no shell-level `cd` required.
-    yaml += `    working_dir: ${yamlScalar(wsMount.container)}\n`;
-  }
-  if (allowDocker) yaml += `      - /var/run/docker.sock:/var/run/docker.sock\n`;
-  if (network) yaml += `    network_mode: container:${network}\n`;
-  yaml += `    environment:\n      TZ: Asia/Kolkata\n      ROOT_PASSWORD: ${password || ''}\n`;
+  const args = argsFromDockerfile(path.join(INSTANCES_DIR, name, 'build', 'Dockerfile'));
+  const buildArgs = Object.fromEntries(args.map((a) => [
+    a.name,
+    a.default ? `\${${a.name}:-${a.default}}` : `\${${a.name}}`,
+  ]));
+  const volumes = [`${HOST_WORKSPACE}/instances/${name}/${agent}:${driver.dataDir}`];
+  const service = {
+    build: {
+      // The compose CLI runs in the webui, so the build context uses its view.
+      context: path.resolve(WORKSPACE, 'instances', name, 'build'),
+      ...(args.length ? { args: buildArgs } : {}),
+    },
+    image: imageFor(name),
+    container_name: name,
+    restart: 'unless-stopped',
+    volumes,
+  };
 
-  // Web door: when the agent shares a peer's network stack, published ports are
-  // impossible on the agent itself. A tiny socat "door" container joins the
-  // peer's docker network, publishes the host port, and forwards to the peer by
-  // name — the agent's web server binds inside the peer's namespace, so it's
-  // reachable at <peer>:<containerPort>. Resolving by name per connection means
-  // the door survives peer recreates without any change of its own.
-  if (peerMode && webService && webService.hostPort) {
+  const ports = [];
+  if (!peerMode) {
+    if (port) ports.push(`${port}:22`);
+    if (webService?.hostPort) ports.push(`${webService.hostPort}:${webService.containerPort}`);
+    for (const p of readExtraPorts(name)) ports.push(`${p.host}:${p.container}`);
+  }
+  if (ports.length) service.ports = ports;
+  if (wsMount) {
+    volumes.push(`${wsMount.host}:${wsMount.container}`);
+    service.working_dir = wsMount.container;
+  }
+  if (allowDocker) volumes.push('/var/run/docker.sock:/var/run/docker.sock');
+  for (const v of readExtraVolumes(name)) {
+    volumes.push(`${v.host}:${v.container}${v.readonly ? ':ro' : ''}`);
+  }
+  if (network) service.network_mode = `container:${network}`;
+  service.environment = { TZ: 'Asia/Kolkata', ROOT_PASSWORD: password || '' };
+
+  const services = { [name]: service };
+  let networks;
+  if (peerMode && webService?.hostPort) {
     const door = webDoorName(name);
-    yaml += `  ${door}:\n`;
-    yaml += `    image: alpine/socat\n`;
-    yaml += `    container_name: ${door}\n`;
-    yaml += `    restart: unless-stopped\n`;
     if (webPeerNetwork) {
-      yaml += `    networks:\n      - webbridge\n`;
-      yaml += `    ports:\n      - "${webService.hostPort}:${webService.containerPort}"\n`;
-      yaml += `    command: TCP-LISTEN:${webService.containerPort},fork,reuseaddr TCP:${network}:${webService.containerPort}\n`;
-      yaml += `networks:\n  webbridge:\n    external: true\n    name: ${webPeerNetwork}\n`;
+      services[door] = {
+        image: 'alpine/socat',
+        container_name: door,
+        restart: 'unless-stopped',
+        networks: ['webbridge'],
+        ports: [`${webService.hostPort}:${webService.containerPort}`],
+        command: `TCP-LISTEN:${webService.containerPort},fork,reuseaddr TCP:${network}:${webService.containerPort}`,
+      };
+      networks = { webbridge: { external: true, name: webPeerNetwork } };
     } else {
-      // Peer shares the host network (no docker network to join) → the door
-      // runs on the host network and forwards to localhost instead.
-      yaml += `    network_mode: host\n`;
-      yaml += `    command: TCP-LISTEN:${webService.hostPort},fork,reuseaddr TCP:127.0.0.1:${webService.containerPort}\n`;
+      services[door] = {
+        image: 'alpine/socat',
+        container_name: door,
+        restart: 'unless-stopped',
+        network_mode: 'host',
+        command: `TCP-LISTEN:${webService.hostPort},fork,reuseaddr TCP:127.0.0.1:${webService.containerPort}`,
+      };
     }
   }
-  return yaml;
+
+  // JSON is valid YAML. Serializing the structured compose model avoids fragile
+  // hand-built YAML where a Compose interpolation such as `${VAR:-default}`
+  // can be parsed as YAML syntax.
+  return JSON.stringify({ services, ...(networks ? { networks } : {}) }, null, 2) + '\n';
 }
 
 function writeInstanceCompose(name, agent, password, port, opts = {}) {
@@ -474,6 +675,22 @@ async function applySettings(name, opts = {}) {
   } else {
     setMetaFlag(name, 'WORKSPACE_HOST', '');
     setMetaFlag(name, 'WORKSPACE_DIR', '');
+  }
+
+  // Extra volumes / ports (plan 28): written BEFORE the compose regen so the
+  // generator (which reads them from meta) picks them up. Each is only written
+  // when the caller passes it — existing regen paths (web, settings, migration)
+  // preserve the stored value for free.
+  if (opts.extraVolumes !== undefined) {
+    const vols = validateExtraVolumes(name, agent, opts.extraVolumes);
+    setMetaFlag(name, 'EXTRA_VOLUMES', vols.length ? JSON.stringify(vols) : '');
+  }
+  if (opts.extraPorts !== undefined) {
+    const ports = validateExtraPorts(opts.extraPorts, {
+      sshPort: meta.PORT || '',
+      network,
+    });
+    setMetaFlag(name, 'EXTRA_PORTS', ports.length ? JSON.stringify(ports) : '');
   }
 
   let webPeerNetwork = '';
@@ -636,6 +853,8 @@ async function createVm(name, options = {}) {
     sshEnabled = false, port = '', password = '',
     onLog = () => {}, onStep = () => {}, skipSetup = false,
     workspaceHost = '', workspaceDir = '',
+    allowDocker = false, network = '',
+    extraVolumes = null, extraPorts = null,
   } = options;
 
   if (existingServices().has(name)) {
@@ -649,26 +868,25 @@ async function createVm(name, options = {}) {
   const pw = password || name.replace(PREFIX_RE, '');
   let finalPort = '';
   if (sshEnabled) {
-    if (port) {
-      finalPort = port;
-    } else {
-      const used = new Set();
-      if (fs.existsSync(INSTANCES_DIR)) {
-        for (const entry of fs.readdirSync(INSTANCES_DIR, { withFileTypes: true })) {
-          if (!entry.isDirectory()) continue;
-          const composeFile = path.join(INSTANCES_DIR, entry.name, 'docker-compose.yml');
-          if (fs.existsSync(composeFile)) {
-            for (const m of fs.readFileSync(composeFile, 'utf8').matchAll(/"(\d+):22"/g)) {
-              used.add(parseInt(m[1]));
-            }
-          }
-        }
-      }
-      let p = 43817;
-      while (used.has(p)) p++;
-      finalPort = String(p);
-    }
+    finalPort = port || autoSshPort();
   }
+
+  // Validate EVERYTHING up front (plan 28) so a bad request aborts with a
+  // clear error and leaves nothing behind: network peer must exist and run,
+  // extra volumes/ports must pass the guards, and the custom workspace mount
+  // must be valid. The route already checked host-port availability against
+  // other agents before returning 202; here we re-check the pure constraints.
+  if (network) {
+    if (network === name) throw new Error('Cannot route an agent through itself');
+    let running = false;
+    try {
+      const r = await runCmd('docker', ['inspect', network, '--format', '{{.State.Status}}'], { timeout: 15000 });
+      running = (r.stdout || '').trim() === 'running';
+    } catch {}
+    if (!running) throw new Error(`Container '${network}' is not running`);
+  }
+  const extraVols = validateExtraVolumes(name, agent, extraVolumes);
+  const extraPs = validateExtraPorts(extraPorts, { sshPort: finalPort, network });
 
   // Custom workspace bind (plan 24): validate BEFORE writing meta/compose so a
   // bad request aborts with a clear error and leaves nothing behind. `wsMount`
@@ -735,18 +953,27 @@ async function createVm(name, options = {}) {
       fs.cpSync(srcBuildDir, buildDir(name), { recursive: true });
       onLog('system', `Cloned build files from ${src}`);
     }
+    // The clone inherits the source's build.env; the docker toggle still needs
+    // to reflect the requested state for THIS clone.
+    setBuildEnv(name, { INSTALL_DOCKER: allowDocker ? '1' : '0' });
   } else {
-    seedBuildDir(name, agent);
+    seedBuildDir(name, agent, { installDocker: allowDocker });
   }
 
   let metaTxt = `ROOT_PASSWORD=${pw}\nAGENT=${agent}\n`;
   if (finalPort) metaTxt += `PORT=${finalPort}\n`;
+  metaTxt += `DOCKER=${allowDocker ? '1' : '0'}\n`;
+  if (network) metaTxt += `NETWORK=${network}\n`;
   // Workspace mount flags MUST be written before writeInstanceCompose — the
   // compose generator reads them from meta to emit the extra bind.
   if (wsMount) metaTxt += `WORKSPACE_HOST=${wsMount.host}\nWORKSPACE_DIR=${wsMount.container}\n`;
+  // Extra volumes / ports (plan 28): single-line JSON, read back by the
+  // compose generator (readExtraVolumes/readExtraPorts) on every regen path.
+  if (extraVols.length) metaTxt += `EXTRA_VOLUMES=${JSON.stringify(extraVols)}\n`;
+  if (extraPs.length) metaTxt += `EXTRA_PORTS=${JSON.stringify(extraPs)}\n`;
   fs.writeFileSync(path.join(instDir, 'meta.env'), metaTxt);
 
-  writeInstanceCompose(name, agent, pw, finalPort);
+  writeInstanceCompose(name, agent, pw, finalPort, { allowDocker, network });
 
   const composePath = instanceComposePath(name);
 
@@ -842,8 +1069,17 @@ async function resetVm(name) {
 
   const pw = meta.ROOT_PASSWORD || name.replace(PREFIX_RE, '');
   const port = meta.PORT || '';
-  seedBuildDir(name, agent, { installDocker: meta.DOCKER === '1' });
-  writeInstanceCompose(name, agent, pw, port);
+  const allowDocker = meta.DOCKER === '1';
+  const network = meta.NETWORK || '';
+  seedBuildDir(name, agent, { installDocker: allowDocker });
+  // Preserve the COMPLETE persisted binding set (plan 28 fix): docker, network
+  // peer, published web app (+ its door), custom workspace, and the extra
+  // volumes/ports in meta — the compose generator reads them all from meta, so
+  // resetting the data dir must never silently drop a bind.
+  const webService = readWebService(name);
+  let webPeerNetwork = '';
+  if (webService && network) webPeerNetwork = await getPeerNetworkName(network);
+  writeInstanceCompose(name, agent, pw, port, { allowDocker, network, webService, webPeerNetwork });
 
   const composePath = instanceComposePath(name);
   await runCmd('docker', composeCommand(name, 'up', '-d'), { timeout: 120000 });
@@ -936,6 +1172,8 @@ module.exports = {
   readWebService, applyWebServices, webHookPath,
   writeWebStartHook, removeWebStartHook, webDoorName,
   validateWorkspaceMount, workspaceMountInfo, readWorkspaceMount,
+  validateExtraVolume, validateExtraVolumes, validateExtraPorts,
+  readExtraVolumes, readExtraPorts, autoSshPort,
   imageFor, seedBuildDir, buildDir, buildEnvPath,
   readBuildEnv, setBuildEnv,
   argsFromDockerfile,

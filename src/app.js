@@ -814,6 +814,8 @@ app.get('/api/agents/:name/settings', async (req, res) => {
       version,
       networkHealth,
       workspaceMount,
+      extraVolumes: vm.readExtraVolumes(name),
+      extraPorts: vm.readExtraPorts(name),
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -855,7 +857,7 @@ async function imageHasDockerCli(name, image, wasRunning) {
 app.post('/api/agents/:name/settings', async (req, res) => {
   const name = safeVmName(req.params.name);
   if (!name) return res.status(400).json({ error: 'Invalid agent name' });
-  const { allowDocker, network } = req.body || {};
+  const { allowDocker, network, extraVolumes } = req.body || {};
   try {
     const meta = readMeta(name);
     if (!meta.AGENT && !meta.ROOT_PASSWORD) return res.status(404).json({ error: 'Agent not found' });
@@ -887,7 +889,19 @@ app.post('/api/agents/:name/settings', async (req, res) => {
     const newWsKey = wsMount ? `${wsMount.host}\u0000${wsMount.container}` : '';
     const workspaceChanged = oldWsKey !== newWsKey;
 
-    // Network target validation (only on a real change to a non-empty target)
+    // Additional volumes (plan 28): full-replace list. Omitted → no change;
+    // provided (even []) replaces the stored set.
+    const oldVols = vm.readExtraVolumes(name);
+    let newVols = oldVols;
+    let volumesChanged = false;
+    if (extraVolumes !== undefined) {
+      newVols = vm.validateExtraVolumes(name, agentType, extraVolumes);
+      volumesChanged = JSON.stringify(newVols) !== JSON.stringify(oldVols);
+    }
+
+    // Network target validation (only on a real change to a non-empty target).
+    // Switching INTO peer mode while extra ports exist is rejected — Docker
+    // cannot publish ports in that mode.
     if (newNetwork !== oldNetwork && newNetwork) {
       if (newNetwork === name) return res.status(400).json({ error: 'Cannot route an agent through itself' });
       const target = containers[newNetwork];
@@ -895,13 +909,18 @@ app.post('/api/agents/:name/settings', async (req, res) => {
       if ((target.State || '').toLowerCase() !== 'running') {
         return res.status(400).json({ error: `Container '${newNetwork}' is not running` });
       }
+      if (vm.readExtraPorts(name).length) {
+        return res.status(400).json({
+          error: `Docker cannot publish ports while this agent joins ${newNetwork}'s network — clear the network override or remove the extra ports`,
+        });
+      }
     }
 
     const image = vm.imageFor(name);
     const dockerChanged = newAllow !== oldAllow;
     const networkChanged = newNetwork !== oldNetwork;
-    if (!dockerChanged && !networkChanged && !workspaceChanged) {
-      return res.json({ allowDocker: newAllow, network: newNetwork, image, workspaceMount: oldMount });
+    if (!dockerChanged && !networkChanged && !workspaceChanged && !volumesChanged) {
+      return res.json({ allowDocker: newAllow, network: newNetwork, image, workspaceMount: oldMount, extraVolumes: oldVols });
     }
 
     // Persist the requested docker state in the instance build.env — the toggle
@@ -944,6 +963,7 @@ app.post('/api/agents/:name/settings', async (req, res) => {
         if (dockerChanged) summary.push(`allowDocker=${newAllow}`);
         if (networkChanged) summary.push(`network=${newNetwork || 'default'}`);
         if (workspaceChanged) summary.push(wsMount ? `workspace=${wsMount.host} → ${wsMount.container}` : 'workspace=default');
+        if (volumesChanged) summary.push(`extraVolumes=${newVols.length} mount(s)`);
         log('system', `Applying settings: ${summary.join(', ')}`);
         if (webService) {
           log('system', `Web app is published (host port ${webService.hostPort}) — keeping it live across the change`);
@@ -954,6 +974,7 @@ app.post('/api/agents/:name/settings', async (req, res) => {
           network: newNetwork,
           workspaceHost: wsMount ? wsMount.host : '',
           workspaceDir: wsMount ? wsMount.container : '',
+          ...(volumesChanged ? { extraVolumes: newVols } : {}),
         });
         registry.dockerPsList(true);
 
@@ -1033,6 +1054,7 @@ app.post('/api/agents/:name/settings', async (req, res) => {
             network: oldNetwork,
             workspaceHost: oldMount ? oldMount.host : '',
             workspaceDir: oldMount ? oldMount.container : '',
+            ...(volumesChanged ? { extraVolumes: oldVols } : {}),
           });
           // Same ordering rule as the happy path: the door must be gone before
           // the agent recreate when rolling back to the default network, or the
@@ -1151,7 +1173,10 @@ app.get('/api/agents/:name/web', async (req, res) => {
     if (!meta.AGENT && !meta.ROOT_PASSWORD) return res.status(404).json({ error: 'Agent not found' });
     const agentType = meta.AGENT || 'openclaw';
     const driver = drivers.getDriver(agentType);
-    if (!driver.webApp) return res.json({ webApp: null });
+    // Extra Docker ports (plan 28) are independent of the built-in web app and
+    // always reported — even for agent types with no web app to publish.
+    const extraPorts = vm.readExtraPorts(name);
+    if (!driver.webApp) return res.json({ webApp: null, extraPorts });
 
     const webService = vm.readWebService(name);
     const active = !!webService;
@@ -1190,6 +1215,7 @@ app.get('/api/agents/:name/web', async (req, res) => {
       passwordConfigured: active && !!password,
       startCommand: active ? driver.webApp.startCommand({ password, containerPort: webService.containerPort }) : '',
       actualPorts,
+      extraPorts,
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1333,6 +1359,108 @@ app.post('/api/agents/:name/web', async (req, res) => {
         } catch {}
         try {
           registry.recordActivity(name, 'web', turningOn ? 'publish' : 'unpublish', 'error', e.message);
+        } catch {}
+        jobLog.fail(job, e.message);
+      } finally {
+        registry.setRestarting(name, false);
+      }
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── Additional Docker ports (plan 28) ──────────────────────
+
+/** Full-replace the agent's declared extra ports (independent of the built-in
+ *  web app). Same SSE-job shape as settings: validate → stop → applySettings
+ *  (regenerates the compose, preserving web/workspace/volumes) → recreate.
+ *  Never touches web.json. */
+app.post('/api/agents/:name/ports', async (req, res) => {
+  const name = safeVmName(req.params.name);
+  if (!name) return res.status(400).json({ error: 'Invalid agent name' });
+  const { extraPorts } = req.body || {};
+  try {
+    const meta = readMeta(name);
+    if (!meta.AGENT && !meta.ROOT_PASSWORD) return res.status(404).json({ error: 'Agent not found' });
+
+    const sshPort = meta.PORT || '';
+    const webService = vm.readWebService(name);
+    const webHostPort = webService ? webService.hostPort : '';
+    const network = meta.NETWORK || '';
+    // Pure validation first (bounds, self-dups, SSH/web conflicts, peer-mode
+    // ban), then the async cross-agent availability check.
+    const ports = vm.validateExtraPorts(extraPorts, { sshPort, webHostPort, network });
+    for (const p of ports) {
+      if (await hostPortInUse(p.host, name)) {
+        return res.status(400).json({ error: `Host port ${p.host} is already in use by another agent` });
+      }
+    }
+
+    const oldPorts = vm.readExtraPorts(name);
+    const changed = JSON.stringify(ports) !== JSON.stringify(oldPorts);
+    if (!changed) return res.json({ extraPorts: ports });
+
+    const containers = await dockerPsList();
+    const current = containers[name];
+    const wasRunning = current && (current.State || '').toLowerCase() === 'running';
+
+    const jobKey = 'update:' + name;
+    const job = jobLog.getOrCreateJob(jobKey);
+    const log = (stream, text) => jobLog.line(job, stream, text);
+    const step = (stepName, state) => jobLog.setStep(job, stepName, state);
+
+    res.status(202).json({ ok: true, job: jobKey, streaming: true, action: 'ports' });
+
+    setImmediate(async () => {
+      registry.setRestarting(name, true);
+      const portsChanged = ports.length ? `extraPorts=${ports.map((p) => `${p.host}→${p.container}`).join(', ')}` : 'extraPorts=none';
+      try {
+        await logStore.capture(name);
+        if (wasRunning) {
+          step('stop', 'start');
+          await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 });
+          step('stop', 'end');
+        }
+
+        log('system', `Applying ports: ${portsChanged}`);
+        await vm.applySettings(name, {
+          allowDocker: meta.DOCKER === '1',
+          network,
+          extraPorts: ports,
+        });
+        registry.dockerPsList(true);
+
+        step('recreate', 'start');
+        await runCmdStream('docker', vm.composeCommand(name, 'up', '-d', '--no-deps', '--force-recreate', name), { onLog: log, timeout: 300000 });
+        step('recreate', 'end');
+
+        if (!wasRunning) {
+          try { await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 }); } catch {}
+        }
+
+        registry.dockerPsList(true);
+        registry.discoverAgents();
+        try {
+          registry.recordActivity(name, 'ports', 'update', 'ok', portsChanged);
+        } catch {}
+        log('system', 'Done — container recreated with the new ports');
+        jobLog.finish(job, true);
+      } catch (e) {
+        console.error(`Ports change failed for ${name}:`, e.message);
+        try {
+          await vm.applySettings(name, {
+            allowDocker: meta.DOCKER === '1',
+            network,
+            extraPorts: oldPorts,
+          });
+          if (wasRunning) {
+            await runCmdStream('docker', vm.composeCommand(name, 'up', '-d', '--no-deps', '--force-recreate', name), { onLog: log, timeout: 180000 });
+          }
+          registry.dockerPsList(true);
+        } catch {}
+        try {
+          registry.recordActivity(name, 'ports', 'update', 'error', e.message);
         } catch {}
         jobLog.fail(job, e.message);
       } finally {
@@ -2243,7 +2371,7 @@ app.get('/api/vault/:id/decrypt', requireAdmin, (req, res) => {
 // ─── API: Create Agent ──────────────────────────────────────
 
 app.post('/api/agents/create', async (req, res) => {
-  const { name, agent, assign_to, workspace_host, workspace_dir } = req.body;
+  const { name, agent, assign_to, workspace_host, workspace_dir, allowDocker, network, sshEnabled, port, extraVolumes, extraPorts } = req.body;
   if (!name) return res.status(400).json({ error: 'Name is required' });
   if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
   if (registry.getAgent(name)) return res.status(409).json({ error: 'Agent already exists' });
@@ -2259,6 +2387,45 @@ app.post('/api/agents/create', async (req, res) => {
     }
   }
 
+  // Plan 28 options — validate everything up front so the 202 is never emitted
+  // for a request that will fail mid-create.
+  const agentType = agent || 'openclaw';
+  const containers = await dockerPsList();
+  if (network) {
+    if (network === name) return res.status(400).json({ error: 'Cannot route an agent through itself' });
+    const target = containers[network];
+    if (!target) return res.status(400).json({ error: `Container '${network}' not found` });
+    if ((target.State || '').toLowerCase() !== 'running') {
+      return res.status(400).json({ error: `Container '${network}' is not running` });
+    }
+  }
+
+  let sshHostPort = '';
+  if (sshEnabled) sshHostPort = port || vm.autoSshPort();
+
+  let extraVols = [];
+  try {
+    extraVols = vm.validateExtraVolumes(name, agentType, extraVolumes);
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+  let extraPs = [];
+  try {
+    extraPs = vm.validateExtraPorts(extraPorts, { sshPort: sshHostPort, network });
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+
+  // Host-port availability across the whole request: the optional SSH port and
+  // every extra port together, before anything is created.
+  const allHostPorts = [...extraPs.map((p) => p.host)];
+  if (sshHostPort) allHostPorts.push(sshHostPort);
+  for (const hp of allHostPorts) {
+    if (await hostPortInUse(hp, name)) {
+      return res.status(400).json({ error: `Host port ${hp} is already in use by another agent` });
+    }
+  }
+
   const job = jobLog.getOrCreateJob(name);
   const log = (stream, text) => jobLog.line(job, stream, text);
   const step = (stepName, state) => jobLog.setStep(job, stepName, state);
@@ -2270,10 +2437,16 @@ app.post('/api/agents/create', async (req, res) => {
   setImmediate(async () => {
     try {
       await vm.createVm(name, {
-        agent: agent || 'openclaw',
+        agent: agentType,
         mode: 'fresh',
         workspaceHost: wsMount ? wsMount.host : '',
         workspaceDir: wsMount ? wsMount.container : '',
+        allowDocker: !!allowDocker,
+        network: network || '',
+        sshEnabled: !!sshEnabled,
+        port: sshHostPort,
+        extraVolumes: extraVols,
+        extraPorts: extraPs,
         onLog: log,
         onStep: step,
       });

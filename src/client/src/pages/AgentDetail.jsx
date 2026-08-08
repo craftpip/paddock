@@ -16,7 +16,7 @@ const MODES = [
   { id: 'commands', label: 'Commands' },
   { id: 'workspace', label: 'Workspace' },
   { id: 'config', label: 'Config' },
-  { id: 'web', label: 'Web' },
+  { id: 'web', label: 'Web & Ports' },
   { id: 'logs', label: 'Logs' },
   { id: 'sessions', label: 'Sessions' },
   { id: 'activity', label: 'Activity' },

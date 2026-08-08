@@ -29,6 +29,8 @@ export default function SettingsTab({ agent }) {
   const [wsEnabled, setWsEnabled] = useState(false)
   const [wsHost, setWsHost] = useState('')
   const [wsDir, setWsDir] = useState('')
+  const [volDraft, setVolDraft] = useState([])
+  const [volDirty, setVolDirty] = useState(false)
 
   function refresh() {
     api(`/api/agents/${agent.name}/settings`)
@@ -80,6 +82,9 @@ export default function SettingsTab({ agent }) {
     setWsEnabled(!!m)
     setWsHost(m ? m.host : '')
     setWsDir(m ? m.container : (driverInfo?.workspaceDir || agent.workspace_dir || ''))
+    // Sync the additional volumes draft once (do not clobber while editing).
+    setVolDraft((settings.extraVolumes || []).map((v) => ({ ...v })))
+    setVolDirty(false)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings, driverInfo, agent.name])
 
@@ -379,6 +384,88 @@ export default function SettingsTab({ agent }) {
     }
   }
 
+  // ── Additional volumes (plan 28) ──────────────────────────
+
+  const VOL_SYSTEM = ['/etc', '/proc', '/sys', '/dev', '/boot', '/bin', '/sbin', '/usr', '/lib', '/home', '/root', '/opt', '/tmp', '/var/run']
+  const VOL_PROTECTED = ['/etc', '/proc', '/sys', '/dev', '/var/run', '/usr', '/bin', '/sbin', '/lib', '/boot', '/tmp']
+
+  function volHostIssue(h) {
+    const v = (h || '').trim()
+    if (!v) return 'Host source is required'
+    if (v.startsWith('/')) {
+      if (v === '/') return 'Cannot be the host root'
+      for (const s of VOL_SYSTEM) {
+        if (v === s || v.startsWith(s + '/')) return `System directory (${s}) cannot be a host source`
+      }
+    } else if (!v.startsWith('instances/')) {
+      return 'Must be an absolute path or start with instances/'
+    }
+    if (v.includes(':')) return 'Host source cannot contain ":"'
+    if (/['"\\]/.test(v)) return 'Quotes and backslashes not allowed'
+    return ''
+  }
+
+  function volDirIssue(d) {
+    const v = (d || '').trim()
+    if (!v) return 'Container path is required'
+    if (!v.startsWith('/')) return 'Container path must be absolute'
+    if (v === '/') return 'Container path cannot be /'
+    for (const p of VOL_PROTECTED) {
+      if (v === p || v.startsWith(p + '/')) return `Cannot mount at the system path ${p}`
+    }
+    return ''
+  }
+
+  function setVol(i, patch) {
+    setVolDraft(prev => prev.map((v, idx) => (idx === i ? { ...v, ...patch } : v)))
+    setVolDirty(true)
+  }
+
+  const volErrors = volDraft.map((v) => ({ host: volHostIssue(v.host), dir: volDirIssue(v.container) }))
+  const volHasErrors = volErrors.some((e) => e.host || e.dir)
+
+  async function handleVolumesSave() {
+    if (volHasErrors) {
+      toast.error('Fix the highlighted volume fields before saving')
+      return
+    }
+    const vols = volDraft
+      .filter((v) => v.host && v.host.trim() && v.container && v.container.trim())
+      .map((v) => ({ host: v.host.trim(), container: v.container.trim(), readonly: !!v.readonly }))
+    const ok = await confirm({
+      title: 'Apply additional volumes',
+      message: vols.length
+        ? `This will stop and recreate ${agent.name} with ${vols.length} additional bind mount${vols.length === 1 ? '' : 's'}.\n\n${vols.map((v) => `${v.host} → ${v.container}${v.readonly ? ' (ro)' : ''}`).join('\n')}`
+        : `This will stop and recreate ${agent.name} to remove all additional volumes.`,
+      confirmText: 'Apply & recreate',
+      cancelText: 'Cancel',
+    })
+    if (!ok) return
+    setSaving(true)
+    if (agent.status === 'running') updateAgentStatus(agent.name, 'restarting')
+    try {
+      const d = await api(`/api/agents/${agent.name}/settings`, { method: 'POST', body: { extraVolumes: vols } })
+      if (d && d.streaming) {
+        setModal({
+          key: `vols-${Date.now()}`,
+          title: `Applying additional volumes for ${agent.name}`,
+          onDone: () => {
+            refresh()
+            fetchAgents()
+            toast.success('Additional volumes applied')
+          },
+        })
+      } else {
+        setSettings(d)
+        toast.success('Additional volumes applied')
+        setSaving(false)
+      }
+    } catch (err) {
+      toast.error(err.error || err.message || 'Failed to update additional volumes')
+      setSaving(false)
+    }
+  }
+
   return (
     <div className="max-w-3xl space-y-6">
       {loadError && <p className="text-danger text-sm">{loadError}</p>}
@@ -538,7 +625,79 @@ export default function SettingsTab({ agent }) {
         </p>
       </section>
 
-      {/* 5b. Custom workspace */}
+      {/* 5b. Additional volumes */}
+      <section className="bg-panel/60 border border-line rounded-xl p-5">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-medium text-ink-muted">Additional volumes</h3>
+            <p className="text-xs text-ink-dim mt-1 max-w-md">
+              Extra host → container bind mounts beyond the data and workspace folders. Applying changes recreates the container.
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-4 space-y-3">
+          {volDraft.length === 0 && (
+            <p className="text-xs text-ink-dim">No additional volumes.</p>
+          )}
+          {volDraft.map((v, i) => (
+            <div key={i} className="space-y-3 rounded-lg bg-sunken border border-line-faint p-3">
+              <div className="flex items-end gap-2">
+                <div className="flex-1">
+                  <label className="block text-xs text-ink-dim mb-1">Host source</label>
+                  <input type="text" value={v.host}
+                         onChange={(e) => setVol(i, { host: e.target.value })}
+                         className="w-full bg-raised border border-line-faint rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line font-mono" />
+                  {volErrors[i].host && <p className="text-xs text-danger mt-1">{volErrors[i].host}</p>}
+                </div>
+                <div className="flex-1">
+                  <label className="block text-xs text-ink-dim mb-1">Container path</label>
+                  <input type="text" value={v.container}
+                         onChange={(e) => setVol(i, { container: e.target.value })}
+                         className="w-full bg-raised border border-line-faint rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line font-mono" />
+                  {volErrors[i].dir && <p className="text-xs text-danger mt-1">{volErrors[i].dir}</p>}
+                </div>
+                <button type="button"
+                        onClick={() => { setVolDraft(prev => prev.filter((_, idx) => idx !== i)); setVolDirty(true) }}
+                        className="px-2 py-2 bg-raised hover:bg-raised-hover text-ink-dim rounded-lg text-xs shrink-0"
+                        title="Remove volume">✕</button>
+              </div>
+              <label className="flex items-center gap-2 text-xs text-ink-dim cursor-pointer select-none">
+                <input type="checkbox" checked={!!v.readonly}
+                       onChange={(e) => setVol(i, { readonly: e.target.checked })}
+                       className="w-3.5 h-3.5 accent-accent" />
+                Read-only mount
+              </label>
+            </div>
+          ))}
+
+          <button type="button"
+                  onClick={() => { setVolDraft(prev => [...prev, { host: '', container: '', readonly: false }]); setVolDirty(true) }}
+                  disabled={saving}
+                  className="px-3 py-1.5 bg-raised hover:bg-raised-hover disabled:opacity-50 text-ink rounded-lg text-xs font-medium transition-colors">
+            + Add volume
+          </button>
+
+          {volHasErrors && (
+            <p className="text-xs text-danger">Fix the invalid volume fields before saving.</p>
+          )}
+
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleVolumesSave}
+              disabled={saving || !volDirty || volHasErrors}
+              className="px-3 py-1.5 bg-accent hover:bg-accent-hover disabled:opacity-50 text-accent-ink rounded-lg text-xs font-medium transition-colors"
+            >
+              Apply volumes & recreate
+            </button>
+            {volDirty && !saving && (
+              <span className="text-xs text-ink-dim">Unsaved volume changes</span>
+            )}
+          </div>
+        </div>
+      </section>
+
+      {/* 5c. Custom workspace */}
       {!wsHidden && (
         <section className="bg-panel/60 border border-line rounded-xl p-5">
           <div className="flex items-start justify-between gap-4">
