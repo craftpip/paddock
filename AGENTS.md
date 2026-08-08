@@ -704,6 +704,27 @@ Terminal appeared small/constrained because xterm.js FitAddon calls `fit()` befo
 - All three tested with correct DOM updates and CSRF handling.
 
 
+## Blank Settings Tab: unguarded `settings.network` on first render (2026-08-08)
+
+**Symptom:** The agent Settings tab renders a fully blank page (empty `#root`).
+The whole SPA unmounts — no error message, because React 19 has no error
+boundary, so a render-time throw blanks the entire app.
+
+**Root cause:** In `SettingsTab.jsx`, state `settings` starts `null` and is
+filled by a `refresh()` fetch. The new "Additional ports" JSX (plan 28) read
+`settings.network` directly (no `?.`) during the **first render**, throwing
+`TypeError: Cannot read properties of null (reading 'network')`. The rest of
+the file already used safe `settings?.x` or a derived `currentNetwork`
+(`settings?.network || ''`). Any new JSX that touches `settings` on initial
+mount must use the safe form.
+
+**Fix:** Replaced `settings.network` in the ports section with the existing
+`currentNetwork` variable. Rebuild + restart:
+```bash
+cd src/client && npm run build   # output → src/public/
+docker restart paddock
+```
+
 ## Settings Tab — Agent Detail Page (2026-08-04)
 
 ### Implemented (plan 09, Phases 1-3)

@@ -31,6 +31,8 @@ export default function SettingsTab({ agent }) {
   const [wsDir, setWsDir] = useState('')
   const [volDraft, setVolDraft] = useState([])
   const [volDirty, setVolDirty] = useState(false)
+  const [portDraft, setPortDraft] = useState([])
+  const [portDirty, setPortDirty] = useState(false)
 
   function refresh() {
     api(`/api/agents/${agent.name}/settings`)
@@ -85,6 +87,9 @@ export default function SettingsTab({ agent }) {
     // Sync the additional volumes draft once (do not clobber while editing).
     setVolDraft((settings.extraVolumes || []).map((v) => ({ ...v })))
     setVolDirty(false)
+    // Sync the additional ports draft once (do not clobber while editing).
+    setPortDraft((settings.extraPorts || []).map((p) => ({ ...p })))
+    setPortDirty(false)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings, driverInfo, agent.name])
 
@@ -466,6 +471,66 @@ export default function SettingsTab({ agent }) {
     }
   }
 
+  // ── Additional ports (plan 28) ────────────────────────────
+
+  function setPort(i, patch) {
+    setPortDraft(prev => prev.map((p, idx) => (idx === i ? { ...p, ...patch } : p)))
+    setPortDirty(true)
+  }
+
+  function portIssue(n) {
+    const v = String(n ?? '').trim()
+    if (!v) return 'Port is required'
+    if (!/^\d+$/.test(v) || +v < 1 || +v > 65535) return 'Must be an integer 1–65535'
+    return ''
+  }
+
+  const portErrors = portDraft.map((p) => ({ host: portIssue(p.host), container: portIssue(p.container) }))
+  const portHasErrors = portErrors.some((e) => e.host || e.container)
+
+  async function handlePortsSave() {
+    if (portHasErrors) {
+      toast.error('Fix the highlighted port fields before saving')
+      return
+    }
+    const ports = portDraft
+      .filter((p) => p.host && String(p.host).trim())
+      .map((p) => ({ host: String(p.host).trim(), container: String(p.container).trim() }))
+    const ok = await confirm({
+      title: 'Apply additional ports',
+      message: ports.length
+        ? `This will stop and recreate ${agent.name} with ${ports.length} additional port mapping${ports.length === 1 ? '' : 's'}.\n\n${ports.map((p) => `${p.host} → ${p.container}`).join('\n')}`
+        : `This will stop and recreate ${agent.name} to remove all additional ports.`,
+      confirmText: 'Apply & recreate',
+      cancelText: 'Cancel',
+    })
+    if (!ok) return
+    setSaving(true)
+    if (agent.status === 'running') updateAgentStatus(agent.name, 'restarting')
+    try {
+      const d = await api(`/api/agents/${agent.name}/ports`, { method: 'POST', body: { extraPorts: ports } })
+      if (d && d.streaming) {
+        setModal({
+          key: `ports-${Date.now()}`,
+          title: `Applying additional ports for ${agent.name}`,
+          onDone: () => {
+            refresh()
+            fetchAgents()
+            toast.success('Additional ports applied')
+          },
+        })
+      } else {
+        setSettings({ ...settings, extraPorts: d.extraPorts })
+        setPortDirty(false)
+        toast.success('Additional ports applied')
+        setSaving(false)
+      }
+    } catch (err) {
+      toast.error(err.error || err.message || 'Failed to update additional ports')
+      setSaving(false)
+    }
+  }
+
   return (
     <div className="max-w-3xl space-y-6">
       {loadError && <p className="text-danger text-sm">{loadError}</p>}
@@ -697,7 +762,76 @@ export default function SettingsTab({ agent }) {
         </div>
       </section>
 
-      {/* 5c. Custom workspace */}
+      {/* 5c. Additional ports */}
+      <section className="bg-panel/60 border border-line rounded-xl p-5">
+        <div>
+          <h3 className="text-sm font-medium text-ink-muted">Additional ports</h3>
+          <p className="text-xs text-ink-dim mt-1 max-w-md">
+            Host → container TCP port mappings, independent of the web app and SSH port. Applying changes recreates the container.
+          </p>
+        </div>
+
+        {currentNetwork && portDraft.length > 0 && (
+          <div className="mt-3 rounded-lg bg-warning-soft border border-warning-line/70 px-3 py-2 text-xs text-warning">
+            This agent joins <code className="text-ink">{currentNetwork}</code>'s network — Docker can't publish ports on it. Remove the extra ports or clear the network override above.
+          </div>
+        )}
+
+        <div className="mt-4 space-y-3">
+          {portDraft.length === 0 && (
+            <p className="text-xs text-ink-dim">No additional ports.</p>
+          )}
+          {portDraft.map((p, i) => (
+            <div key={i} className="flex items-end gap-2 rounded-lg bg-sunken border border-line-faint p-3">
+              <div className="w-40">
+                <label className="block text-xs text-ink-dim mb-1">Host port</label>
+                <input type="number" min="1" max="65535" value={p.host}
+                       onChange={(e) => setPort(i, { host: e.target.value })}
+                       className="w-full bg-raised border border-line-faint rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line font-mono" />
+                {portErrors[i].host && <p className="text-xs text-danger mt-1">{portErrors[i].host}</p>}
+              </div>
+              <div className="w-40">
+                <label className="block text-xs text-ink-dim mb-1">Container port</label>
+                <input type="number" min="1" max="65535" value={p.container}
+                       onChange={(e) => setPort(i, { container: e.target.value })}
+                       className="w-full bg-raised border border-line-faint rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line font-mono" />
+                {portErrors[i].container && <p className="text-xs text-danger mt-1">{portErrors[i].container}</p>}
+              </div>
+              <button type="button"
+                      onClick={() => { setPortDraft(prev => prev.filter((_, idx) => idx !== i)); setPortDirty(true) }}
+                      className="px-2 py-2 bg-raised hover:bg-raised-hover text-ink-dim rounded-lg text-xs shrink-0"
+                      title="Remove port">✕</button>
+            </div>
+          ))}
+
+          <button type="button"
+                  onClick={() => { setPortDraft(prev => [...prev, { host: '', container: '' }]); setPortDirty(true) }}
+                  disabled={saving || !!currentNetwork}
+                  className="px-3 py-1.5 bg-raised hover:bg-raised-hover disabled:opacity-50 text-ink rounded-lg text-xs font-medium transition-colors"
+                  title={currentNetwork ? 'Not available while joining a network peer' : 'Add a port'}>
+            + Add port
+          </button>
+
+          {portHasErrors && (
+            <p className="text-xs text-danger">Fix the invalid port fields before saving.</p>
+          )}
+
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handlePortsSave}
+              disabled={saving || !portDirty || portHasErrors || !!currentNetwork}
+              className="px-3 py-1.5 bg-accent hover:bg-accent-hover disabled:opacity-50 text-accent-ink rounded-lg text-xs font-medium transition-colors"
+              title={currentNetwork ? 'Clear the network override above to publish ports' : 'Apply port changes'}>
+              Apply ports & recreate
+            </button>
+            {portDirty && !saving && (
+              <span className="text-xs text-ink-dim">Unsaved port changes</span>
+            )}
+          </div>
+        </div>
+      </section>
+
+      {/* 5d. Custom workspace */}
       {!wsHidden && (
         <section className="bg-panel/60 border border-line rounded-xl p-5">
           <div className="flex items-start justify-between gap-4">
