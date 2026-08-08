@@ -515,7 +515,6 @@ function VaultDropdown({ termRef, connected }) {
     try {
       if (pinMode?.type === 'paste') {
         await doPaste(pinMode.item, pastePin)
-        toast.success(`"${pinMode.item.name}" pasted to terminal`)
       } else if (pinMode?.type === 'add') {
         await doAdd(name.trim(), value.trim(), pastePin)
       }
