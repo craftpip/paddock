@@ -1170,3 +1170,36 @@ used to show URL only for HTTP transports and command only for stdio).
 - `removeVm()` removes the workspace dir only when `WORKSPACE_HOST` lies under
   the project root. Backup/restore and "Clone from backup" do NOT include an
   external workspace (documented limitation in the UI).
+
+## Compose Serialization + Validation (plan 29 — 2026-08-08)
+
+- `generateInstanceCompose()` builds the compose as a **structured JS object**
+  and serializes with `JSON.stringify(..., null, 2)` — JSON is valid YAML, so no
+  YAML library and no hand-built YAML strings. `${VAR:-default}` interpolation
+  and `host:port` / `host:path` colon values survive byte-for-byte as JSON
+  values (the original bug: unquoted `${INSTALL_DOCKER:-0}` in hand-joined YAML
+  was parsed as flow syntax). Unit tests parse the output with `JSON.parse()`
+  and assert structure, never layout text.
+- `vm.validateInstanceCompose(name)` runs
+  `docker compose --env-file <build.env> -f <compose> config --quiet` (parse +
+  schema + interpolation, no side effects) and **throws with the parser output**
+  on failure. It catches what JSON generation can't: schema violations,
+  interpolation failures (a `${ARG}` missing from `build.env`), and invalid
+  external-network references.
+- `vm.runCompose(name, args, opts)` validates then runs every per-instance
+  `build`/`up`. Settings/ports/web/recreate routes additionally call
+  `validateInstanceCompose` **before** `docker stop` — so a bad document aborts
+  with the PAD still running (verified live: corrupted compose → recreate →
+  error event with go-yaml output, container stayed "Up").
+- The settings/ports/web rollback paths only force-recreate when a `touched`
+  flag was set (i.e. the container was actually stopped) — a validation failure
+  that aborts before the stop leaves the running container untouched, instead
+  of pointlessly restarting it.
+- Compose CLI lives **inside the webui container** (`/usr/libexec/docker/
+  cli-plugins/docker-compose`, v5.3.1) — the host docker CLI has no compose
+  plugin. `docker compose` is always invoked from the container; the host only
+  needs the plugin if you want to test from this shell (`cp` it from the
+  container to `~/.docker/cli-plugins/`).
+- `docker compose config --quiet` does NOT check build-context existence or
+  external-network existence — those surface at `build`/`up` time. Its value is
+  syntax/schema/interpolation, and it's cheap (~100ms).

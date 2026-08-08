@@ -309,6 +309,61 @@ describe('vm-manager - workspace mount guards (GUARD_*)', () => {
   });
 });
 
+describe('vm-manager - compose validation gate (plan 29)', () => {
+  // Each test runs with its OWN WORKSPACE_ROOT; the module is re-required fresh
+  // so env is read at require time, and env is restored after.
+  async function withTmp(fn) {
+    const TMP = '/tmp/comptest-' + Date.now() + '-' + Math.floor(Math.random() * 1e6);
+    const prevWs = process.env.WORKSPACE_ROOT;
+    const prevHost = process.env.HOST_WORKSPACE_ROOT;
+    process.env.WORKSPACE_ROOT = TMP;
+    process.env.HOST_WORKSPACE_ROOT = TMP;
+    delete require.cache[require.resolve('../services/vm-manager')];
+    const vm = require('../services/vm-manager');
+    try {
+      return await fn(TMP, vm);
+    } finally {
+      fs.rmSync(TMP, { recursive: true, force: true });
+      process.env.WORKSPACE_ROOT = prevWs;
+      process.env.HOST_WORKSPACE_ROOT = prevHost;
+      delete require.cache[require.resolve('../services/vm-manager')];
+    }
+  }
+
+  it('emits interpolation and colon-bearing values as literal JSON strings', async () => {
+    await withTmp((TMP, vm) => {
+      const instDir = path.join(TMP, 'instances', 'pad-c');
+      fs.mkdirSync(path.join(instDir, 'build'), { recursive: true });
+      fs.writeFileSync(path.join(instDir, 'build', 'Dockerfile'), 'FROM base\nARG INSTALL_DOCKER=0\n');
+      fs.writeFileSync(path.join(instDir, 'meta.env'),
+        'AGENT=opencode\nROOT_PASSWORD=pw\n' +
+        'WORKSPACE_HOST=/shared-ws\nWORKSPACE_DIR=/ws\n' +
+        'EXTRA_PORTS=[{"host":"43899","container":"8443"}]\n');
+      const yaml = vm.generateInstanceCompose('pad-c', 'opencode', 'pw', '22001');
+      const compose = JSON.parse(yaml);
+      // JSON never needs quoting, so `${VAR:-default}` and `host:container`
+      // pairs survive byte-for-byte as values, not as YAML flow syntax.
+      assert.strictEqual(compose.services['pad-c'].build.args.INSTALL_DOCKER, '${INSTALL_DOCKER:-0}');
+      assert.deepStrictEqual(compose.services['pad-c'].ports, ['22001:22', '43899:8443']);
+      assert.ok(compose.services['pad-c'].volumes.includes('/shared-ws:/ws'), 'colon-bearing volume bind');
+    });
+  });
+
+  it('validateInstanceCompose passes a generated compose and reports parser output on garbage', async () => {
+    await withTmp(async (TMP, vm) => {
+      const instDir = path.join(TMP, 'instances', 'pad-v');
+      fs.mkdirSync(instDir, { recursive: true });
+      fs.writeFileSync(path.join(instDir, 'meta.env'), 'AGENT=opencode\nROOT_PASSWORD=pw\n');
+      vm.writeInstanceCompose('pad-v', 'opencode', 'pw', '');
+      await vm.validateInstanceCompose('pad-v'); // must not throw
+
+      fs.writeFileSync(path.join(instDir, 'docker-compose.yml'), '{ not valid json at all::::\n');
+      await assert.rejects(() => vm.validateInstanceCompose('pad-v'),
+        /Compose validation failed for 'pad-v'/);
+    });
+  });
+});
+
 describe('vm-manager - extra volumes & ports (plan 28)', () => {
   function withTmp(fn) {
     const TMP = '/tmp/p28test-' + Date.now() + '-' + Math.floor(Math.random() * 1e6);

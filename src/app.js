@@ -715,7 +715,7 @@ app.post('/api/agents/:name/start', async (req, res) => {
       // Stale network peer (e.g. gluetun was rebuilt) — `docker start` can't
       // rejoin the old `container:<id>` namespace. Recreate via compose so the
       // peer re-resolves by name to the current container.
-      await runCmd('docker', vm.composeCommand(name, 'up', '-d', '--no-deps', '--force-recreate', name), { timeout: 180000 });
+      await vm.runCompose(name, ['up', '-d', '--no-deps', '--force-recreate', name], { timeout: 180000 });
     }
   } finally {
     registry.setLifecycle(name, null);
@@ -951,13 +951,13 @@ app.post('/api/agents/:name/settings', async (req, res) => {
       // for the new network below — a published web app must survive a network
       // switch, not silently break (web.json is only touched by applyWebServices).
       const webService = vm.readWebService(name);
+      // Tracks whether the container was actually stopped. A compose
+      // validation failure aborts BEFORE this point, so the rollback then
+      // leaves the still-running container alone (it already matches the
+      // rolled-back compose).
+      let touched = false;
       try {
         await logStore.capture(name);
-        if (wasRunning) {
-          step('stop', 'start');
-          await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 });
-          step('stop', 'end');
-        }
 
         const summary = [];
         if (dockerChanged) summary.push(`allowDocker=${newAllow}`);
@@ -969,6 +969,9 @@ app.post('/api/agents/:name/settings', async (req, res) => {
           log('system', `Web app is published (host port ${webService.hostPort}) — keeping it live across the change`);
         }
 
+        // Regenerate the compose FIRST and validate it (config --quiet) while
+        // the container is still running — applySettings only writes files, so
+        // a malformed document aborts here and the PAD is never stopped.
         await vm.applySettings(name, {
           allowDocker: newAllow,
           network: newNetwork,
@@ -976,7 +979,15 @@ app.post('/api/agents/:name/settings', async (req, res) => {
           workspaceDir: wsMount ? wsMount.container : '',
           ...(volumesChanged ? { extraVolumes: newVols } : {}),
         });
+        await vm.validateInstanceCompose(name);
         registry.dockerPsList(true);
+
+        if (wasRunning) {
+          touched = true;
+          step('stop', 'start');
+          await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 });
+          step('stop', 'end');
+        }
 
         // Leaving peer mode: the socat door is orphaned and still holds the host
         // port the agent is about to publish — it must go BEFORE the recreate,
@@ -995,7 +1006,7 @@ app.post('/api/agents/:name/settings', async (req, res) => {
           // silently ignore the compose change. Recreate so the new config
           // actually applies.
           step('recreate', 'start');
-          await runCmdStream('docker', vm.composeCommand(name, 'up', '-d', '--no-deps', '--force-recreate', name), { onLog: log, timeout: 300000 });
+          await vm.runCompose(name, ['up', '-d', '--no-deps', '--force-recreate', name], { stream: true, onLog: log, timeout: 300000 });
           step('recreate', 'end');
         }
 
@@ -1007,10 +1018,10 @@ app.post('/api/agents/:name/settings', async (req, res) => {
         // restarts it inside the new namespace.
         if (webService) {
           if (newNetwork) {
-            const doorArgs = vm.composeCommand(name, 'up', '-d', '--no-deps');
+            const doorArgs = ['up', '-d', '--no-deps'];
             if (networkChanged) doorArgs.push('--force-recreate');
             doorArgs.push(vm.webDoorName(name));
-            await runCmdStream('docker', doorArgs, { onLog: log, timeout: 180000 });
+            await vm.runCompose(name, doorArgs, { stream: true, onLog: log, timeout: 180000 });
           } else {
             await runCmd('docker', ['rm', '-f', vm.webDoorName(name)], { timeout: 30000 }).catch(() => {});
           }
@@ -1047,7 +1058,9 @@ app.post('/api/agents/:name/settings', async (req, res) => {
       } catch (e) {
         console.error(`Settings change failed for ${name}:`, e.message);
         // Roll settings back so the agent stays usable, then bring it back up
-        // if it was running.
+        // if it was running (and was actually stopped — a validation failure
+        // aborts before the stop, so the running container already matches the
+        // rolled-back compose).
         try {
           await vm.applySettings(name, {
             allowDocker: oldAllow,
@@ -1062,10 +1075,10 @@ app.post('/api/agents/:name/settings', async (req, res) => {
           if (webService && !oldNetwork) {
             await runCmd('docker', ['rm', '-f', vm.webDoorName(name)], { timeout: 30000 }).catch(() => {});
           }
-          if (wasRunning) {
+          if (wasRunning && touched) {
             const rollbackSvc = [name];
             if (webService && oldNetwork) rollbackSvc.push(vm.webDoorName(name));
-            await runCmdStream('docker', vm.composeCommand(name, 'up', '-d', '--no-deps', '--force-recreate', ...rollbackSvc), { onLog: log, timeout: 180000 });
+            await vm.runCompose(name, ['up', '-d', '--no-deps', '--force-recreate', ...rollbackSvc], { stream: true, onLog: log, timeout: 180000 });
           }
           registry.dockerPsList(true);
         } catch {}
@@ -1271,13 +1284,13 @@ app.post('/api/agents/:name/web', async (req, res) => {
 
     setImmediate(async () => {
       registry.setRestarting(name, true);
+      // Tracks whether the container was actually stopped. A compose validation
+      // failure aborts BEFORE this point, so the rollback then leaves the
+      // still-running container alone (it already matches the rolled-back
+      // compose).
+      let touched = false;
       try {
         await logStore.capture(name);
-        if (wasRunning) {
-          step('stop', 'start');
-          await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 });
-          step('stop', 'end');
-        }
 
         log('system', turningOn
           ? `Publishing web app on host port ${newWeb.hostPort} → container port ${newWeb.containerPort}`
@@ -1293,10 +1306,21 @@ app.post('/api/agents/:name/web', async (req, res) => {
           step('web-hook', 'end');
         }
 
+        // Regenerate the compose FIRST and validate it (config --quiet) while
+        // the container is still running — a malformed document aborts here and
+        // the PAD is never stopped or recreated.
         step('web-compose', 'start');
         await vm.applyWebServices(name, newWeb);
+        await vm.validateInstanceCompose(name);
         registry.dockerPsList(true);
         step('web-compose', 'end');
+
+        if (wasRunning) {
+          touched = true;
+          step('stop', 'start');
+          await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 });
+          step('stop', 'end');
+        }
 
         step('recreate', 'start');
         // Peer-networked agents expose the web app through a socat door service
@@ -1304,7 +1328,7 @@ app.post('/api/agents/:name/web', async (req, res) => {
         // (alpine/socat) is auto-pulled by compose on first use.
         const upServices = [name];
         if (turningOn && currentNetworkPeer(name)) upServices.push(vm.webDoorName(name));
-        await runCmdStream('docker', vm.composeCommand(name, 'up', '-d', '--no-deps', '--force-recreate', ...upServices), { onLog: log, timeout: 300000 });
+        await vm.runCompose(name, ['up', '-d', '--no-deps', '--force-recreate', ...upServices], { stream: true, onLog: log, timeout: 300000 });
         step('recreate', 'end');
 
         if (!turningOn) {
@@ -1352,8 +1376,8 @@ app.post('/api/agents/:name/web', async (req, res) => {
           else if (oldWeb) vm.writeWebStartHook(name, agentType, buildWebHook(driver, agentType, oldWeb, readHookPassword(vm.webHookPath(name, agentType)) || ''));
           await vm.applyWebServices(name, oldWeb);
           await runCmd('docker', ['rm', '-f', vm.webDoorName(name)], { timeout: 30000 }).catch(() => {});
-          if (wasRunning) {
-            await runCmd('docker', vm.composeCommand(name, 'up', '-d', '--no-deps', '--force-recreate', name), { timeout: 180000 });
+          if (wasRunning && touched) {
+            await vm.runCompose(name, ['up', '-d', '--no-deps', '--force-recreate', name], { timeout: 180000 });
           }
           registry.dockerPsList(true);
         } catch {}
@@ -1415,24 +1439,35 @@ app.post('/api/agents/:name/ports', async (req, res) => {
     setImmediate(async () => {
       registry.setRestarting(name, true);
       const portsChanged = ports.length ? `extraPorts=${ports.map((p) => `${p.host}→${p.container}`).join(', ')}` : 'extraPorts=none';
+      // Tracks whether the container was actually stopped. A compose validation
+      // failure aborts BEFORE this point, so the rollback then leaves the
+      // still-running container alone (it already matches the rolled-back
+      // compose).
+      let touched = false;
       try {
         await logStore.capture(name);
-        if (wasRunning) {
-          step('stop', 'start');
-          await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 });
-          step('stop', 'end');
-        }
 
         log('system', `Applying ports: ${portsChanged}`);
+        // Regenerate the compose FIRST and validate it (config --quiet) while
+        // the container is still running — a malformed document aborts here and
+        // the PAD is never stopped.
         await vm.applySettings(name, {
           allowDocker: meta.DOCKER === '1',
           network,
           extraPorts: ports,
         });
+        await vm.validateInstanceCompose(name);
         registry.dockerPsList(true);
 
+        if (wasRunning) {
+          touched = true;
+          step('stop', 'start');
+          await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 });
+          step('stop', 'end');
+        }
+
         step('recreate', 'start');
-        await runCmdStream('docker', vm.composeCommand(name, 'up', '-d', '--no-deps', '--force-recreate', name), { onLog: log, timeout: 300000 });
+        await vm.runCompose(name, ['up', '-d', '--no-deps', '--force-recreate', name], { stream: true, onLog: log, timeout: 300000 });
         step('recreate', 'end');
 
         if (!wasRunning) {
@@ -1454,8 +1489,8 @@ app.post('/api/agents/:name/ports', async (req, res) => {
             network,
             extraPorts: oldPorts,
           });
-          if (wasRunning) {
-            await runCmdStream('docker', vm.composeCommand(name, 'up', '-d', '--no-deps', '--force-recreate', name), { onLog: log, timeout: 180000 });
+          if (wasRunning && touched) {
+            await vm.runCompose(name, ['up', '-d', '--no-deps', '--force-recreate', name], { stream: true, onLog: log, timeout: 180000 });
           }
           registry.dockerPsList(true);
         } catch {}
@@ -1494,6 +1529,9 @@ app.post('/api/agents/:name/recreate', async (req, res) => {
       registry.setRestarting(name, true);
       try {
         await logStore.capture(name);
+        // Validate the compose BEFORE stopping — a malformed document aborts
+        // with the container still running instead of stranding it stopped.
+        await vm.validateInstanceCompose(name);
         if (wasRunning) {
           step('stop', 'start');
           await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 });
@@ -1501,7 +1539,7 @@ app.post('/api/agents/:name/recreate', async (req, res) => {
         }
         log('system', 'Recreating container to re-resolve the network peer…');
         step('recreate', 'start');
-        await runCmdStream('docker', vm.composeCommand(name, 'up', '-d', '--no-deps', '--force-recreate', name), { onLog: log, timeout: 300000 });
+        await vm.runCompose(name, ['up', '-d', '--no-deps', '--force-recreate', name], { stream: true, onLog: log, timeout: 300000 });
         step('recreate', 'end');
         if (!wasRunning) {
           try { await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 }); } catch {}

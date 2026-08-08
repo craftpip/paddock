@@ -277,6 +277,42 @@ function composeCommand(name, ...args) {
   return cmd;
 }
 
+/** Pre-flight validation of an instance's compose document (plan 29). Runs
+ *  `docker compose --env-file <build.env> -f <compose> config --quiet` — a
+ *  pure parse + schema + interpolation-resolution pass with NO side effects.
+ *  Throws with the parser output on failure. Call BEFORE stopping or
+ *  recreating a PAD so a malformed document aborts the flow with the existing
+ *  container still running. */
+async function validateInstanceCompose(name) {
+  const composePath = instanceComposePath(name);
+  if (!fs.existsSync(composePath)) {
+    throw new Error(`Compose file not found for '${name}': ${composePath}`);
+  }
+  return new Promise((resolve, reject) => {
+    execFile('docker', composeCommand(name, 'config', '--quiet'), { timeout: 60000 }, (err, stdout, stderr) => {
+      if (err) {
+        const detail = (stderr || stdout || err.message || '').trim();
+        reject(new Error(`Compose validation failed for '${name}': ${detail}`));
+      } else {
+        resolve({ stdout: stdout || '', stderr: stderr || '' });
+      }
+    });
+  });
+}
+
+/** Run a per-instance `docker compose` command, validating the document first
+ *  (config --quiet). A malformed compose aborts BEFORE any build/up — compose
+ *  can otherwise partially recreate services and leave the PAD stopped.
+ *  `opts.stream` streams output via onLog (build/up); otherwise runCmd. */
+async function runCompose(name, args, opts = {}) {
+  await validateInstanceCompose(name);
+  const full = composeCommand(name, ...args);
+  if (opts.stream) {
+    return runCmdStream('docker', full, { onLog: opts.onLog, timeout: opts.timeout });
+  }
+  return runCmd('docker', full, { timeout: opts.timeout });
+}
+
 /** Health of an agent's network_mode. When an agent routes through another
  *  container (e.g. gluetun) via `network_mode: container:<peer>`, Docker
  *  records the peer as a container ID at create time. If that peer is later
@@ -812,13 +848,13 @@ async function updateAgent(name, { onLog = () => {}, onStep = () => {}, buildArg
   // nothing is force-appended to the build args anymore. The rebuild reads the
   // instance Dockerfile + build.env (via the compose env-file) directly.
   seedBuildDir(name, agent, { installDocker: meta.DOCKER === '1' });
-  const args = composeCommand(name, 'build');
+  const args = ['build'];
   if (pull) args.push('--pull');
   for (const ba of buildArgs) args.push('--build-arg', ba);
   args.push(name);
   onStep('build', 'start');
   try {
-    await runCmdStream('docker', args, { onLog, timeout: 900000 });
+    await runCompose(name, args, { stream: true, onLog, timeout: 900000 });
   } catch (e) {
     onStep('build', 'error');
     throw e;
@@ -827,7 +863,7 @@ async function updateAgent(name, { onLog = () => {}, onStep = () => {}, buildArg
 
   onStep('recreate', 'start');
   try {
-    await runCmdStream('docker', composeCommand(name, 'up', '-d', '--no-deps', '--force-recreate', name), { onLog, timeout: 300000 });
+    await runCompose(name, ['up', '-d', '--no-deps', '--force-recreate', name], { stream: true, onLog, timeout: 300000 });
   } catch (e) {
     onStep('recreate', 'error');
     throw e;
@@ -979,7 +1015,7 @@ async function createVm(name, options = {}) {
 
   onStep('build', 'start');
   try {
-    await runCmdStream('docker', composeCommand(name, 'build'), { onLog, timeout: 900000 });
+    await runCompose(name, ['build'], { stream: true, onLog, timeout: 900000 });
   } catch (e) {
     onStep('build', 'error');
     throw e;
@@ -988,7 +1024,7 @@ async function createVm(name, options = {}) {
 
   onStep('up', 'start');
   try {
-    await runCmdStream('docker', composeCommand(name, 'up', '-d'), { onLog, timeout: 300000 });
+    await runCompose(name, ['up', '-d'], { stream: true, onLog, timeout: 300000 });
   } catch (e) {
     onStep('up', 'error');
     throw e;
@@ -1082,7 +1118,7 @@ async function resetVm(name) {
   writeInstanceCompose(name, agent, pw, port, { allowDocker, network, webService, webPeerNetwork });
 
   const composePath = instanceComposePath(name);
-  await runCmd('docker', composeCommand(name, 'up', '-d'), { timeout: 120000 });
+  await runCompose(name, ['up', '-d'], { timeout: 120000 });
 }
 
 function getComposePath(name) {
@@ -1094,7 +1130,7 @@ async function startAgent(name) {
   try {
     await runCmd('docker', ['start', name], { timeout: 30000 });
   } catch {
-    await runCmd('docker', composeCommand(name, 'up', '-d'), { timeout: 180000 });
+    await runCompose(name, ['up', '-d'], { timeout: 180000 });
   }
 }
 
@@ -1151,7 +1187,7 @@ async function ensureInstanceBuilds({ onLog = () => {} } = {}) {
         running = (r.stdout || '').trim() === 'running';
       } catch {}
       if (running) {
-        await runCmdStream('docker', composeCommand(name, 'up', '-d', '--no-deps', '--force-recreate', name), { onLog, timeout: 180000 });
+        await runCompose(name, ['up', '-d', '--no-deps', '--force-recreate', name], { stream: true, onLog, timeout: 180000 });
         onLog('system', `[migrate] recreated ${name} under ${imageFor(name)}`);
       }
       results.seeded.push(name);
@@ -1177,7 +1213,7 @@ module.exports = {
   imageFor, seedBuildDir, buildDir, buildEnvPath,
   readBuildEnv, setBuildEnv,
   argsFromDockerfile,
-  composeCommand, ensureInstanceBuilds,
+  composeCommand, runCompose, validateInstanceCompose, ensureInstanceBuilds,
   INSTANCES_DIR, PREFIX, PREFIX_RE,
   HOST_WORKSPACE, WORKSPACE,
 };
