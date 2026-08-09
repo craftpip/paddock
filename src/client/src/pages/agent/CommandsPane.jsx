@@ -44,6 +44,35 @@ function Pill({ label, onClick, cmd, desc, color, disabled }) {
   )
 }
 
+/** Shell-quote a value so it survives the shell in the terminal. */
+function sq(s) {
+  return "'" + String(s).replace(/'/g, "'\\''") + "'"
+}
+
+/** Run a driver command. Commands that declare `fields` open the prompt modal
+ *  first; `{key}` placeholders in `cmd` are replaced with the (shell-quoted)
+ *  entered values, then the built command is pasted into the terminal. Plain
+ *  commands run as-is, still through the terminal. */
+async function onClickCommand(x, prompt, run) {
+  if (x.fields?.length) {
+    const v = await prompt({
+      title: x.label,
+      message: x.desc || 'Enter the arguments for this command.',
+      confirmText: x.label,
+      fields: x.fields,
+    })
+    if (!v) return
+    let cmd = x.cmd
+    for (const f of x.fields) {
+      const val = v[f.key] === undefined || v[f.key] === null ? '' : String(v[f.key])
+      cmd = cmd.split(`{${f.key}}`).join(val ? sq(val) : '')
+    }
+    run(cmd, x)
+    return
+  }
+  run(x.cmd, x)
+}
+
 /** Small inline group label chip, sits in the flow before its buttons. */
 function GroupLabel({ color, title }) {
   const c = COLORS[color] || COLORS.slate
@@ -55,7 +84,7 @@ function GroupLabel({ color, title }) {
   )
 }
 
-function FlowGroup({ group, query, run, connected }) {
+function FlowGroup({ group, query, run, prompt, connected }) {
   const c = COLORS[group.color] || COLORS.slate
   const groupHit = matches(query, group.title)
   const visible = group.commands.filter((x) => groupHit || matches(query, x.label, x.cmd, x.desc))
@@ -72,7 +101,7 @@ function FlowGroup({ group, query, run, connected }) {
           color={c.pill}
           danger={x.danger}
           disabled={!connected}
-          onClick={() => run(x.cmd, x)}
+          onClick={() => onClickCommand(x, prompt, run)}
         />
       ))}
     </>
@@ -753,7 +782,7 @@ export default function CommandsPane({ agent, termRef, run, connected }) {
           {isOpenclaw && <SkillsFlow agent={agent} query={query} run={run} prompt={prompt} connected={connected} />}
           {isOpenclaw && <MemoryFlow agent={agent} query={query} run={run} prompt={prompt} connected={connected} />}
           {driverGroups.map((g) => (
-            <FlowGroup key={g.title} group={g} query={query} run={run} connected={connected} />
+            <FlowGroup key={g.title} group={g} query={query} run={run} prompt={prompt} connected={connected} />
           ))}
         </div>
       )}

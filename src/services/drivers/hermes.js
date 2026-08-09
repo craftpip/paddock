@@ -60,9 +60,16 @@ const HERMES = {
     {
       title: 'Auth', color: 'brand',
       commands: [
-        { cmd: 'hermes login', label: 'Login', desc: 'Log in to an inference provider' },
-        { cmd: 'hermes logout', label: 'Logout', desc: 'Clear provider credentials' },
-        { cmd: 'hermes auth', label: 'Auth status', desc: 'Health check — pooled provider credentials status' },
+        { cmd: 'hermes auth list', label: 'List credentials', desc: 'Pooled provider credentials' },
+        { cmd: 'hermes auth add {provider}', label: 'Add credential', desc: 'Add a provider credential (key/OAuth prompt)', fields: [
+          { key: 'provider', label: 'Provider id', placeholder: 'e.g. anthropic, openai-codex, openrouter', hint: 'Provider to add credentials for.' },
+        ]},
+        { cmd: 'hermes auth status {provider}', label: 'Auth status', desc: 'Credential status for a provider', fields: [
+          { key: 'provider', label: 'Provider id', placeholder: 'e.g. openrouter' },
+        ]},
+        { cmd: 'hermes auth logout {provider}', label: 'Logout provider', desc: 'Clear stored auth state for a provider', danger: true, fields: [
+          { key: 'provider', label: 'Provider id', placeholder: 'e.g. anthropic' },
+        ]},
       ],
     },
     {
@@ -79,13 +86,51 @@ const HERMES = {
       commands: [
         { cmd: 'hermes cron list', label: 'List jobs', desc: 'All scheduled jobs' },
         { cmd: 'hermes cron create', label: 'Add job', desc: 'Schedule a new job (interactive)' },
+        { cmd: 'hermes cron status', label: 'Scheduler status', desc: 'Is the cron scheduler running?' },
+        { cmd: 'hermes cron pause {job_id}', label: 'Pause job', desc: 'Pause a scheduled job', fields: [
+          { key: 'job_id', label: 'Job ID', placeholder: 'e.g. 3' },
+        ]},
+        { cmd: 'hermes cron resume {job_id}', label: 'Resume job', desc: 'Resume a paused job', fields: [
+          { key: 'job_id', label: 'Job ID', placeholder: 'e.g. 3' },
+        ]},
+        { cmd: 'hermes cron remove {job_id}', label: 'Remove job', desc: 'Delete a scheduled job', danger: true, fields: [
+          { key: 'job_id', label: 'Job ID', placeholder: 'e.g. 3' },
+        ]},
       ],
     },
     {
       title: 'Skills', color: 'info',
       commands: [
         { cmd: 'hermes skills list', label: 'List installed', desc: 'Installed skills' },
-        { cmd: 'hermes skills install', label: 'Install', desc: 'Install a skill from the hub' },
+        { cmd: 'hermes skills install', label: 'Install', desc: 'Install a skill from the hub (interactive)' },
+        { cmd: 'hermes skills search {query}', label: 'Search', desc: 'Search skill registries', fields: [
+          { key: 'query', label: 'Search query', placeholder: 'e.g. redis' },
+        ]},
+        { cmd: 'hermes skills check', label: 'Check updates', desc: 'Check installed hub skills for updates' },
+        { cmd: 'hermes skills update', label: 'Update skills', desc: 'Update installed hub skills', confirm: true },
+        { cmd: 'hermes skills uninstall {name}', label: 'Uninstall', desc: 'Remove a hub-installed skill', danger: true, fields: [
+          { key: 'name', label: 'Skill name', placeholder: 'e.g. github' },
+        ]},
+      ],
+    },
+    {
+      title: 'MCP', color: 'info',
+      commands: [
+        { cmd: 'hermes mcp list', label: 'List servers', desc: 'Configured MCP servers' },
+        { cmd: 'hermes mcp catalog', label: 'Catalog', desc: 'Nous-approved MCP servers installable in one click' },
+        { cmd: 'hermes mcp install {identifier}', label: 'Install from catalog', desc: 'One-click install a catalog MCP by name', fields: [
+          { key: 'identifier', label: 'Catalog name', placeholder: 'e.g. n8n or official/<name>' },
+        ]},
+        { cmd: 'hermes mcp add {name}', label: 'Add server', desc: 'Connect a new MCP server (URL or stdio command)', fields: [
+          { key: 'name', label: 'Server name', placeholder: 'e.g. filesystem', hint: 'Config key used for tools.' },
+        ]},
+        { cmd: 'hermes mcp remove {name}', label: 'Remove server', desc: 'Disconnect an MCP server', danger: true, fields: [
+          { key: 'name', label: 'Server name', placeholder: 'e.g. filesystem' },
+        ]},
+        { cmd: 'hermes mcp test {name}', label: 'Test server', desc: 'Check a server connection', fields: [
+          { key: 'name', label: 'Server name', placeholder: 'e.g. filesystem' },
+        ]},
+        { cmd: 'hermes mcp serve', label: 'Run as MCP server', desc: 'Expose Hermes to other agents via MCP (long-running)' },
       ],
     },
     {
@@ -100,13 +145,30 @@ const HERMES = {
       commands: [
         { cmd: 'hermes sessions list', label: 'List sessions', desc: 'Recent sessions' },
         { cmd: 'hermes --continue', label: 'Continue last', desc: 'Resume the most recent session' },
+        { cmd: 'hermes sessions export', label: 'Export', desc: 'Export sessions to JSONL/MD (interactive)' },
+        { cmd: 'hermes sessions stats', label: 'Store stats', desc: 'Session store statistics' },
+      ],
+    },
+    {
+      title: 'Plugins', color: 'brand',
+      commands: [
+        { cmd: 'hermes plugins list', label: 'List plugins', desc: 'Installed plugins' },
+        { cmd: 'hermes plugins install {identifier}', label: 'Install', desc: 'Install from a Git URL or owner/repo', fields: [
+          { key: 'identifier', label: 'Git URL or owner/repo', placeholder: 'e.g. user/hermes-plugin-foo' },
+        ]},
+        { cmd: 'hermes plugins enable {name}', label: 'Enable', desc: 'Enable a disabled plugin', fields: [
+          { key: 'name', label: 'Plugin name', placeholder: 'e.g. foo' },
+        ]},
+        { cmd: 'hermes plugins disable {name}', label: 'Disable', desc: 'Disable a plugin without removing it', fields: [
+          { key: 'name', label: 'Plugin name', placeholder: 'e.g. foo' },
+        ]},
       ],
     },
     {
       title: 'Other', color: 'slate',
       commands: [
-        { cmd: 'hermes mcp list', label: 'MCP servers', desc: 'Configured MCP servers' },
         { cmd: 'hermes backup -q', label: 'Quick backup', desc: 'Snapshot critical state (config, db, auth, cron)' },
+        { cmd: 'hermes logs -n 100', label: 'View logs', desc: 'Recent agent logs (last 100 lines)' },
       ],
     },
   ],

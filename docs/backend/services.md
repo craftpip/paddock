@@ -56,11 +56,11 @@ and its own image tag (`paddock-vm-<name>:latest`). See
 - `validateAgentCreate(name, opts)` — the shared create **pre-flight**: name/agent-type, network peer exists+running, extra volumes/ports, SSH container port, workspace mount, and the async cross-agent host-port sweep all abort (throw) before anything is created. Returns `{ sshHostPort, sshCport, wsMount }` normalized for `createVm`.
 - `createAgent(name, opts)` — `validateAgentCreate` then `createVm` (mode `fresh`, port/sshCport/workspace normalized). The single create path behind both `POST /api/agents/create` and the MCP `create_agent` tool.
 - `removeVm(name)` — `docker rm -f` the agent **and** its door (`<name>-door`/`<name>-web`), remove the compose network (`<name>_default`), delete the instance dir
-- `resetVm(name)` — remove container + wipe data + recreate + compose up
+- `resetVm(name)` — remove container + wipe data + recreate + compose up; the compose regen reads the full persisted binding set from `meta.env`/`web.json` (docker, network, web, extra volumes/ports, workspace) so a reset never drops a bind
 - `startAgent(name)` / `stopAgent(name)` / `restartAgent(name)` — docker lifecycle; also start/stop the socat door with the agent (`startDoors`/`stopDoors`)
 - `generateInstanceCompose(name, agent, password, port, { allowDocker, network, sshCport, workspaceHost, workspaceDir, extraVolumes, extraPorts, webService, webPeerNetwork })` — builds the compose as a structured JS object and serializes it with `JSON.stringify(..., null, 2)` (JSON is valid YAML) — never hand-concatenated YAML. `allowDocker` adds the `/var/run/docker.sock` volume, `network` adds `network_mode: container:<name>`, `extraPorts`/`webService`/`sshCport` produce `ports:` bindings (or door mappings in peer mode), `workspaceHost`/`workspaceDir` add a second volume line. Builds from `instances/<name>/build` with `image: paddock-vm-<name>:latest`; the `build.args:` block is generated from the instance Dockerfile's `ARG` lines (values interpolated from the instance `build.env`).
 - `writeInstanceCompose(name, agent, password, port, opts)` — write the serialized compose to disk (passes the options through)
-- `applySettings(name, { allowDocker, network, sshPort, sshCport, workspaceHost, workspaceDir, extraVolumes, extraPorts, password })` — regenerates compose + writes the changed `meta.env` keys (`DOCKER`, `NETWORK`, `PORT`, `SSH_CPORT`, `ROOT_PASSWORD`, `WORKSPACE_*`, `EXTRA_PORTS`); returns the new state. **Async** — reads the active `web.json` binding itself and regenerates with `webService` + the resolved `webPeerNetwork` for the new network, so a network/docker-toggle change never drops a published web app.
+- `applySettings(name, { allowDocker, network, sshPort, sshCport, workspaceHost, workspaceDir, extraVolumes, extraPorts, password })` — regenerates compose + writes the changed `meta.env` keys (`DOCKER`, `NETWORK`, `PORT`, `SSH_CPORT`, `ROOT_PASSWORD`, `WORKSPACE_*`, `EXTRA_PORTS`, `EXTRA_VOLUMES`); returns the new state. **Async** — reads the active `web.json` binding itself and regenerates with `webService` + the resolved `webPeerNetwork` for the new network, so a network/docker-toggle change never drops a published web app.
 - `applyAgentChanges(name, opts, { onLog, onStep })` — the **consolidated mutation flow**: settings POST, web/ports POST, and the MCP `recreate` tool all funnel through it (stop → regen → reconcile door → up → boot hooks → verify → rollback on failure)
 - `updateAgent(name, { onLog, onStep })` — streams `docker compose --env-file <instance>/build/build.env -f <compose> build --pull <name>` (900s) then `up -d --no-deps --force-recreate <name>` (300s); steps `build`/`recreate`. No forced build args — the image is per-PAD, so the rebuild reads the instance Dockerfile + `build.env` directly.
 - `readSettings(name)` — the full settings + published-web + ports picture shared by `GET /api/agents/:name/settings` and the MCP `settings_get` tool (`{ allowDocker, network, sshPort, sshContainerPort, image, version, networkHealth, workspaceMount, extraVolumes, extraPorts, web }`)
@@ -105,8 +105,10 @@ Image/tag/version lookups no longer live here — they go through
 ## Driver Registry (services/drivers/)
 
 One module per agent type — `openclaw.js`, `opencode.js`, `picoclaw.js`,
-`hermes.js`, `codex.js` — registered in `index.js`. Every type is an equal
-citizen.
+`hermes.js`, `codex.js`, `claude.js` — registered in `index.js`. Every type is
+an equal citizen. The per-driver field values, command groups, and gotchas
+live in [drivers.md](drivers.md); this section documents the registry and the
+interface.
 
 **Functions:**
 - `getDriver(type)` — returns the driver for a type, **falls back to the
@@ -127,7 +129,6 @@ citizen.
 | `backupTypeMarker` | filename sniff for backup-type detection (generic backups are removed; kept for plan 26) |
 | `webApp` | built-in web app descriptor (`label`, `docs`, `containerPort`, `auth`, `startCommand`) — only opencode has one today |
 | `startWebCommand` | shell command to (re)start the web app in the container |
-| `installDockerBuildArg` | whether the image installs the docker CLI via the `INSTALL_DOCKER` build arg |
 | `currentVersion(name)` | live version inside the container (regex-parsed; picoclaw prints a heavy ANSI banner) |
 | `availableVersion()` | upstream available version (cached 5 min; empty where inapplicable) |
 | `commands` | Command groups (Status/Auth/Cron/Skills/Other) for the CommandsPane |

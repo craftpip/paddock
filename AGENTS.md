@@ -134,6 +134,14 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
 
 ## User Preferences
 
+- **How the user gives tasks — queue everything.** The user brain-dumps tasks
+  ("I will just bombard you with whatever I say") and **can't hold a list in
+  their head** — they'll drop a new task mid-task, then come back with hints
+  or steering. Whenever the user gives a new task while one is already going
+  on, **add it to the todo list immediately** (verbatim intent, not the full
+  wording) and finish it later — do not treat it as a context switch. Keep the
+  todo list updated one by one as items complete. The user may repeat or
+  clarify an item later — that's a steer, not a new task.
 - Plans go in `plans/` as separate `.md` files.
 - **Plan workflow (always):** the user says "create a plan" → a new `.md` plan
   file goes in `plans/`. Then we start working on it. Then, only after the plan

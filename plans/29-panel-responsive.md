@@ -3,6 +3,11 @@
 ## Status: Proposed (not started, 2026-08-09) — 0% implemented. Full-SPA
 responsive survey done (2026-08-09); no CSS/class changes landed yet.
 
+> **Note (2026-08-09):** this plan now owns the responsive workstream from
+> plan 02 (UI Enhancements, absorbed into docs and removed). Plan 02 had
+> gotten as far as hiding table columns on mobile; forms, terminal, and the
+> rest are this plan's scope.
+
 > **Scope correction (2026-08-09):** the original file was written as
 > "Terminal Responsive" only. The real intent is the **whole panel** — terminal
 > is just the worst offender. This rewrite keeps the terminal section but adds

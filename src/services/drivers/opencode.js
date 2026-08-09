@@ -60,6 +60,7 @@ const OPENCODE = {
         { cmd: 'opencode providers login', label: 'Login', desc: 'Log in to a provider (interactive)' },
         { cmd: 'opencode providers logout', label: 'Logout', desc: 'Log out a configured provider' },
         { cmd: 'opencode models', label: 'Available models', desc: 'List available models' },
+        { cmd: 'opencode models --refresh', label: 'Refresh models', desc: 'Refresh the models cache from models.dev' },
       ],
     },
     {
@@ -68,6 +69,9 @@ const OPENCODE = {
         { cmd: 'opencode session list', label: 'List sessions', desc: 'Recent sessions' },
         { cmd: 'opencode stats', label: 'Token usage', desc: 'Usage + cost statistics' },
         { cmd: 'opencode export', label: 'Export session', desc: 'Export session data as JSON' },
+        { cmd: 'opencode session delete {sessionID}', label: 'Delete session', desc: 'Delete a session by ID', danger: true, fields: [
+          { key: 'sessionID', label: 'Session ID', placeholder: 'e.g. abc123' },
+        ]},
       ],
     },
     {
@@ -76,6 +80,12 @@ const OPENCODE = {
         { cmd: 'opencode mcp list', label: 'List servers', desc: 'Health check — MCP servers + status' },
         { cmd: 'opencode mcp add', label: 'Add server', desc: 'Add an MCP server (interactive)' },
         { cmd: 'opencode mcp auth', label: 'Auth server', desc: 'OAuth login for an MCP server' },
+        { cmd: 'opencode mcp logout {name}', label: 'Logout OAuth', desc: 'Remove OAuth credentials for an MCP server', fields: [
+          { key: 'name', label: 'Server name', placeholder: 'e.g. my-server', hint: 'Leave blank if unsure.' },
+        ]},
+        { cmd: 'opencode mcp debug {name}', label: 'Debug OAuth', desc: 'Debug the OAuth connection for an MCP server', fields: [
+          { key: 'name', label: 'Server name', placeholder: 'e.g. my-server' },
+        ]},
       ],
     },
     {
@@ -83,6 +93,14 @@ const OPENCODE = {
       commands: [
         { cmd: 'opencode agent list', label: 'List agents', desc: 'Available agents' },
         { cmd: 'opencode agent create', label: 'Create agent', desc: 'Create a new agent (interactive)' },
+      ],
+    },
+    {
+      title: 'Plugin', color: 'brand',
+      commands: [
+        { cmd: 'opencode plugin {module}', label: 'Install plugin', desc: 'Install an npm plugin module and update config', fields: [
+          { key: 'module', label: 'npm module', placeholder: 'e.g. @opencode/plugin-…' },
+        ]},
       ],
     },
     {

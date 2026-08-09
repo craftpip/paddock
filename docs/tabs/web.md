@@ -16,13 +16,21 @@ File: `src/client/src/pages/agent/WebTab.jsx`. Wired into `AgentDetail.jsx` as
 
 ## Built-in web apps per agent type
 
+Each agent's built-in browser UI is its **web console** — how it works, its
+port, and its auth requirements are detailed in
+[web-consoles.md](web-consoles.md). The table here is the quick version:
+
 | Agent | Built-in web app? | Default container port | Auth when exposed |
 |-------|-------------------|------------------------|-------------------|
 | **opencode** | OpenCode Web (`opencode web`) | **8080** | `OPENCODE_SERVER_PASSWORD` (username always `opencode`) |
-| openclaw | Gateway Dashboard ("Control UI") + WebChat | 18789 | `gateway.auth.token` / `gateway.auth.password` |
-| hermes | Web Dashboard | 9119 | `dashboard.basic_auth` username/password (required — non-loopback bind fails closed) |
-| picoclaw | Gateway web console + chat UI | 18790 | `channels.pico.token` |
+| openclaw | Gateway Dashboard ("Control UI") + WebChat | 18789 | `gateway.auth.token` / `gateway.auth.password` (required — non-loopback bind fails closed) |
+| hermes | Web Dashboard (`hermes dashboard`) | 9119 | `HERMES_DASHBOARD_BASIC_AUTH_*` (required — non-loopback bind fails closed) |
+| picoclaw | Launcher dashboard (`picoclaw-launcher`) | **18800** | `PICOCLAW_LAUNCHER_TOKEN` (dashboard always gated) |
 | codex | none — terminal TUI only | n/a | n/a |
+
+> The picoclaw gateway (18790) does NOT serve a console — it only hosts the
+> Pico chat WebSocket at `/pico/ws`. The actual web console is the separate
+> launcher dashboard on 18800 (verified live 2026-08-09).
 
 **Currently implemented in the codebase:** only the opencode driver carries a
 `webApp` descriptor today (live-verified on pad-opencode-yo). The others are
@@ -38,7 +46,7 @@ webApp: {
   auth: {
     label: 'Server password',
     hint: 'Optional — protects the web UI with a password.',
-    target: 'env',                                      // env | openclaw.json | config.yaml | .security.yml
+    target: 'env',                                      // env | openclaw.json (see below)
     envKey: 'OPENCODE_SERVER_PASSWORD',                 // for target: 'env'
   },
   startCommand({ password = '', containerPort }) {
@@ -50,11 +58,12 @@ webApp: {
 ```
 
 - **port is NOT uniform** — each driver prefills its own container port. The
-  user picks the **host** port.
-- Auth `target` is one of: `openclaw.json` (JSON, `gateway.auth`),
-  `config.yaml` (hermes, `dashboard.basic_auth`), `.security.yml` (picoclaw,
-  `channels.pico.token`), or `env` (opencode — no file patch, the password is
-  embedded in the start command).
+  user picks the **host** port. For fixed-port drivers (`containerPortEditable:
+  false`, e.g. openclaw's gateway at 18789) the field renders read-only.
+- Auth `target` is one of: `env` (opencode, picoclaw launcher, hermes — no file
+  patch; the password is embedded in the start command via `startCommand`), or
+  `openclaw.json` (openclaw, `gateway.auth` + `gateway.bind` — the only driver
+  needing a config-file patch, applied by the boot hook before `gateway run`).
 - `webApp: null` (codex/claude) → the tab renders a read-only empty state:
   no form, no Apply, no auth section.
 
@@ -88,7 +97,8 @@ shapes.
 - `instances/<name>/web.json`:
   `{ "containerPort": 8080, "hostPort": 8090 }` (single web app per agent).
   `meta.env` carries `PORT` (ssh host port), `SSH_CPORT` (ssh container port),
-  `ROOT_PASSWORD`, and `EXTRA_PORTS` (`host:container,host:container`).
+  `ROOT_PASSWORD`, and `EXTRA_PORTS` (`[{"host":8080,"container":8080}]` — a
+  JSON array of `{ host, container }`, `[]` when empty).
 - `generateInstanceCompose(name, agent, password, port, opts)` gains
   `opts.webService = { containerPort, hostPort }` and emits a `ports:` block:
   `- "<hostPort>:<containerPort>"`. On a network peer it emits the socat door
@@ -220,21 +230,28 @@ a distinct `sshContainerPort`. Live-verified on `pad-opencode-aic` (8081) and
 
 ## Per-driver auth patches (planned per driver)
 
+For the full per-console reference — which consoles require a password, where
+it is stored, and exactly how to set it — see
+[web-consoles.md](web-consoles.md). Summary of the patch targets:
+
 - **opencode** — password is **env-only**; no config-file patch (`applyWebAuth`
   is a no-op, target `env`). The password lives in `start-web.sh` and the
   immediate post-recreate `docker exec` start.
-- **openclaw** — `gateway.auth.token` or `gateway.auth.password` in
-  `openclaw.json`; patch BEFORE recreate so the gateway starts with the new
-  secret. Caveat: the dashboard is only reachable when the gateway binds a
-  non-loopback address.
-- **hermes** — `dashboard.basic_auth` `{ username, password, secret }` in
-  `config.yaml`; `secret` should be a random 32-byte key. Required — hermes
-  fails closed on a non-loopback bind with no auth provider. Needs
-  `uv pip install -e ".[web,pty]"` baked into the image.
-- **picoclaw** — `channels.pico.token` in `.security.yml` (recommended over
-  config.json / env). Env overrides file — if the instance sets
-  `PICOCLAW_CHANNELS_PICO_TOKEN`, the file is ignored. The gateway already runs
-  `picoclaw gateway -E`, so no boot hook needed.
+- **openclaw** — `gateway.auth.token` in `openclaw.json` + `gateway.bind:
+  lan`. The only driver that needs a config-file patch, applied by the boot
+  hook BEFORE `openclaw gateway run` in start.sh. Bind changes require a FULL
+  gateway restart (in-process restart keeps old sockets); the gateway binds
+  nothing at all when auth is missing on a `lan` bind (fails closed).
+- **hermes** — `HERMES_DASHBOARD_BASIC_AUTH_USERNAME` / `_PASSWORD` (plus
+  optional `_PASSWORD_HASH`, `_SECRET`, `_TTL_SECONDS`) embedded in
+  `hermes dashboard --host 0.0.0.0 --port <cport> --no-open --skip-build`
+  via a `start-web.sh` hook. Required — fails closed on non-loopback without
+  auth. The web/pty extras are already baked in the image (no Dockerfile
+  change); only `/api/status` is public when auth is on.
+- **picoclaw** — `PICOCLAW_LAUNCHER_TOKEN` pinned via env + a `start-web.sh`
+  hook running `picoclaw-launcher -console -no-browser -public -port <cport>`
+  alongside the gateway (the launcher coexists with `picoclaw gateway -E`).
+  The dashboard is always gated; the gateway on 18790 has no console UI.
 
 ## Link base override (HOST_NAME / HOST_PROTO)
 

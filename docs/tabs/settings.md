@@ -80,7 +80,15 @@ A new folder starts empty; the old folder stays on disk.
 ### 7. Extra volumes (card)
 
 Additional bind mounts `hostPath:containerPath` (`EXTRA_VOLUMES` in meta.env,
-`host:container,host:container`). Same validation family as the workspace mount.
+`[{"host":"/mnt/data","container":"/data","readonly":false}]` — a JSON array of
+`{ host, container, readonly }`, `[]` when empty). Validated by
+`vm.validateExtraVolumes` (same guard family as the workspace mount: no system
+dirs, no project root / `src` / `instances`, no other agent's folder, no
+swallowing the data mount; container path must not be a protected system path
+or a parent-or-self of the data dir, though descendant subfolders ARE allowed).
+Removing a volume row removes only the bind from meta + compose (agent
+recreates); the host source directory is **never deleted** — extra-volume
+sources are arbitrary user dirs, so `removeVm()` does not clean them up.
 
 ### 8. Danger Zone — Delete Container
 
@@ -114,7 +122,7 @@ Wires the existing `POST /api/agents/:name/delete` (stop + remove container + do
 - `getNetworkHealth(name)` — resolves the compose `network_mode: container:<peer>` against the live docker state: `none` (no override) / `ok` (peer running + bound) / `stale` (peer container was recreated — recorded ID dead, start fails with "No such container") / `peer-stopped` (peer exists but not running)
 - `validateWorkspaceMount(name, agent, host, dir)` — single authority for workspace bind validation
 - `ensureSshStartBlock(name)` / `imageHasSshPortSupport(name, image, wasRunning)` — backfill the `Port $SSH_PORT` sed block into old instances' `build/start.sh` / detect it in the image; a non-22 ssh container port on an image without support sets `sshRebuild` into the update flow
-- Per-instance image tags come from `instance-image.js` (`imageFor(name)` → `paddock-vm-<name>:latest`); the shared template the instance build dir is copied from lives in `src/vm-builds/<type>/` (driver `buildRel`). vm-manager no longer exports `AGENT_IMAGES` / `AGENT_BASE_IMAGES`.
+- Per-instance image tags come from `instance-image.js` (`imageFor(name)` → `paddock-vm-<name>:latest`); the shared template the instance build dir is copied from lives in `src/vm-builds/<type>/` (driver `templateDir`). vm-manager no longer exports `AGENT_IMAGES` / `AGENT_BASE_IMAGES`.
 
 ## Notes
 

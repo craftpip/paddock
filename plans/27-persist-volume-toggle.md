@@ -1,7 +1,9 @@
 # Persistent Container Storage Toggle (plan 27)
 
 ## Status: Blocked (dropped 2026-08-08) — mechanism impossible in Docker; all
-implementation reverted.
+implementation reverted. **Research added 2026-08-09: the same mechanism IS
+possible in Podman** (see "Podman feasibility" below) — a Podman port would
+unblock this plan's goal; no Docker-path work is planned.
 
 > **The core mechanism is impossible in Docker.** The container's root
 > filesystem *is* the writable layer — there is no place a volume can sit
@@ -27,6 +29,79 @@ implementation reverted.
 > capture later changes). It genuinely preserves OS-layer state, at the cost of a
 > stored image per PAD. Not pursued — the app data dir already persists via bind
 > mounts, and OS-layer persistence wasn't worth the image-snapshot model.
+
+## Podman feasibility (research, 2026-08-09)
+
+**Verdict: plan 27's mechanism works natively in Podman** — mounting a named
+volume at `/` so OS-layer state survives a recreate is supported and the
+"seed from image on first use" behavior comes for free. Verified from Podman
+source (main branch, Apr 2026) + real-world reports; not yet run live (no
+Podman on this host).
+
+### Why Docker blocked it but Podman doesn't
+
+Docker failed at the volume mount over `/` (the rootfs *is* the writable
+layer — nothing can sit "under" it). Podman's implementation order avoids the
+problem entirely:
+
+1. **Mounting at `/` is permitted.** `parse.ValidateVolumeCtrDir`
+   (`pkg/specgen/generate/storage.go`) only requires an absolute path — there
+   is no protection against `/` as a destination. A real-world report confirms
+   the runtime accepts it: `podman run -v /tmp/x:/:O image` actually *started*
+   (failing only because the overlay hid the empty rootfs — i.e. the mount
+   itself worked).
+2. **Copy-on-first-use seeds the volume with the whole image rootfs.**
+   `mountNamedVolume` (`libpod/container_internal.go:1897`) computes
+   `srcDir = securejoin(containerRootfs, v.Dest)`; for `Dest="/"` that is the
+   container rootfs itself, then streams it into the volume's `_data` dir via
+   buildah's copier (`copier.Get(srcDir, "", ..., "/.")` →
+   `copier.Put(volMount, ...)`) and sets `CopiedUp=true`. The copy writes to
+   the volume's storage dir *before* the OCI runtime applies the mount at `/`,
+   so there is no self-hiding/recursion (the thing that breaks Docker). A fresh
+   `-v root:/` named volume therefore = full image content; a recreate just
+   reattaches the existing volume, so `apt install` / `/etc` edits survive.
+3. **Runtime-only mounts are unaffected.** `/etc/hosts`, `/etc/hostname`,
+   `/etc/resolv.conf`, `/proc`, `/sys`, `/dev` are runtime mounts, not image
+   content — copy-up never touches them and they still mount at runtime, just
+   as the Docker design assumed.
+
+### Semantics map 1:1 to the original design
+
+- Fresh volume → seeded from image → the "enable persist **first**, then
+  install" rule still applies (htop installed before enabling is lost).
+- Existing volume on toggle-back → old content returns; off-period changes are
+  lost (the resurrection trap still holds).
+- Reset/delete → `podman volume rm <name>_root` gives a true wipe, same naming
+  scheme as `<name>_default` in compose.
+
+### Podman-native extras
+
+- **`podman commit`** (the alternative rejected for Docker) is a first-class
+  libpod/buildah operation — "capture current state on enable" (open question
+  5) becomes cheap and native instead of a 1–2 GB workaround.
+- **Image volume driver** (`podman volume create --driver image
+  --opt image=paddock-vm-<type>`) overlay-mounts an image with copy-on-write
+  persistence — a cleaner "persist OS layer" primitive than the `/` mount when
+  the target can be a subpath.
+
+### Porting notes (Docker → Podman CLI)
+
+The control-plane code speaks `docker ...` via the socket; commands/flags are
+identical under Podman, but **output differs** — anything parsing stdout needs
+attention:
+
+- `docker inspect` always returns a JSON **array**; `podman inspect` returns a
+  **single object** for one arg (array for many). Indexing `[0]` breaks.
+- `inspect` field layout diverges (`.Config.Image` vs `.ImageID`/`.ImageName`);
+  common template fields like `{{range .Mounts}}`, `{{.State.Status}}` work.
+- `docker network ls` has a SCOPE column; Podman's has none. `docker events` and
+  `docker info`/`version` output formats differ entirely; error wording differs.
+- `docker compose config --format json` output is byte-identical (same
+  compose-go library). `ps`/`images`/`volume ls`/`logs` are near-identical but
+  not byte-identical.
+- The project's socket bind (`/var/run/docker.sock`) would become
+  `/run/podman/podman.sock` + `DOCKER_HOST`; and `docker restart paddock` →
+  systemd/quadlet for boot-persistence.
 
 ## Goal
 
@@ -344,6 +419,8 @@ container" (`SettingsTab.jsx`, same switch pattern as the docker toggle):
 
 ## Progress
 
+- [x] Podman feasibility research (2026-08-09) — mechanism works natively in
+      Podman; findings recorded above
 - [ ] `generateInstanceCompose` emits `root:/` + top-level `volumes:` from
       meta `PERSIST`
 - [ ] `createVm` + create route accept `persist`; meta written before compose

@@ -95,35 +95,61 @@ Implemented enhancements for user experience and functionality:
 
 ### General
 
-- **Standardized confirmation modals** — supports title, message, danger styling, confirm/cancel buttons.
-- **Keyboard shortcuts** — Ctrl+K (search), Ctrl+N (new agent), Ctrl+S (save).
-- **Toast notification improvements** — stacking, auto-dismiss, action/undo buttons, slide-in animation.
-- **Offline/broken state handling** — shows "Connection lost" when backend is unreachable.
+Shared promise-based dialogs (`confirm`/`alert`/`prompt`), toasts, keyboard
+shortcuts, and connection-lost handling live in
+[`components/ux.md`](../components/ux.md).
 
 ## Create Agent (`/agents/create`)
 
 File: `CreateAgent.jsx`
 
-Form to create a new PAD, laid out in three rows:
+Form to create a new PAD. Name row on top, an expandable **Optional settings**
+accordion below, then the create button:
 
 ```
 ┌─────────────────────────────────────────────────────┐
 │  ← Back to fleet                                    │
 │                                                     │
-│  Create PAD                                       │
+│  Create Agent                                       │
+│  Only a name is required — everything else is       │
+│  optional and can be changed later.                 │
 │                                                     │
-│  ┌─────────────────────────────────────────────┐    │
-│  │ pad-  [openclaw ▼]  -  [my-PAD           ] │    │
-│  └─────────────────────────────────────────────┘    │
+│  pad-  [openclaw ▼]  -  [my-PAD                ]    │
 │                                                     │
-│  ┌─────────────────────────────────────────────┐    │
-│  │  [ Create pad-my-PAD                     ]  │    │
-│  └─────────────────────────────────────────────┘    │
+│  ▼ Optional settings                                │
+│    ┌ Workspace (host source + container path) ─────┐ │
+│    ┌ Container options (docker toggle, network ▼) ─┐ │
+│    ┌ Expose OpenSSH on a host port (toggle) ───────┐ │
+│    ┌ Additional volumes (+ Add volume rows) ───────┐ │
+│    ┌ Additional ports (+ Add port rows) ───────────┐ │
+│                                                     │
+│  [ Create my agent                             ]    │
 └─────────────────────────────────────────────────────┘
 ```
 
-- **Row 1** — Prefix (from CONTAINER_PREFIX, e.g. `pad`), PAD type dropdown (openclaw/opencode/picoclaw/hermes/codex), name input (alphanumeric + hyphens). Toggles for SSH expose (host + container port + password), custom workspace mount, docker access, and network routing.
-- **Row 2** — Create button shows the full name being created (e.g. "Create pad-my-PAD")
+- **Name row** — Prefix (from CONTAINER_PREFIX, e.g. `pad`), PAD type dropdown
+  (openclaw/opencode/picoclaw/hermes/codex), name input (alphanumeric +
+  hyphens).
+- **Optional settings** — five cards, all optional:
+  1. **Workspace** — host source + fixed container path (locked per driver).
+  2. **Container options** — "Allow docker in the container" toggle (docker.sock
+     + CLI, rebuilds the image at create) and a Network dropdown of running
+     containers (peer routing via `network_mode: container:`).
+  3. **Expose OpenSSH** — toggle + host port (empty = auto-allocate 43817+),
+     container port (default 22, distinct per peer-shared agent), optional root
+     password.
+  4. **Additional volumes** — dynamic `host → container` bind rows with a
+     readonly checkbox.
+  5. **Additional ports** — dynamic `host → container` TCP port rows.
+
+The form validates client-side before enabling **Create my agent** (name,
+volume/port fields). Submit posts all options
+(`allowDocker`, `network`, `sshEnabled`, `port`, `sshContainerPort`, `password`,
+`extraVolumes`, `extraPorts`, `workspace_host`, `workspace_dir`) to
+`POST /api/agents/create`; the server pre-flights everything
+(`vm.validateAgentCreate`: network peer exists+running, extra volumes/ports,
+SSH container port, workspace mount, cross-agent host-port sweep) and returns
+`400` before the `202` if any check fails — nothing is created.
 
 **Creation flow (live streaming):**
 1. Form submits via fetch — POST `/api/agents/create` returns `202` immediately and a background job starts

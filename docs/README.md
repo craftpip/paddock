@@ -14,6 +14,7 @@ docs/
 │   └── react-migration.md            ← React migration details, stack, routes
 ├── backend/                          ← server-side modules
 │   ├── services.md                   ← all services with functions, schemas, business logic
+│   ├── drivers.md                    ← per-driver reference: fields, commands, gotchas for each agent type
 │   ├── middleware.md                  ← auth + CSRF + rate limiter internals
 │   └── user-management.md            ← multi-user system, owner-based scoping, data access rules
 ├── pages/                            ← top-level page docs
@@ -22,13 +23,15 @@ docs/
 │   ├── overview.md                   ← all tabs/modes described
 │   ├── terminal.md                   ← the docked interactive shell (tmux + xterm)
 │   ├── web.md                        ← Web & Ports tab: web app publish, SSH expose, extra ports, the socat door
+│   ├── web-consoles.md               ← per-agent web consoles: ports, auth requirements, where + how to set the password
 │   ├── health.md                     ← container health checkup (lives in Settings)
 │   ├── mcp.md                        ← MCP server management (Commands pane, paste-commands flow)
 │   ├── skills.md                     ← skill listing (Commands pane, paste-commands flow)
 │   └── settings.md                   ← container settings: update, health checkup, docker, network, workspace+volumes, ssh/ports, delete
 ├── components/                       ← shared/reusable UI pieces
 │   ├── stats.md                      ← sidebar Docker stats
-│   └── theme.md                      ← design guidelines: horse-brown palette, tokens, light/dark
+│   ├── theme.md                      ← design guidelines: horse-brown palette, tokens, light/dark
+│   └── ux.md                         ← shared UX utilities: dialogs, toasts, shortcuts, connection-lost
 └── operations/                       ← operational workflows
     ├── overview.md                   ← agent lifecycle, dev workflow, git workflow
     └── openclaw.md                   ← OpenClaw: cron, provider keys, updates, memory

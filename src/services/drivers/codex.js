@@ -32,19 +32,71 @@ const CODEX = {
   /** No gateway/onboard flow — codex config is created on first run. */
   setupSteps: [],
 
-  /** Command groups served to the Commands tab. */
+  /** Command groups served to the Commands tab. All commands verified against
+   *  codex-cli 0.147.0 in the test PAD. Note: codex has NO messaging channels
+   *  and NO CLI skill management — skills are file-based (docs), so neither
+   *  group has buttons here. */
   commands: [
     {
-      title: 'Session', color: 'info',
+      title: 'Provider', color: 'info',
       commands: [
-        { cmd: 'codex exec --help', label: 'Exec help', desc: 'codex exec usage (run codex non-interactively)' },
-        { cmd: 'codex eval --help', label: 'Eval help', desc: 'codex eval usage' },
+        { cmd: 'codex login', label: 'Login', desc: 'Log in to a provider (interactive)' },
+        { cmd: 'codex login status', label: 'Login status', desc: 'Show current login status' },
+        { cmd: 'codex logout', label: 'Logout', desc: 'Remove stored credentials', danger: true },
+      ],
+    },
+    {
+      title: 'MCP', color: 'success',
+      commands: [
+        { cmd: 'codex mcp list', label: 'List servers', desc: 'Configured MCP servers' },
+        { cmd: 'codex mcp get {name}', label: 'Get server', desc: 'Show one server config', fields: [
+          { key: 'name', label: 'Server name', placeholder: 'e.g. filesystem' },
+        ]},
+        { cmd: 'codex mcp add {name}', label: 'Add server', desc: 'Add an MCP server (interactive)', fields: [
+          { key: 'name', label: 'Server name', placeholder: 'e.g. filesystem' },
+        ]},
+        { cmd: 'codex mcp remove {name}', label: 'Remove server', desc: 'Remove an MCP server', danger: true, fields: [
+          { key: 'name', label: 'Server name', placeholder: 'e.g. filesystem' },
+        ]},
+        { cmd: 'codex mcp login {name}', label: 'OAuth login', desc: 'Log in to an OAuth MCP server', fields: [
+          { key: 'name', label: 'Server name', placeholder: 'e.g. my-server' },
+        ]},
+        { cmd: 'codex mcp logout {name}', label: 'OAuth logout', desc: 'Clear OAuth credentials for a server', fields: [
+          { key: 'name', label: 'Server name', placeholder: 'e.g. my-server' },
+        ]},
+      ],
+    },
+    {
+      title: 'Session', color: 'accent',
+      commands: [
+        { cmd: 'codex resume --last', label: 'Continue last', desc: 'Resume the most recent session' },
+        { cmd: 'codex review', label: 'Code review', desc: 'Run a non-interactive code review' },
+      ],
+    },
+    {
+      title: 'Plugin', color: 'brand',
+      commands: [
+        { cmd: 'codex plugin list', label: 'List plugins', desc: 'Plugins from configured marketplaces' },
+        { cmd: 'codex plugin marketplace', label: 'Marketplaces', desc: 'Add/list/upgrade/remove plugin marketplaces (interactive)' },
+        { cmd: 'codex plugin add {name}', label: 'Install plugin', desc: 'Install from a marketplace snapshot', fields: [
+          { key: 'name', label: 'Plugin name', placeholder: 'e.g. openai/foo' },
+        ]},
+        { cmd: 'codex plugin remove {name}', label: 'Remove plugin', desc: 'Remove an installed plugin', danger: true, fields: [
+          { key: 'name', label: 'Plugin name', placeholder: 'e.g. foo' },
+        ]},
+      ],
+    },
+    {
+      title: 'Health', color: 'warning',
+      commands: [
+        { cmd: 'codex doctor', label: 'Doctor', desc: 'Diagnose install, config, auth and runtime health' },
       ],
     },
     {
       title: 'Other', color: 'slate',
       commands: [
         { cmd: 'codex --version', label: 'Version', desc: 'codex version' },
+        { cmd: 'codex update', label: 'Update', desc: 'Update Codex to the latest version', confirm: true },
         { cmd: 'codex --help', label: 'Help', desc: 'codex top-level help' },
       ],
     },

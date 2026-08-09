@@ -152,10 +152,11 @@ tini (mirrors the openclaw image, which used `tini -s --` already):
 tini forwards SIGTERM to its bash child; bash dies, tini exits → clean stop in
 ~0.1–0.3s with exit 143.
 
-**Rebuild notes:** rebuilding tags the shared `paddock-vm-<type>:latest`, so
-**recreate** existing containers (`docker compose -f instances/<pad>/docker-compose.yml up -d --force-recreate`)
-to pick up a new entrypoint — `docker start` keeps the old image ID. Preserve
-the docker toggle on rebuild: agents with the docker socket mount were built
-with `--build-arg INSTALL_DOCKER=1`. Verify PID 1 is `tini` via
-`docker exec <pad> ps -o pid,ppid,comm`, then `time docker stop <pad>` should
-be well under a second.
+**Rebuild notes:** rebuilding tags the per-instance `paddock-vm-<name>:latest`
+(from `instances/<pad>/build/`), so **recreate** the container
+(`docker compose -f instances/<pad>/docker-compose.yml up -d --force-recreate`)
+to pick up a new entrypoint — `docker start` keeps the old image ID. Rebuilds
+go through Settings → Update; the docker toggle writes `INSTALL_DOCKER=1` into
+the instance `build.env` and rebuilds only that PAD's image. Verify PID 1 is
+`tini` via `docker exec <pad> ps -o pid,ppid,comm`, then `time docker stop
+<pad>` should be well under a second.

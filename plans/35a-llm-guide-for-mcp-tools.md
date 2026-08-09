@@ -1,7 +1,15 @@
-# Plan 33 — LLM guide: how to use Paddock
+# Plan 35a — LLM guide for MCP tools: how an LLM drives Paddock through the MCP surface (tool guide + non-interactive command catalog)
 
-## Status: Draft (2026-08-09) — raw requirements recorded; nothing implemented
-yet.
+## Status: Draft (2026-08-09) — raw requirements recorded; research on the core
+catalog commands verified live against a running openclaw PAD (v2026.7.1);
+nothing implemented yet.
+
+> **Task A of plan 35 (renamed from plan 33, 2026-08-09).** Plan 35 is ONE plan
+> with TWO **simultaneous** tasks — they do not block each other, they exist
+> for each other. Task A (this file) makes the Paddock MCP surface descriptive
+> and usable by the LLM; Task B (`35b-paddock-mcp-for-agents.md`) wires Paddock's
+> MCP server into the agents. The two are kept as separate, independent files
+> that reference each other. Read the sibling before or after this one.
 
 > **The goal of this plan:** give the LLM a better understanding of **how to use Paddock** —
 > what Paddock is, what the LLM can do through it, which commands exist, which are
@@ -161,6 +169,12 @@ LLM to ask the user to run it in the terminal (or skip it).
 
 #### Models (the LLM must be able to ADD models)
 
+> Live-verified 2026-08-09 against `pad-openclaw-work-pls` (v2026.7.1): the
+> non-interactive `models auth paste-api-key --provider <name>` subcommand
+> exists and takes key via stdin. `models auth add` is the interactive helper;
+> `login` runs provider OAuth flows. TTY-only commands: `login-github-copilot`,
+> `setup-token`.
+
 | Button / command today | Interactive? | Non-interactive alternative for the LLM |
 |---|---|---|
 | "Add provider" `openclaw configure --section model` | **YES** — interactive TUI (login, OAuth, device code) | `openclaw models auth paste-api-key --provider <name>` (key via stdin) — **CAVEAT: overwrites the whole `openclaw.json`; save the config first and merge it back** (AGENTS.md). Or `openclaw models auth login --device-code` only when a TTY is available |
@@ -172,11 +186,18 @@ LLM to ask the user to run it in the terminal (or skip it).
 
 #### MCP tools (the LLM must be able to ADD MCP servers)
 
+> Live-verified 2026-08-09 against `pad-openclaw-work-pls` (v2026.7.1): `openclaw
+> mcp add <name>` takes `--url`, `--transport streamable-http|sse`,
+> `--header <key=value>`, `--command`, `--no-probe`, `--include/--exclude`
+> (tool filter), `--timeout/--connect-timeout`, `--disabled`. `mcp reload`,
+> `mcp probe [name]`, `mcp doctor`, `mcp tools <name> --include/--exclude`
+> (per-server filter, least privilege) all exist.
+
 | Button / command today | Interactive? | Non-interactive alternative for the LLM |
 |---|---|---|
 | "Add server" → `openclaw mcp add <name> [--no-probe] --url <u> --transport <t>` / `--command <c>` | no, when fully parameterized | as-is, but **default `--no-probe` for LLM calls** (the probe can hang without a TTY/network) |
 | "Remove server" `openclaw mcp unset <name>` | no | as-is |
-| `openclaw mcp list` / `reload` / `probe [name]` / `doctor` | no | as-is |
+| `openclaw mcp list` / `reload` / `probe [name]` / `doctor` / `tools` | no | as-is |
 
 #### Other openclaw flows (for the same audit)
 
@@ -251,8 +272,13 @@ differently — e.g. a `paddock_help`-style tool returning the full guide, plus 
   command catalog?
 - Do we expose Set B for the human UI too (e.g. show the non-interactive command on each
   button so the user can copy it)?
-- Confirm `openclaw models auth paste-api-key` is still the current non-interactive way to
-  add a provider (always check https://docs.openclaw.ai — CLI changes frequently).
+- ~~Confirm `openclaw models auth paste-api-key` is still the current non-interactive way to
+  add a provider~~ **ANSWERED live (2026-08-09, v2026.7.1):** yes, exists and takes the key
+  via stdin; `models auth add`/`login` remain interactive. The config-destroy caveat
+  (AGENTS.md) still stands and must be encoded in the guidance text.
 - Where does the general guide (§§1–4) live as source of truth — duplicated in the plan, in
   `docs/`, or generated? (docs/ is the source of truth per AGENTS.md; the guide should be
   generated from `docs/` where possible.)
+- The openclaw non-interactive catalog is verified; the same audit for opencode / picoclaw /
+  hermes / codex / claude is still "to be inventoried" — their CLI sets differ (see sibling
+  plan 35b for the per-driver MCP shapes already researched).
