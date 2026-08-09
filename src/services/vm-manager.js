@@ -1146,6 +1146,7 @@ async function updateAgent(name, { onLog = () => {}, onStep = () => {}, buildArg
     throw e;
   }
   onStep('recreate', 'end');
+  await pruneDanglingImages(onLog);
 }
 
 /** Recreate a container with optional extras (the Settings "Recreate Container"
@@ -1198,6 +1199,7 @@ async function recreateAgent(name, { pull = false, reset = false, onLog = () => 
     throw e;
   }
   onStep('recreate', 'end');
+  await pruneDanglingImages(onLog);
 }
 
 function existingServices() {
@@ -1360,6 +1362,7 @@ async function createVm(name, options = {}) {
     await runCompose(name, ['build'], { stream: true, onLog, timeout: 900000 });
   } catch (e) {
     onStep('build', 'error');
+    await pruneDanglingImages(onLog);
     throw e;
   }
   onStep('build', 'end');
@@ -1369,9 +1372,11 @@ async function createVm(name, options = {}) {
     await runCompose(name, ['up', '-d'], { stream: true, onLog, timeout: 300000 });
   } catch (e) {
     onStep('up', 'error');
+    await pruneDanglingImages(onLog);
     throw e;
   }
   onStep('up', 'end');
+  await pruneDanglingImages(onLog);
 
   const driver = getDriver(agent);
   const setupSteps = driver.setupSteps || [];
@@ -1500,7 +1505,11 @@ async function removeInstanceDir(name, instDir) {
   }
   const hostInstDir = path.join(HOST_WORKSPACE, 'instances', name);
   try {
-    await runCmd('docker', ['run', '--rm', '-v', `${hostInstDir}:/d`, '--entrypoint', 'rm', 'paddock-webui:latest', '-rf', '/d'], { timeout: 120000 });
+    // Delete the MOUNT'S CONTENTS, not the mountpoint itself — `rm -rf /d`
+    // fails with EACCES "Device or resource busy" because /d is the bind
+    // target. `find -delete` clears the root-owned files; the empty dir is
+    // then rmdir'd by the webui (the parent is uid-1000-owned).
+    await runCmd('docker', ['run', '--rm', '-v', `${hostInstDir}:/d`, '--entrypoint', 'find', 'paddock-webui:latest', '/d', '-mindepth', '1', '-delete'], { timeout: 120000 });
   } catch {
     throw new Error(
       `Deleting '${name}' failed: the instance data is root-owned and the privileged cleanup could not remove it. Run this on the host: chown -R 1000:1000 ${hostInstDir}`
@@ -1539,6 +1548,23 @@ async function removeVm(name) {
   // The per-instance image is this PAD's own tag — drop it too, otherwise every
   // create/delete cycle leaks a paddock-vm-<name>:latest image.
   try { await runCmd('docker', ['rmi', imageFor(name)], { timeout: 30000 }); } catch {}
+  // ...and sweep any dangling layers the tag shared or left behind.
+  await pruneDanglingImages();
+}
+
+/** Reclaim disk from orphaned image layers. `docker compose build` retags the
+ *  per-PAD image, orphaning every previous build as a dangling `<none>` image;
+ *  failed creates and interrupted jobs leak whole images. A dangling prune is
+ *  safe (only touches `<none>` layers no container references) and a cheap
+ *  no-op when there's nothing to reclaim. Never throws; reports freed space. */
+async function pruneDanglingImages(onLog = () => {}) {
+  try {
+    const r = await runCmd('docker', ['image', 'prune', '-f'], { timeout: 120000 });
+    const m = /Total reclaimed space:\s*([0-9.]+[kMGT]?B)/i.exec(r.stderr || r.stdout || '');
+    if (m) onLog('system', `Reclaimed ${m[1]} from dangling image layers`);
+  } catch (e) {
+    onLog('system', `Image prune skipped: ${e.message || e}`);
+  }
 }
 
 async function resetVm(name) {

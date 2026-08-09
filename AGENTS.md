@@ -70,10 +70,18 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
 - **Root-owned instance data breaks delete.** Agent containers write their data
   dir as root; the webui runs as uid 1000 and a plain `fs.rmSync` then throws
   `EACCES`. `removeVm` now catches it and finishes via a one-shot root helper
-  container of our own image (host-path bind). If a delete still reports the
+  container of our own image (host-path bind). The helper clears the mount
+  CONTENTS (`find /d -mindepth 1 -delete`) — never `rm -rf /d`, which fails on
+  a bind mountpoint ("Device or resource busy"). If a delete still reports the
   `chown -R 1000:1000 ...` hint, run it on the host. Never `docker exec paddock
   node …` on DB paths (recreates root-owned `app.db*`); the webui image runs
   root by default, which is why the helper works.
+- **Per-PAD image builds orphan disk.** Every create/rebuild retags
+  `paddock-vm-<name>:latest` and orphans the old build as a dangling image;
+  delete removes the tag and `pruneDanglingImages` (`docker image prune -f`,
+  dangling only) runs after create/rebuild/delete to reclaim it. A dangling
+  image that survives the prune is in use by a container (possibly another
+  project) — don't force-remove it.
 - **Restart the webui after editing backend code** (`app.js`, `vm-manager.js`,
   any `services/drivers/*.js`) — Node caches `require()`; a stale process
   keeps old behavior or builds the wrong image via the openclaw-driver

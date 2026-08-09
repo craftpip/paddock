@@ -131,11 +131,21 @@ The frontend polls agent state — no HTMX.
 into the (webui-owned) instance dir, so a plain `fs.rmSync` from the webui
 (uid 1000) throws `EACCES`. `removeVm` now catches `EACCES`/`EPERM` and finishes
 the deletion with a one-shot root helper container built from our own
-`paddock-webui:latest` image (`docker run --rm -v <HOST_WORKSPACE>/instances/<name>:/d
---entrypoint rm paddock-webui:latest -rf /d` — the daemon resolves the bind by
-HOST path, not the webui's `/workspace` namespace). If even that fails, the
-delete errors with the exact host `chown` command to run. Existing pads with
-root-owned data were normalized once with `chown -R node:node instances/`.
+`paddock-webui:latest` image (the daemon resolves the bind by HOST path, not
+the webui's `/workspace` namespace). The helper clears the mount's *contents*
+(`find /d -mindepth 1 -delete`), never the mountpoint itself — `rm -rf /d`
+fails with EACCES "Device or resource busy" because `/d` is a bind target. The
+empty dir is then removed by the webui (its parent is uid-1000-owned). If even
+that fails, the delete errors with the exact host `chown` command to run.
+Existing pads with root-owned data were normalized once with
+`chown -R node:node instances/`.
+
+**Image cleanup:** each PAD builds its own `paddock-vm-<name>:latest` tag.
+Deleting a PAD also runs `docker rmi paddock-vm-<name>:latest`. Every image
+build or rebuild orphans the previous build as a dangling `<none>` image, so
+`pruneDanglingImages` (`docker image prune -f`) runs at the end of create,
+rebuild (`updateAgent`/`recreateAgent`) and delete — it only touches `<none>`
+layers no container references, so it can never break a running agent.
 
 ### Reset Flow (`resetVm`)
 
