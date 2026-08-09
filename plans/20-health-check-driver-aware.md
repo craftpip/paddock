@@ -1,5 +1,9 @@
 # Driver-Aware Health Checks (plan 20 — 2026-08-07, future work)
 
+## Status: Proposed (not started, 2026-08-09) — design complete, 0%
+implemented. The driver-agnostic container-level check layer ships; the
+driver-aware `healthChecks` layer is not built.
+
 ## Context
 
 `src/services/container-health.js` ships a generic, driver-agnostic Docker-level

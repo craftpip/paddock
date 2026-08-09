@@ -1,6 +1,9 @@
 # Goal 32 — GitHub Pages: modern deploy workflow + docs website from `docs/`
 
-> **Status: Plan / not yet started.** User request: "create the modern workflow,
+## Status: Proposed (not started, 2026-08-09) — 0% implemented: no Actions
+workflow, no VitePress scaffold, no `.github/` yet.
+
+> User request: "create the modern workflow,
 > keep it" for GitHub Pages, plus a documentation website built directly from the
 > existing `docs/` markdown folder so anyone can read the tool's docs on the web.
 >

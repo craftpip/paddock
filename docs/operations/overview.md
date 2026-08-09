@@ -134,3 +134,28 @@ run it with the guard envs cleared:
 - **No daily-commit script exists anymore** (no `scripts/`, no crontab) — a
   daily `sudo git add -A && sudo git commit -m "auto: daily commit"` is not
   running. Re-create it if wanted.
+
+## Container Process and Signals (PID 1)
+
+**Problem:** a bare `bash start.sh` as PID 1 silently drops SIGTERM (the kernel
+does not deliver default-action signals to PID 1 without a handler), so
+`docker stop <pad>` hangs the full `-t 30` grace then SIGKILLs (exit 137).
+
+**Fix (2026-08-07):** every `vm-builds/*/Dockerfile` entrypoint is wrapped in
+tini (mirrors the openclaw image, which used `tini -s --` already):
+
+- picoclaw (Alpine): `apk add tini` →
+  `ENTRYPOINT ["/sbin/tini", "-s", "--", "/usr/local/bin/start.sh"]`
+- codex / opencode / hermes (Debian): `apt-get install -y tini` →
+  `ENTRYPOINT ["/usr/bin/tini", "-s", "--", "/usr/local/bin/start.sh"]`
+
+tini forwards SIGTERM to its bash child; bash dies, tini exits → clean stop in
+~0.1–0.3s with exit 143.
+
+**Rebuild notes:** rebuilding tags the shared `paddock-vm-<type>:latest`, so
+**recreate** existing containers (`docker compose -f instances/<pad>/docker-compose.yml up -d --force-recreate`)
+to pick up a new entrypoint — `docker start` keeps the old image ID. Preserve
+the docker toggle on rebuild: agents with the docker socket mount were built
+with `--build-arg INSTALL_DOCKER=1`. Verify PID 1 is `tini` via
+`docker exec <pad> ps -o pid,ppid,comm`, then `time docker stop <pad>` should
+be well under a second.

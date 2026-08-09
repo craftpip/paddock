@@ -1,6 +1,9 @@
 # Agent Build Images + Agent Driver Architecture — Plan
 
-## Status: Proposed (2026-08-06)
+## Status: Complete (umbrella, 2026-08-09) — all work shipped via its per-goal
+plan files: settings (09), driver framework + openclaw (12), picoclaw (13),
+hermes (14), opencode (15), codex (16). Remaining, tracked in their own files:
+claude (17) and Docker MCP (18) — not started.
 
 The original "Settings page" part of this plan (the "allow docker in the
 container" checkbox) shipped as part of plan 09 (2026-08-04) — removed here.

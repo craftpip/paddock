@@ -1,5 +1,9 @@
 # Independent Per-Instance Build Files (plan 25)
 
+## Status: Complete (2026-08-09) — 12/12 progress items done and live-verified
+across all five agent types (see regression table). Open questions are
+non-blocking.
+
 ## Goal
 
 Every agent becomes **completely self-contained**: its build files

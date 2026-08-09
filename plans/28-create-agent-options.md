@@ -1,5 +1,10 @@
 # Create Agent Options — Docker, Network, Extra Volumes, Extra Ports (plan 28)
 
+## Status: Proposed (not started, 2026-08-09) — 0/4 phases implemented.
+Current-behavior mapping (2026-08-08) + design complete; backend
+storage/compose, create endpoint + form, Settings volumes, and Web/ports all
+pending.
+
 ## Goal
 
 Turn the Create Agent page (`/agents/create`) into the full options form it was

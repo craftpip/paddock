@@ -289,3 +289,28 @@ Wizard for setting up a running PAD: Telegram bot token, channel user ID, and a
 model-provider API key. Submits to `POST /api/agents/:name/onboard` (the flow
 that was formerly `scripts/onboard-bot.sh`, absorbed into app.js route handlers
 and `vm-manager.js` config patching). Secrets live in the Vault, not a JSON file.
+
+## Frontend Conventions and Gotchas
+
+- **JSX/CSS edits need a build.** The SPA serves the built bundle from
+  `src/public/`, so editing a `.jsx` file alone does nothing until
+  `cd src/client && npm run build` + `docker restart paddock`. Symptom: a new
+  className never appears in the DOM. Verify the class string made it into
+  `src/public/assets/index-*.js` before browser-testing.
+- **`api()` throws on non-2xx.** `src/client/src/lib/api.js` checks `res.ok`
+  and throws with the error payload on any non-2xx response (not just 401).
+- **Safe state access on first render.** React 19 has no error boundary, so a
+  render-time throw blanks the whole app. Tab components that fetch settings
+  into `null`-initialized state must use `settings?.x` (or a derived safe
+  variable like `settings?.network || ''`) on the first render — never
+  `settings.network` directly.
+- **File modal.** The workspace file modal uses `value` + `onChange` for
+  content tracking, an Escape-key handler, and a dirty/saved indicator; close
+  warns if there are unsaved changes.
+- **Terminal keeps xterm's default colors** — the themed palette and
+  `paddock:theme` listener were removed at the user's request; the theme
+  toggle only affects the app UI, not the shell.
+- **Custom scrollbars** live in `src/client/src/index.css`, token-driven
+  (`scrollbar-width: thin`, WebKit `::-webkit-scrollbar`).
+- **Logs tab fills its area** — root is `flex flex-col h-full min-h-0`,
+  header `flex-shrink-0`, pre `flex-1 min-h-0 overflow-auto`.

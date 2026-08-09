@@ -1,7 +1,8 @@
 # Plan 33 — LLM guide: how to use Paddock
 
-> **Status: Draft — raw requirements recorded (2026-08-09).** Nothing implemented yet.
->
+## Status: Draft (2026-08-09) — raw requirements recorded; nothing implemented
+yet.
+
 > **The goal of this plan:** give the LLM a better understanding of **how to use Paddock** —
 > what Paddock is, what the LLM can do through it, which commands exist, which are
 > interactive vs non-interactive, and how to run them perfectly through the MCP `exec` tool.

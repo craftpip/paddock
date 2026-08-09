@@ -235,3 +235,13 @@ a distinct `sshContainerPort`. Live-verified on `pad-opencode-aic` (8081) and
   config.json / env). Env overrides file — if the instance sets
   `PICOCLAW_CHANNELS_PICO_TOKEN`, the file is ignored. The gateway already runs
   `picoclaw gateway -E`, so no boot hook needed.
+
+## Link base override (HOST_NAME / HOST_PROTO)
+
+`.env` can set `HOST_NAME` (IP or hostname) and `HOST_PROTO` (`http`|`https`).
+These override the base used for **published web-app links** (AgentCard ↗ icon,
+Web tab access URL). `/api/config` exposes them as `host` + `hostProtocol`.
+The frontend `src/client/src/lib/web.js` caches them at boot and uses them in
+`webBase()`; otherwise it falls back to `window.location`. Because `.env`
+values are baked in at container create (env_file), a plain `docker restart` is
+not enough — **recreate** the paddock container to pick up the change.

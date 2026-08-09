@@ -1,6 +1,7 @@
 # Goal 6 — claude Driver + Image
 
-## Status: Planned (2026-08-06)
+## Status: Proposed (not started, 2026-08-06) — 0% implemented: no Dockerfile,
+no driver, no CreateAgent option.
 
 ## Goal
 

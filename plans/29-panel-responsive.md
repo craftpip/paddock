@@ -1,5 +1,8 @@
 # Panel Responsive — the whole SPA down to ~360px (plan 29)
 
+## Status: Proposed (not started, 2026-08-09) — 0% implemented. Full-SPA
+responsive survey done (2026-08-09); no CSS/class changes landed yet.
+
 > **Scope correction (2026-08-09):** the original file was written as
 > "Terminal Responsive" only. The real intent is the **whole panel** — terminal
 > is just the worst offender. This rewrite keeps the terminal section but adds

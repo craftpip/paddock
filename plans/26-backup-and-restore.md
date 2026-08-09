@@ -1,5 +1,9 @@
 # Native Agent Backups And Restore (plan 26)
 
+## Status: In progress (2026-08-09) — Pre-plan complete: generic tar backup
+system fully removed (2026-08-08). Goals 0–5 (shared `/backup` folder +
+manifest + Backups tab + native driver capabilities) 0/6 implemented.
+
 ## Goal
 
 Paddock uses an agent's own documented backup and restore commands. It never

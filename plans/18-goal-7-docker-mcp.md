@@ -1,6 +1,7 @@
 # Goal 7 — Docker MCP (openclaw)
 
-## Status: Planned (2026-08-06)
+## Status: Proposed (not started, 2026-08-06) — 0% implemented: the exact MCP
+command is unverified, nothing documented in the driver or MCP commands group.
 
 ## Goal
 

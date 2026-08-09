@@ -30,7 +30,8 @@ docs/
 │   ├── stats.md                      ← sidebar Docker stats
 │   └── theme.md                      ← design guidelines: horse-brown palette, tokens, light/dark
 └── operations/                       ← operational workflows
-    └── overview.md                   ← agent lifecycle, dev workflow, git workflow
+    ├── overview.md                   ← agent lifecycle, dev workflow, git workflow
+    └── openclaw.md                   ← OpenClaw: cron, provider keys, updates, memory
 ```
 
 ## Adding new docs

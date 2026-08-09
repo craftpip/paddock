@@ -1,5 +1,9 @@
 # Settings Page — Plan
 
+## Status: Complete (2026-08-04) — Phases 1–3 implemented and absorbed into
+docs. Phase 4 (Install Paddock MCP toggle) deferred — requires plan 06 (Paddock
+MCP server), unbuilt.
+
 **Date:** 2026-08-03
 **Status:** Implemented (Phases 1-3) — Phase 4 (Paddock MCP toggle) deferred by user decision 2026-08-04. **2026-08-04 +popup console:** Update, the docker toggle, and the network change all open a modal popup (`CommandModal.jsx`) that streams the job output live, instead of an inline pane. **2026-08-04 +version check:** Container Info shows the current OpenClaw version; clicking Update first checks current vs available (latest base image) and shows a confirm dialog with both versions before starting.
 **Absorbed into docs:** `docs/tabs/settings.md` (+ `docs/tabs/overview.md`, `docs/backend/services.md`, `docs/operations/overview.md`). This file stays as the record of the deferred Phase 4 (MCP toggle) and the original design notes.

@@ -1,5 +1,9 @@
 # UI Enhancements
 
+## Status: In progress (2026-08-09) — 11/12 items done. Remaining: responsive
+mobile improvements (`[~]` partially done — tables hide on mobile; forms and
+terminal still need work; superseded by plan 29).
+
 ## SPA Polish & Quality of Life
 
 ### Terminal Tab

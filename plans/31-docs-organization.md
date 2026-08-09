@@ -1,6 +1,13 @@
 # Goal 31 — Documentation Organization: one format, one guide, a reviewed corpus
 
-> **Status: Plan / not yet started.** User request: "organize the documentation
+## Status: In progress (2026-08-09) — Phase 1 done: `docs/STYLE-GUIDE.md`
+created (the parent guide; user chose that name over CONTRIBUTING.md) +
+`docs/README.md` indexed and linked. Remaining: markdownlint config decision
+(inline in the guide for now, open question 2), the corpus audit (markdownlint,
+H1/See-Also/table/length sweeps), and ~12 gap docs (API ref, MCP, drivers,
+Vault, backup, SSH, components, security, state, …).
+
+> User request: "organize the documentation
 > folder, add more documentation, review what's going on, and make it organized
 > with one formatting and one consistency. I want a parent documentation file
 > which describes how to write the documentation — how to format it and all.

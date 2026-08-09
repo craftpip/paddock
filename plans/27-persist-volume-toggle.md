@@ -1,7 +1,8 @@
 # Persistent Container Storage Toggle (plan 27)
 
-> ## ⛔ BLOCKED — cannot work (2026-08-08) — plan dropped
->
+## Status: Blocked (dropped 2026-08-08) — mechanism impossible in Docker; all
+implementation reverted.
+
 > **The core mechanism is impossible in Docker.** The container's root
 > filesystem *is* the writable layer — there is no place a volume can sit
 > "under" `/`. Docker has no way to overlay a volume on top of the rootfs, so
