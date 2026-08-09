@@ -2,7 +2,9 @@
 
 Skills live in the **Commands** mode (the old dedicated Skills tab was removed
 in the SPA migration). The installed-skills list is read-only; every action
-**pastes `openclaw skills ...` commands into the docked terminal**.
+**pastes `openclaw skills ...` commands into the docked terminal**. This flow
+is openclaw-only; other agent types have no skill buttons (file-based skills)
+or manage skills via their driver buttons — see [commands.md](commands.md).
 
 > Last updated: 2026-08-09
 

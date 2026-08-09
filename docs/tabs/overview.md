@@ -26,17 +26,19 @@ alive). See [terminal.md](terminal.md) for the dock and shell.
 
 ## Commands (default)
 
-File: `src/client/src/pages/agent/CommandsPane.jsx`.
+File: `src/client/src/pages/agent/CommandsPane.jsx`. See
+[commands.md](commands.md) for the full mechanics and the per-type button
+inventory.
 
-One wrapped flow of command pills grouped by area (Messaging, Models, MCP,
-Skills, Memory, Config, Other, Security, Doctor, Diagnostics), with a search
-box, a **Run TUI** button, and a right-aligned **Vault dropdown**. Clicking a
-pill injects the CLI command into the docked terminal via `run(cmd)` — buttons
-paste commands, not APIs (Vault is the deliberate exception). Groups + pills
-are hardcoded in `CommandsPane.jsx`, not a config file.
+One wrapped flow of command pills grouped by area, with a search box, a **Run
+TUI** button, and a right-aligned **Vault dropdown**. Clicking a pill injects
+the CLI command into the docked terminal via `run(cmd)` — buttons paste
+commands, not APIs (Vault is the deliberate exception).
 
-Per-driver command groups come from the driver `commands` field — see
-`/api/agent-types/<type>/commands`.
+Groups + pills come from the agent driver's `commands` field, served by
+`GET /api/agent-types/<type>/commands` (not hardcoded in the SPA). openclaw is
+the one exception — it renders extra hardcoded flows (Messaging, Models, MCP,
+Skills, Memory) on top of its driver groups.
 
 ## Workspace
 

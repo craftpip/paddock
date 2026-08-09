@@ -692,58 +692,52 @@ export default function SettingsTab({ agent }) {
           )}
           {volDraft.length > 0 && (
             <div className="rounded-lg overflow-hidden border border-line-faint">
-              <table className="w-full text-left text-xs">
-                <thead>
-                  <tr className="bg-sunken text-ink-faint uppercase tracking-wider">
-                    <th className="px-3 py-2 font-medium w-36">Type</th>
-                    <th className="px-2 py-2 font-medium w-2/5">Host source / Volume name</th>
-                    <th className="px-2 py-2 font-medium w-2/5">Container path</th>
-                    <th className="px-2 py-2 font-medium text-center w-14" title="Read-only mount">Ro</th>
-                    <th className="px-2 py-2 w-10"></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {volDraft.map((v, i) => (
-                    <tr key={i} className="border-t border-line-faint align-top">
-                      <td className="px-2 py-1.5">
-                        <select value={v.type || 'bind'}
-                                onChange={(e) => setVol(i, { type: e.target.value })}
-                                className="w-full bg-raised border border-line-faint rounded-lg px-1.5 py-1.5 text-xs text-ink focus:outline-none focus:border-accent-line">
-                          <option value="bind">Bind mount</option>
-                          <option value="volume">Named volume</option>
-                        </select>
-                      </td>
-                      <td className="px-2 py-1.5">
-                        <input type="text" value={v.host}
-                               onChange={(e) => setVol(i, { host: e.target.value })}
-                               title={v.type === 'volume' ? (v.external ? `Attaches the existing volume ${v.external}` : 'Creates a fresh volume') : undefined}
-                               placeholder={v.type === 'volume' ? 'e.g. mempalace-dbdata' : 'e.g. /mnt/shared'}
-                               className="w-full min-w-0 bg-raised border border-line-faint rounded-lg px-2 py-1.5 text-xs font-mono text-ink focus:outline-none focus:border-accent-line placeholder-ink-dim" />
-                        {volErrors[i].host && <p className="text-xs text-danger mt-0.5">{volErrors[i].host}</p>}
-                      </td>
-                      <td className="px-2 py-1.5">
-                        <input type="text" value={v.container}
-                               onChange={(e) => setVol(i, { container: e.target.value })}
-                               placeholder="e.g. /data"
-                               className="w-full min-w-0 bg-raised border border-line-faint rounded-lg px-2 py-1.5 text-xs font-mono text-ink focus:outline-none focus:border-accent-line placeholder-ink-dim" />
-                        {volErrors[i].dir && <p className="text-xs text-danger mt-0.5">{volErrors[i].dir}</p>}
-                      </td>
-                      <td className="px-2 py-1.5 text-center">
-                        <input type="checkbox" checked={!!v.readonly}
-                               onChange={(e) => setVol(i, { readonly: e.target.checked })}
-                               title="Read-only mount"
-                               className="w-3.5 h-3.5 accent-accent" />
-                      </td>
-                      <td className="px-1 py-1.5 text-center">
-                        <button type="button"
-                                onClick={() => { setVolDraft(prev => prev.filter((_, idx) => idx !== i)); setVolDirty(true) }}
-                                className="w-7 h-7 grid place-items-center rounded-md text-ink-dim hover:text-danger hover:bg-raised transition-colors"
-                                title="Remove volume">✕</button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              <div className="bg-sunken text-ink-faint uppercase tracking-wider text-[11px] px-2 py-2 flex items-center gap-2 font-medium">
+                <span className="w-32 shrink-0">Type</span>
+                <span className="flex-1 min-w-0">Host source / Volume name</span>
+                <span className="flex-1 min-w-0">Container path</span>
+                <span className="w-7 shrink-0 text-center" title="Read-only mount">Ro</span>
+                <span className="w-7 shrink-0"></span>
+              </div>
+              {volDraft.map((v, i) => (
+                <div key={i} className="border-t border-line-faint flex items-start gap-2 px-2 py-1.5">
+                  <div className="w-32 shrink-0">
+                    <select value={v.type || 'bind'}
+                            onChange={(e) => setVol(i, { type: e.target.value })}
+                            className="w-full h-7 bg-raised border border-line-faint rounded-lg px-1.5 text-xs text-ink focus:outline-none focus:border-accent-line">
+                      <option value="bind">Bind mount</option>
+                      <option value="volume">Named volume</option>
+                    </select>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <input type="text" value={v.host}
+                           onChange={(e) => setVol(i, { host: e.target.value })}
+                           title={v.type === 'volume' ? (v.external ? `Attaches the existing volume ${v.external}` : 'Creates a fresh volume') : undefined}
+                           placeholder={v.type === 'volume' ? 'e.g. mempalace-dbdata' : 'e.g. /mnt/shared'}
+                           className="w-full h-7 min-w-0 bg-raised border border-line-faint rounded-lg px-2 text-xs font-mono text-ink focus:outline-none focus:border-accent-line placeholder-ink-dim" />
+                    {volErrors[i].host && <p className="text-xs text-danger mt-0.5">{volErrors[i].host}</p>}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <input type="text" value={v.container}
+                           onChange={(e) => setVol(i, { container: e.target.value })}
+                           placeholder="e.g. /data"
+                           className="w-full h-7 min-w-0 bg-raised border border-line-faint rounded-lg px-2 text-xs font-mono text-ink focus:outline-none focus:border-accent-line placeholder-ink-dim" />
+                    {volErrors[i].dir && <p className="text-xs text-danger mt-0.5">{volErrors[i].dir}</p>}
+                  </div>
+                  <div className="w-7 shrink-0 h-7 flex items-center justify-center" title="Read-only mount">
+                    <input type="checkbox" checked={!!v.readonly}
+                           onChange={(e) => setVol(i, { readonly: e.target.checked })}
+                           title="Read-only mount"
+                           className="w-3.5 h-3.5 accent-accent" />
+                  </div>
+                  <div className="w-7 shrink-0">
+                    <button type="button"
+                            onClick={() => { setVolDraft(prev => prev.filter((_, idx) => idx !== i)); setVolDirty(true) }}
+                            className="w-7 h-7 grid place-items-center rounded-md text-ink-dim hover:text-danger hover:bg-raised transition-colors"
+                            title="Remove volume">✕</button>
+                  </div>
+                </div>
+              ))}
             </div>
           )}
 

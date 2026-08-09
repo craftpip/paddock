@@ -21,6 +21,7 @@ docs/
 │   └── overview.md                   ← pages: dashboard, create, agent detail, vault, backups, onboard
 ├── tabs/                             ← Agent Detail page tabs (modes)
 │   ├── overview.md                   ← all tabs/modes described
+│   ├── commands.md                   ← Commands mode: pill buttons, driver command API, per-type matrix
 │   ├── terminal.md                   ← the docked interactive shell (tmux + xterm)
 │   ├── web.md                        ← Web & Ports tab: web app publish, SSH expose, extra ports, the socat door
 │   ├── web-consoles.md               ← per-agent web consoles: ports, auth requirements, where + how to set the password

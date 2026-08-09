@@ -3,7 +3,9 @@
 MCP server management for an agent lives in the **Commands** mode (the old
 dedicated MCP tab was removed in the SPA migration). Configured servers show as
 chips; all **actions paste `openclaw mcp ...` commands into the docked
-terminal** — buttons never call a backend action API.
+terminal** — buttons never call a backend action API. This flow is
+openclaw-only; other agent types manage MCP through their driver buttons (see
+[commands.md](commands.md)).
 
 > Last updated: 2026-08-09
 

@@ -33,6 +33,10 @@ All six drivers expose the same shape: `type`/`label`, `templateDir`,
 `availableVersion()`. `opencode` additionally carries a `webApp` descriptor;
 `hermes` and `codex` carry `configFormat` (`yaml` / `toml`).
 
+The `commands` field is what renders as the pill buttons on the agent detail
+page's Commands tab; see [tabs/commands.md](../tabs/commands.md) for the full
+mechanism and the per-type button matrix.
+
 ## Openclaw (reference driver)
 
 The driver the framework was built around; `getDriver()` falls back to it for
@@ -81,9 +85,10 @@ CLI agent — no gateway daemon, the terminal is the interface.
   `OPENCODE_SERVER_PASSWORD` env (username always `opencode`), start command
   `opencode web --hostname 0.0.0.0 --port <port>`. See [tabs/web.md](../tabs/web.md).
 
-Command groups: Model (providers list/login/logout, models), Session
-(list/stats/export), MCP (list/add/auth), Agent (list/create), Other
-(version, debug info, debug config, upgrade).
+Command groups: Model (providers list/login/logout, models, models --refresh),
+Session (list, stats, export, session delete), MCP (list, add, auth, logout,
+debug), Agent (list/create), Plugin (install), Other (version, debug info,
+debug config, upgrade).
 
 Gotchas:
 
@@ -117,8 +122,9 @@ encoded.
 - `workspaceCapability` — `fixed`
 - `tuiCommand` — `picoclaw agent` (interactive chat — needs a model configured)
 
-Command groups: Status (status/version/model), Auth (auth status/models/login/
-logout), Cron (list/add/remove), Skills (list/list-builtin/search/install),
+Command groups: Status (status/version/model), Auth (status/models/login/
+logout/weixin/wecom), Channels (gateway), Cron (list/add/enable/disable/remove),
+Skills (list/list-builtin/install-builtin/search/install/show/remove),
 Other (update, migrate --dry-run).
 
 Model config shape: `agents.defaults.provider` + `agents.defaults.model_name`
@@ -157,9 +163,12 @@ The `/opt/data` special case; first driver to use a non-json `configFormat`.
 - `tuiCommand` — `hermes`
 
 Command groups: Status (status/version/doctor/config check), Model
-(model/fallbacks/config get model.default), Auth (login/logout/auth), Gateway
-(status/list/setup/restart), Cron (list/create), Skills (list/install), Memory
-(status/setup), Sessions (list/--continue), Other (mcp list, backup -q).
+(model/fallbacks/config get model.default), Auth (list/add/status/logout),
+Gateway (status/list/setup/restart), Cron (list/create/status/pause/resume/
+remove), Skills (list/install/search/check/update/uninstall), MCP
+(list/catalog/install/add/remove/test/serve), Memory (status/setup), Sessions
+(list/--continue/export/stats), Plugins (list/install/enable/disable),
+Other (backup -q, logs -n 100).
 
 Gotchas:
 
@@ -172,6 +181,8 @@ Gotchas:
   `INSTALL_DOCKER=1` rebuild is a verified no-op for hermes.
 - `hermes model` is interactive-only (needs a TTY); `hermes --version` vs
   `hermes version` — the driver uses `hermes version`.
+- `hermes login`/`logout` are **deprecated** — "use `hermes auth` to manage
+  credentials"; the driver buttons use the `auth` subcommands.
 - Debian base, so `apt-get` exists, but tmux + sqlite3 are still baked in.
 
 ## Codex
@@ -192,11 +203,16 @@ interface.
 - `workspaceCapability` — `editable`
 - `tuiCommand` — `codex`
 
-Command groups: Session (exec help, eval help), Other (version, help).
+Command groups: Provider (login/status/logout), MCP (list/get/add/remove/
+login/logout), Session (resume --last, review), Plugin (list/marketplace/add/
+remove), Health (doctor), Other (--version, update, --help).
 
 Gotchas:
 
 - `codex exec` (non-interactive) is confirmed working — good for scripts.
+- **`codex eval` does not exist** — the old driver's button just started the
+  interactive CLI with "eval" as the prompt (a broken stub). Validate any new
+  codex button against `codex --help` first.
 - The webui terminal's single-client policy can kick an earlier browser
   session when a probe connects to the same tmux session; Reconnect (via the
   confirm dialog) restores it. Not a codex issue.
@@ -218,8 +234,9 @@ dir.
 - `tuiCommand` — `claude`
 
 Command groups: Status (doctor, auth status, version), Auth (login/logout/
-setup-token), Session (continue last, list background, import codex config),
-MCP (list/login/logout), Other (update, install stable).
+setup-token), Session (continue last, start background, list background, all
+sessions), MCP (list/add/get/remove/login/logout), Plugin (list/marketplace/
+install/update/uninstall), Other (update, install stable).
 
 Gotchas:
 
@@ -229,6 +246,11 @@ Gotchas:
   auto-update/telemetry churn in a throwaway container.
 - `claude auth status` works headless (JSON); `claude doctor` needs a warm
   TTY/prompt and can look idle in `docker exec` — not a driver issue.
+- **`claude import` does not exist in 2.1.197** — the old `import codex
+  --dry-run` button was removed; it would have started an interactive session
+  with "import" as the prompt. Background agents use `claude --bg` and are
+  managed with the single `claude agents` command — there is no `claude
+  stop`/`logs`/`respawn`.
 - The Run TUI button drops into the interactive `claude` UI (theme picker
   renders) in the docked terminal.
 - Open question: `~/.claude.json` (MCP server state) lives outside `dataDir`
