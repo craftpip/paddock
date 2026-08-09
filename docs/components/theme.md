@@ -37,6 +37,19 @@ the rendered app
   switch — no component changes per theme. Opacity modifiers
   (`bg-panel/80`) compile to `color-mix()`.
 
+## Typography
+
+- UI font is **Bitter** (classic warm slab serif — the "horse" feel), loaded
+  from Google Fonts at the top of `src/client/src/index.css`
+  (`@import url('https://fonts.googleapis.com/css2?family=Bitter:wght@400;500;600;700&display=swap')`).
+- `--font-sans` in `@theme inline` maps Bitter to Tailwind's `font-sans`, and
+  a `body { font-family: ... }` rule sets it as the base UI font.
+- To change the font, swap all three spots (the `@import`, `--font-sans`, and
+  the `body` rule) to the new family — keep weights 400/500/600/700, matching
+  what components use (`font-medium`, `font-semibold`, `font-bold`).
+- `font-mono` stays Tailwind's default stack for code/terminal/IDs — never
+  theme the terminal, including its font.
+
 ## Semantic tokens
 
 | Token | Role |
