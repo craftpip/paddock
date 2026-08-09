@@ -22,13 +22,6 @@ function fmtTime(ts) {
   }
 }
 
-function randomPassword() {
-  const chars = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
-  const buf = new Uint32Array(16)
-  crypto.getRandomValues(buf)
-  return Array.from(buf, (n) => chars[n % chars.length]).join('')
-}
-
 export default function CreateAgent() {
   const navigate = useNavigate()
   const { name: urlName } = useParams()
@@ -47,13 +40,6 @@ export default function CreateAgent() {
   const [extraVolumes, setExtraVolumes] = useState([])
   const [extraPorts, setExtraPorts] = useState([])
   const [showAdvanced, setShowAdvanced] = useState(false)
-
-  // SSH expose
-  const [sshEnabled, setSshEnabled] = useState(false)
-  const [sshPort, setSshPort] = useState('')
-  const [sshCport, setSshCport] = useState('22')
-  const [sshPassword, setSshPassword] = useState('')
-  const [showSshPw, setShowSshPw] = useState(false)
 
   const [phase, setPhase] = useState(() => (urlName ? 'creating' : 'idle')) // idle | creating | done | failed
   const [lines, setLines] = useState([])
@@ -220,7 +206,6 @@ export default function CreateAgent() {
     wsActive,
     allowDocker,
     network,
-    sshEnabled,
     extraVolumes.some((v) => v.host && v.container),
     extraPorts.some((p) => p.host),
   ].filter(Boolean).length
@@ -303,16 +288,6 @@ export default function CreateAgent() {
       setError('Fix the highlighted additional volume / port fields before creating')
       return
     }
-    if (sshEnabled) {
-      if (sshPort.trim() && portIssue(sshPort)) {
-        setError(portIssue(sshPort) + ' (SSH host port)')
-        return
-      }
-      if (sshCport.trim() && portIssue(sshCport)) {
-        setError(portIssue(sshCport) + ' (SSH container port)')
-        return
-      }
-    }
     const vols = extraVolumes
       .filter((v) => v.host && v.host.trim() && v.container && v.container.trim())
       .map((v) => ({
@@ -323,7 +298,6 @@ export default function CreateAgent() {
     const ports = extraPorts
       .filter((p) => p.host && p.host.trim())
       .map((p) => ({ host: p.host.trim(), container: p.container.trim() }))
-    const sshCportTrim = sshCport.trim()
 
     try {
       const result = await api('/api/agents/create', {
@@ -335,10 +309,6 @@ export default function CreateAgent() {
           workspace_dir: wsHost.trim() ? (wsDir.trim() || defaultWsDir) : '',
           allowDocker,
           network,
-          sshEnabled,
-          port: sshEnabled ? sshPort.trim() : '',
-          sshContainerPort: sshEnabled && sshCportTrim ? sshCportTrim : '',
-          password: sshEnabled ? sshPassword.trim() : '',
           extraVolumes: vols,
           extraPorts: ports,
         },
@@ -425,7 +395,7 @@ export default function CreateAgent() {
           </button>
           {!showAdvanced && (
             <p className="text-xs text-ink-dim -mt-3 px-1">
-              Custom workspace, docker access, network routing, SSH expose, extra volumes and ports.
+              Custom workspace, docker access, network routing, extra volumes and ports.
             </p>
           )}
 
@@ -538,83 +508,6 @@ export default function CreateAgent() {
                 In peer mode, published ports (web, additional ports) are forwarded through a socat door on the peer's bridge — no limitation.
               </p>
             </div>
-          </div>
-
-          {/* Expose OpenSSH */}
-          <div className="bg-raised border border-line-faint rounded-xl p-5 space-y-5">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <h3 className="text-sm font-medium text-ink">Expose OpenSSH on a host port</h3>
-                <p className="text-xs text-ink-dim mt-1 max-w-md">
-                  Publishes the container's SSH server on a host port. The container
-                  port defaults to 22 (where sshd listens) — pick a distinct one for
-                  agents that share a network namespace, since they can't ALL bind
-                  port 22. Leave the host port empty to auto-allocate one (starting at 43817).
-                </p>
-              </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={sshEnabled}
-                onClick={() => setSshEnabled(!sshEnabled)}
-                className={`relative w-10 h-6 rounded-full transition-colors shrink-0 ${sshEnabled ? 'bg-accent' : 'bg-raised'}`}
-              >
-                <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${sshEnabled ? 'translate-x-4' : ''}`} />
-              </button>
-            </div>
-
-            {sshEnabled && (
-              <div className="space-y-4">
-                <div className="grid grid-cols-2 gap-4">
-                  <label className="block">
-                    <span className="text-xs text-ink-dim">Host port</span>
-                    <input type="number" min="1" max="65535" value={sshPort}
-                           onChange={(e) => setSshPort(e.target.value)}
-                           placeholder="auto (43817+)"
-                           className="mt-1 w-full bg-sunken border border-line rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line font-mono" />
-                    {sshPort.trim() && portIssue(sshPort) && (
-                      <span className="block text-xs text-danger mt-1">{portIssue(sshPort)}</span>
-                    )}
-                  </label>
-                  <label className="block">
-                    <span className="text-xs text-ink-dim">Container port (sshd in the container)</span>
-                    <input type="number" min="1" max="65535" value={sshCport}
-                           onChange={(e) => setSshCport(e.target.value)}
-                           placeholder="22"
-                           className="mt-1 w-full bg-sunken border border-line rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line font-mono" />
-                    {sshCport.trim() && portIssue(sshCport) && (
-                      <p className="text-xs text-danger mt-1">{portIssue(sshCport)}</p>
-                    )}
-                    {!sshCport.trim() && (
-                      <p className="text-xs text-ink-dim mt-1">Empty = 22 (the sshd default).</p>
-                    )}
-                  </label>
-                </div>
-
-                <label className="block">
-                  <span className="text-xs text-ink-dim">Root / SSH password (optional)</span>
-                  <div className="mt-1 flex items-center gap-2">
-                    <input type={showSshPw ? 'text' : 'password'} value={sshPassword}
-                           onChange={(e) => setSshPassword(e.target.value)}
-                           placeholder="Optional — set the root password"
-                           className="w-full bg-sunken border border-line rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line" />
-                    <button type="button" onClick={() => setShowSshPw(!showSshPw)}
-                            className="px-2 py-2 bg-raised hover:bg-raised-hover text-ink rounded-lg text-xs font-medium transition-colors shrink-0"
-                            title={showSshPw ? 'Hide password' : 'Show password'}>
-                      {showSshPw ? 'Hide' : 'Show'}
-                    </button>
-                    <button type="button" onClick={() => setSshPassword(randomPassword())}
-                            className="px-2 py-2 bg-raised hover:bg-raised-hover text-ink rounded-lg text-xs font-medium transition-colors shrink-0"
-                            title="Generate a random password">
-                      Generate
-                    </button>
-                  </div>
-                  <span className="block text-xs text-ink-dim mt-1">
-                    This is the password for <code className="text-ink">root</code> logins via SSH.
-                  </span>
-                </label>
-              </div>
-            )}
           </div>
 
           {/* Plan 28: Additional volumes */}

@@ -119,7 +119,6 @@ accordion below, then the create button:
 │  ▼ Optional settings                                │
 │    ┌ Workspace (host source + container path) ─────┐ │
 │    ┌ Container options (docker toggle, network ▼) ─┐ │
-│    ┌ Expose OpenSSH on a host port (toggle) ───────┐ │
 │    ┌ Additional volumes (+ Add volume rows) ───────┐ │
 │    ┌ Additional ports (+ Add port rows) ───────────┐ │
 │                                                     │
@@ -130,26 +129,24 @@ accordion below, then the create button:
 - **Name row** — Prefix (from CONTAINER_PREFIX, e.g. `pad`), PAD type dropdown
   (openclaw/opencode/picoclaw/hermes/codex), name input (alphanumeric +
   hyphens).
-- **Optional settings** — five cards, all optional:
+- **Optional settings** — four cards, all optional:
   1. **Workspace** — host source + fixed container path (locked per driver).
   2. **Container options** — "Allow docker in the container" toggle (docker.sock
      + CLI, rebuilds the image at create) and a Network dropdown of running
      containers (peer routing via `network_mode: container:`).
-  3. **Expose OpenSSH** — toggle + host port (empty = auto-allocate 43817+),
-     container port (default 22, distinct per peer-shared agent), optional root
-     password.
-  4. **Additional volumes** — dynamic `host → container` bind rows with a
+  3. **Additional volumes** — dynamic `host → container` bind rows with a
      readonly checkbox.
-  5. **Additional ports** — dynamic `host → container` TCP port rows.
+  4. **Additional ports** — dynamic `host → container` TCP port rows.
 
 The form validates client-side before enabling **Create my agent** (name,
 volume/port fields). Submit posts all options
-(`allowDocker`, `network`, `sshEnabled`, `port`, `sshContainerPort`, `password`,
-`extraVolumes`, `extraPorts`, `workspace_host`, `workspace_dir`) to
-`POST /api/agents/create`; the server pre-flights everything
-(`vm.validateAgentCreate`: network peer exists+running, extra volumes/ports,
-SSH container port, workspace mount, cross-agent host-port sweep) and returns
-`400` before the `202` if any check fails — nothing is created.
+(`allowDocker`, `network`, `extraVolumes`, `extraPorts`, `workspace_host`,
+`workspace_dir`) to `POST /api/agents/create`; the server pre-flights
+everything (`vm.validateAgentCreate`: network peer exists+running, extra
+volumes/ports, SSH container port if any, workspace mount, cross-agent
+host-port sweep) and returns `400` before the `202` if any check fails —
+nothing is created. OpenSSH exposure is **not** part of the create form; it is
+configured afterwards from the agent's [Web & Ports tab](../tabs/web.md).
 
 **Creation flow (live streaming):**
 1. Form submits via fetch — POST `/api/agents/create` returns `202` immediately and a background job starts
