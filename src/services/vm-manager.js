@@ -1483,6 +1483,32 @@ async function createAgent(name, opts = {}) {
   });
 }
 
+/** Remove an instance directory even when its data is root-owned. Agent
+ *  containers run as root and write their data dir as root; the webui runs as
+ *  uid 1000 and cannot unlink files inside root-owned directories, so a plain
+ *  `fs.rmSync` throws EACCES. On EACCES/EPERM the deletion finishes through a
+ *  one-shot root helper container built from our own webui image — the daemon
+ *  resolves the bind by HOST path (`HOST_WORKSPACE`), not the webui's
+ *  `/workspace` namespace. Falls back to a clear, actionable error. */
+async function removeInstanceDir(name, instDir) {
+  if (!fs.existsSync(instDir)) return;
+  try {
+    fs.rmSync(instDir, { recursive: true, force: true });
+    return;
+  } catch (e) {
+    if (e.code !== 'EACCES' && e.code !== 'EPERM') throw e;
+  }
+  const hostInstDir = path.join(HOST_WORKSPACE, 'instances', name);
+  try {
+    await runCmd('docker', ['run', '--rm', '-v', `${hostInstDir}:/d`, '--entrypoint', 'rm', 'paddock-webui:latest', '-rf', '/d'], { timeout: 120000 });
+  } catch {
+    throw new Error(
+      `Deleting '${name}' failed: the instance data is root-owned and the privileged cleanup could not remove it. Run this on the host: chown -R 1000:1000 ${hostInstDir}`
+    );
+  }
+  if (fs.existsSync(instDir)) fs.rmSync(instDir, { recursive: true, force: true });
+}
+
 async function removeVm(name) {
   try { await runCmd('docker', ['rm', '-f', name], { timeout: 30000 }); } catch {}
   // The socat door container (<name>-door, or the legacy <name>-web) survives
@@ -1509,7 +1535,7 @@ async function removeVm(name) {
       }
     } catch {}
   }
-  if (fs.existsSync(instDir)) fs.rmSync(instDir, { recursive: true, force: true });
+  await removeInstanceDir(name, instDir);
   // The per-instance image is this PAD's own tag — drop it too, otherwise every
   // create/delete cycle leaks a paddock-vm-<name>:latest image.
   try { await runCmd('docker', ['rmi', imageFor(name)], { timeout: 30000 }); } catch {}

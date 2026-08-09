@@ -124,8 +124,18 @@ The frontend polls agent state — no HTMX.
 1. `docker rm -f <name>`
 2. `docker rm -f <name>-door` (and the legacy `<name>-web`) — frees the host ports
 3. `docker network rm <name>_default` (error-swallowed) — frees the compose subnet
-4. `rm -rf instances/<name>/` (recursive delete)
+4. `rm -rf instances/<name>/` (recursive delete, via `removeInstanceDir`)
 5. `registry.removeAgentFromDb(name)` — deletes the `agents` row plus its activity/sessions rows
+
+**Root-owned data:** agent containers run as root and write root-owned files
+into the (webui-owned) instance dir, so a plain `fs.rmSync` from the webui
+(uid 1000) throws `EACCES`. `removeVm` now catches `EACCES`/`EPERM` and finishes
+the deletion with a one-shot root helper container built from our own
+`paddock-webui:latest` image (`docker run --rm -v <HOST_WORKSPACE>/instances/<name>:/d
+--entrypoint rm paddock-webui:latest -rf /d` — the daemon resolves the bind by
+HOST path, not the webui's `/workspace` namespace). If even that fails, the
+delete errors with the exact host `chown` command to run. Existing pads with
+root-owned data were normalized once with `chown -R node:node instances/`.
 
 ### Reset Flow (`resetVm`)
 
