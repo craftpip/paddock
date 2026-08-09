@@ -62,6 +62,76 @@ describe('vm-manager - Web door compose generation', () => {
   });
 });
 
+describe('vm-manager - pad default-network subnet (pool exhaustion fix)', () => {
+  // Each test runs with its OWN WORKSPACE_ROOT so meta writes never touch real
+  // instances; the module is re-required fresh and env is restored after.
+  function withTmp(fn) {
+    const TMP = '/tmp/subtest-' + Date.now() + '-' + Math.floor(Math.random() * 1e6);
+    const prevWs = process.env.WORKSPACE_ROOT;
+    const prevHost = process.env.HOST_WORKSPACE_ROOT;
+    process.env.WORKSPACE_ROOT = TMP;
+    process.env.HOST_WORKSPACE_ROOT = TMP;
+    delete require.cache[require.resolve('../services/vm-manager')];
+    const vm = require('../services/vm-manager');
+    try {
+      fn(TMP, vm);
+    } finally {
+      fs.rmSync(TMP, { recursive: true, force: true });
+      process.env.WORKSPACE_ROOT = prevWs;
+      process.env.HOST_WORKSPACE_ROOT = prevHost;
+      delete require.cache[require.resolve('../services/vm-manager')];
+    }
+  }
+
+  it('emits the persisted SUBNET on the default network', () => {
+    withTmp((TMP, vm) => {
+      const instDir = path.join(TMP, 'instances', 'pad-sub');
+      fs.mkdirSync(instDir, { recursive: true });
+      fs.writeFileSync(path.join(instDir, 'meta.env'), 'AGENT=opencode\nROOT_PASSWORD=pw\nSUBNET=10.200.42.0/24\n');
+      const compose = JSON.parse(vm.generateInstanceCompose('pad-sub', 'opencode', 'pw', ''));
+      assert.strictEqual(compose.networks.default.ipam.config[0].subnet, '10.200.42.0/24');
+    });
+  });
+
+  it('keeps the door webbridge network alongside the default subnet', () => {
+    withTmp((TMP, vm) => {
+      const instDir = path.join(TMP, 'instances', 'pad-sub');
+      fs.mkdirSync(instDir, { recursive: true });
+      fs.writeFileSync(path.join(instDir, 'meta.env'), 'AGENT=opencode\nROOT_PASSWORD=pw\nSUBNET=10.200.42.0/24\n');
+      const yaml = vm.generateInstanceCompose('pad-sub', 'opencode', 'pw', '22001', {
+        network: 'gluetun-global',
+        webPeerNetwork: 'gluetun_default',
+      });
+      const compose = JSON.parse(yaml);
+      assert.strictEqual(compose.networks.default.ipam.config[0].subnet, '10.200.42.0/24');
+      assert.strictEqual(compose.networks.webbridge.name, 'gluetun_default');
+    });
+  });
+
+  it('leaves the compose subnet-less when SUBNET is absent', () => {
+    withTmp((TMP, vm) => {
+      const instDir = path.join(TMP, 'instances', 'pad-sub2');
+      fs.mkdirSync(instDir, { recursive: true });
+      fs.writeFileSync(path.join(instDir, 'meta.env'), 'AGENT=opencode\nROOT_PASSWORD=pw\n');
+      const yaml = vm.generateInstanceCompose('pad-sub2', 'opencode', 'pw', '');
+      assert.ok(!yaml.includes('"networks"'), 'no networks block without a persisted subnet');
+    });
+  });
+
+  it('writeInstanceCompose persists a fresh pool subnet for a never-started pad', () => {
+    withTmp((TMP, vm) => {
+      const instDir = path.join(TMP, 'instances', 'pad-sub3');
+      fs.mkdirSync(instDir, { recursive: true });
+      fs.writeFileSync(path.join(instDir, 'meta.env'), 'AGENT=opencode\nROOT_PASSWORD=pw\n');
+      vm.writeInstanceCompose('pad-sub3', 'opencode', 'pw', '');
+      const subnet = vm.readMeta(instDir).SUBNET;
+      assert.ok(/^10\.200\.\d{1,3}\.0\/24$/.test(subnet), `subnet in the pad pool, got ${subnet}`);
+      const compose = JSON.parse(fs.readFileSync(path.join(instDir, 'docker-compose.yml'), 'utf8'));
+      assert.strictEqual(compose.networks.default.ipam.config[0].subnet, subnet, 'compose and meta agree');
+    });
+  });
+});
+
 describe('vm-manager - Web start hook', () => {
   process.env.WORKSPACE_ROOT = '/workspace';
   process.env.HOST_WORKSPACE_ROOT = '/workspace';

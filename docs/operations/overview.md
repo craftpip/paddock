@@ -22,6 +22,18 @@ Streaming routes:
 
 Why SSE not WebSocket: `/ws/terminal/:name` rejects connections while the container isn't running — exactly the window creation needs to stream through (build runs before the container exists). SSE is one-way, auto-reconnects with `Last-Event-ID`, and needs no changes to the wss handler.
 
+### Troubleshooting: "all predefined address pools have been fully subnetted"
+
+A create that dies at the **up** step with this error means the host daemon's
+`default-address-pools` are exhausted — the pad's compose left its `default`
+network subnet unspecified, so the daemon tried to allocate one from its finite
+pools (`192.168.0.0/16` at `/20`). New pads no longer hit this: the compose
+generator carves a fixed `/24` out of `10.200.0.0/16` (persisted as `SUBNET` in
+`meta.env`) and declares it explicitly. See `docs/backend/services.md` (pad
+subnet pool). Delete the leftover instance dir + its image (`docker rmi
+paddock-vm-<name>:latest`) if the failed create left state behind, then retry
+from the form.
+
 ### Start / Stop / Restart
 
 POST routes use docker compose lifecycle:

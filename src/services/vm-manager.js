@@ -39,6 +39,82 @@ function dockerVolumeExists(name) {
   }
 }
 
+/** Sync probe whether a Docker network with the given name exists (cheap
+ *  metadata call). Never throws. */
+function dockerNetworkExists(name) {
+  try {
+    const r = execFileSync('docker', ['network', 'inspect', name, '--format', '{{.Name}}'], { stdio: 'pipe', timeout: 10000 });
+    return !!(r && r.toString().trim());
+  } catch {
+    return false;
+  }
+}
+
+/** Pad `default`-network subnet pool: 10.200.0.0/16 carved into /24s (256
+ *  pads). Deliberately disjoint from the daemon's default address pools
+ *  (172.16.0.0/12, 192.168.0.0/16) and the office LAN (10.69.0.0/16). The
+ *  daemon only hands out subnets from its pools when a compose leaves the
+ *  subnet unspecified — once a pool is fully subnetted, creating ANY new
+ *  bridge network fails with `all predefined address pools have been fully
+ *  subnetted`. Declaring an explicit subnet in each generated compose
+ *  sidesteps the pools entirely. */
+const PAD_SUBNET_POOL = '10.200.0.0/16';
+const PAD_SUBNET_PREFIX = 24;
+
+/** Third octets of 10.200.x.0/24 already claimed by existing Docker networks,
+ *  so a fresh pad never collides with another pad or an unrelated project. */
+function usedPadSubnetOctets() {
+  const used = new Set();
+  let ids = [];
+  try {
+    const r = execFileSync('docker', ['network', 'ls', '-q'], { stdio: 'pipe', timeout: 15000 });
+    ids = r.toString().trim().split('\n').filter(Boolean);
+  } catch {
+    return used;
+  }
+  const re = /(\d+)\.(\d+)\.(\d+)\.(\d+)\/(\d+)/g;
+  for (const id of ids) {
+    try {
+      const r = execFileSync('docker', ['network', 'inspect', id, '--format', '{{range .IPAM.Config}}{{.Subnet}} {{end}}'], { stdio: 'pipe', timeout: 10000 });
+      let m;
+      while ((m = re.exec(r.toString())) !== null) {
+        const a = +m[1], b = +m[2], c = +m[3], prefix = +m[5];
+        if (a === 10 && b === 200 && prefix === PAD_SUBNET_PREFIX) used.add(c);
+      }
+    } catch {}
+  }
+  return used;
+}
+
+/** The lowest free /24 in the pad pool, or '' when the pool is full. */
+function pickFreePadSubnet() {
+  const used = usedPadSubnetOctets();
+  for (let oct = 0; oct < 256; oct++) {
+    if (!used.has(oct)) return `10.200.${oct}.0/${PAD_SUBNET_PREFIX}`;
+  }
+  return '';
+}
+
+/** Ensure this pad's compose declares a concrete subnet for its `default`
+ *  bridge network. Existing networks (older pads) are left untouched —
+ *  declaring a different subnet would force a disruptive network recreate.
+ *  For a network that doesn't exist yet, carve a fresh /24 out of the pad pool
+ *  and persist it (meta SUBNET) so every later regen keeps the same subnet.
+ *  Returns the subnet, or '' when the compose should stay subnet-less. */
+function ensurePadSubnet(name) {
+  const instDir = path.join(INSTANCES_DIR, name);
+  if (!fs.existsSync(instDir)) return '';
+  const meta = readMeta(instDir);
+  if (meta.SUBNET) return meta.SUBNET;
+  if (dockerNetworkExists(`${name}_default`)) return '';
+  const subnet = pickFreePadSubnet();
+  if (!subnet) {
+    throw new Error(`The pad subnet pool (${PAD_SUBNET_POOL}) is exhausted — every /24 is taken. Delete a pad to free one, or extend the pool.`);
+  }
+  setMetaFlag(name, 'SUBNET', subnet);
+  return subnet;
+}
+
 function readMeta(vmDir) {
   const meta = {};
   const metaFile = path.join(vmDir, 'meta.env');
@@ -732,17 +808,28 @@ function generateInstanceCompose(name, agent, password, port, opts = {}) {
     }
   }
 
+  // The persisted SUBNET (written by ensurePadSubnet on first write) anchors
+  // the pad's `default` network to a fixed /24 in the pad pool — see the pool
+  // constants above. Without it, compose leaves the subnet unspecified and the
+  // daemon allocates from its finite default-address-pools, which exhaust.
+  let allNetworks = networks;
+  const subnet = (readMeta(path.join(INSTANCES_DIR, name)).SUBNET || '').trim();
+  if (subnet) {
+    allNetworks = { default: { ipam: { config: [{ subnet }] } }, ...(networks || {}) };
+  }
+
   // JSON is valid YAML. Serializing the structured compose model avoids fragile
   // hand-built YAML where a Compose interpolation such as `${VAR:-default}`
   // can be parsed as YAML syntax.
   return JSON.stringify({
     services,
-    ...(networks ? { networks } : {}),
+    ...(allNetworks ? { networks: allNetworks } : {}),
     ...(Object.keys(namedVolumes).length ? { volumes: namedVolumes } : {}),
   }, null, 2) + '\n';
 }
 
 function writeInstanceCompose(name, agent, password, port, opts = {}) {
+  ensurePadSubnet(name);
   const yaml = generateInstanceCompose(name, agent, password, port, opts);
   const composePath = instanceComposePath(name);
   fs.mkdirSync(path.dirname(composePath), { recursive: true });
