@@ -4,7 +4,8 @@
 complete (add / list / probe / remove of an HTTP MCP server verified against
 PADs of **all six** agent types: openclaw, opencode, picoclaw, hermes, codex,
 claude — full matrix in §3b; reachability: LAN IP 10.69.1.164 → 200 from every
-agent container). implementation 0%. No agent has the Paddock MCP wired in yet.
+agent container). Credential bootstrap, grants, and per-driver action contracts
+are designed below. implementation 0%. No agent has the Paddock MCP wired in yet.
 This is a **standalone goal** — it was never part of
 the multiple-agents umbrella (plan 08, absorbed into `docs/` 2026-08-09, covers
 driver goals 1-6 only).
@@ -82,57 +83,146 @@ tools by the agent itself.
   document it; a per-instance computed URL (mirroring how `web.json` binds) is
   cleaner than a hardcoded one.
 - **Key provisioning:** who creates the key and where does it live?
-  - Manual: user creates an API key on the Profile page and pastes it via the
-    MCP flow (respects the "paste commands, not APIs" rule) — a new
-    CommandsPane button "Connect Paddock MCP" builds the `mcp add` command and
-    asks for the key.
-  - Auto: backend generates a key for the agent owner and injects it into the
-    agent's config at create/recreate (secret-in-config concerns — see below).
+  - Manual bootstrap: user creates a dedicated, restricted API key on the
+    Profile page and types it into a terminal `read -rsp` prompt emitted by the
+    "Connect Paddock MCP" command. The key is never included in the pasted
+    command or frontend state.
+  - Auto-provisioning is out of scope for the first implementation. It would
+    require a secure one-time delivery path and must not silently inject an
+    owner/admin key into an agent config.
 - **Secret handling:** the key ends up in the agent's config file
-  (openclaw.json / config.toml / …). Docs note non-`json` configs are served
-  and written verbatim with no redaction (AGENTS.md) — the plan must either
-  route the key through an env var referenced by the MCP config (never stored
-  literally) or accept and document the trade-off.
-- **Ownership:** the key must belong to the agent's **owner**, so Paddock's own
-  ACL (`canAccess`) keeps agents scoped to their user's fleet.
+  (openclaw.json / config.toml / …) or a driver-supported persistent secret
+  reference. Docs note non-`json` configs are served and written verbatim with
+  no redaction (AGENTS.md), so each driver's storage location and trade-off must
+  be documented; a dedicated, restricted, revocable key limits exposure.
+- **Ownership:** the key belongs to the agent's owner, but server-enforced target
+  and tool grants further restrict it below the owner's normal fleet access.
 
-### 2. Standardized driver MCP interface (the core of this plan)
+### 2. Driver MCP interface (the core of this plan)
 
-Every driver owns the MCP commands for its agent type. Add a **`mcp` object to
-each driver** whose functions return the **shell command string** for each
-operation (the terminal is the interface — CommandsPane pastes the string):
+Every driver owns MCP operations for its agent type. Add a capability-aware
+**`mcp` object to each driver**. It returns fully shell-quoted command strings
+or safe native config-patch commands; the terminal remains the interface and
+CommandsPane pastes the resulting command:
 
 ```js
 // src/services/drivers/openclaw.js
 mcp: {
   serverName: 'paddock',
-  list:   (opts) => 'openclaw mcp list',
-  add:    (opts) => `openclaw mcp add ${opts.serverName} --no-probe ` +
-                      `--url ${sq(opts.url)} --transport streamable-http ` +
-                      `--header 'Authorization: Bearer ${opts.token}'`,
-  remove: (opts) => `openclaw mcp unset ${opts.serverName}`,
-  test:   (opts) => `openclaw mcp probe ${opts.serverName}`,
+  capabilities: { list: true, add: 'command', remove: 'command', test: true },
+  buildConnect: (opts) => '<read token; add Paddock MCP command>',
+  buildDisconnect: () => 'openclaw mcp unset paddock',
+  buildInspect: () => 'openclaw mcp list',
+  buildTest: () => 'openclaw mcp probe paddock',
 }
 ```
 
-- **One standardized call site.** `src/services/drivers/index.js` gains a
-  shared `mcpCommands(type, opts)` (or a `src/services/drivers/mcp.js` helper)
-  that delegates to `getDriver(type).mcp.list/add/remove/test`. Callers never
-  switch on agent type — they call the one function and get the right command.
+- **One shared call site.** `src/services/drivers/index.js` gains a driver MCP
+  helper that delegates to the available `build*` operation. Callers never
+  switch on agent type; unsupported operations return an explicit capability,
+  not a made-up command.
 - **Backend serves it.** Extend `GET /api/agent-types/:type/commands` to include
   an `mcp` block built from `driver.mcp` (or add `/api/agent-types/:type/mcp`),
   so the frontend renders the MCP group from the driver for **every** agent
   type. CommandsPane's hardcoded openclaw MCP pills (CommandsPane.jsx:161-263)
   get replaced by this driver-driven group.
-- **Token never lives in the endpoint.** The backend builds the commands with a
-  placeholder; the frontend prompts for the API key and the token is
-  interpolated client-side right before `run(cmd)` (matches the
-  paste-commands-not-APIs rule). Drivers whose CLI can't take an inline header
-  (codex) instead emit a command that exports/references an env var.
+- **Token never lives in the endpoint or frontend state.** The backend builds a
+  shell-quoted, driver-specific bootstrap command that reads the API key at the
+  terminal with `read -rsp`; the variable is used only while writing the
+  driver's persistent MCP configuration, then unset. Drivers that cannot take
+  an inline header use their native config patch or a persistent env-var
+  reference.
 - **Least privilege:** `add` should default to `--no-probe` (the probe fires an
   authenticated round-trip the user may not expect) and the Paddock key handed
   to agents may scope tools down (exclude `create_agent` / `delete_agent` /
   `recreate reset`) — see Open questions.
+
+### 2a. Resolved connection and credential flow
+
+There are two credential flows. They must stay separate:
+
+1. **Human bootstrap: connect an agent to Paddock MCP.** The agent has no
+   Paddock MCP connection yet, so this cannot be performed by an MCP tool. The
+   user creates a dedicated, revocable Paddock API key in Profile, selects the
+   intended grant, clicks **Connect Paddock MCP**, and types the key into a
+   terminal `read -rsp` prompt. The generated command contains no literal key
+   and the key is not held in React state:
+
+   ```sh
+   read -rsp 'Paddock API key: ' PADDOCK_MCP_TOKEN; echo
+   <driver-specific add command using "$PADDOCK_MCP_TOKEN">
+   unset PADDOCK_MCP_TOKEN
+   ```
+
+   The driver config necessarily persists the credential (or a persistent
+   secret reference where that driver supports one), because the agent needs it
+   after the shell exits. The key must never appear in the pasted command,
+   terminal history, command descriptions, frontend/API logs, or toast text.
+   The UI immediately offers a read-only list/test command after setup.
+
+2. **LLM credential insertion after connection: add a model/provider.** The
+   LLM calls Paddock MCP `exec` with a separate redacted `stdin` field, not a
+   secret embedded in `command`. `exec` writes that value to the child stdin and
+   must not log or return it. This enables `openclaw models auth paste-api-key`
+   and equivalent non-interactive provider commands. Plan 35a owns the catalog,
+   preservation/merge, and verification rules for this flow.
+
+#### Grants are server-enforced, not a client-side tool filter
+
+The bootstrap key is a dedicated agent key, never the owner's normal/admin API
+key. API-key scopes already exist in storage but are not currently enforced by
+the MCP server; implementation must enforce them before this button is enabled.
+Every key carries both an owner and a Paddock grant:
+
+- **Target grant:** default = only the PAD being connected; optional explicit
+  grant = every PAD owned by the same user. An admin-owned agent never inherits
+  unrestricted admin access by accident.
+- **Tool grant:** default = read/inspect, workspace read/write, and `exec` for
+  the allowed target. Lifecycle, recreate/update, create, delete, and reset are
+  separate opt-in grants. `reset` is always separately confirmation-gated.
+- `list_agents` is filtered to the target grant, and every tool validates both
+  the tool grant and target grant before existing owner/admin checks.
+- Driver-level include/exclude filters are a useful second layer for tool
+  discovery, but never the authorization boundary.
+
+Disconnect/revoke flow: remove the server through the driver action, revoke the
+dedicated key in Profile, verify `mcp list` no longer contains `paddock`, then
+record the result without printing the old credential. Deleting an agent must
+revoke keys bound only to that agent. Rotating a key repeats the human bootstrap
+flow, verifies the new connection, then revokes the old key.
+
+#### Capability-aware driver actions
+
+`driver.mcp` cannot promise `list/add/remove/test` strings for every driver:
+the installed Picoclaw has no MCP CLI, OpenCode has no CLI remove, and Hermes
+requires a YAML config patch for authenticated add. Define actions by capability
+instead:
+
+```js
+mcp: {
+  capabilities: { list: true, add: 'command', remove: 'configPatch', test: false },
+  buildConnect(opts),
+  buildDisconnect(opts),
+  buildInspect(opts),
+  buildTest(opts), // null when unsupported
+}
+```
+
+Each builder returns a fully shell-quoted command or a safe, driver-owned
+config-patch command. No caller concatenates URL, name, header, or token text.
+The Commands pane renders only supported actions and explains unsupported test
+or removal behavior. Config patchers must parse and rewrite their native format
+(JSONC/YAML/TOML); no string replacement. The implementation must document the
+exact persistent credential location for each driver.
+
+#### Endpoint source and release gate
+
+Do not bake `10.69.1.164` into a generated command. Add one configured,
+validated `PADDOCK_MCP_URL` (or equivalently named) internal endpoint setting.
+The computed URL is shown to the user before bootstrap and tested from the
+target container. LAN-IP fallback is permitted only when explicitly configured.
+Peer-mode connectivity is a release gate: no driver is marked complete until a
+peer-mode PAD connects, lists tools, and invokes a read-only Paddock MCP tool.
 
 ### 3. Per-driver research (2026-08-09, from current docs + live CLI verification)
 
@@ -348,8 +438,9 @@ LAN-IP answer. A peer-mode agent must be tested live before locking in.
       per-driver gotchas in §3b. All configs restored to pre-test state.
 - [ ] Decide reachable host URL (default vs peer mode) + verify on a peer-mode
       agent and on a hermes/codex/claude PAD
-- [ ] Standardized `driver.mcp` object (list/add/remove/test) in all 6 drivers
-- [ ] Shared `mcpCommands(type, opts)` call site in `src/services/drivers/index.js`
+- [ ] Capability-aware `driver.mcp` actions in all 6 drivers; unsupported
+      list/add/remove/test paths are explicit
+- [ ] Shared driver MCP call site in `src/services/drivers/index.js`
 - [ ] Backend serves the driver `mcp` commands; CommandsPane MCP group is
       driver-driven, not hardcoded to openclaw
 - [ ] "Connect Paddock MCP" button (URL + key prompt) on `test-agents`
@@ -359,6 +450,14 @@ LAN-IP answer. A peer-mode agent must be tested live before locking in.
 - [ ] Peer-mode reachability verified
 - [ ] opencode + picoclaw + hermes + codex + claude wired + verified
 - [ ] Docs updated (`docs/tabs/mcp.md` + drivers)
+- [ ] Server-enforced API-key target/tool grants; dedicated agent-key create,
+      revoke, rotate, and delete cleanup flow
+- [ ] Human bootstrap command reads the Paddock key without placing it in the
+      pasted command/history; all six driver credential locations documented
+- [ ] MCP `exec.stdin` secret channel implemented, redaction tested, and
+      OpenClaw model-provider insertion verified end to end (plan 35a)
+- [ ] JSONC/YAML/TOML MCP config patch paths are parser-based and tested
+- [ ] Configured Paddock MCP endpoint validated from a peer-mode PAD
 
 ## Verification
 

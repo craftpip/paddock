@@ -81,7 +81,9 @@ show a read-only empty state. See [web.md](web.md).
 
 Container logs viewer, streamed through the persistent log store
 (`instances/<name>/logs/container.log`, appended incrementally across
-recreates).
+recreates). Published web servers retain their own `<dataDir>/web.log` and
+also stream output into the container log, so startup and runtime errors appear
+here.
 
 **Features:** tail-count selector, auto-scroll toggle, log-level filter
 (All/Info/Warn/Error), text search, timestamp toggle, streaming dot indicator.

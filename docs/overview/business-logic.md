@@ -45,7 +45,7 @@ DOCKER=1                           # only when docker access is enabled
 WORKSPACE_HOST=...                 # custom workspace bind (plan 24), when set
 WORKSPACE_DIR=...
 EXTRA_PORTS=[{"host":8080,"container":8080}]   # JSON array, when set
-EXTRA_VOLUMES=[{"host":"/mnt/data","container":"/data","readonly":false}]   # JSON array, when set
+EXTRA_VOLUMES=[{"host":"/mnt/data","container":"/data","readonly":false},{"type":"volume","name":"mempalace-data","container":"/data","readonly":false,"external":"mempalace_mempalace-data"}]   # JSON array (binds + named volumes), when set
 ```
 
 This file is **critical**. Without it, the PAD is invisible to the discovery system.
@@ -235,6 +235,69 @@ volumes:
 - The `HOST_WORKSPACE_ROOT` env var tells the webui container what the host-side path is
 - `generateInstanceCompose()` uses this to produce `- ${HOST_WORKSPACE_ROOT}/instances/${name}/${agent}:${dataDir}`
 - Without this fix, newly created PADs have empty workspaces
+
+---
+
+## Workspace as Project
+
+The folder the user picks as an agent's workspace **is the project** — this
+holds uniformly for every agent type (personal, developer, or anything else);
+there is no personal-vs-developer bifurcation. When that folder contains a
+`docker-compose.yml`/`compose.yml`, the Create Agent form reads the project's
+volumes and **pre-fills** the Additional volumes rows for review/edit/delete
+(plan 40). The pre-fill is a convenience, never a forced value.
+
+### Visibility: one-to-one mounts
+
+A project folder must be bind-mounted into paddock **at the same path it has
+on the host** (one-to-one) — only then can the webui probe it, read its
+compose file, and trust "exists in the container" ≈ "valid host source for the
+daemon". This is a one-time manual step in `docker-compose.yml` (e.g.
+`- /www2:/www2:ro`) + a webui recreate; no registry or env var is involved —
+the mount itself is the source of truth. A `:ro` mount is readable for probing
+but the webui cannot create new folders inside it. The path must not collide
+with paddock's own mounts (`/app`, `/workspace`) or system dirs
+(`GUARD_SYSTEM_DIRS`).
+
+### Discovery order (compose first, container supplement)
+
+`discoverVolumes()` (`services/path-probe.js`) reads the workspace folder's
+compose file via `docker compose config --format json` (the compose CLI lives
+in paddock — `${VAR}`, `.env`, `extends`, and override files resolve like the
+real deploy), then supplements with `docker inspect` mounts from the project's
+containers that the file did not already cover — so `docker run`-only mounts
+surface too, and stopped projects still work (mounts are stored config). Only
+compose files can serve never-started projects (no container object exists).
+Named volumes are annotated with their full Docker volume name (`external`)
+and whether it exists right now. Reference: `backend/services.md` — Path Probe.
+
+### Security filters (D6)
+
+`/var/run/docker.sock`, system-dir sources, anonymous volumes, and `tmpfs`
+mounts are never inherited into an agent container. The raw compose file is
+never served — the discovery endpoint returns the volume list only, because
+compose files can contain secrets.
+
+### Generated compose shape (D5)
+
+Each inherited named volume becomes a service mount plus a top-level
+`volumes:` entry: `external: true` when the volume exists (attach the
+project's real data), a fresh-volume declaration when it does not (so
+never-started projects get a working volume on first up).
+
+**Dev-environment rule for binds:** inherited bind mounts are **one-to-one** —
+the container path is set to the host source path (`/www1/navigator` →
+`/www1/navigator`, not the compose's own destination). The agent container
+mirrors the host filesystem layout, so you never type a separate container
+path. Only named volumes keep their compose destination.
+
+### Behavioral note — persona bootstrap
+
+openclaw `setup --baseline` (and the other setups) bootstrap persona files
+into the workspace (`BOOTSTRAP.md`, `SOUL.md`, `HEARTBEAT.md`, `TOOLS.md`,
+`USER.md`, `IDENTITY.md`, `openclaw-workspace-state.json`). For a
+project-as-workspace agent these land in the user's real project folder —
+expected, not a bug: the project is the agent's home.
 
 ---
 

@@ -89,6 +89,13 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
 - **Job logs are in-memory** — `docker restart paddock` kills running
   update/create jobs and their SSE streams.
 - **Test PADs:** `test-agents` for general testing.
+- **`src/data/app.db*` must stay `1000:1000`-owned.** The webui container runs
+  as uid 1000 (`user: ${PUID:-1000}`) and `/app/data` is a bind mount of
+  `src/data/` — if the DB files become host-root-owned, every write fails with
+  `attempt to write a readonly database` (surfaces as "Create failed", crashed
+  requests in `api-keys.js`, etc.). Fix: `chown 1000:1000 src/data/app.db*`.
+  Never run `docker exec paddock node …` (runs as root) against code paths that
+  open the DB, or it may recreate root-owned DB files.
 
 ## Workflow Commands
 

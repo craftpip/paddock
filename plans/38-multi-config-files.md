@@ -1,15 +1,17 @@
 # Plan 38 — Multi-Config Editor (Per-Agent Config File Picker)
 
-## Status: Proposed (2026-08-09) — not started. 0/6 phases done. Online research
-for all six agent types is complete and embedded below (plan 38 embeds it
-directly, no sub-files needed).
+## Status: Proposed (2026-08-09) — not started. 0/6 phases done. Research is
+embedded below; review blockers are resolved in the plan: the live SPA API is
+the backend target, OpenCode's actual path is used, parser and secret handling
+are explicit, path and symlink checks are required, and the test matrix covers
+the new contracts.
 
 ## Goal
 
 Every agent type ships **more than one configuration file**. Today the Config
 tab (`ConfigTab` in `AgentDetail.jsx`) hard-codes a single file from
 `driver.configFile` (`openclaw.json`, `config.json`, `config.yaml`,
-`config.toml`, `settings.json`, `opencode.json`). This plan:
+    `config.toml`, `settings.json`, `config/opencode.json`). This plan:
 
 1. Identifies, per agent type, **the real config files** the agent reads
    (verified against official docs online).
@@ -25,7 +27,10 @@ Sources: official docs (docs.openclaw.ai, opencode.ai/docs/config,
 docs.picoclaw.io, hermes-agent.nousresearch.com/docs,
 developers.openai.com/codex, code.claude.com/docs) searched 2026-08-09.
 Container paths use the driver `dataDir` as the base (matches how Paddock
-bind-mounts `config_root`).
+bind-mounts `config_root`). OpenCode is an exception to the simple root-file
+layout: its image sets `XDG_CONFIG_HOME=/root/.opencode/config`, so the active
+global file is `/root/.opencode/config/opencode.json`. The driver metadata must
+match this actual path rather than the stale `configFile: opencode.json` value.
 
 ### OpenClaw — base `~/.openclaw` (`/root/.openclaw`)
 
@@ -38,11 +43,11 @@ bind-mounts `config_root`).
 OpenClaw supports splitting config via `$include` (e.g. `plugins.json5`) —
 the picker lists the known core files; `$include`d files resolve at runtime.
 
-### Opencode — base `~/.config/opencode` (`/root/.opencode` in driver)
+### Opencode — base `/root/.opencode` in the Paddock image
 
 | File | Format | Purpose | Edit in UI |
 |---|---|---|---|
-| `opencode.json` | JSONC | main config (model, providers, permissions, agents, mcp) | yes (primary, secret-redacted) |
+| `config/opencode.json` | JSONC | main config (model, providers, permissions, agents, mcp) | yes (primary, secret-redacted) |
 | `tui.json` | JSON | TUI-specific settings | yes |
 | `AGENTS.md` | text | global instructions (rules) | optional |
 
@@ -84,7 +89,7 @@ the picker lists the known core files; `$include`d files resolve at runtime.
 ### Cross-type summary
 
 - **Primary config** (already served today): openclaw `openclaw.json`,
-  opencode `opencode.json`, picoclaw `config.json`, hermes `config.yaml`,
+  opencode `config/opencode.json`, picoclaw `config.json`, hermes `config.yaml`,
   codex `config.toml`, claude `settings.json`.
 - **Secrets files** worth editing in the UI: openclaw `.env`, picoclaw
   `.security.yml`, hermes `.env`.
@@ -115,26 +120,54 @@ configFiles: [
 
 - `path` is **relative to the driver `dataDir`** (the container path the agent
   actually reads); the frontend renders the full container path.
-- `format`: `json | json5 | yaml | toml | text`. Only the primary JSON/JSON5
-  file gets secret redaction + `preserveSecrets` merge on save (existing
-  behavior). All other files are served/written **verbatim**.
+- `format`: `json | json5 | jsonc | yaml | toml | text`. Only the primary
+  JSON/JSON5/JSONC file gets secret redaction + `preserveSecrets` merge on
+  save. All other files are served/written **verbatim**.
 - `editable: false` lists a file read-only (view + copy, no Save).
-- `listDrivers()` in `drivers/index.js` and the config route expose it.
+- `listDrivers()` in `drivers/index.js` and the live config API expose it.
+- The OpenCode primary entry is `path: 'config/opencode.json'`; update its
+  driver `configFile` to that path so registry model parsing, config reads, and
+  the picker share one source of truth.
 
-### 2. Backend (`vm-manager.js` + `routes/agents.js`)
+#### Format and Secret Policy
+
+- Add the required parser dependency to the backend image/package for JSON5 and
+  JSONC (JSONC can use the same JSON5 parser if its accepted syntax matches the
+  documented config contract). Do not depend on packages installed only in the
+  frontend.
+- `json` uses strict `JSON.parse`; `json5`/`jsonc` use the selected parser;
+  `yaml`, `toml`, and `text` are not parsed by the API and are written exactly
+  as submitted, apart from the existing final-newline convention.
+- Redact configured secret keys on primary JSON-family reads and preserve the
+  original values when the submitted document contains `[REDACTED]`. Never
+  redact or merge arbitrary secondary files unless their driver entry
+  explicitly declares a future policy.
+
+### 2. Backend (`vm-manager.js` + live SPA API in `app.js`)
 
 - `readAgentConfig(agent, relPath = driver.configFile)` — generalize the
-  existing function (`vm-manager.js:2307`) to take a relative path within
-  `config_root`; keep secret handling only for primary JSON/JSON5.
-- **Path-traversal guard** (critical): resolved path must stay under
-  `agent.config_root` — reject `..`, absolute, or otherwise escaping paths
-  with 400.
+  existing function (`vm-manager.js:2360`) to take a relative path within
+  `config_root`; keep secret handling only for primary JSON/JSON5/JSONC. Update the
+  live React API routes in `app.js` (`/api/agents/:name/config`), not the dead
+  EJS routes in `routes/agents.js`.
+- **Path-traversal guard** (critical): accept only a driver-declared relative
+  path; reject `..`, absolute paths, NUL bytes, encoded traversal, and unknown
+  files with 400. Resolve the candidate and its real parent with `realpath` so
+  a symlink inside `config_root` cannot escape the config root. Do not follow
+  symlinks that resolve outside `agent.config_root`.
 - `GET /api/agents/:agentId/configs` → `{ files: [{ name, label, path,
-  fullPath, format, editable, primary, exists }] }` (no file contents).
+  fullPath, hostPath, format, editable, primary, exists }] }` (no file
+  contents). `fullPath` is the container path (`driver.dataDir + path`);
+  `hostPath` is the server-side `agent.config_root + path` and is returned only
+  for the authenticated UI, never as a writable user-supplied path.
 - `GET /api/agents/:agentId/config?file=<rel>` → content for the chosen file
   (backwards compatible: no `file` = primary).
-- `POST /api/agents/:agentId/config?file=<rel>` → validate format, write
-  verbatim (or secret-preserving merge for the primary JSON/JSON5 file).
+- `POST /api/agents/:agentId/config?file=<rel>` → validate the selected
+  driver entry and format, then write verbatim for `yaml`, `toml`, and `text`.
+  Parse JSON5/JSONC with a backend dependency or a documented equivalent,
+  canonicalize only where the format permits it, and apply secret-preserving
+  merge for the primary JSON/JSON5/JSONC file. Redaction and preservation must
+  happen in the live `app.js` API path; do not rely on the dead EJS helper.
 - Keep the existing no-`file` behavior so the MCP `config_get` tool keeps
   working unchanged.
 
@@ -144,12 +177,13 @@ configFiles: [
   the tab header (next to the Save button).
 - Selecting a file loads its content (`GET /config?file=`); switching files
   discards unsaved changes after a confirm (reuse the unsaved-changes state).
-- **Above the editor** show the full path, e.g.
-  `/root/.openclaw/openclaw.json` (container path built from
-  `driver.dataDir` + `file.path`). Show host path in a tooltip/title attr.
+- **Above the editor** show the full container path, e.g.
+  `/root/.openclaw/openclaw.json` (from the API's `fullPath`). Show the
+  authenticated API's `hostPath` only in a tooltip/title attr; never use it as
+  a path input or expose it as an editable field.
 - Read-only files render the editor without the Save button.
-- Non-JSON formats (`yaml`, `toml`, `text`) skip the JSON.parse validation on
-  Save (mirror of today's `configFormat !== 'json'` branch).
+- Non-JSON formats (`yaml`, `toml`, `text`) skip JSON validation on Save;
+  JSON5/JSONC use the same parser as the backend so the editor and API agree.
 
 ### 4. Optional stretch
 
@@ -167,12 +201,16 @@ configFiles: [
   endpoint.
 - [ ] **Phase 3 — Backend write.** Extend `POST /config` to accept `?file=`
   with per-file format validation and verbatim write (secret merge only for
-  primary JSON/JSON5).
+  primary JSON/JSON5/JSONC), using backend parser dependencies.
 - [ ] **Phase 4 — Frontend picker.** Dropdown on the right of the Config tab;
   per-file load; full-path display above the editor; read-only handling.
-- [ ] **Phase 5 — Tests.** Unit tests for path-traversal guard and
-  per-file read/write (individual `node --test` runs per AGENTS.md);
-  live-verify in a browser against real PADs.
+- [ ] **Phase 5 — Tests.** Add live `app.js` API tests for config listing,
+  primary and secondary reads/writes, missing files, read-only files, strict
+  JSON and JSON5/JSONC parsing, secret redaction/preservation, and the
+  final-newline policy. Add path tests for `..`, absolute paths, encoded
+  traversal, NUL bytes, unknown driver paths, and symlinks escaping
+  `config_root`. Run each test file individually per `AGENTS.md`; live-verify
+  in a browser against real PADs.
 - [ ] **Phase 6 — Docs.** Absorb into `docs/` (driver + tabs docs) and remove
   this plan file when complete.
 

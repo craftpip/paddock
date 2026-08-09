@@ -15,7 +15,7 @@ RUN npm install
 
 COPY . .
 
-RUN mkdir -p /app/data /app/views/partials
+RUN mkdir -p /app/data /app/views/partials && chown node:node /home
 
 EXPOSE 6789
 

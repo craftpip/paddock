@@ -1,6 +1,6 @@
 # Plan 36b — Agent Profiles · Subtask: Opencode research
 
-## Status: In progress (2026-08-09) — research complete + live-verified on
+## Status: Complete (2026-08-09) — research complete + live-verified on
 `pad-opencode-test3` (opencode 1.18.15). Docs surveyed (opencode.ai/docs:
 agents, config, permissions, tui, cli) + CLI/DB verified: agent list/create
 (interactive + non-interactive), markdown agent files (global + project),
@@ -15,10 +15,12 @@ Implementation 0%.
 ## Scope
 
 Opencode has a built-in **agents** concept (`opencode agent list/create`).
-Research verdict: **agents are persona presets, NOT isolated instances** — they
-are the opposite of Hermes profiles on state isolation, but the working
-directory behaves like the Hermes gotcha in reverse (it is per-launch, never
-per-agent).
+Research verdict: **OpenCode does not support profiles**. Its agents are
+persona presets, not isolated instances. They share config, credentials,
+sessions, and data, while the working directory is selected per launch, never
+per agent. Do not add an Agent Profiles action group for OpenCode. Document
+`--agent` as a persona selector and use separate PADs when state isolation is
+required.
 
 ## Findings (all verified 2026-08-09)
 
@@ -117,10 +119,11 @@ per-agent).
 
 - Existing CommandsPane **Agent** group already has `opencode agent list` /
   `opencode agent create`.
-- Add a **create recipe** (markdown write + verify) and a **run/select**
-  command (`opencode --agent <name>` in the web terminal, or
-  `opencode run --agent <name> --dir <dir>`), plus `opencode agent create` for
-  the LLM-generated flow.
+- Keep the existing **Agent** group as a persona-management group only. Do not
+  add profile creation or state-isolation actions for OpenCode. A future
+  command may select a persona with `opencode --agent <name>` or
+  `opencode run --agent <name> --dir <dir>`, but it must not be labelled as
+  profile creation.
 - OpenCode Web (built-in web app, port 8080) exposes the agent switcher in the
   browser.
 

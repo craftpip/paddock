@@ -41,6 +41,7 @@ src/
 │   ├── agent-registry.js     PAD discovery from instances/ + Docker state
 │   ├── db.js                 SQLite metadata store (users, agents, vault, api_keys)
 │   ├── workspace.js          Safe file operations with path traversal protection
+│   ├── path-probe.js         Read-only host-path probes + compose volume inheritance (plan 40)
 │   ├── vm-manager.js         Create/remove/reset PADs, compose generation, applySettings,
 │   │                         applyAgentChanges, readSettings, containerInfo, the socat door
 │   ├── drivers/              Per-type adapters: openclaw, opencode, picoclaw, hermes, codex
@@ -118,6 +119,7 @@ carries all host ports and forwards to the peer by name. See `tabs/web.md`.
 | Secret redaction in config responses | Don't leak tokens |
 | Socat door for peer-networked agents | Port publishing is impossible on `network_mode: container:` |
 | `HOST_WORKSPACE_ROOT` env var | Fixes bind-mount split-brain |
+| One-to-one project-folder mounts (`- /www2:/www2:ro`) | Create Agent volume inheritance reads real project compose files at host-identical paths |
 | MCP server at `/mcp` (bearer API keys) | opencode/Claude Code manage Paddock over Streamable HTTP |
 
 ## Environment Variables

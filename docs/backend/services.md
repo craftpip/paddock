@@ -43,6 +43,71 @@ All functions take `(agentId, relativePath)` and internally:
 
 **Legacy functions (kept for compat):** `listParentDir`, `readParentFile`, `downloadParentFile`, `writeParentFile` — these allow browsing above workspace root. Only used by old EJS routes; the React SPA no longer uses them.
 
+## Path Probe (path-probe.js)
+
+Read-only host-path probes backing the Create Agent workspace-source field
+(plan 40). "Exists in the container" ≈ "valid host source for the daemon"
+thanks to the one-to-one mount rule — a project folder mounted into paddock at
+the same path it has on the host is identical in both namespaces. Business
+logic: See `overview/business-logic.md` — Workspace as Project.
+
+**Exports:**
+- `probe(hostPath)` — `{ path, exists, isDir, writable, forbidden, compose }`;
+  `writable` via `fs.accessSync(W_OK)`, `compose` is the found
+  `docker-compose.yml`/`compose.yml` mapped to its host path (null when absent).
+- `autocomplete(q)` — the subdirectories of the deepest existing ancestor of
+  `q`, hidden-filtered (dot-dirs, system dirs, `/app`/`/workspace`) and mapped
+  back to host paths; the client applies prefix filtering.
+- `discoverVolumes(hostPath)` — the volume-inheritance model (below).
+- `containerPathOf(hostPath)` / `hostPathOf(containerPath)` — the one-to-one
+  mapping; only the paddock root (`HOST_WORKSPACE_ROOT` ↔ `WORKSPACE_ROOT`)
+  changes, everything else is identity.
+- `isForbidden(p)` / `isDangerousSource(src)` — the system-dir + own-mount
+  blocklists; `isDangerousSource` additionally rejects `/var/run/docker.sock`
+  (D6 — never inherited into an agent container).
+- `findComposeFile(dir)` — first of `docker-compose.yml`/`.yaml`,
+  `compose.yml`/`.yaml` present in the dir.
+
+**Routes (app.js, read-only GETs, no CSRF):** `GET /api/paths/probe?path=…`,
+`GET /api/paths/autocomplete?q=…`, `GET /api/paths/volumes?path=…`.
+
+### discoverVolumes — the model
+
+Compose file first, container supplement second (D2):
+
+1. Run `docker compose --project-directory <dir> -f <compose> config --format
+   json` inside paddock (the compose CLI lives there) — never hand-rolled YAML,
+   so `${VAR}`, `.env`, `extends`, and override files resolve exactly like the
+   real deploy. Parse errors are surfaced in the response `errors` array, not
+   thrown.
+2. Supplement: `docker ps -a --filter label=com.docker.compose.project=<name>`
+   then `docker inspect` each container's `Mounts`; mounts not already covered
+   by the compose file are added with `origin: 'container'`. Works for stopped
+   containers (mounts are stored config). The project label comes from the
+   compose `name`, falling back to the **host** directory name when the
+   container view differs — the paddock root maps to `workspace` and would
+   otherwise collide with any other project named `workspace`.
+
+Each row is normalized `{ type: 'bind'|'volume', source, target, readonly,
+service, origin: 'compose'|'container' }` — deduped (binds by source+target,
+named volumes by target). Bind sources are mapped back to host paths. **Dev-
+environment rule:** binds pre-fill **one-to-one** — `target` is set to the
+host source path, so the agent container sees the same filesystem layout as
+the host; the compose's own container destination is ignored for binds (rows
+29→24 on `/www1/agents` when this landed — the remapped duplicates collapsed).
+Named volumes keep their compose destination and are annotated with `external`
+(the full Docker volume name: `<project>_<name>` for file volumes, the
+volume's own name for container volumes) and `exists` (whether `docker volume
+inspect` finds it now) — so the form can distinguish "attach the project's
+real data" from "create a fresh volume".
+
+D6 filters apply everywhere: `/var/run/docker.sock`, anonymous volumes, and
+`tmpfs` mounts are dropped; system-dir sources are never inherited. The raw
+compose file is never served — the endpoint returns the volume list only
+(compose files can contain secrets).
+
+**Returns:** `{ path, project, compose, source, volumes, errors }`.
+
 ## VM Manager (vm-manager.js)
 
 Business logic: See `overview/business-logic.md` — Agent Lifecycle, Bind-Mount Split-Brain.
@@ -58,7 +123,7 @@ and its own image tag (`paddock-vm-<name>:latest`). See
 - `removeVm(name)` — `docker rm -f` the agent **and** its door (`<name>-door`/`<name>-web`), remove the compose network (`<name>_default`), delete the instance dir
 - `resetVm(name)` — remove container + wipe data + recreate + compose up; the compose regen reads the full persisted binding set from `meta.env`/`web.json` (docker, network, web, extra volumes/ports, workspace) so a reset never drops a bind
 - `startAgent(name)` / `stopAgent(name)` / `restartAgent(name)` — docker lifecycle; also start/stop the socat door with the agent (`startDoors`/`stopDoors`)
-- `generateInstanceCompose(name, agent, password, port, { allowDocker, network, sshCport, workspaceHost, workspaceDir, extraVolumes, extraPorts, webService, webPeerNetwork })` — builds the compose as a structured JS object and serializes it with `JSON.stringify(..., null, 2)` (JSON is valid YAML) — never hand-concatenated YAML. `allowDocker` adds the `/var/run/docker.sock` volume, `network` adds `network_mode: container:<name>`, `extraPorts`/`webService`/`sshCport` produce `ports:` bindings (or door mappings in peer mode), `workspaceHost`/`workspaceDir` add a second volume line. Builds from `instances/<name>/build` with `image: paddock-vm-<name>:latest`; the `build.args:` block is generated from the instance Dockerfile's `ARG` lines (values interpolated from the instance `build.env`).
+- `generateInstanceCompose(name, agent, password, port, { allowDocker, network, sshCport, workspaceHost, workspaceDir, extraVolumes, extraPorts, webService, webPeerNetwork })` — builds the compose as a structured JS object and serializes it with `JSON.stringify(..., null, 2)` (JSON is valid YAML) — never hand-concatenated YAML. `allowDocker` adds the `/var/run/docker.sock` volume, `network` adds `network_mode: container:<name>`, `extraPorts`/`webService`/`sshCport` produce `ports:` bindings (or door mappings in peer mode), `workspaceHost`/`workspaceDir` add a second volume line. Named-volume rows (plan 40 D5) emit their service mount **and** a top-level `volumes:` section — `external: true` when the volume already exists, a fresh-volume declaration otherwise (so never-started projects work on first up). Builds from `instances/<name>/build` with `image: paddock-vm-<name>:latest`; the `build.args:` block is generated from the instance Dockerfile's `ARG` lines (values interpolated from the instance `build.env`).
 - `writeInstanceCompose(name, agent, password, port, opts)` — write the serialized compose to disk (passes the options through)
 - `applySettings(name, { allowDocker, network, sshPort, sshCport, workspaceHost, workspaceDir, extraVolumes, extraPorts, password })` — regenerates compose + writes the changed `meta.env` keys (`DOCKER`, `NETWORK`, `PORT`, `SSH_CPORT`, `ROOT_PASSWORD`, `WORKSPACE_*`, `EXTRA_PORTS`, `EXTRA_VOLUMES`); returns the new state. **Async** — reads the active `web.json` binding itself and regenerates with `webService` + the resolved `webPeerNetwork` for the new network, so a network/docker-toggle change never drops a published web app.
 - `applyAgentChanges(name, opts, { onLog, onStep })` — the **consolidated mutation flow**: settings POST, web/ports POST, and the MCP `recreate` tool all funnel through it (stop → regen → reconcile door → up → boot hooks → verify → rollback on failure)
@@ -68,12 +133,17 @@ and its own image tag (`paddock-vm-<name>:latest`). See
 - `readWebService(name)` / `webServicePath(name)` — read/`web.json` path (per-agent published web binding `{ containerPort, hostPort }`; null when absent)
 - `applyWebServices(name, webService)` — **async**. Set (truthy) or clear (`null`) the published web app: writes `web.json`, regenerates the compose with the `ports:` binding — or the socat door service when the agent routes through a network peer (see `tabs/web.md`). Returns `{ agent, webService }`. Does NOT stop/recreate — the route does that as an SSE job.
 - `doorName(name)` — `<name>-door`, the socat door container name; `doorNameRe(name)` matches both `<name>-door` and the legacy `<name>-web`. `startDoors(name)`/`stopDoors(name)` start/stop it with the agent; `cleanOrphanDoors()` sweeps `<x>-door`/`<x>-web` containers whose agent is gone (runs at boot)
-- `webHookPath(name, agent)` / `writeWebStartHook` / `removeWebStartHook` — the per-instance boot hook at `<dataDir>/start-web.sh`, sourced by the image `start.sh` so the web app survives recreates
+- `webHookPath(name, agent)` / `writeWebStartHook` / `removeWebStartHook` — the
+  per-instance boot hook at `<dataDir>/start-web.sh`, executed with `bash` by
+  the image `start.sh` so its port-guard cannot exit the parent start script.
+  `buildWebHook` starts web servers through `tee`: output remains in
+  `<dataDir>/web.log` and is also written to `/proc/1/fd/1` for `docker logs`
+  and the Logs tab.
 - `getNetworkHealth(name)` — resolves the compose `network_mode: container:<peer>` against live docker state → `none` / `ok` / `stale` (peer recreated, recorded ID dead) / `peer-stopped`
 - `validateWorkspaceMount(name, agent, host, dir)` — the single authority for custom workspace binds (plan 24); returns `{ host, container, webuiVisible, hostBrowsable }` or throws
 - `autoSshPort()` — next free host port starting at 43817 (scans web/extra/ssh host ports)
 - `readSshCport(name)` — persisted SSH container port (meta `SSH_CPORT`, default `22`); `ensureSshStartBlock(name)` — backfills the `SSH_PORT` block into an old instance's own `build/start.sh` (idempotent)
-- `readExtraPorts(name)` / `readExtraVolumes(name)` / `validateExtraPorts(...)` / `validateExtraVolumes(...)` — extra TCP port + volume management (plan 28)
+- `readExtraPorts(name)` / `readExtraVolumes(name)` / `validateExtraPorts(...)` / `validateExtraVolumes(...)` — extra TCP port + volume management (plan 28). Extra volumes are `{ host, container, readonly }` binds or `{ type: 'volume', name, container, readonly, external }` named-volume entries (plan 40 D5)
 - `setMetaFlag(name, key, value)` — writes/clears a `KEY=VALUE` line in `meta.env` preserving other lines (empty value **removes** the line)
 - `seedBuildDir(name, agent, { installDocker })` — idempotently copies `src/vm-builds/<type>/` → `instances/<name>/build/`, seeds `extras/.gitkeep` + `build.env`; never overwrites existing build files
 - `composeCommand(name, ...args)` — `docker compose --env-file <instance>/build/build.env -f <compose> ...` prefix used by every per-instance compose invocation (skips the env-file when the build dir is missing)
@@ -168,9 +238,10 @@ removes the log file), so a recreated PAD's Logs tab would start empty. The log
 store captures each container's logs into a rolling file at
 `instances/<name>/logs/container.log`:
 
-- `capture(name)` — runs `docker logs --timestamps`, parses each line's
-  RFC3339Nano timestamp, appends only lines newer than the last captured one
-  (`meta.json` stores `lastTs`) — a recreated container's logs naturally append
+- `capture(name)` — runs `docker logs --timestamps`, preserves each line's full
+  RFC3339Nano timestamp, and appends only uncaptured lines. `meta.json` stores
+  the last timestamp plus its boundary lines, preventing both nanosecond output
+  loss and duplicate captures. A recreated container's logs naturally append
   with no dupes/gaps. File is trimmed past 8MB/20k lines.
 - `captureAll(containerNames)` — the 30s `setInterval` sweep in app.js over all
   `safeVmName` containers.
@@ -306,7 +377,8 @@ Rules:
   `createAgent` with `POST /api/agents/create` — the REST route kept only the
   409 exists-check and the admin `assign_to` owner override.
 - Mutations go through one gun: `recreate` accepts every Settings/Web option
-  (`allowDocker`, `network`, `extraVolumes`, `workspaceHost`/`workspaceDir`,
+  (`allowDocker`, `network`, `extraVolumes` — binds or named-volume entries,
+  `workspaceHost`/`workspaceDir`,
   `sshEnabled`/`sshPort`/`sshContainerPort`/`sshPassword`, `extraPorts`, `web`)
   plus `pull` and `reset`. Only the options you specify change; pass `[]`,
   `''` or `false` to explicitly clear. `reset: true` wipes the data dir and

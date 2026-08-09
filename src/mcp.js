@@ -343,9 +343,11 @@ function registerTools(server) {
         workspaceHost: z.string().optional().describe('Custom workspace host source — both-or-neither with workspaceDir'),
         workspaceDir: z.string().optional().describe('Custom workspace container path — both-or-neither with workspaceHost'),
         extraVolumes: z.array(z.object({
-          host: z.string().describe('Host source path'),
+          type: z.enum(['bind', 'volume']).optional().describe('bind = host source path, volume = named Docker volume'),
+          host: z.string().describe('Host source path (or the volume name when type is volume)'),
           container: z.string().describe('Container destination path'),
           readonly: z.boolean().optional().describe('Mount read-only'),
+          external: z.string().optional().describe('Full Docker volume name to attach (volume type only)'),
         })).optional().describe('Additional volumes'),
         extraPorts: z.array(z.object({
           host: z.number().int().min(1).max(65535),
@@ -430,9 +432,11 @@ function registerTools(server) {
         allowDocker: z.boolean().optional().describe('Mount the host docker socket + CLI into the container (Settings tab)'),
         network: z.string().optional().describe('Network peer container to route through (empty string clears to the default network)'),
         extraVolumes: z.array(z.object({
-          host: z.string().describe('Host source path'),
+          type: z.enum(['bind', 'volume']).optional().describe('bind = host source path, volume = named Docker volume'),
+          host: z.string().describe('Host source path (or the volume name when type is volume)'),
           container: z.string().describe('Container destination path'),
           readonly: z.boolean().optional().describe('Mount read-only'),
+          external: z.string().optional().describe('Full Docker volume name to attach (volume type only)'),
         })).optional().describe('Additional volumes (full replace list)'),
         workspaceHost: z.string().optional().describe('Custom workspace host source — both-or-neither with workspaceDir'),
         workspaceDir: z.string().optional().describe('Custom workspace container path — both-or-neither with workspaceHost'),

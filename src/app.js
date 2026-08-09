@@ -758,6 +758,40 @@ app.get('/api/containers', async (req, res) => {
   }
 });
 
+// ─── Path probing (plan 40) ──────────────────────────────────
+// Read-only filesystem probes for the Create Agent workspace source field:
+// existence/writability/compose detection plus autocomplete suggestions. The
+// one-to-one mount rule means "exists in the container" ≈ "valid host source".
+
+const pathProbe = require('./services/path-probe');
+
+app.get('/api/paths/probe', (req, res) => {
+  try {
+    res.json(pathProbe.probe(String(req.query.path || '')));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/api/paths/autocomplete', (req, res) => {
+  try {
+    res.json(pathProbe.autocomplete(String(req.query.q || '')));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+/** Volumes exposed by a workspace folder's project (compose file + running
+ *  container supplement), normalized for the Create Agent form's volume
+ *  pre-fill (plan 40, D2/D4/D6). */
+app.get('/api/paths/volumes', async (req, res) => {
+  try {
+    res.json(await pathProbe.discoverVolumes(String(req.query.path || '')));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 app.get('/api/agents/:name/settings', async (req, res) => {
   const name = safeVmName(req.params.name);
   if (!name) return res.status(400).json({ error: 'Invalid agent name' });

@@ -79,16 +79,22 @@ A new folder starts empty; the old folder stays on disk.
 
 ### 7. Extra volumes (card)
 
-Additional bind mounts `hostPath:containerPath` (`EXTRA_VOLUMES` in meta.env,
-`[{"host":"/mnt/data","container":"/data","readonly":false}]` — a JSON array of
-`{ host, container, readonly }`, `[]` when empty). Validated by
-`vm.validateExtraVolumes` (same guard family as the workspace mount: no system
-dirs, no project root / `src` / `instances`, no other agent's folder, no
-swallowing the data mount; container path must not be a protected system path
-or a parent-or-self of the data dir, though descendant subfolders ARE allowed).
-Removing a volume row removes only the bind from meta + compose (agent
-recreates); the host source directory is **never deleted** — extra-volume
-sources are arbitrary user dirs, so `removeVm()` does not clean them up.
+Additional mounts — **bind** rows `hostPath:containerPath` or **named-volume**
+rows. Persisted in `EXTRA_VOLUMES` in meta.env as a JSON array, `[]` when
+empty: binds are `{ "host": "/mnt/data", "container": "/data", "readonly":
+false }`, named volumes `{ "type": "volume", "name": "mempalace-data",
+"container": "/data", "readonly": false, "external": "mempalace_mempalace-data"
+}`. Validated by `vm.validateExtraVolumes` (same guard family as the workspace
+mount: no system dirs, no project root / `src` / `instances`, no other agent's
+folder, no swallowing the data mount; container path must not be a protected
+system path or a parent-or-self of the data dir, though descendant subfolders
+ARE allowed). Named volumes use the same type select as Create Agent; a
+discovered volume shows "Attaches the existing volume <external>" / "Creates a
+fresh volume", and the generator emits the top-level `volumes:` section with
+`external: true` only when the volume exists. Removing a volume row removes
+only the mount from meta + compose (agent recreates); the host source directory
+is **never deleted** — extra-volume sources are arbitrary user dirs, so
+`removeVm()` does not clean them up.
 
 ### 8. Danger Zone — Delete Container
 

@@ -85,6 +85,27 @@ docker restart paddock
 
 The compose service is `webui`, container name `paddock`.
 
+### Runtime File Ownership
+
+The webui runs as numeric UID/GID `1000:1000`, configured by `PUID` and
+`PGID` in `.env`. Docker stores these numeric IDs on bind-mounted files; the
+host and container each resolve them to their own local account names. No host
+account name is added to or exposed inside the container.
+
+`docker-compose.yml` includes `1000:1000` fallbacks if `PUID` or `PGID` are
+not supplied. The container image makes `/home` writable by UID `1000` and
+sets `HOME=/home`, giving tools such as Docker CLI a container-local user
+directory.
+
+The webui also has supplementary group `DOCKER_GID` (currently `988`) so it
+can access the mounted `/var/run/docker.sock`. Socket access is equivalent to
+host-root-level Docker control and is required for the webui to manage PADs.
+
+Files created by the webui in project bind mounts use UID/GID `1000:1000`.
+Files created by the Docker daemon, Docker-managed volumes, or individual PAD
+agent containers can use different ownership because they are created by
+different processes.
+
 ### Vite Dev Server (HMR)
 
 ```bash

@@ -62,6 +62,22 @@ describe('vm-manager - Web door compose generation', () => {
   });
 });
 
+describe('vm-manager - Web start hook', () => {
+  process.env.WORKSPACE_ROOT = '/workspace';
+  process.env.HOST_WORKSPACE_ROOT = '/workspace';
+  const vm = require('../services/vm-manager');
+
+  it('streams web-server output to Docker logs while retaining web.log', () => {
+    const hook = vm.buildWebHook({
+      dataDir: '/root/.opencode',
+      webApp: { startCommand: () => 'opencode web --port 8080' },
+    }, 'opencode', { containerPort: 8080 }, '');
+
+    assert.ok(hook.includes('( exec 3<>/dev/tcp/127.0.0.1/8080 ) 2>/dev/null'), 'quiet port probe');
+    assert.ok(hook.includes('opencode web --port 8080 2>&1 | tee -a /root/.opencode/web.log >/proc/1/fd/1 &'), 'server output reaches Docker logs and web.log');
+  });
+});
+
 describe('vm-manager - applySettings keeps a published web app alive', () => {
   const TMP = '/tmp/vmtest-' + Date.now();
   process.env.WORKSPACE_ROOT = TMP;
@@ -461,6 +477,41 @@ describe('vm-manager - extra volumes & ports (plan 28)', () => {
     });
   });
 
+  it('validateExtraVolume accepts named volumes and rejects bad names', () => {
+    withTmp((TMP, vm) => {
+      const vol = vm.validateExtraVolume('pad-a', 'openclaw', 'mempalace-dbdata', '/var/lib/postgresql', false, 'volume');
+      assert.strictEqual(vol.type, 'volume');
+      assert.strictEqual(vol.host, 'mempalace-dbdata');
+      assert.strictEqual(vol.container, '/var/lib/postgresql');
+      assert.strictEqual(vol.readonly, false);
+      assert.strictEqual(vol.external, undefined);
+      const ext = vm.validateExtraVolume('pad-a', 'openclaw', 'dbdata', '/data', true, 'volume', 'mempalace_dbdata');
+      assert.strictEqual(ext.external, 'mempalace_dbdata');
+      assert.throws(() => vm.validateExtraVolume('pad-a', 'openclaw', 'db/data', '/data', false, 'volume'), /plain volume name/);
+      assert.throws(() => vm.validateExtraVolume('pad-a', 'openclaw', '/abs/path', '/data', false, 'volume'), /plain volume name/);
+      assert.throws(() => vm.validateExtraVolume('pad-a', 'openclaw', 'dbdata', '/etc', false, 'volume'), /system path \/etc/);
+      assert.throws(() => vm.validateExtraVolume('pad-a', 'openclaw', 'dbdata', '/root', false, 'volume'), /swallow the agent data directory/);
+    });
+  });
+
+  it('validateExtraVolumes forwards volume type/external and dedupes', () => {
+    withTmp((TMP, vm) => {
+      const vols = vm.validateExtraVolumes('pad-a', 'openclaw', [
+        { type: 'volume', host: 'dbdata', container: '/data', readonly: true, external: 'proj_dbdata' },
+        { type: 'bind', host: '/mnt/backups', container: '/backups' },
+      ]);
+      assert.strictEqual(vols.length, 2);
+      assert.deepStrictEqual(vols[0], { type: 'volume', host: 'dbdata', container: '/data', readonly: true, external: 'proj_dbdata' });
+      assert.throws(
+        () => vm.validateExtraVolumes('pad-a', 'openclaw', [
+          { type: 'volume', host: 'dbdata', container: '/data' },
+          { type: 'volume', host: 'dbdata', container: '/data' },
+        ]),
+        /Duplicate extra volume mount/,
+      );
+    });
+  });
+
   it('validateExtraPorts enforces bounds, self-dups, SSH and web conflicts', () => {
     withTmp((TMP, vm) => {
       assert.throws(() => vm.validateExtraPorts([{ host: 0, container: 80 }]), /between 1 and 65535/);
@@ -493,6 +544,27 @@ describe('vm-manager - extra volumes & ports (plan 28)', () => {
       const service = JSON.parse(yaml).services['pad-vp'];
       assert.ok(service.volumes.includes('/mnt/data:/root/.opencode/data/extra:ro'), 'extra volume with :ro suffix');
       assert.deepStrictEqual(service.ports, ['22001:22', '9000:80'], 'SSH + extra ports published');
+    });
+  });
+
+  it('generateInstanceCompose emits a top-level volumes section for named volumes', () => {
+    withTmp((TMP, vm) => {
+      const instDir = path.join(TMP, 'instances', 'pad-nv');
+      fs.mkdirSync(instDir, { recursive: true });
+      fs.writeFileSync(path.join(instDir, 'meta.env'),
+        'AGENT=openclaw\nROOT_PASSWORD=pw\n' +
+        'EXTRA_VOLUMES=[{"type":"volume","host":"dbdata","container":"/var/lib/postgresql","readonly":true,"external":"mempalace_dbdata"},{"host":"/mnt/backups","container":"/backups"}]\n');
+      const yaml = vm.generateInstanceCompose('pad-nv', 'openclaw', 'pw', '');
+      const compose = JSON.parse(yaml);
+      const service = compose.services['pad-nv'];
+      assert.ok(service.volumes.includes('dbdata:/var/lib/postgresql:ro'), 'named volume in service mounts');
+      assert.ok(service.volumes.includes('/mnt/backups:/backups'), 'bind kept');
+      // dockerVolumeExists is a live docker probe in the test env — assert the
+      // top-level key exists and either attaches the real volume or falls back
+      // to a fresh-volume declaration.
+      assert.ok(compose.volumes && compose.volumes.dbdata, 'top-level volumes section declares the named volume');
+      const decl = compose.volumes.dbdata;
+      assert.ok(!decl.external || decl.name === 'mempalace_dbdata', 'external attach only against the real volume');
     });
   });
 
@@ -529,6 +601,8 @@ describe('vm-manager - extra volumes & ports (plan 28)', () => {
       vm.setMetaFlag('pad-rt', 'EXTRA_PORTS', JSON.stringify([{ host: '9000', container: '80' }]));
       assert.deepStrictEqual(vm.readExtraVolumes('pad-rt'), [{ host: '/a', container: '/b', readonly: false }]);
       assert.deepStrictEqual(vm.readExtraPorts('pad-rt'), [{ host: '9000', container: '80' }]);
+      vm.setMetaFlag('pad-rt', 'EXTRA_VOLUMES', JSON.stringify([{ type: 'volume', host: 'dbdata', container: '/data', readonly: true, external: 'x_dbdata' }]));
+      assert.deepStrictEqual(vm.readExtraVolumes('pad-rt'), [{ type: 'volume', host: 'dbdata', container: '/data', readonly: true, external: 'x_dbdata' }]);
       vm.setMetaFlag('pad-rt', 'EXTRA_VOLUMES', '');
       assert.deepStrictEqual(vm.readExtraVolumes('pad-rt'), []);
     });

@@ -103,21 +103,30 @@ shortcuts, and connection-lost handling live in
 
 File: `CreateAgent.jsx`
 
-Form to create a new PAD. Name row on top, an expandable **Optional settings**
-accordion below, then the create button:
+Form to create a new PAD. The visual core (plan 40 D9) is **name the agent +
+pick the folder it will work on — that's it**; everything else sits under the
+collapsed Optional settings accordion:
 
 ```
 ┌─────────────────────────────────────────────────────┐
 │  ← Back to fleet                                    │
 │                                                     │
 │  Create Agent                                       │
-│  Only a name is required — everything else is       │
-│  optional and can be changed later.                 │
+│  Name your agent and pick the folder it will work   │
+│  on — everything else is optional and can be        │
+│  changed later.                                     │
 │                                                     │
 │  pad-  [openclaw ▼]  -  [my-PAD                ]    │
 │                                                     │
-│  ▼ Optional settings                                │
-│    ┌ Workspace (host source + container path) ─────┐ │
+│  Workspace source folder (host)  [ /www2/…     ▼ ]  │
+│  This folder is where your agent's files live on    │
+│  this PC — open it directly from your file manager. │
+│  ⚠ 3 volumes found in mempalace's compose file —    │
+│    pre-filled under Optional settings → Additional  │
+│    volumes. Review, edit or remove them.            │
+│                                                     │
+│  ▼ Optional settings   (3 active)                   │
+│    ┌ Container-side workspace path ────────────────┐ │
 │    ┌ Container options (docker toggle, network ▼) ─┐ │
 │    ┌ Additional volumes (+ Add volume rows) ───────┐ │
 │    ┌ Additional ports (+ Add port rows) ───────────┐ │
@@ -126,16 +135,42 @@ accordion below, then the create button:
 └─────────────────────────────────────────────────────┘
 ```
 
-- **Name row** — Prefix (from CONTAINER_PREFIX, e.g. `pad`), PAD type dropdown
-  (openclaw/opencode/picoclaw/hermes/codex), name input (alphanumeric +
-  hyphens).
-- **Optional settings** — four cards, all optional:
-  1. **Workspace** — host source + fixed container path (locked per driver).
+- **Identity row** — Prefix (from `CONTAINER_PREFIX`, e.g. `pad`), PAD type
+  dropdown (openclaw/opencode/picoclaw/hermes/codex), name input (alphanumeric
+  + hyphens). Always visible.
+- **Workspace source folder (host)** — the primary field, always visible,
+  **resolved to an absolute host path by default** (e.g.
+  `/www2/paddock/instances/pad-openclaw-mya/openclaw/workspace`, updating live
+  as name/type/prefix change) so the user always sees the concrete path. It
+  carries the plan-40 plumbing:
+  - **Path autocomplete** — typing triggers `GET /api/paths/autocomplete`
+    (debounced ~220 ms); suggestions are the hidden-filtered subdirectories of
+    the typed prefix, pickable by keyboard or mouse, with a stale-response
+    guard.
+  - **Probe + discovery** — once the path settles (~550 ms) the form calls
+    `GET /api/paths/probe` (exists/writable/compose detection) and, when a
+    compose file exists, `GET /api/paths/volumes`.
+  - **Pre-fill banner** — "N volumes found in <project>'s compose file —
+    pre-filled under Optional settings → Additional volumes. Review, edit or
+    remove them before creating." The discovered volumes pre-fill the
+    **Additional volumes** rows (D4: a convenience, never a forced value —
+    every row stays an editable input).
+  - Gated by the driver's `workspaceCapability`: section hidden for `none`
+    (hermes); probe + autocomplete for `fixed` (openclaw, picoclaw) and
+    `editable` (opencode, codex, claude).
+- **Optional settings** (collapsed by default; the badge shows how many active
+  pre-filled/edited options):
+  1. **Container-side workspace path** — plain input; disabled (locked to the
+     driver's `workspaceDir`) for `fixed`-capability agents, editable for
+     `editable` ones.
   2. **Container options** — "Allow docker in the container" toggle (docker.sock
      + CLI, rebuilds the image at create) and a Network dropdown of running
      containers (peer routing via `network_mode: container:`).
-  3. **Additional volumes** — dynamic `host → container` bind rows with a
-     readonly checkbox.
+  3. **Additional volumes** — dynamic rows, each with a **type select**
+     (Bind / Named volume), source-or-name input, container path, and readonly
+     checkbox. Named-volume rows hint at discovery: "Attaches the existing
+     volume <external>" vs "Creates a fresh volume"; the name validator rejects
+     bare host paths on named-volume rows.
   4. **Additional ports** — dynamic `host → container` TCP port rows.
 
 The form validates client-side before enabling **Create my agent** (name,
@@ -147,6 +182,17 @@ volumes/ports, SSH container port if any, workspace mount, cross-agent
 host-port sweep) and returns `400` before the `202` if any check fails —
 nothing is created. OpenSSH exposure is **not** part of the create form; it is
 configured afterwards from the agent's [Web & Ports tab](../tabs/web.md).
+
+**Named-volume inheritance** (plan 40 D5): discovered named volumes pre-fill as
+`{ type: 'volume', name, container, readonly, external }`; the generated
+compose emits the service mount **and** a top-level `volumes:` section —
+`external: true` when the volume exists (attach the project's real data), a
+fresh-volume declaration when it doesn't (never-started projects work on first
+up). Named-volume pre-fills are never auto-applied — review/edit/delete before
+submit. **Bind pre-fills are one-to-one** (dev-environment rule): the
+Container path field is auto-filled with the Host source path, so the agent
+sees the same filesystem layout as the host — you never have to type a
+container path for a bind.
 
 **Creation flow (live streaming):**
 1. Form submits via fetch — POST `/api/agents/create` returns `202` immediately and a background job starts

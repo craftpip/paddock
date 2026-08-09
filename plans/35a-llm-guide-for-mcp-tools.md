@@ -2,7 +2,7 @@
 
 ## Status: Draft (2026-08-09) — raw requirements recorded; research on the core
 catalog commands verified live against a running openclaw PAD (v2026.7.1);
-nothing implemented yet.
+credential-insertion and authorization flow designed; nothing implemented yet.
 
 > **Task A of plan 35 (renamed from plan 33, 2026-08-09).** Plan 35 is ONE plan
 > with TWO **simultaneous** tasks — they do not block each other, they exist
@@ -219,6 +219,43 @@ interactive/non-interactive audit applies (`picoclaw onboard`? `hermes config se
 `hermes model` is interactive-only per AGENTS.md; `codex` TUI, etc.). To be inventoried
 during implementation.
 
+### 6. Credential insertion through MCP (required capability)
+
+The LLM must be able to add a model/provider that requires a secret, but an MCP
+tool call has no terminal prompt or TTY. `exec` therefore needs an explicit
+`stdin` input in addition to `command`:
+
+```json
+{
+  "name": "pad-example",
+  "command": "openclaw models auth paste-api-key --provider openai",
+  "stdin": "<user-supplied API key>"
+}
+```
+
+Implementation contract:
+
+- `exec.stdin` is optional, is written verbatim to the container process stdin,
+  and must never be included in activity logs, process-error messages, tool
+  responses, browser telemetry, or command-history output.
+- The guide tells the LLM to ask the user for a provider credential only at the
+  final write step. It must not place a secret in the shell command, a config
+  write, or a tool result.
+- The command catalog marks every operation that needs stdin as
+  `credentialInput: "stdin"`, including the provider name and exact verification
+  command. An interactive-only OAuth/device-login flow remains unavailable to
+  MCP and must be handed to the human terminal.
+- For OpenClaw, preserve `openclaw.json`, run `models auth paste-api-key` with
+  `stdin`, merge the auth result back into the saved config, then run
+  `openclaw models auth list` and `openclaw models status`. This prevents the
+  known config-destroy behavior.
+- Never return or repeat the supplied credential. Success is verified only by
+  provider/model status, not by printing config or auth records.
+
+This is distinct from the initial Paddock-MCP connection credential. That
+bootstrap happens before the agent can use Paddock MCP and is specified in
+plan 35b.
+
 ## Current state (context)
 
 - The Commands-tab buttons live in the drivers: `GET /api/agent-types/:type/commands`
@@ -257,6 +294,8 @@ differently — e.g. a `paddock_help`-style tool returning the full guide, plus 
 - Defaulting `--no-probe` on LLM-built `mcp add` commands.
 - How to represent "interactive-only, ask the user" commands in the guidance.
 - Whether §§1–4 are served as a separate help tool or merged into one document.
+- Add `stdin` to MCP `exec` as a redacted secret channel; do not attempt to
+  emulate interactive prompts with shell pipes or command-string interpolation.
 
 ## Files (anticipated)
 

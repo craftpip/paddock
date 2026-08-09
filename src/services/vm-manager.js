@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { execFile } = require('child_process');
+const { execFile, execFileSync } = require('child_process');
 const { runCmdStream } = require('./cmd');
 const { getDriver, drivers } = require('./drivers');
 const { imageFor, legacySharedImage, buildDir, buildEnvPath, readBuildEnv, setBuildEnv, argsFromDockerfile } = require('./instance-image');
@@ -24,6 +24,19 @@ function runCmd(cmd, args, options = {}) {
       else resolve({ stdout: stdout || '', stderr: stderr || '' });
     });
   });
+}
+
+/** Sync probe whether a named Docker volume exists (cheap metadata call).
+ *  Used by the compose generator to decide between attaching an existing
+ *  volume (`external: true`) and letting compose create a fresh one so
+ *  never-started projects still work (plan 40 D5). Never throws. */
+function dockerVolumeExists(name) {
+  try {
+    const r = execFileSync('docker', ['volume', 'inspect', name], { stdio: 'pipe', timeout: 10000 });
+    return !!(r && r.length);
+  } catch {
+    return false;
+  }
 }
 
 function readMeta(vmDir) {
@@ -372,7 +385,10 @@ function readWorkspaceMount(name, agent) {
 }
 
 /** Read the persisted extra volumes from meta (EXTRA_VOLUMES JSON) or [] when
- *  absent/corrupt. Never throws. Entries are normalized (strings, no bools). */
+ *  absent/corrupt. Never throws. Entries are normalized (strings, no bools).
+ *  Bind entries keep the legacy `{ host, container, readonly }` shape; named
+ *  volumes carry `type: 'volume'` (host = volume name) + optional `external`
+ *  (the full Docker volume name to attach). */
 function readExtraVolumes(name) {
   const meta = readMeta(path.join(INSTANCES_DIR, name)) || {};
   if (!meta.EXTRA_VOLUMES) return [];
@@ -381,11 +397,19 @@ function readExtraVolumes(name) {
     if (!Array.isArray(arr)) return [];
     return arr
       .filter((v) => v && v.host && v.container)
-      .map((v) => ({
-        host: path.normalize(String(v.host)),
-        container: path.normalize(String(v.container)),
-        readonly: !!v.readonly,
-      }));
+      .map((v) => {
+        const type = v.type === 'volume' ? 'volume' : 'bind';
+        const entry = {
+          host: path.normalize(String(v.host)),
+          container: path.normalize(String(v.container)),
+          readonly: !!v.readonly,
+        };
+        if (type === 'volume') {
+          entry.type = 'volume';
+          if (v.external) entry.external = String(v.external);
+        }
+        return entry;
+      });
   } catch {
     return [];
   }
@@ -419,13 +443,17 @@ function readExtraPorts(name) {
   }
 }
 
-/** Validate ONE extra host→container bind (plan 28). Returns the normalized
- *  `{ host, container, readonly }` or throws. Mirrors the workspace-mount
- *  guards: host must not be a system dir / project root / src / instances /
- *  another agent's folder / a parent-or-self of this agent's data dir; the
- *  container path must not be a protected system path or a parent-or-self of
- *  the driver data dir (descendant subfolders ARE allowed). */
-function validateExtraVolume(name, agent, hostPath, container, readonly) {
+/** Validate ONE extra volume mount (plan 28). Returns the normalized
+ *  `{ host, container, readonly }` (bind) or `{ type: 'volume', host, container,
+ *  readonly, external? }` (named volume) or throws. For binds this mirrors the
+ *  workspace-mount guards: host must not be a system dir / project root / src /
+ *  instances / another agent's folder / a parent-or-self of this agent's data
+ *  dir; the container path must not be a protected system path or a
+ *  parent-or-self of the driver data dir (descendant subfolders ARE allowed).
+ *  Named volumes (type 'volume', plan 40 D5) skip the host-path guards — their
+ *  source is a Docker volume name, not a filesystem path — but keep the
+ *  container-destination guards. */
+function validateExtraVolume(name, agent, hostPath, container, readonly, type, external) {
   const hostRaw = String(hostPath || '').trim();
   const dirRaw = String(container || '').trim();
   if (!hostRaw || !dirRaw) {
@@ -438,6 +466,14 @@ function validateExtraVolume(name, agent, hostPath, container, readonly) {
     throw new Error('Quotes and backslashes are not allowed in extra volume paths');
   }
 
+  const volType = type === 'volume' ? 'volume' : 'bind';
+  let host = '';
+  if (volType === 'volume') {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(hostRaw)) {
+      throw new Error('A named volume source must be a plain volume name (letters, digits, dots, dashes, underscores — no slashes)');
+    }
+    host = hostRaw;
+  } else {
   // ── Host source ──
   if (hostRaw === '/') throw new Error('An extra volume host source cannot be the host root');
   if (hostRaw.split('/').some((s) => s === '.' || s === '..')) {
@@ -446,7 +482,6 @@ function validateExtraVolume(name, agent, hostPath, container, readonly) {
   if (hostRaw.includes(':')) {
     throw new Error('The host source cannot contain ":"');
   }
-  let host;
   if (hostRaw.startsWith('/')) {
     host = path.normalize(hostRaw.replace(/\/{2,}/g, '/').replace(/\/+$/, ''));
   } else {
@@ -498,6 +533,7 @@ function validateExtraVolume(name, agent, hostPath, container, readonly) {
   if (fs.existsSync(host) && !fs.statSync(host).isDirectory()) {
     throw new Error('The host source already exists and is not a directory');
   }
+  }
 
   // ── Container destination ──
   const dir = path.normalize(dirRaw.replace(/\/{2,}/g, '/').replace(/\/+$/, ''));
@@ -513,7 +549,12 @@ function validateExtraVolume(name, agent, hostPath, container, readonly) {
     throw new Error('Extra volume container path would swallow the agent data directory');
   }
 
-  return { host, container: dir, readonly: !!readonly };
+  const vol = { host, container: dir, readonly: !!readonly };
+  if (volType === 'volume') {
+    vol.type = 'volume';
+    if (external) vol.external = String(external);
+  }
+  return vol;
 }
 
 /** Validate a list of extra volumes; returns the normalized array or throws.
@@ -525,8 +566,8 @@ function validateExtraVolumes(name, agent, list) {
   const seen = new Set();
   for (const v of list) {
     if (!v || (v.host === undefined && v.container === undefined)) continue;
-    const vol = validateExtraVolume(name, agent, v.host, v.container, v.readonly);
-    const key = `${vol.host}\u0000${vol.container}`;
+    const vol = validateExtraVolume(name, agent, v.host, v.container, v.readonly, v.type, v.external);
+    const key = `${vol.type || 'bind'}\u0000${vol.host}\u0000${vol.container}`;
     if (seen.has(key)) throw new Error(`Duplicate extra volume mount ${vol.host} → ${vol.container}`);
     seen.add(key);
     out.push(vol);
@@ -627,8 +668,16 @@ function generateInstanceCompose(name, agent, password, port, opts = {}) {
     service.working_dir = wsMount.container;
   }
   if (allowDocker) volumes.push('/var/run/docker.sock:/var/run/docker.sock');
+  const namedVolumes = {};
   for (const v of readExtraVolumes(name)) {
     volumes.push(`${v.host}:${v.container}${v.readonly ? ':ro' : ''}`);
+    if (v.type === 'volume') {
+      // Named volume (plan 40 D5): attach the pre-existing Docker volume when
+      // it exists (shares the project's real data); otherwise let compose
+      // create a fresh volume so never-started projects still work.
+      const external = v.external && dockerVolumeExists(v.external) ? v.external : '';
+      namedVolumes[v.host] = external ? { external: true, name: external } : {};
+    }
   }
   if (network) service.network_mode = `container:${network}`;
   service.environment = {
@@ -686,7 +735,11 @@ function generateInstanceCompose(name, agent, password, port, opts = {}) {
   // JSON is valid YAML. Serializing the structured compose model avoids fragile
   // hand-built YAML where a Compose interpolation such as `${VAR:-default}`
   // can be parsed as YAML syntax.
-  return JSON.stringify({ services, ...(networks ? { networks } : {}) }, null, 2) + '\n';
+  return JSON.stringify({
+    services,
+    ...(networks ? { networks } : {}),
+    ...(Object.keys(namedVolumes).length ? { volumes: namedVolumes } : {}),
+  }, null, 2) + '\n';
 }
 
 function writeInstanceCompose(name, agent, password, port, opts = {}) {
@@ -1526,9 +1579,10 @@ async function hostPortInUse(hostPort, excludeName) {
 }
 
 /** Shell content of the per-instance web start hook (start-web.sh). The hook
- *  is written into the agent's data-dir bind mount and sourced by start.sh on
- *  boot, so the published server survives recreates. It is re-runnable: a
- *  pidfile guard skips the launch when an instance is already listening. */
+ *  is written into the agent's data-dir bind mount and executed by start.sh on
+ *  boot, so the published server survives recreates. Execute it with `bash`,
+ *  not `source`: its early exit must not terminate start.sh. It is re-runnable:
+ *  a port probe skips the launch when an instance is already listening. */
 function buildWebHook(driver, agent, webService, password) {
   const dataDir = driver.dataDir;
   const pidFile = `${dataDir}/web.pid`;
@@ -1538,11 +1592,11 @@ function buildWebHook(driver, agent, webService, password) {
 # Paddock web publishing — start the published web server on boot.
 # Re-runnable: skips when something is already listening on the port (a plain
 # pidfile can go stale across container recreates since the data dir persists).
-if exec 3<>/dev/tcp/127.0.0.1/${webService.containerPort} 2>/dev/null; then
+if ( exec 3<>/dev/tcp/127.0.0.1/${webService.containerPort} ) 2>/dev/null; then
   exec 3>&- 2>/dev/null
   exit 0
 fi
-${startCmd} >>${logFile} 2>&1 &
+${startCmd} 2>&1 | tee -a ${logFile} >/proc/1/fd/1 &
 echo $! > "${pidFile}"
 `;
 }
@@ -2388,7 +2442,7 @@ module.exports = {
   getNetworkHealth,
   existingServices, startAgent, stopAgent, restartAgent,
   readAgentConfig, redactSecrets, listDoors, startDoors, stopDoors,
-  readWebService, applyWebServices, webHookPath,
+  readWebService, applyWebServices, webHookPath, buildWebHook,
   writeWebStartHook, removeWebStartHook, doorName, doorPorts, desiredDoors,
   validateWorkspaceMount, workspaceMountInfo, readWorkspaceMount,
   validateExtraVolume, validateExtraVolumes, validateExtraPorts,

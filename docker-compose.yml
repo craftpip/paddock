@@ -5,12 +5,20 @@ services:
     image: paddock-webui:latest
     container_name: paddock
     restart: unless-stopped
+    # Numeric IDs avoid adding a host-named account inside the container.
+    user: "${PUID:-1000}:${PGID:-1000}"
+    group_add:
+      - "${DOCKER_GID:-988}"
     ports:
       - "6789:6789"
       - "5173:5173"
     volumes:
       - .:/workspace:rw
       - ./src:/app:rw
+      - /www2:/www2:ro
+      - /www1:/www1:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
     env_file:
       - .env
+    environment:
+      HOME: /home

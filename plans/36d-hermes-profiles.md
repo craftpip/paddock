@@ -58,7 +58,9 @@ own working directory automatically** — you must set `terminal.cwd`.
 - **No auto-cd exists.** The only `os.chdir` in hermes startup is a cwd
   *restore* (`main.py:2584`). The scaffolded `workspace/` subdir is never
   entered automatically.
-- **Fix:** `hermes -p <name> config set terminal.cwd /absolute/path`. Official
+- **Fix:** `hermes -p <name> config set terminal.cwd /absolute/path`. Paddock
+  uses the workspace selected by the user for `/absolute/path`; profile
+  activation never silently changes it. Official
   docs warn: *"Asking the model 'what directory are you in?' is not a reliable
   isolation test — set `terminal.cwd` explicitly."*
 - **Profiles do NOT sandbox the filesystem.** Same OS-user access as the base
@@ -113,5 +115,6 @@ own working directory automatically** — you must set `terminal.cwd`.
 - [x] Confirm `terminal.cwd` fix + no filesystem sandboxing
 - [x] Confirm coding-context (workspace snapshot) mechanism
 - [x] Note Paddock-specific gateway supervision caveat
-- [ ] Decide naming/placement + `terminal.cwd` target per profile
+- [x] Decide naming/placement + use the user-selected workspace as
+      `terminal.cwd`
 - [ ] Prove profile chat starts in new cwd on a real PAD (implementation)
