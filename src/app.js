@@ -983,8 +983,17 @@ app.get('/api/agents/:name/web', async (req, res) => {
         label: driver.webApp.label,
         docs: driver.webApp.docs || '',
         containerPort: driver.webApp.containerPort,
+        // Fixed-port consoles (openclaw gateway 18789) can't be retargeted —
+        // the Web tab renders the container port read-only and warns about
+        // peer-mode collisions.
+        containerPortEditable: driver.webApp.containerPortEditable !== false,
+        startable: driver.webApp.startable !== false,
         auth: driver.webApp.auth
-          ? { label: driver.webApp.auth.label, hint: driver.webApp.auth.hint || '' }
+          ? {
+              label: driver.webApp.auth.label,
+              hint: driver.webApp.auth.hint || '',
+              required: !!driver.webApp.auth.required,
+            }
           : null,
       },
       active,
@@ -994,7 +1003,22 @@ app.get('/api/agents/:name/web', async (req, res) => {
       // Token for the tokenized console URL (#token=...) — only for drivers
       // whose web console accepts it (openclaw Control UI). Others get ''.
       authToken: active && driver.webApp.auth && driver.webApp.auth.urlToken ? password : '',
-      startCommand: active ? driver.webApp.startCommand({ password, containerPort: webService.containerPort }) : '',
+      // Shell command that starts the console in the docked terminal (Start
+      // button). When published it uses the live binding; otherwise it honors
+      // draft ?containerPort&password query params (defaults: driver port, no
+      // password) so the user can try the console without a recreate.
+      startCommand: active
+        ? driver.webApp.startCommand({ password, containerPort: webService.containerPort })
+        : driver.webApp.startCommand({
+            password: typeof req.query.password === 'string' ? req.query.password : '',
+            containerPort: parseInt(req.query.containerPort, 10) || driver.webApp.containerPort,
+          }),
+      // Peer-mode collision: peer-shared agents share the door's network, so a
+      // fixed container port can't be bound twice. Reported when another agent
+      // on the same peer already publishes this container port.
+      collision: netPeer && driver.webApp.containerPortEditable === false
+        ? vm.findWebCollision(name, netPeer, driver.webApp.containerPort)
+        : null,
       actualPorts,
       extraPorts,
       sshPort: meta.PORT || '',

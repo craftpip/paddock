@@ -17,7 +17,7 @@ function randomPassword() {
 /** Publish the agent's built-in web app, expose OpenSSH, and manage extra
  *  TCP port mappings. Every change runs an SSE job (like Settings) and streams
  *  it in the Console popup. */
-export default function WebTab({ agent }) {
+export default function WebTab({ agent, run, connected, expandTerminal }) {
   const confirm = useConfirm()
   const toast = useToast()
   const updateAgentStatus = useAgents((s) => s.updateAgentStatus)
@@ -25,6 +25,7 @@ export default function WebTab({ agent }) {
   const [data, setData] = useState(null)
   const [loadError, setLoadError] = useState('')
   const [saving, setSaving] = useState(false)
+  const [startBusy, setStartBusy] = useState(false)
   const [modal, setModal] = useState(null)
   const [hostPort, setHostPort] = useState('')
   const [containerPort, setContainerPort] = useState('')
@@ -105,8 +106,40 @@ export default function WebTab({ agent }) {
     }
   }
 
-  // ── Additional ports (plan 28) ────────────────────────────
+  /** Paste the console's start command into the docked terminal (CommandsPane
+   *  rule: actions run as commands, never a backend action API). The command
+   *  is built server-side from the driver's startCommand with the current
+   *  draft container port + password, so the user can try the console without
+   *  a recreate. */
+  async function startInTerminal() {
+    if (!connected || startBusy || !data?.webApp?.startable) return
+    setStartBusy(true)
+    try {
+      // The terminal auto-collapses in non-commands modes, and the flush
+      // poll that would deliver a queued command only runs while expanded —
+      // a collapsed terminal silently swallows the paste. Pop it open first.
+      expandTerminal?.()
+      // Published console: the API already carries the live start command (real
+      // password baked in). Unpublished: build one from the draft port/password.
+      let cmd = data.active ? data.startCommand : ''
+      if (!cmd) {
+        const q = new URLSearchParams()
+        if (containerPort) q.set('containerPort', containerPort)
+        if (password) q.set('password', password)
+        const d = await api(`/api/agents/${agent.name}/web?${q}`)
+        cmd = d && d.startCommand
+      }
+      if (!cmd) throw new Error('No start command for this console')
+      run(cmd)
+      toast.success(`Pasted "${data.webApp.label}" start command into the terminal`)
+    } catch (err) {
+      toast.error(err.error || err.message || 'Failed to build the start command')
+    } finally {
+      setStartBusy(false)
+    }
+  }
 
+  // ── Additional ports (plan 28) ────────────────────────────
   function setPort(i, patch) {
     setPortDraft((prev) => prev.map((p, idx) => (idx === i ? { ...p, ...patch } : p)))
     setPortDirty(true)
@@ -237,6 +270,7 @@ export default function WebTab({ agent }) {
 
   const active = data.active
   const webApp = data.webApp
+  const startable = !!webApp && webApp.startable !== false && !!run
   const viaDoor = !!data.networkMode
   const accessUrl = data.webService ? webUrlForPort(data.webService.hostPort, data.authToken || '') : ''
   const publishedPort = (data.webService && data.webService.containerPort) || webApp?.containerPort
@@ -263,6 +297,19 @@ export default function WebTab({ agent }) {
                 small <code className="text-ink">socat</code> door container on{' '}
                 <code className="text-ink">{data.networkMode}</code>'s network that forwards to it —{' '}
                 {data.networkMode} and its other tenants stay untouched.
+              </p>
+            </section>
+          )}
+
+          {/* Peer-mode collision — fixed container port already bound on the same door */}
+          {data.collision && (
+            <section className="bg-warning-soft border border-warning-line/40 rounded-xl p-4">
+              <h3 className="text-sm font-medium text-warning">Container port collision</h3>
+              <p className="text-xs text-ink-dim mt-1 max-w-lg">
+                This console listens on a fixed container port ({webApp.containerPort}) that can't be changed, and{' '}
+                <code className="text-ink">{data.collision.name}</code> on the same network already publishes it
+                (host port <code className="text-ink">{data.collision.hostPort}</code>). Two agents sharing a
+                network can't bind the same container port — unpublish one of them before recreating this one.
               </p>
             </section>
           )}
@@ -324,6 +371,16 @@ export default function WebTab({ agent }) {
                     >
                       Open {webApp.label}
                     </a>
+                    {startable && (
+                      <button
+                        onClick={startInTerminal}
+                        disabled={!connected || startBusy}
+                        title={connected ? `Run ${webApp.label} in the docked terminal` : 'Waiting for the terminal to connect'}
+                        className="px-3 py-1.5 bg-raised hover:bg-raised-hover disabled:opacity-50 text-ink rounded-lg text-xs font-medium transition-colors"
+                      >
+                        {startBusy ? 'Building…' : 'Start in terminal'}
+                      </button>
+                    )}
                     <span className="text-xs text-ink-dim whitespace-nowrap">
                       <span className="font-mono text-ink">{data.webService.hostPort}</span>
                       <span className="text-ink-faint mx-1">→</span>
@@ -358,7 +415,9 @@ export default function WebTab({ agent }) {
                     />
                   </label>
                   <label className="block">
-                    <span className="text-xs text-ink-dim">Container port</span>
+                    <span className="text-xs text-ink-dim">
+                      Container port{webApp.containerPortEditable === false ? ' (fixed)' : ''}
+                    </span>
                     <input
                       type="number"
                       min="1"
@@ -366,19 +425,28 @@ export default function WebTab({ agent }) {
                       value={containerPort}
                       onChange={(e) => setContainerPort(e.target.value)}
                       disabled={saving}
+                      readOnly={webApp.containerPortEditable === false}
+                      title={webApp.containerPortEditable === false ? `Fixed — ${webApp.label} always listens on ${webApp.containerPort} inside the container` : ''}
                       className="mt-1 w-full bg-sunken border border-line rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line disabled:opacity-50"
                     />
+                    {webApp.containerPortEditable === false && (
+                      <span className="block text-xs text-ink-dim mt-1">
+                        Fixed — {webApp.label} always listens on {webApp.containerPort} inside.
+                      </span>
+                    )}
                   </label>
                 </div>
                 <label className="block">
-                  <span className="text-xs text-ink-dim">{webApp.auth?.label || 'Password'} (optional)</span>
+                  <span className="text-xs text-ink-dim">
+                    {webApp.auth?.label || 'Password'} ({webApp.auth?.required ? 'required' : 'optional'})
+                  </span>
                   <div className="mt-1 flex items-center gap-2">
                     <input
                       type={showPw ? 'text' : 'password'}
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
                       disabled={saving}
-                      placeholder="Leave empty for no auth"
+                      placeholder={webApp.auth?.required ? 'Required to bind outside loopback' : 'Leave empty for no auth'}
                       className="w-full bg-sunken border border-line rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line disabled:opacity-50"
                     />
                     <button
@@ -402,7 +470,7 @@ export default function WebTab({ agent }) {
                   </div>
                   {webApp.auth?.hint && <span className="block text-xs text-ink-dim mt-1">{webApp.auth.hint}</span>}
                 </label>
-                <div>
+                <div className="flex items-center gap-3">
                   <button
                     onClick={handleApply}
                     disabled={saving || !hostPort}
@@ -410,7 +478,23 @@ export default function WebTab({ agent }) {
                   >
                     {saving ? 'Applying…' : 'Publish & recreate'}
                   </button>
+                  {startable && (
+                    <button
+                      onClick={startInTerminal}
+                      disabled={!connected || startBusy}
+                      title={connected ? `Run ${webApp.label} in the docked terminal (no recreate)` : 'Waiting for the terminal to connect'}
+                      className="px-3 py-1.5 bg-raised hover:bg-raised-hover disabled:opacity-50 text-ink rounded-lg text-xs font-medium transition-colors"
+                    >
+                      {startBusy ? 'Building…' : 'Start in terminal'}
+                    </button>
+                  )}
                 </div>
+                {startable && (
+                  <p className="text-xs text-ink-dim">
+                    Prefer to try it first? "Start in terminal" pastes the launch command into the docked terminal
+                    without recreating the container.
+                  </p>
+                )}
               </>
             )}
           </section>

@@ -1,13 +1,13 @@
 # Sub-goal 34e — WebTab UI Updates
 
-## Status: Proposed (2026-08-10) — 0/3 items. Depends on 34a-34d (descriptors live in drivers).
+## Status: Complete (2026-08-10) — 3/3 items + build/verify done. Collision warning is code-verified only (no peer-mode openclaw pad exists to trigger it live).
 
 Progress checklist:
 
-- [ ] **Start in terminal** button (`run(webApp.startCommand(...))`)
-- [ ] Read-only container-port field for fixed-port drivers (`containerPortEditable: false`)
-- [ ] Peer-mode collision warning
-- [ ] SPA build + live verify
+- [x] **Start in terminal** button (`run(webApp.startCommand(...))`)
+- [x] Read-only container-port field for fixed-port drivers (`containerPortEditable: false`)
+- [x] Peer-mode collision warning
+- [x] SPA build + live verify
 
 Parent: `plans/34-web-publish-all-drivers.md`.
 
@@ -39,4 +39,23 @@ Parent: `plans/34-web-publish-all-drivers.md`.
 ## Files
 
 - **Modified** `src/client/src/pages/agent/WebTab.jsx`
+- **Modified** `src/client/src/pages/AgentDetail.jsx`
+- **Modified** `src/app.js`, `src/services/vm-manager.js`,
+  `src/services/drivers/openclaw.js`
 - Build: `cd src/client && npm run build` + `docker restart paddock`
+
+## Verification notes (2026-08-10)
+
+- Hermes (active): Start in terminal expands the docked terminal, pastes the
+  live published command, shell executes it. (Found + fixed a real bug: the
+  terminal auto-collapses in non-commands modes and the flush poll that
+  delivers queued commands only runs while expanded — a collapsed terminal
+  silently swallowed the paste. WebTab now calls `expandTerminal()` first.)
+- Openclaw (active + inactive): no Start button (startable:false); inactive
+  form shows read-only 18789 + "(fixed)" hint + "Gateway token (required)" +
+  placeholder "Required to bind outside loopback".
+- Picoclaw (inactive): editable port + Start button + "Dashboard token
+  (optional)"; draft path fetches `?containerPort` and pastes
+  `picoclaw-launcher -console -no-browser -public -port 18800`.
+- API `GET /api/agents/:name/web` returns `collision` (null without a
+  collision) and `startCommand` in all states.

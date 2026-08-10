@@ -256,7 +256,7 @@ export default function AgentDetail() {
         )}
         {mode === 'workspace' && <WorkspaceTab agent={agent} />}
         {mode === 'config' && <ConfigTab agent={agent} />}
-        {mode === 'web' && <WebTab agent={agent} />}
+        {mode === 'web' &&           <WebTab agent={agent} run={run} connected={termConnected} expandTerminal={() => setTermCollapsed(false)} />}
         {mode === 'logs' && <LogsTab agent={agent} />}
         {mode === 'sessions' && <SessionsTab agent={agent} />}
         {mode === 'activity' && <ActivityTab agent={agent} />}

@@ -54,6 +54,9 @@ const OPENCLAW = {
     docs: 'https://docs.openclaw.ai/web/control-ui',
     containerPort: 18789,
     containerPortEditable: false,
+    // The gateway always serves the console (start.sh keeps it alive), so a
+    // "start in terminal" button would paste a no-op — hide it.
+    startable: false,
     auth: {
       label: 'Gateway token',
       hint: 'Required — the gateway refuses to listen outside loopback without auth. This token unlocks the Control UI. Paddock publishes over plain HTTP, so the Control UI device-identity check is disabled while published (token-only auth); the original setting is restored on unpublish.',

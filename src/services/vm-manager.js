@@ -980,6 +980,23 @@ function readWebService(name) {
   }
 }
 
+/** Peer-mode web collision: agents routing through a network peer share the
+ *  door's network stack, so two of them can't bind the same container port.
+ *  Returns the first OTHER agent routing through the same peer that already
+ *  publishes the given container port ({ name, hostPort }), or null. Only
+ *  meaningful for fixed-container-port apps (the Web tab shows a warning). */
+function findWebCollision(name, peer, containerPort) {
+  if (!peer || !containerPort || !fs.existsSync(INSTANCES_DIR)) return null;
+  for (const entry of fs.readdirSync(INSTANCES_DIR, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name === name) continue;
+    const other = readWebService(entry.name);
+    if (other && other.containerPort === containerPort && currentNetworkPeer(entry.name) === peer) {
+      return { name: entry.name, hostPort: other.hostPort };
+    }
+  }
+  return null;
+}
+
 /** Set (webService truthy) or clear (null/undefined) the published web app.
  *  Persists the binding in web.json and regenerates the compose file (the
  *  machine-generated compose remains the source of truth for the ports block,
@@ -2951,4 +2968,5 @@ module.exports = {
   validateAgentCreate, createAgent, hostPortInUse,
   INSTANCES_DIR, PREFIX, PREFIX_RE, VM_NAME_RE,
   HOST_WORKSPACE, WORKSPACE,
+  findWebCollision,
 };
