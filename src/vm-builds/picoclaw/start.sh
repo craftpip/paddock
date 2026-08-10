@@ -22,4 +22,11 @@ if [ ! -f /root/.picoclaw/config.json ]; then
     tail -f /dev/null
 fi
 export PICOCLAW_GATEWAY_HOST=0.0.0.0
+# Paddock web publishing: if the webui wrote a start-web.sh hook (bound via
+# the data-dir bind mount), run it so the published web server survives
+# recreates. The hook is idempotent and backgrounds itself. Runs after the
+# config check, before the foreground gateway — the launcher coexists with it.
+if [ -f /root/.picoclaw/start-web.sh ]; then
+    bash /root/.picoclaw/start-web.sh || true
+fi
 picoclaw gateway -E || tail -f /dev/null

@@ -34,6 +34,34 @@ const PICOCLAW = {
     { cmd: 'picoclaw', args: ['onboard'] },
   ],
 
+  /** Built-in web app the PAD can publish (Web tab) — the **launcher
+   *  dashboard** (`picoclaw-launcher`, a separate background process, default
+   *  18800). NOT the gateway (18790, `picoclaw gateway -E`), which only serves
+   *  the pico chat WS at `/pico/ws` and returns 404 on root `/`. The launcher
+   *  coexists fine with the gateway start.sh runs; it attaches and reports its
+   *  own gatekeeping. It takes `-port <cport>` (editable), binds 0.0.0.0 with
+   *  `-public`, and gates on a dashboard token that is random **per run** unless
+   *  pinned via `PICOCLAW_LAUNCHER_TOKEN` (verified via `/api/auth/status` →
+   *  `token_help.env_var_name`). Paddock pins it as the publish password, so
+   *  the login gate (`/launcher-login`, `POST /api/auth/login {token}` →
+   *  cookie `picoclaw_launcher_auth`) stays usable across recreates. */
+  webApp: {
+    label: 'Web Console (Launcher Dashboard)',
+    docs: 'https://docs.picoclaw.io/',
+    containerPort: 18800,
+    containerPortEditable: true,
+    auth: {
+      label: 'Dashboard token',
+      hint: 'Optional — pins the launcher dashboard token. Without it the token is random per run (recreated agents are locked out until the log is read).',
+      target: 'env',
+      envKey: 'PICOCLAW_LAUNCHER_TOKEN',
+    },
+    startCommand({ password = '', containerPort }) {
+      const pass = password ? `${this.auth.envKey}='${password}' ` : '';
+      return `${pass}picoclaw-launcher -console -no-browser -public -port ${containerPort}`;
+    },
+  },
+
   /** Command groups served to the Commands tab — from picoclaw's own CLI
    *  (`picoclaw --help` on v0.2.5). No backup/memory/doctor: picoclaw
    *  doesn't ship them. */

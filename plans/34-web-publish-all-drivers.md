@@ -1,11 +1,12 @@
 # Plan 34 — Web Publishing for All Drivers
 
-## Status: In progress (2026-08-10) — openclaw (34b) now COMPLETE and
-live-verified (publish/unpublish roundtrip on pad-openclaw-work-pls, including
-the real-browser Control UI check — device-pairing question resolved). opencode
-web publishing (the reference mechanism) is live; picoclaw and hermes are not
-started. Terminology locked ("web console"). All three consoles were **tested
-live on running PADs** (openclaw on pad-openclaw-work-pls, picoclaw on
+## Status: In progress (2026-08-10) — openclaw (34b) and picoclaw (34c) now
+COMPLETE and live-verified (openclaw: publish/unpublish roundtrip on
+pad-openclaw-work-pls; picoclaw: publish from the Web tab on pad-picoclaw-asdsa
+→ launcher dashboard live at 18800, token login unlocks the Chat UI). opencode
+web publishing (the reference mechanism) is live; hermes is not started.
+Terminology locked ("web console"). All three consoles were **tested live on
+running PADs** (openclaw on pad-openclaw-work-pls, picoclaw on
 pad-picoclaw-asdsa, hermes on pad-hermes-sup) — console behavior, auth, and
 bind requirements are verified first-hand; see "Live verification" below. Work
 is split into six sub-goal files under `plans/` (see "Sub-goals" below) —
@@ -20,7 +21,7 @@ Progress checklist (tracked per sub-goal):
 - [x] Live-verify hermes console (fails closed, env auth, login flow)
 - [ ] **34a** Shared mechanism in vm-manager.js (readWebAuth/applyWebAuth/webChanged)
 - [x] **34b** openclaw driver webApp + boot-hook config patch
-- [ ] **34c** picoclaw driver webApp + start-web.sh launcher hook
+- [x] **34c** picoclaw driver webApp + start-web.sh launcher hook
 - [ ] **34d** hermes driver webApp + start-web.sh dashboard hook
 - [ ] **34e** WebTab.jsx: Start button, read-only fixed ports, peer-collision warning
 - [ ] **34f** Per-driver live verification + docs absorption + plan close

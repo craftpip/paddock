@@ -1,13 +1,17 @@
 # Sub-goal 34a — Shared Web-Publish Mechanism
 
-## Status: Proposed (2026-08-10) — 0/4 items. Research done in plan 34; nothing built yet.
+## Status: In progress (2026-08-10) — items 1–3 done (built during 34b/34c),
+item 4 partial (openclaw + picoclaw start.sh hooked; hermes pending in 34d).
+Item 1's `readWebAuth` env branch was hardcoded to `OPENCODE_SERVER_PASSWORD`;
+generalized to `auth.envKey` during 34c live verification (picoclaw showed
+"no auth" with a working token — see 34c notes).
 
 Progress checklist:
 
-- [ ] Generalize `readHookPassword` → `readWebAuth(driver, name)`
-- [ ] Add `applyWebAuth` / `removeWebAuth` (openclaw config patch with backup + rollback)
-- [ ] Fix `webChanged` to include the password (password-only changes re-apply)
-- [ ] Generic `start-web.sh` boot-hook block in all three `start.sh` + instance backfill
+- [x] Generalize `readHookPassword` → `readWebAuth` (incl. `auth.envKey` regex fix)
+- [x] Add `applyWebAuth` / `removeWebAuth` (openclaw config patch with backup + rollback)
+- [x] Fix `webChanged` to include the password (password-only changes re-apply)
+- [~] Generic `start-web.sh` boot-hook block in all three `start.sh` + instance backfill — openclaw (34b) + picoclaw (34c) done; hermes pending (34d)
 
 Parent: `plans/34-web-publish-all-drivers.md`. This sub-goal is the
 **do-first** shared infra that unblocks 34b/34c/34d. Details live in the

@@ -1818,7 +1818,8 @@ function readWebAuth(driver, name) {
   const hookPath = webHookPath(name, driver.type);
   if (!fs.existsSync(hookPath)) return '';
   const content = fs.readFileSync(hookPath, 'utf8');
-  const m = /OPENCODE_SERVER_PASSWORD='([^']*)'/.exec(content);
+  const envKey = (auth && auth.envKey) || 'OPENCODE_SERVER_PASSWORD';
+  const m = new RegExp(`${envKey}='([^']*)'`).exec(content);
   return m ? m[1] : '';
 }
 
