@@ -5,6 +5,16 @@ const { getAgent } = require('./agent-registry');
 
 const MAX_UPLOAD_SIZE = 100 * 1024 * 1024; // 100MB
 
+// Human-readable byte size ("313.4 MB") for the workspace file table.
+function humanSize(n) {
+  if (n == null || isNaN(n) || n < 0) return null;
+  if (n === 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.min(Math.floor(Math.log(n) / Math.log(1024)), units.length - 1);
+  const v = n / Math.pow(1024, i);
+  return (v >= 100 ? v.toFixed(0) : v.toFixed(1)) + ' ' + units[i];
+}
+
 // The pad container's OpenClaw data dir (agent's workspace inside the pad).
 const CONTAINER_DATA_DIR = '/root/.openclaw';
 
@@ -65,17 +75,18 @@ function resolveSafePath(workspaceRoot, relativePath) {
 
 const CONTAINER_HELPER = `let s='';process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>{
 const fs=require('fs'),path=require('path');let out={};
+const hr=n=>{if(n==null||isNaN(n)||n<0)return null;if(n===0)return'0 B';const u=['B','KB','MB','GB','TB'];const i=Math.min(Math.floor(Math.log(n)/Math.log(1024)),u.length-1);const v=n/Math.pow(1024,i);return(v>=100?v.toFixed(0):v.toFixed(1))+' '+u[i]};
 try{
   const q=JSON.parse(s),p=q.path;
   const st=p=>{try{return fs.statSync(p)}catch{return null}};
   const lst=p=>{const stat=st(p);if(!stat)throw new Error('Path not found');if(!stat.isDirectory())throw new Error('Not a directory');
     return fs.readdirSync(p,{withFileTypes:true}).map(e=>{const es=st(path.join(p,e.name))||{};
-      return{name:e.name,type:e.isDirectory()?'directory':'file',size:es.size||0,modified:es.mtime?new Date(es.mtime).toISOString():null};})
+      return{name:e.name,type:e.isDirectory()?'directory':'file',size:es.size||0,size_hr:hr(es.size),modified:es.mtime?new Date(es.mtime).toISOString():null};})
       .sort((a,b)=>a.type!==b.type?(a.type==='directory'?-1:1):a.name.localeCompare(b.name));};
   switch(q.op){
     case 'list':out={path:p,entries:lst(p)};break;
     case 'read':{const stat=st(p);if(!stat)throw new Error('File not found');if(stat.isDirectory())throw new Error('Cannot read directory');
-      out={content:fs.readFileSync(p,'utf8'),size:stat.size,modified:new Date(stat.mtime).toISOString(),name:path.basename(p)};break;}
+      out={content:fs.readFileSync(p,'utf8'),size:stat.size,size_hr:hr(stat.size),modified:new Date(stat.mtime).toISOString(),name:path.basename(p)};break;}
     case 'save':{fs.writeFileSync(p,q.content||'','utf8');const stat=fs.statSync(p);
       out={ok:true,name:path.basename(p),size:Buffer.byteLength(q.content||'','utf8'),modified:new Date(stat.mtime).toISOString()};break;}
     case 'mkdir':fs.mkdirSync(path.join(p,q.name),{recursive:false});out={ok:true};break;
@@ -95,7 +106,8 @@ process.stdout.write(JSON.stringify(out));
 
 function containerExec(agentName, payload, timeout = 30000) {
   return new Promise((resolve, reject) => {
-    const child = execFile('docker', ['exec', '-i', agentName, 'node', '-e', CONTAINER_HELPER], { timeout }, (err, stdout) => {
+    const child = execFile('docker', ['exec', '-i', agentName, 'node', '-e', CONTAINER_HELPER],
+      { timeout, maxBuffer: 512 * 1024 * 1024 }, (err, stdout) => {
       if (err) return reject(new Error('Container is not running'));
       try { resolve(JSON.parse(stdout)); }
       catch { reject(new Error('Unexpected container response')); }
@@ -141,6 +153,7 @@ function fsList(absPath) {
         name: e.name,
         type: e.isDirectory() ? 'directory' : 'file',
         size: entryStat ? entryStat.size : 0,
+        size_hr: entryStat ? humanSize(entryStat.size) : null,
         modified: entryStat ? entryStat.mtime.toISOString() : null,
       };
     })
@@ -173,6 +186,7 @@ async function readFile(agentId, relativePath, scope) {
   return {
     content: fs.readFileSync(absPath, 'utf8'),
     size: stat.size,
+    size_hr: humanSize(stat.size),
     modified: stat.mtime.toISOString(),
     name: path.basename(absPath),
   };

@@ -909,13 +909,6 @@ app.post('/api/agents/:name/settings', async (req, res) => {
 
 // ─── Web publishing (built-in web app) ─────────────────────
 
-function readHookPassword(hookPath) {
-  if (!fs.existsSync(hookPath)) return '';
-  const content = fs.readFileSync(hookPath, 'utf8');
-  const m = /OPENCODE_SERVER_PASSWORD='([^']*)'/.exec(content);
-  return m ? m[1] : '';
-}
-
 /** True when the given host port is published by any OTHER agent — either a
  *  declared compose port (other instances) or a live docker published port. */
 /** Boot-time sweep: drop any <name>-door / <name>-web forwarding containers
@@ -927,6 +920,8 @@ async function cleanOrphanDoors() {
   for (const cname of Object.keys(all)) {
     const m = /^(.*)-(door|web)$/.exec(cname);
     if (!m) continue;
+    // Never remove a real agent whose name happens to end in -door/-web.
+    if (fs.existsSync(path.join(INSTANCES_DIR, cname))) continue;
     const base = m[1];
     if (fs.existsSync(path.join(INSTANCES_DIR, base))) continue;
     console.log(`[orphan-door] removing ${cname} (agent ${base} gone)`);
@@ -965,7 +960,7 @@ app.get('/api/agents/:name/web', async (req, res) => {
     const active = !!webService;
     let password = '';
     if (active) {
-      password = readHookPassword(vm.webHookPath(name, agentType));
+      password = vm.readWebAuth(driver, name);
     }
 
     // The published port lives on the agent itself on the default network, but
@@ -1581,6 +1576,32 @@ app.post('/api/agents/:name/workspace/create-file', async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/agents/:name/workspace/media', async (req, res) => {
+  const agent = registry.getAgent(req.params.name);
+  if (!agent) return res.status(404).json({ error: 'Agent not found' });
+  const relativePath = req.query.path;
+  if (!relativePath) return res.status(400).send('path required');
+  const MEDIA_MIME = {
+    jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif',
+    webp: 'image/webp', bmp: 'image/bmp', avif: 'image/avif',
+    mp4: 'video/mp4', webm: 'video/webm', ogv: 'video/ogg', mov: 'video/quicktime',
+  };
+  try {
+    const file = await require('./services/workspace').readFileB64(agent.name, relativePath, req.query.scope || 'host');
+    if (file.error) return res.status(404).send(file.error);
+    if (file.size > 100 * 1024 * 1024) return res.status(413).send('File too large');
+    const ext = (file.name || '').split('.').pop().toLowerCase();
+    const mime = MEDIA_MIME[ext];
+    if (!mime) return res.status(415).send('Unsupported media type');
+    res.setHeader('Content-Type', mime);
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(file.name || 'media')}"`);
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(Buffer.from(file.content, 'base64'));
+  } catch (err) {
+    res.status(400).send(err.message);
   }
 });
 

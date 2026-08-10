@@ -546,8 +546,22 @@ function WorkspaceTab({ agent }) {
     } catch (err) { setError(toMsg(err)) }
   }
 
-  async function openFile(entryPath) {
+  const MEDIA_IMAGE = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'avif']
+  const MEDIA_VIDEO = ['mp4', 'webm', 'ogv', 'mov']
+  function mediaTypeOf(name) {
+    const ext = (name || '').split('.').pop()?.toLowerCase()
+    if (MEDIA_IMAGE.includes(ext)) return 'image'
+    if (MEDIA_VIDEO.includes(ext)) return 'video'
+    return null
+  }
+
+  async function openFile(entry, entryPath) {
     try {
+      const media = mediaTypeOf(entry?.name || entryPath.split('/').pop())
+      if (media) {
+        setFileModal({ name: entryPath.split('/').pop(), path: entryPath, size: entry?.size, size_hr: entry?.size_hr, media, mediaUrl: `/api/agents/${agent.name}/workspace/media?path=${encodeURIComponent(entryPath)}&scope=${scope}` })
+        return
+      }
       const d = await api(`/api/agents/${agent.name}/workspace/file?path=` + encodeURIComponent(entryPath) + `&scope=${scope}`)
       if (d.error) { setError(d.error); return }
       setFileModal({ ...d, path: entryPath })
@@ -687,7 +701,7 @@ function WorkspaceTab({ agent }) {
                     <tr key={entry.name} className="border-b border-line-faint/50 hover:bg-panel/30 group">
                       <td className="px-4 py-3 cursor-pointer"
                           onClick={() => {
-                            if (entry.type !== 'directory') openFile(entryPath)
+                            if (entry.type !== 'directory') openFile(entry, entryPath)
                             else goToDir(entryPath)
                           }}>
                         {entry.type === 'directory' ? (
@@ -743,13 +757,13 @@ function WorkspaceTab({ agent }) {
               <div className="flex items-center gap-3 min-w-0">
                 <span className="text-ink-faint">📄</span>
                 <span className="text-sm font-medium text-ink truncate">{fileModal.name}</span>
-                <span className="text-xs text-ink-dim">{fileModal.size} bytes · {ext.replace('.', '').toUpperCase()}</span>
+                <span className="text-xs text-ink-dim">{fileModal.size_hr || (fileModal.size != null ? fileModal.size + ' bytes' : '')} · {ext.replace('.', '').toUpperCase()}</span>
                 {editable && (
                   <span className={`text-xs ml-2 ${jsonError ? 'text-danger' : fileSaved ? 'text-success' : fileDirty ? 'text-warning' : 'text-ink-dim'}`}>
                     {jsonError || (fileSaved ? 'Saved' : fileDirty ? 'Unsaved' : '')}
                   </span>
                 )}
-                {!editable && (
+                {!editable && !fileModal.media && (
                   <span className="text-xs text-ink-dim ml-2">Binary file — read-only</span>
                 )}
               </div>
@@ -761,7 +775,15 @@ function WorkspaceTab({ agent }) {
               </div>
             </div>
             <div className="flex-1 overflow-hidden p-4">
-              {editable ? (
+              {fileModal.media === 'image' ? (
+                <div className="w-full h-full flex items-center justify-center">
+                  <img src={fileModal.mediaUrl} alt={fileModal.name} className="max-w-full max-h-full object-contain rounded-lg" />
+                </div>
+              ) : fileModal.media === 'video' ? (
+                <div className="w-full h-full flex items-center justify-center">
+                  <video src={fileModal.mediaUrl} controls autoPlay className="max-w-full max-h-full rounded-lg" />
+                </div>
+              ) : editable ? (
                 <textarea id="file-editor" value={fileModal.content}
                           onChange={(e) => { setFileModal({ ...fileModal, content: e.target.value }); setFileDirty(true); setFileSaved(false); setJsonError('') }}
                           className="w-full h-full bg-sunken text-ink font-mono text-sm p-4 rounded-lg border border-line focus:border-accent-line focus:outline-none resize-none"
