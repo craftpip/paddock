@@ -64,6 +64,16 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
 - **`openclaw models auth paste-api-key` destroys the whole `openclaw.json`**
   (rewrites it with auth info only). Save the config first and merge it back
   after. It reads the key from stdin — use `spawn`, not `execFile` (hangs).
+- **Published openclaw refuses Control UI over plain HTTP unless device
+  identity is skipped.** The WS handshake fails with
+  `cause: control-ui-insecure-auth`; `gateway.controlUi.allowInsecureAuth`
+  alone does NOT fix it. `applyWebAuth` therefore sets
+  `gateway.controlUi.dangerouslyDisableDeviceAuth: true` on publish (token-only
+  auth) and `removeWebAuth` restores the pre-publish `controlUi` (state file
+  `web-openclaw.json` now saves `{ bind, auth, controlUi }` — both the native
+  path and the root-helper patch script). The state file is written only on the
+  FIRST publish; re-publishing an already-published pad keeps the original
+  saved state (overwriting it made unpublish restore the published form).
 - **`instances/*/meta.env` is critical** — without it PAD discovery returns 0
   PADs and detail pages show "Agent not found". `setMetaFlag(name, key, '')`
   REMOVES the line instead of writing `KEY=`.

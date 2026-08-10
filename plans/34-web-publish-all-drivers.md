@@ -1,28 +1,47 @@
 # Plan 34 — Web Publishing for All Drivers
 
-## Status: In progress (2026-08-09) — research + live verification done
-(terminology locked: "web console"), implementation 0/3. opencode web
-publishing (the reference mechanism) is live; extending to openclaw, picoclaw,
-and hermes is not started. All three consoles were **tested live on running
-PADs today** (openclaw on pad-openclaw-work-pls, picoclaw on
+## Status: In progress (2026-08-10) — openclaw (34b) now COMPLETE and
+live-verified (publish/unpublish roundtrip on pad-openclaw-work-pls, including
+the real-browser Control UI check — device-pairing question resolved). opencode
+web publishing (the reference mechanism) is live; picoclaw and hermes are not
+started. Terminology locked ("web console"). All three consoles were **tested
+live on running PADs** (openclaw on pad-openclaw-work-pls, picoclaw on
 pad-picoclaw-asdsa, hermes on pad-hermes-sup) — console behavior, auth, and
-bind requirements are verified first-hand; see "Live verification" below.
+bind requirements are verified first-hand; see "Live verification" below. Work
+is split into six sub-goal files under `plans/` (see "Sub-goals" below) —
+2026-08-10.
 
-Progress checklist:
+Progress checklist (tracked per sub-goal):
 
 - [x] Terminology locked ("web console")
 - [x] Survey: which drivers ship a web console (4/6)
 - [x] Live-verify openclaw console (bind modes, auth gate, fail-closed)
 - [x] Live-verify picoclaw console (launcher dashboard, token login)
 - [x] Live-verify hermes console (fails closed, env auth, login flow)
-- [ ] Shared mechanism in vm-manager.js (readWebAuth/applyWebAuth/webChanged)
-- [ ] openclaw driver webApp + boot-hook config patch
-- [ ] picoclaw driver webApp + start-web.sh launcher hook
-- [ ] hermes driver webApp + start-web.sh dashboard hook
-- [ ] start.sh hook blocks (3 images rebuilt) + instance backfill
-- [ ] WebTab.jsx: Start button, read-only fixed ports, peer-collision warning
-- [ ] Per-driver live verification (publish/recreate/unpublish/door/rollback)
-- [ ] Absorb into docs (web.md status) and close plan
+- [ ] **34a** Shared mechanism in vm-manager.js (readWebAuth/applyWebAuth/webChanged)
+- [x] **34b** openclaw driver webApp + boot-hook config patch
+- [ ] **34c** picoclaw driver webApp + start-web.sh launcher hook
+- [ ] **34d** hermes driver webApp + start-web.sh dashboard hook
+- [ ] **34e** WebTab.jsx: Start button, read-only fixed ports, peer-collision warning
+- [ ] **34f** Per-driver live verification + docs absorption + plan close
+
+## Sub-goals
+
+The implementation work below is split into focused sub-goal files. Status of
+the parent tracks them; each sub-goal has its own `## Status:` header and
+checklist.
+
+| File | Scope |
+|------|-------|
+| `plans/34a-shared-mechanism.md` | `readWebAuth`/`applyWebAuth`/`removeWebAuth`, `webChanged` password fix, generic start.sh boot-hook + backfill |
+| `plans/34b-openclaw-web-console.md` | openclaw `webApp` + gateway config patch (18789) |
+| `plans/34c-picoclaw-web-console.md` | picoclaw `webApp` + launcher hook (18800) |
+| `plans/34d-hermes-web-console.md` | hermes `webApp` + dashboard hook (9119) |
+| `plans/34e-web-tab-ui.md` | WebTab.jsx Start button, read-only fixed ports, collision warning |
+| `plans/34f-verification-and-docs.md` | live verification, docs/web.md status, plan close |
+
+**Order:** 34a first (unblocks everything), then 34b/34c/34d (can run in
+parallel), then 34e, then 34f.
 
 ## Terminology — "web console"
 
@@ -74,10 +93,15 @@ vendor name is kept in the UI copy: openclaw **Control UI** (Gateway Dashboard
 - **Fails closed, exact message**: `Refusing to bind gateway to lan without
   auth.` — with `bind: lan` and no auth the gateway **does not listen at all**
   (probe fails). Auth (token or password) is mandatory for publishing.
-- ⚠️ **Device pairing NOT verified** — the gateway loads a `device-pair`
-  plugin; whether a fresh browser must approve pairing after auth is still
-  unconfirmed. Needs a real-browser test before the UI promises the dashboard
-  end-to-end. (Plan's earlier worry stands.)
+- ⚠️ ~~Device pairing NOT verified~~ **RESOLVED 2026-08-10 (real browser):**
+  the gateway loads a `device-pair` plugin and **refuses the WS handshake from
+  an insecure (plain-HTTP) context** — `cause: control-ui-insecure-auth` on the
+  handshake. Neither the token gate nor `gateway.controlUi.allowInsecureAuth`
+  alone fixes it. The publish patch sets
+  `gateway.controlUi.dangerouslyDisableDeviceAuth: true` (token-only auth,
+  device identity skipped) while published, and unpublish restores the
+  pre-publish `controlUi` value. Live-verified end-to-end: Control UI loads the
+  dashboard from the Web tab's published URL with just the gateway token.
 
 ### picoclaw — pad-picoclaw-asdsa
 

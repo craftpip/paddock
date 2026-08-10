@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { getDb } = require('./db');
 const { getDriver } = require('./drivers');
-const { workspaceMountInfo, readWebService } = require('./vm-manager');
+const { workspaceMountInfo, readWebService, readWebAuth } = require('./vm-manager');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const INSTANCES_DIR = path.join(WORKSPACE, 'instances');
@@ -215,6 +215,9 @@ function buildAgent(vmName, dockerState) {
         hostPort: ws.hostPort,
         containerPort: ws.containerPort,
         label: driver.webApp.label,
+        // Token for the tokenized console URL (#token=...) — only for drivers
+        // whose web console accepts it (openclaw Control UI).
+        token: driver.webApp.auth && driver.webApp.auth.urlToken ? readWebAuth(driver, vmName) : '',
       };
     }
   }

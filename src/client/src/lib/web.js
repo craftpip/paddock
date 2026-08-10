@@ -31,13 +31,17 @@ export function webBase() {
   return `${window.location.protocol}//${window.location.hostname}`
 }
 
-export function webUrlForPort(hostPort) {
-  return hostPort ? `${webBase()}:${hostPort}` : ''
+export function webUrlForPort(hostPort, token) {
+  if (!hostPort) return ''
+  const base = `${webBase()}:${hostPort}`
+  return token ? `${base}#token=${encodeURIComponent(token)}` : base
 }
 
-/** Direct URL for an agent's published web app, or '' when not published. */
+/** Direct URL for an agent's published web app, or '' when not published.
+ *  Appends the `#token=...` fragment when the console accepts tokenized URLs
+ *  (openclaw Control UI) so opening it auto-authenticates. */
 export function webUrlForAgent(agent) {
   const w = agent && agent.web
   if (!w || !w.active || !w.hostPort) return ''
-  return webUrlForPort(w.hostPort)
+  return webUrlForPort(w.hostPort, w.token)
 }

@@ -52,7 +52,7 @@ async function inspectContainer(name) {
   }
 }
 
-/** Resolved compose service definition (from `docker compose config`). */
+/** Resolved compose service definitions (from `docker compose config`). */
 async function resolveCompose(name) {
   try {
     const args = ['compose'];
@@ -62,7 +62,7 @@ async function resolveCompose(name) {
     args.push('-f', composePath(name), 'config', '--format', 'json');
     const r = await runCmd('docker', args, { timeout: 20000 });
     const data = JSON.parse(r.stdout);
-    return (data.services && data.services[name]) || null;
+    return data.services || null;
   } catch {
     return null;
   }
@@ -86,7 +86,8 @@ async function checkContainerHealth(name, onCheck) {
     if (onCheck) onCheck(check);
   };
 
-  const compose = await resolveCompose(name);
+  const services = await resolveCompose(name);
+  const compose = services && services[name];
   const ctr = await inspectContainer(name);
 
   if (!compose) {
@@ -183,6 +184,29 @@ async function checkContainerHealth(name, onCheck) {
     }
   } else {
     add({ key: 'network', label: 'Network mode', status: 'ok', expected: 'default', actual: actNet || 'default' });
+  }
+
+  // ── Peer-network forwarding door ───────────────────────────
+  const door = services && services[`${name}-door`];
+  if (door) {
+    const doorContainer = door.container_name || `${name}-door`;
+    const doorCtr = await inspectContainer(doorContainer);
+    const doorState = doorCtr && doorCtr.State;
+    if (!doorCtr) {
+      add({
+        key: 'door', label: 'Forwarding door', status: 'error',
+        expected: `${doorContainer} (running)`, actual: 'not found',
+        hint: 'The forwarding door is missing, so published web and SSH ports cannot reach this agent. Recreate to restore it.',
+      });
+    } else if (!doorState.Running) {
+      add({
+        key: 'door', label: 'Forwarding door', status: 'error',
+        expected: `${doorContainer} (running)`, actual: `${doorContainer} (${doorState.Status || 'stopped'})`,
+        hint: 'The forwarding door is stopped, so published web and SSH ports cannot reach this agent. Recreate to restore it.',
+      });
+    } else {
+      add({ key: 'door', label: 'Forwarding door', status: 'ok', expected: `${doorContainer} (running)`, actual: `${doorContainer} (running)` });
+    }
   }
 
   // ── Volumes / bind mounts ──────────────────────────────────

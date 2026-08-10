@@ -991,6 +991,9 @@ app.get('/api/agents/:name/web', async (req, res) => {
       networkMode: netPeer,
       webService: active ? webService : null,
       passwordConfigured: active && !!password,
+      // Token for the tokenized console URL (#token=...) — only for drivers
+      // whose web console accepts it (openclaw Control UI). Others get ''.
+      authToken: active && driver.webApp.auth && driver.webApp.auth.urlToken ? password : '',
       startCommand: active ? driver.webApp.startCommand({ password, containerPort: webService.containerPort }) : '',
       actualPorts,
       extraPorts,

@@ -14,9 +14,10 @@ against the **actual** container (`docker inspect`). It works on stopped
 containers too — while down it reports *why* (exit code, OOM-kill, stale
 network peer) instead of failing.
 
-**11 checks:** compose file · container exists/status (with OOM/exit-code
+**12 checks:** compose file · container exists/status (with OOM/exit-code
 reason) · Docker `/healthz` probe · restart policy · image · network mode +
-`container:` peer existence/running state · volumes/bind mounts (incl.
+`container:` peer existence/running state · peer-network forwarding door
+existence/running state · volumes/bind mounts (incl.
 `/workspace` host-path split-brain detection) · docker socket mount · published
 ports · env keys (secrets excluded via `/(password|token|key|secret)/i`).
 

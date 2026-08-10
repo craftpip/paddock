@@ -40,6 +40,38 @@ const OPENCLAW = {
     { cmd: 'openclaw', args: ['setup', '--baseline'] },
   ],
 
+  /** Built-in web app the PAD can publish (Web tab) — the Gateway-served
+   *  Control UI + WebChat on 18789. Unlike opencode/picoclaw/hermes this is
+   *  NOT a separate server: start.sh already runs the gateway as the container
+   *  main process, so "publishing" means patching gateway.bind → "lan" and
+   *  gateway.auth with a token BEFORE the recreate (applyWebAuth in
+   *  vm-manager.js) and verifying via the start-web.sh port probe. The auth
+   *  target is 'openclaw.json' because the gateway reads the config on
+   *  startup; auth is required (fails closed on non-loopback binds). The
+   *  container port is fixed — the gateway can't be told to listen elsewhere. */
+  webApp: {
+    label: 'Gateway Dashboard + WebChat',
+    docs: 'https://docs.openclaw.ai/web/control-ui',
+    containerPort: 18789,
+    containerPortEditable: false,
+    auth: {
+      label: 'Gateway token',
+      hint: 'Required — the gateway refuses to listen outside loopback without auth. This token unlocks the Control UI. Paddock publishes over plain HTTP, so the Control UI device-identity check is disabled while published (token-only auth); the original setting is restored on unpublish.',
+      target: 'openclaw.json',
+      required: true,
+      /** The Control UI accepts `#token=<gateway token>` in the URL fragment
+       *  and hydrates auth from it (then strips it). Paddock appends the token
+       *  so opening the console auto-authenticates — no manual paste. */
+      urlToken: true,
+    },
+    startCommand() {
+      // The gateway already serves the console (start.sh keeps it alive as the
+      // main process); the hook only needs its port probe to verify, and a
+      // no-op keeps the hook pipeline valid.
+      return 'true';
+    },
+  },
+
   /** Command groups served to the Commands tab (`/api/agent-types/openclaw/commands`). */
   commands: [
     {

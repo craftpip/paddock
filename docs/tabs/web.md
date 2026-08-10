@@ -23,7 +23,7 @@ port, and its auth requirements are detailed in
 | Agent | Built-in web app? | Default container port | Auth when exposed |
 |-------|-------------------|------------------------|-------------------|
 | **opencode** | OpenCode Web (`opencode web`) | **8080** | `OPENCODE_SERVER_PASSWORD` (username always `opencode`) |
-| openclaw | Gateway Dashboard ("Control UI") + WebChat | 18789 | `gateway.auth.token` / `gateway.auth.password` (required — non-loopback bind fails closed) |
+| openclaw | Gateway Dashboard ("Control UI") + WebChat | 18789 | `gateway.auth.token` / `gateway.auth.password` (required — non-loopback bind fails closed). Publishing over plain HTTP also sets `gateway.controlUi.dangerouslyDisableDeviceAuth: true` (token-only; restored on unpublish) |
 | hermes | Web Dashboard (`hermes dashboard`) | 9119 | `HERMES_DASHBOARD_BASIC_AUTH_*` (required — non-loopback bind fails closed) |
 | picoclaw | Launcher dashboard (`picoclaw-launcher`) | **18800** | `PICOCLAW_LAUNCHER_TOKEN` (dashboard always gated) |
 | codex | none — terminal TUI only | n/a | n/a |
@@ -32,8 +32,9 @@ port, and its auth requirements are detailed in
 > Pico chat WebSocket at `/pico/ws`. The actual web console is the separate
 > launcher dashboard on 18800 (verified live 2026-08-09).
 
-**Currently implemented in the codebase:** only the opencode driver carries a
-`webApp` descriptor today (live-verified on pad-opencode-yo). The others are
+**Currently implemented in the codebase:** opencode and **openclaw** carry a
+`webApp` descriptor (live-verified — openclaw publish/unpublish roundtrip
+tested on pad-openclaw-work-pls 2026-08-10). picoclaw and hermes are still
 planned per driver — see below for the descriptor shape each will use.
 
 ## Driver `webApp` descriptor
@@ -238,10 +239,20 @@ it is stored, and exactly how to set it — see
   is a no-op, target `env`). The password lives in `start-web.sh` and the
   immediate post-recreate `docker exec` start.
 - **openclaw** — `gateway.auth.token` in `openclaw.json` + `gateway.bind:
-  lan`. The only driver that needs a config-file patch, applied by the boot
-  hook BEFORE `openclaw gateway run` in start.sh. Bind changes require a FULL
-  gateway restart (in-process restart keeps old sockets); the gateway binds
-  nothing at all when auth is missing on a `lan` bind (fails closed).
+  lan`. The only driver that needs a config-file patch (`applyWebAuth`), applied
+  by the boot hook BEFORE `openclaw gateway run` in start.sh. Bind changes
+  require a FULL gateway restart (in-process restart keeps old sockets); the
+  gateway binds nothing at all when auth is missing on a `lan` bind (fails
+  closed). **Plain-HTTP caveat (live-verified 2026-08-10):** the Control UI
+  refuses to handshake over an insecure context unless device identity is
+  skipped — a browser connecting to `http://<host>:<port>` fails the WS
+  handshake with `control-ui-insecure-auth` unless the publish patch also sets
+  `gateway.controlUi.dangerouslyDisableDeviceAuth: true`. Paddock sets it
+  (token-only auth) on publish and restores the pre-publish `controlUi` value
+  on unpublish (saved alongside `bind`/`auth` in `web-openclaw.json`). The
+  state file is written only on the FIRST publish — re-publishing an already
+  published pad (password or host-port change) keeps the original saved state,
+  or unpublish would restore the published form.
 - **hermes** — `HERMES_DASHBOARD_BASIC_AUTH_USERNAME` / `_PASSWORD` (plus
   optional `_PASSWORD_HASH`, `_SECRET`, `_TTL_SECONDS`) embedded in
   `hermes dashboard --host 0.0.0.0 --port <cport> --no-open --skip-build`

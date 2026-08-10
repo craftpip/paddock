@@ -998,7 +998,11 @@ async function applyWebServices(name, webService) {
 
   const p = webServicePath(name);
   if (webService) {
-    fs.writeFileSync(p, JSON.stringify({ containerPort: webService.containerPort, hostPort: webService.hostPort }, null, 2));
+    fs.writeFileSync(p, JSON.stringify({
+      containerPort: webService.containerPort,
+      hostPort: webService.hostPort,
+      authToken: webService.authToken || '',
+    }, null, 2));
   } else if (fs.existsSync(p)) {
     fs.rmSync(p);
   }
@@ -1094,6 +1098,46 @@ if [ -n "$SSH_PORT" ] && [ "$SSH_PORT" != "22" ]; then
     sed -i "s/^#\\?[[:space:]]*Port .*/Port $SSH_PORT/" /etc/ssh/sshd_config
 fi
 `;
+
+/** Marker + block for the web start-hook, backfilled into an instance's OWN
+ *  build/start.sh (PADs created before the template change don't have it). The
+ *  block must sit BEFORE the driver's foreground process (the openclaw gateway
+ *  line in particular — a published config patch must be in place before the
+ *  gateway binds). The baked `/usr/local/bin/start.sh` only changes after a
+ *  rebuild, so callers must rebuild the image when ensureWebStartBlock returns
+ *  true. */
+const WEB_START_MARKER = 'start-web.sh';
+
+function webStartBlock(agent) {
+  const hookPath = `${getDriver(agent).dataDir}/start-web.sh`;
+  return `# Paddock web publishing: if the webui wrote a start-web.sh hook (bound via
+# the data-dir bind mount), run it so the published web server survives
+# recreates. The hook is idempotent and backgrounds itself.
+if [ -f ${hookPath} ]; then
+    bash ${hookPath} || true
+fi
+`;
+}
+
+/** Backfill the web start-hook block into an instance's OWN build/start.sh
+ *  (PADs created before the template change don't have it). Inserted before the
+ *  driver's gateway line (openclaw `openclaw gateway run`, picoclaw `picoclaw
+ *  gateway -E`, hermes `hermes gateway run`). Returns whether the build/start.sh
+ *  will produce an image that runs the hook (true when the marker is already
+ *  present — e.g. freshly seeded from the updated template — OR after patching);
+ *  false when un-patchable. Callers rebuild the image on true. */
+function ensureWebStartBlock(name, agent) {
+  const dir = buildDir(name);
+  const p = path.join(dir, 'start.sh');
+  if (!fs.existsSync(p)) return false;
+  let content = fs.readFileSync(p, 'utf8');
+  if (content.includes(WEB_START_MARKER)) return true;
+  const re = new RegExp('^(\\s*' + agent + ' gateway.*)$', 'm');
+  if (!re.test(content)) return false;
+  content = content.replace(re, webStartBlock(agent) + '$1');
+  fs.writeFileSync(p, content, { mode: 0o755 });
+  return true;
+}
 
 /** Backfill the SSH_PORT block into an instance's OWN build/start.sh (PADs
  *  created before the template change don't have it). The baked `/usr/local/
@@ -1740,11 +1784,205 @@ echo $! > "${pidFile}"
 `;
 }
 
-function readHookPassword(hookPath) {
+/** Host path of the driver's config file (instances/<name>/<agent>/...), the
+ *  same file the container sees at <dataDir>/<configFile> via the bind mount.
+ *  Only meaningful for drivers that keep a real config file on disk. */
+function driverConfigPath(name, driver) {
+  return path.join(INSTANCES_DIR, name, driver.type, driver.configFile || 'openclaw.json');
+}
+
+/** Effective web-publish auth secret for an agent, read back the same way it
+ *  was applied: an 'env'-target driver embeds the secret in the start-web.sh
+ *  hook via startCommand (opencode/picoclaw/hermes); an 'openclaw.json'-target
+ *  driver stores it in the config file's gateway.auth.token (openclaw). Returns
+ *  '' when nothing is configured. */
+function readWebAuth(driver, name) {
+  const auth = driver.webApp && driver.webApp.auth;
+  if (auth && auth.target === 'openclaw.json') {
+    // Preferred source: the token persisted in web.json at publish time. The
+    // agent container rewrites openclaw.json as root, which the webui (uid
+    // 1000) often can't read back — web.json is webui-owned and stable.
+    try {
+      const w = JSON.parse(fs.readFileSync(webServicePath(name), 'utf8'));
+      if (w && w.authToken) return String(w.authToken);
+    } catch {}
+    const configPath = driverConfigPath(name, driver);
+    if (!fs.existsSync(configPath)) return '';
+    try {
+      const d = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      return (d.gateway && d.gateway.auth && d.gateway.auth.token) || '';
+    } catch {
+      return '';
+    }
+  }
+  const hookPath = webHookPath(name, driver.type);
   if (!fs.existsSync(hookPath)) return '';
   const content = fs.readFileSync(hookPath, 'utf8');
   const m = /OPENCODE_SERVER_PASSWORD='([^']*)'/.exec(content);
   return m ? m[1] : '';
+}
+
+/** Path of the state file holding an openclaw gateway's pre-publish
+ *  `bind` + `auth` (written by applyWebAuth, consumed by removeWebAuth). It
+ *  lives next to the config inside the agent's data dir so the root patch
+ *  helper (which sees only that bind) can read/write it; apply chowns it to
+ *  node so the webui can read it directly. */
+function webOpenclawStatePath(name, driver) {
+  const configPath = driverConfigPath(name, driver);
+  return path.join(path.dirname(configPath), 'web-openclaw.json');
+}
+
+/** Pre-publish openclaw gateway state, or null. Shape: { bind, auth,
+ *  controlUi }. */
+function readWebOpenclawState(name, driver) {
+  const p = webOpenclawStatePath(name, driver);
+  if (!fs.existsSync(p)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(p, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/** One-shot root-helper node script that patches the bind-mounted openclaw
+ *  config from inside a container (agent data dirs are root-owned; the webui
+ *  cannot open them). `apply` saves the pre-publish gateway bind/auth, sets
+ *  bind lan + auth token, then chowns config + state to node so later native
+ *  reads/writes work. `remove` restores the saved bind/auth and drops the
+ *  state file. Exits non-zero on failure (2 unreadable config, 3 no state). */
+const OPENCLAW_WEB_PATCH_SCRIPT = `const fs=require('fs');
+const op=process.argv[1];
+const cfg='/d/openclaw.json';
+const st='/d/web-openclaw.json';
+let d;
+try { d=JSON.parse(fs.readFileSync(cfg,'utf8')); }
+catch(e){ process.stderr.write('read:'+e.message); process.exit(2); }
+let gw=(d.gateway&&typeof d.gateway==='object')?d.gateway:{};
+if(op==='apply'){
+  if(!fs.existsSync(st)){
+    fs.writeFileSync(st,JSON.stringify({
+      bind:gw.bind||'',
+      auth:gw.auth!==undefined?gw.auth:null,
+      controlUi:gw.controlUi!==undefined?gw.controlUi:null
+    },null,2));
+  }
+  d.gateway={...gw,bind:'lan',auth:{mode:'token',token:process.argv[2]||''},
+    controlUi:{dangerouslyDisableDeviceAuth:true}};
+}else if(op==='remove'){
+  let saved;
+  try{ saved=JSON.parse(fs.readFileSync(st,'utf8')); }
+  catch(e){ process.stderr.write('nostate'); process.exit(3); }
+  if(saved.bind) gw.bind=saved.bind; else delete gw.bind;
+  if(saved.auth) gw.auth=saved.auth; else delete gw.auth;
+  if(saved.controlUi) gw.controlUi=saved.controlUi; else delete gw.controlUi;
+  if(Object.keys(gw).length) d.gateway=gw; else delete d.gateway;
+}else{ process.stderr.write('badop'); process.exit(4); }
+fs.writeFileSync(cfg,JSON.stringify(d,null,2)+'\\n');
+fs.chownSync(cfg,1000,1000);
+try{ fs.chownSync(st,1000,1000); }catch{}
+`;
+
+/** Run the openclaw config patch through a one-shot root helper of our own
+ *  image (host-path bind), matching the removeInstanceDir pattern for
+ *  root-owned instance data. Throws with a clear, actionable message. */
+async function patchOpenclawConfigViaHelper(name, driver, op, password) {
+  const hostDir = path.join(HOST_WORKSPACE, 'instances', name, driver.type);
+  try {
+    await runCmd('docker', [
+      'run', '--rm', '-v', `${hostDir}:/d`, '--entrypoint', 'node',
+      'paddock-webui:latest', '-e', OPENCLAW_WEB_PATCH_SCRIPT, op, password || '',
+    ], { timeout: 60000 });
+    return true;
+  } catch (e) {
+    throw new Error(
+      `Could not ${op === 'apply' ? 'patch' : 'restore'} openclaw.json for web publishing ` +
+      `(the file is root-owned). Run this on the host: chown 1000:1000 ${driverConfigPath(name, driver)}`
+    );
+  }
+}
+
+/** Apply the web-publish auth before the container is recreated. Only
+ *  'openclaw.json'-target drivers need this: the openclaw gateway reads
+ *  gateway.bind / gateway.auth from the config on startup, so the config must
+ *  be patched (bind → lan + auth token) before the recreate. 'env'-target
+ *  drivers embed the secret in the start-web.sh hook and need nothing here.
+ *  The pre-publish gateway bind + auth are saved to a state file so unpublish
+ *  restores exactly those fields without reverting unrelated config edits.
+ *  Idempotent. No-op when the driver needs no config patch. Root-owned configs
+ *  are patched through a root helper container. */
+async function applyWebAuth(name, driver, password, { preserveState = false } = {}) {
+  const auth = driver.webApp && driver.webApp.auth;
+  if (!auth || auth.target !== 'openclaw.json') return;
+  const configPath = driverConfigPath(name, driver);
+  if (!fs.existsSync(configPath)) return;
+  let d;
+  try {
+    d = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  } catch (e) {
+    if (e.code === 'EACCES') return patchOpenclawConfigViaHelper(name, driver, 'apply', password);
+    throw new Error(`Cannot patch openclaw.json for web publish: ${e.message}`);
+  }
+  const gw = (d.gateway && typeof d.gateway === 'object') ? d.gateway : {};
+  // Persist the pre-publish state only on the FIRST publish. Re-publishing an
+  // already-published pad (password or host-port change) must NOT overwrite the
+  // saved original with the current published form, or unpublish would restore
+  // the published state instead of the pre-publish one.
+  if (!preserveState) {
+    const statePath = webOpenclawStatePath(name, driver);
+    if (!fs.existsSync(statePath)) {
+      fs.writeFileSync(statePath, JSON.stringify({
+        bind: gw.bind || '',
+        auth: gw.auth !== undefined ? gw.auth : null,
+        controlUi: gw.controlUi !== undefined ? gw.controlUi : null,
+      }, null, 2));
+    }
+  }
+  // Paddock publishes over plain HTTP; the Control UI requires a device
+  // identity in a secure context otherwise, so disable that check (token-only
+  // auth). Restored to the pre-publish value by removeWebAuth.
+  d.gateway = { ...gw, bind: 'lan', auth: { mode: 'token', token: String(password || '') }, controlUi: { dangerouslyDisableDeviceAuth: true } };
+  try {
+    fs.writeFileSync(configPath, JSON.stringify(d, null, 2) + '\n');
+  } catch (e) {
+    throw new Error(
+      `Cannot write openclaw.json to publish the web app (${e.code || e.message}). ` +
+      `If the file is root-owned, fix it on the host: chown 1000:1000 ${configPath}`
+    );
+  }
+}
+
+/** Undo a web-publish config patch: restore the saved pre-publish gateway
+ *  `bind` + `auth` (preserving any unrelated config edits made while
+ *  published) and drop the state file. No-op for drivers that need no patch or
+ *  when nothing was patched. Root-owned configs are restored through a root
+ *  helper container. */
+async function removeWebAuth(name, driver) {
+  const auth = driver.webApp && driver.webApp.auth;
+  if (!auth || auth.target !== 'openclaw.json') return;
+  const saved = readWebOpenclawState(name, driver);
+  if (!saved) return;
+  const configPath = driverConfigPath(name, driver);
+  if (!fs.existsSync(configPath)) {
+    try { fs.rmSync(webOpenclawStatePath(name, driver)); } catch {}
+    return;
+  }
+  try {
+    const d = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    const gw = (d.gateway && typeof d.gateway === 'object') ? { ...d.gateway } : {};
+    if (saved.bind) gw.bind = saved.bind; else delete gw.bind;
+    if (saved.auth) gw.auth = saved.auth; else delete gw.auth;
+    if (saved.controlUi) gw.controlUi = saved.controlUi; else delete gw.controlUi;
+    if (Object.keys(gw).length) d.gateway = gw; else delete d.gateway;
+    fs.writeFileSync(configPath, JSON.stringify(d, null, 2) + '\n');
+    try { fs.rmSync(webOpenclawStatePath(name, driver)); } catch {}
+  } catch (e) {
+    if (e.code === 'EACCES') {
+      return patchOpenclawConfigViaHelper(name, driver, 'remove', '');
+    }
+    // Unreadable for another reason — keep the state file so a later attempt
+    // (or manual fix) can still restore the original bind/auth.
+    console.error(`removeWebAuth could not restore openclaw.json for ${name}:`, e.message);
+  }
 }
 
 /** Whether the baked image's start.sh ships the docker CLI (settings toggle:
@@ -1771,6 +2009,22 @@ async function imageHasSshPortSupport(name, image, wasRunning) {
     await (wasRunning
       ? runCmd('docker', ['exec', name, 'sh', '-lc', 'grep -q SSH_PORT /usr/local/bin/start.sh'], { timeout: 15000 })
       : runCmd('docker', ['run', '--rm', '--entrypoint', 'sh', image, '-lc', 'grep -q SSH_PORT /usr/local/bin/start.sh'], { timeout: 30000 }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Whether the baked /usr/local/bin/start.sh runs the web start-hook (i.e. the
+ *  image was built from a start.sh containing the web start block). Checks the
+ *  running container when up, else spins a throwaway container. Used by
+ *  `applyAgentChanges` to decide whether publishing web on a pre-hook PAD needs
+ *  a rebuild (backfilled via ensureWebStartBlock). */
+async function imageHasWebStartSupport(name, image, wasRunning) {
+  try {
+    await (wasRunning
+      ? runCmd('docker', ['exec', name, 'sh', '-lc', 'grep -q start-web.sh /usr/local/bin/start.sh'], { timeout: 15000 })
+      : runCmd('docker', ['run', '--rm', '--entrypoint', 'sh', image, '-lc', 'grep -q start-web.sh /usr/local/bin/start.sh'], { timeout: 30000 }));
     return true;
   } catch {
     return false;
@@ -1850,6 +2104,8 @@ async function cleanOrphanDoors() {
   for (const cname of await psNames()) {
     const m = /^(.*)-(door|web)$/.exec(cname);
     if (!m) continue;
+    // Never remove a real agent whose name happens to end in -door/-web.
+    if (fs.existsSync(path.join(INSTANCES_DIR, cname))) continue;
     const base = m[1];
     if (fs.existsSync(path.join(INSTANCES_DIR, base))) continue;
     console.log(`[orphan-door] removing ${cname} (agent ${base} gone)`);
@@ -1926,7 +2182,7 @@ async function readWebState(name) {
   const webService = readWebService(name);
   const active = !!webService;
   let password = '';
-  if (active) password = readHookPassword(webHookPath(name, agentType));
+  if (active) password = readWebAuth(driver, name);
   const netPeer = currentNetworkPeer(name);
   const portContainer = netPeer ? doorName(name) : name;
   let actualPorts = [];
@@ -1951,6 +2207,7 @@ async function readWebState(name) {
     networkMode: netPeer,
     webService: active ? webService : null,
     passwordConfigured: active && !!password,
+    authToken: active && driver.webApp.auth && driver.webApp.auth.urlToken ? password : '',
     startCommand: active ? driver.webApp.startCommand({ password, containerPort: webService.containerPort }) : '',
     actualPorts,
     extraPorts,
@@ -2087,6 +2344,11 @@ async function prepareAgentChanges(name, opts = {}) {
   const oldVols = readExtraVolumes(name);
   const oldPorts = readExtraPorts(name);
   const oldMount = readWorkspaceMount(name, agentType);
+  // The existing secret even when NOT yet published: openclaw's token lives in
+  // openclaw.json and outlives unpublishes, so a fresh publish can reuse it
+  // instead of demanding the user retype it. Env-target drivers have no hook
+  // yet when unpublished and return '' — same as before.
+  const oldWebPassword = readWebAuth(driver, name);
 
   if (opts.reset && opts.confirm === false) {
     throw new Error('Refusing to reset without confirm: true (wipes the data dir).');
@@ -2178,12 +2440,15 @@ async function prepareAgentChanges(name, opts = {}) {
   // ── web publish (single binding; omitted fields keep the current ones) ──
   let newWeb = oldWeb;
   let webChanged = false;
+  let newWebPassword = oldWebPassword;
   if (opts.web !== undefined) {
     if (!driver.webApp) throw new Error('This agent type has no web app to publish');
     if (opts.web.active) {
       const oldBinding = oldWeb;
       const hPort = opts.web.hostPort !== undefined ? String(opts.web.hostPort).trim() : (oldBinding ? String(oldBinding.hostPort) : '');
-      const cPort = opts.web.containerPort !== undefined
+      // Fixed-port drivers (openclaw gateway 18789) always publish the driver's
+      // declared container port — the UI renders it read-only.
+      const cPort = opts.web.containerPort !== undefined && driver.webApp.containerPortEditable !== false
         ? Number(opts.web.containerPort)
         : (oldBinding ? oldBinding.containerPort : (driver.webApp.containerPort || 8080));
       if (!/^\d+$/.test(hPort) || +hPort < 1 || +hPort > 65535) {
@@ -2200,11 +2465,25 @@ async function prepareAgentChanges(name, opts = {}) {
         throw new Error(`Host port ${hPort} is already in use by another agent`);
       }
       newWeb = { containerPort: cPort, hostPort: hPort };
+      // Effective auth: a provided password wins. Required-auth drivers
+      // (openclaw — fails closed on non-loopback binds) keep their existing
+      // token when none is given, and refuse to publish without one.
+      if (driver.webApp.auth && driver.webApp.auth.required) {
+        const given = opts.web.password !== undefined ? String(opts.web.password) : '';
+        if (given) {
+          newWebPassword = given;
+        } else if (!newWebPassword) {
+          throw new Error('A gateway token is required to publish this web app (openclaw refuses to listen outside loopback without auth)');
+        }
+      } else {
+        newWebPassword = opts.web.password !== undefined ? String(opts.web.password) : newWebPassword;
+      }
     } else {
       newWeb = null;
     }
     webChanged = (oldWeb ? `${oldWeb.hostPort}:${oldWeb.containerPort}` : '')
-      !== (newWeb ? `${newWeb.hostPort}:${newWeb.containerPort}` : '');
+      !== (newWeb ? `${newWeb.hostPort}:${newWeb.containerPort}` : '')
+      || newWebPassword !== oldWebPassword;
   }
 
   // ── extra ports (full-replace list; conflict-checked vs ssh + web) ──
@@ -2249,7 +2528,9 @@ async function prepareAgentChanges(name, opts = {}) {
   return {
     instDir, meta, agentType, driver, wasRunning,
     oldAllow, oldNetwork, oldSshPort, oldSshCport, oldRootPw, oldWeb, oldVols, oldPorts, oldMount,
+    oldWebPassword,
     newAllow, newNetwork, newSshPort, newSshCport, newRootPw, wsMount, newVols, newPorts, newWeb,
+    newWebPassword,
     dockerChanged, networkChanged, sshChanged, sshCportChanged, passwordChanged,
     workspaceChanged, volumesChanged, portsChanged, webChanged,
     changed, summary, reason,
@@ -2291,21 +2572,29 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
     else if (opts.reset) onLog('system', 'Resetting the data dir');
     else onLog('system', 'Updating to the latest image');
 
-    // ── 1. persist the web binding + start hook ──
+    // ── 1. persist the web binding + start hook (+ config auth for openclaw) ──
     if (webChanged) {
       const p = webServicePath(name);
       if (newWeb) {
-        fs.writeFileSync(p, JSON.stringify({ containerPort: newWeb.containerPort, hostPort: String(newWeb.hostPort) }, null, 2));
-      } else if (fs.existsSync(p)) {
-        fs.rmSync(p);
-      }
-      onStep('web-hook', 'start');
-      if (newWeb) {
-        writeWebStartHook(name, agentType, buildWebHook(driver, agentType, newWeb, (opts.web && opts.web.password) || ''));
+        // Persist the auth token too (webui-owned) — the config file is often
+        // root-owned and unreadable by the webui after the agent rewrites it.
+        fs.writeFileSync(p, JSON.stringify({
+          containerPort: newWeb.containerPort,
+          hostPort: String(newWeb.hostPort),
+          authToken: driver.webApp.auth && driver.webApp.auth.urlToken ? String(ctx.newWebPassword || '') : '',
+        }, null, 2));
+        // Patch the config before the recreate (openclaw gateway reads
+        // gateway.bind/auth on startup); env-target drivers need nothing here.
+        applyWebAuth(name, driver, ctx.newWebPassword);
+        onStep('web-hook', 'start');
+        writeWebStartHook(name, agentType, buildWebHook(driver, agentType, newWeb, ctx.newWebPassword));
+        onStep('web-hook', 'end');
       } else {
+        // Unpublish: restore the pre-publish gateway config, drop the hook.
+        removeWebAuth(name, driver);
         removeWebStartHook(name, agentType);
+        if (fs.existsSync(p)) fs.rmSync(p);
       }
-      onStep('web-hook', 'end');
     }
 
     // ── 2. regenerate the compose (only the specified options) + validate ──
@@ -2362,13 +2651,22 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
         sshRebuild = ensureSshStartBlock(name);
       }
     }
-    const needRebuildFinal = !!opts.pull || needRebuild || sshRebuild;
+    let webRebuild = false;
+    if (webChanged && newWeb) {
+      if (!(await imageHasWebStartSupport(name, image, runningNow))) {
+        seedBuildDir(name, agentType, { installDocker: newAllow });
+        webRebuild = ensureWebStartBlock(name, agentType);
+      }
+    }
+    const needRebuildFinal = !!opts.pull || needRebuild || sshRebuild || webRebuild;
     if (needRebuildFinal) {
       const why = opts.pull
         ? 'Updating to the latest base image'
         : needRebuild
           ? 'Image has no docker CLI'
-          : 'start.sh must learn the custom SSH container port';
+          : sshRebuild
+            ? 'start.sh must learn the custom SSH container port'
+            : 'start.sh must learn the web start hook';
       onLog('system', `${why} — rebuilding the image, then recreating…`);
       await updateAgent(name, { pull: !!opts.pull, onLog, onStep });
     } else {
@@ -2445,13 +2743,21 @@ async function rollbackAgentChanges(name, ctx, touched, onLog) {
     agentType, wasRunning, oldAllow, oldNetwork, oldSshPort, oldSshCport, oldRootPw,
     oldWeb, oldVols, oldPorts, oldMount,
   } = ctx;
-  // Restore web.json + hook FIRST so the applySettings compose regen (which
-  // reads web.json) picks the old binding back up.
+  // Restore web.json + hook + gateway config FIRST so the applySettings compose
+  // regen (which reads web.json) picks the old binding back up.
   const p = webServicePath(name);
+  const driver = getDriver(agentType);
   if (oldWeb) {
     fs.writeFileSync(p, JSON.stringify({ containerPort: oldWeb.containerPort, hostPort: String(oldWeb.hostPort) }, null, 2));
-    writeWebStartHook(name, agentType, buildWebHook(getDriver(agentType), agentType, oldWeb, readHookPassword(webHookPath(name, agentType)) || ''));
+    // The old password is the pre-change one (ctx.oldWebPassword), not the
+    // current config value — a failed apply may already have patched it. Keep
+    // the saved pre-publish state so a later unpublish still restores the
+    // original bind/auth.
+    const oldPw = ctx.oldWebPassword || readWebAuth(driver, name);
+    applyWebAuth(name, driver, oldPw, { preserveState: true });
+    writeWebStartHook(name, agentType, buildWebHook(driver, agentType, oldWeb, oldPw));
   } else {
+    removeWebAuth(name, driver);
     removeWebStartHook(name, agentType);
     if (fs.existsSync(p)) fs.rmSync(p);
   }
@@ -2583,6 +2889,7 @@ module.exports = {
   readAgentConfig, redactSecrets, listDoors, startDoors, stopDoors,
   readWebService, applyWebServices, webHookPath, buildWebHook,
   writeWebStartHook, removeWebStartHook, doorName, doorPorts, desiredDoors,
+  readWebAuth, applyWebAuth, removeWebAuth,
   validateWorkspaceMount, workspaceMountInfo, readWorkspaceMount,
   validateExtraVolume, validateExtraVolumes, validateExtraPorts,
   readExtraVolumes, readExtraPorts, readSshCport, ensureSshStartBlock, autoSshPort,

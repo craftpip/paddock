@@ -238,7 +238,7 @@ export default function WebTab({ agent }) {
   const active = data.active
   const webApp = data.webApp
   const viaDoor = !!data.networkMode
-  const accessUrl = data.webService ? webUrlForPort(data.webService.hostPort) : ''
+  const accessUrl = data.webService ? webUrlForPort(data.webService.hostPort, data.authToken || '') : ''
   const publishedPort = (data.webService && data.webService.containerPort) || webApp?.containerPort
   const published = (data.actualPorts || []).find(
     (p) => p.container === `${publishedPort}/tcp` && p.host,
