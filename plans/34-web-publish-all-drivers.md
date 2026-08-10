@@ -1,16 +1,16 @@
 # Plan 34 — Web Publishing for All Drivers
 
-## Status: In progress (2026-08-10) — openclaw (34b) and picoclaw (34c) now
-COMPLETE and live-verified (openclaw: publish/unpublish roundtrip on
-pad-openclaw-work-pls; picoclaw: publish from the Web tab on pad-picoclaw-asdsa
-→ launcher dashboard live at 18800, token login unlocks the Chat UI). opencode
-web publishing (the reference mechanism) is live; hermes is not started.
-Terminology locked ("web console"). All three consoles were **tested live on
-running PADs** (openclaw on pad-openclaw-work-pls, picoclaw on
-pad-picoclaw-asdsa, hermes on pad-hermes-sup) — console behavior, auth, and
-bind requirements are verified first-hand; see "Live verification" below. Work
-is split into six sub-goal files under `plans/` (see "Sub-goals" below) —
-2026-08-10.
+## Status: In progress (2026-08-10) — 34b/34c/34d COMPLETE and live-verified
+(openclaw: publish/unpublish roundtrip on pad-openclaw-work-pls; picoclaw:
+publish from the Web tab on pad-picoclaw-asdsa → launcher dashboard live at
+18800, token login unlocks the Chat UI; hermes: publish on pad-hermes-sup →
+Web Dashboard live at 9119, basic-auth login → /sessions, plus the WebHook
+root-helper fallback and the /opt/data 0700 watchdog). opencode web publishing
+(the reference mechanism) is live; openclaw/picoclaw/hermes consoles are
+**tested live on running PADs** — console behavior, auth, and bind requirements
+verified first-hand. Remaining: 34a (status fix in checklist below), 34e
+(WebTab UI polish), 34f (final verification + docs + close). Work is split
+into six sub-goal files under `plans/` (see "Sub-goals" below) — 2026-08-10.
 
 Progress checklist (tracked per sub-goal):
 
@@ -19,10 +19,10 @@ Progress checklist (tracked per sub-goal):
 - [x] Live-verify openclaw console (bind modes, auth gate, fail-closed)
 - [x] Live-verify picoclaw console (launcher dashboard, token login)
 - [x] Live-verify hermes console (fails closed, env auth, login flow)
-- [ ] **34a** Shared mechanism in vm-manager.js (readWebAuth/applyWebAuth/webChanged)
+- [x] **34a** Shared mechanism in vm-manager.js (readWebAuth/applyWebAuth/webChanged)
 - [x] **34b** openclaw driver webApp + boot-hook config patch
 - [x] **34c** picoclaw driver webApp + start-web.sh launcher hook
-- [ ] **34d** hermes driver webApp + start-web.sh dashboard hook
+- [x] **34d** hermes driver webApp + start-web.sh dashboard hook
 - [ ] **34e** WebTab.jsx: Start button, read-only fixed ports, peer-collision warning
 - [ ] **34f** Per-driver live verification + docs absorption + plan close
 

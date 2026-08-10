@@ -1,4 +1,5 @@
 const { execFile } = require('child_process');
+const crypto = require('crypto');
 const { imageFor } = require('../instance-image');
 
 function runCmd(cmd, args, options = {}) {
@@ -35,6 +36,39 @@ const HERMES = {
   setupSteps: [
     { cmd: 'hermes', args: ['setup', '--non-interactive'] },
   ],
+
+  /** Built-in web app the PAD can publish (Web tab) — `hermes dashboard`, a
+   *  separate process (the gateway does NOT serve it), default 9119. Web/pty
+   *  extras are baked in the image (fastapi + uvicorn + prebuilt UI at
+   *  /opt/hermes/hermes_cli/web_dist) — no Dockerfile change. It FAILS CLOSED
+   *  on non-loopback binds: 0.0.0.0 without an auth provider refuses to bind
+   *  ("Refusing to bind dashboard to 0.0.0.0 …"), so auth is REQUIRED here
+   *  (unlike opencode/picoclaw where the password is optional). With
+   *  `HERMES_DASHBOARD_BASIC_AUTH_USERNAME`/`_PASSWORD` set it binds 0.0.0.0,
+   *  `auth_required: true`, and sensitive `/api/*` return 401 without a
+   *  session. `_SECRET` HMAC-signs sessions — a stable value makes logins
+   *  survive restarts, so Paddock derives it deterministically from the
+   *  password (same password → same secret → hook stays stable). `envKey` is
+   *  the PASSWORD var (that's what readWebAuth reads back); startCommand emits
+   *  the whole env set. */
+  webApp: {
+    label: 'Web Dashboard',
+    docs: 'https://hermes-agent.nousresearch.com/docs/',
+    containerPort: 9119,
+    containerPortEditable: true,
+    auth: {
+      label: 'Dashboard password',
+      hint: 'Required — the dashboard refuses to bind outside loopback without basic auth. The username is always "admin"; a stable session secret is derived from this password so logins survive recreates.',
+      target: 'env',
+      envKey: 'HERMES_DASHBOARD_BASIC_AUTH_PASSWORD',
+      required: true,
+    },
+    startCommand({ password = '', containerPort }) {
+      const user = 'admin';
+      const secret = crypto.createHash('sha256').update(`paddock-hermes:${password}`).digest('hex');
+      return `HERMES_DASHBOARD_BASIC_AUTH_USERNAME='${user}' HERMES_DASHBOARD_BASIC_AUTH_PASSWORD='${password}' HERMES_DASHBOARD_BASIC_AUTH_SECRET='${secret}' hermes dashboard --host 0.0.0.0 --port ${containerPort} --no-open --skip-build`;
+    },
+  },
 
   /** Command groups from hermes' own CLI (`hermes --help`). Hermes is a full
    *  agent with gateway, cron, skills, memory, sessions and MCP — unlike

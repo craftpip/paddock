@@ -1,7 +1,11 @@
 # Sub-goal 34a — Shared Web-Publish Mechanism
 
-## Status: In progress (2026-08-10) — items 1–3 done (built during 34b/34c),
-item 4 partial (openclaw + picoclaw start.sh hooked; hermes pending in 34d).
+## Status: In progress (2026-08-10) — items 1–4 done (built during 34b/34c/34d),
+plus two robustness fixes discovered during 34d live verification: the WebHook
+writes/removes now fall back to a root-helper container when the agent data dir
+is not webui-owned (hermes chowns `/opt/data`), and hermes' start.sh gained a
+watchdog because hermes re-locks the data dir to 0700 on gateway boot
+(`secure_parent_dir`), which breaks `readWebAuth`. Open items are all in 34e/34f.
 Item 1's `readWebAuth` env branch was hardcoded to `OPENCODE_SERVER_PASSWORD`;
 generalized to `auth.envKey` during 34c live verification (picoclaw showed
 "no auth" with a working token — see 34c notes).
@@ -11,7 +15,9 @@ Progress checklist:
 - [x] Generalize `readHookPassword` → `readWebAuth` (incl. `auth.envKey` regex fix)
 - [x] Add `applyWebAuth` / `removeWebAuth` (openclaw config patch with backup + rollback)
 - [x] Fix `webChanged` to include the password (password-only changes re-apply)
-- [~] Generic `start-web.sh` boot-hook block in all three `start.sh` + instance backfill — openclaw (34b) + picoclaw (34c) done; hermes pending (34d)
+- [x] Generic `start-web.sh` boot-hook block in all three `start.sh` + instance backfill (openclaw, picoclaw, hermes all done in 34b/34c/34d)
+- [x] WebHook write/remove root-helper fallback (`webHookViaHelper`) for non-webui-owned agent data dirs
+- [x] Hermes `/opt/data` 0700 watchdog in start.sh (template + per-instance copy)
 
 Parent: `plans/34-web-publish-all-drivers.md`. This sub-goal is the
 **do-first** shared infra that unblocks 34b/34c/34d. Details live in the

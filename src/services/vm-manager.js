@@ -1074,16 +1074,62 @@ function webHookPath(name, agent) {
   return path.join(INSTANCES_DIR, name, agent, 'start-web.sh');
 }
 
-/** Write (or remove) the web start hook for an agent. */
-function writeWebStartHook(name, agent, content) {
-  const p = webHookPath(name, agent);
-  fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p, content, { mode: 0o755 });
+/** One-shot root-helper node script that writes/removes the start-web.sh hook
+ *  inside the bind-mounted agent data dir from a container (agent data dirs can
+ *  be non-webui-owned — hermes chowns /opt/data to its hermes user on boot, and
+ *  openclaw/opencode rewrite files as root). `write` base64-decodes the content
+ *  from argv[2], writes 0755, and chowns to 1000 so later native reads work;
+ *  `remove` deletes it. Exits non-zero on failure. */
+const WEB_HOOK_HELPER_SCRIPT = `const fs=require('fs');
+const op=process.argv[1];
+const p='/d/start-web.sh';
+try{
+  if(op==='write'){
+    const content=Buffer.from(process.argv[2]||'','base64').toString('utf8');
+    fs.writeFileSync(p, content, {mode:0o755});
+    fs.chownSync(p,1000,1000);
+  }else if(op==='remove'){
+    if(fs.existsSync(p)) fs.rmSync(p);
+  }else{ process.stderr.write('badop'); process.exit(4); }
+}catch(e){ process.stderr.write(String(e&&e.message||e)); process.exit(2); }
+`;
+
+/** Run the hook write/remove through a one-shot root helper of our own image
+ *  (host-path bind), matching the patchOpenclawConfigViaHelper / removeVm
+ *  pattern for non-webui-owned instance data. */
+async function webHookViaHelper(name, agent, op, content) {
+  const hostDir = path.join(HOST_WORKSPACE, 'instances', name, agent);
+  const arg = op === 'write' ? Buffer.from(content).toString('base64') : '';
+  await runCmd('docker', [
+    'run', '--rm', '-v', `${hostDir}:/d`, '--entrypoint', 'node',
+    'paddock-webui:latest', '-e', WEB_HOOK_HELPER_SCRIPT, op, arg,
+  ], { timeout: 60000 });
 }
 
-function removeWebStartHook(name, agent) {
+/** Write (or remove) the web start hook for an agent. Falls back to a root
+ *  helper container when the agent data dir is not webui-writable. */
+async function writeWebStartHook(name, agent, content) {
   const p = webHookPath(name, agent);
-  if (fs.existsSync(p)) fs.rmSync(p);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  try {
+    fs.writeFileSync(p, content, { mode: 0o755 });
+    return;
+  } catch (e) {
+    if (e.code !== 'EACCES') throw e;
+  }
+  await webHookViaHelper(name, agent, 'write', content);
+}
+
+async function removeWebStartHook(name, agent) {
+  const p = webHookPath(name, agent);
+  if (!fs.existsSync(p)) return;
+  try {
+    fs.rmSync(p);
+    return;
+  } catch (e) {
+    if (e.code !== 'EACCES') throw e;
+  }
+  await webHookViaHelper(name, agent, 'remove');
 }
 
 /** The sshd-listen-port block the start.sh templates now ship. start.sh reads
@@ -2588,12 +2634,12 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
         // gateway.bind/auth on startup); env-target drivers need nothing here.
         applyWebAuth(name, driver, ctx.newWebPassword);
         onStep('web-hook', 'start');
-        writeWebStartHook(name, agentType, buildWebHook(driver, agentType, newWeb, ctx.newWebPassword));
+        await writeWebStartHook(name, agentType, buildWebHook(driver, agentType, newWeb, ctx.newWebPassword));
         onStep('web-hook', 'end');
       } else {
         // Unpublish: restore the pre-publish gateway config, drop the hook.
         removeWebAuth(name, driver);
-        removeWebStartHook(name, agentType);
+        await removeWebStartHook(name, agentType);
         if (fs.existsSync(p)) fs.rmSync(p);
       }
     }
@@ -2756,10 +2802,10 @@ async function rollbackAgentChanges(name, ctx, touched, onLog) {
     // original bind/auth.
     const oldPw = ctx.oldWebPassword || readWebAuth(driver, name);
     applyWebAuth(name, driver, oldPw, { preserveState: true });
-    writeWebStartHook(name, agentType, buildWebHook(driver, agentType, oldWeb, oldPw));
+    await writeWebStartHook(name, agentType, buildWebHook(driver, agentType, oldWeb, oldPw));
   } else {
     removeWebAuth(name, driver);
-    removeWebStartHook(name, agentType);
+    await removeWebStartHook(name, agentType);
     if (fs.existsSync(p)) fs.rmSync(p);
   }
   await applySettings(name, {
