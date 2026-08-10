@@ -468,6 +468,22 @@ the door on a network change, drops it when leaving peer mode (BEFORE the agent
 recreate, so the new `ports:` bind doesn't hit "port already allocated"),
 re-execs the boot hook, and re-verifies the server.
 
+### Known limitation: root-owned instance data
+
+Agent containers run as **root**, so their data dirs
+(`instances/<name>/<agent>/` — `openclaw.json`, hermes `/opt/data`, etc.) are
+root-owned. The webui runs as uid 1000 and hits `EACCES` on direct reads and
+writes. Current mitigations: a one-shot root-helper container for web-hook and
+config patches and for deletes, and `web.json` persisting the openclaw gateway
+token so `readWebAuth` never needs to re-read the root-owned config.
+**Accepted as a temporary state only** — the intended direction is to make
+instance data **user-owned** (run agent containers as a non-root user). That is
+a cross-cutting change: every per-type `Dockerfile`/`start.sh` (user accounts,
+`HOME`, permissions), the compose `user:`/`group_add` wiring, the root-helper
+paths (they exist *because* of root ownership and should become unnecessary),
+and any tooling that assumes container-root (e.g. the openclaw CLI writing
+config under `/root/.openclaw`).
+
 
 ---
 

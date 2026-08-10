@@ -8,9 +8,11 @@ hook, the socat door and the `webApp` descriptor are described in
 port it uses, **whether a password is required or optional, where that password
 is stored, and exactly how to set it**.
 
-> Last updated: 2026-08-09 — vendor docs verified online AND **live-tested on
+> Last updated: 2026-08-10 — vendor docs verified online AND **live-tested on
 > running PADs** (openclaw on pad-openclaw-work-pls, picoclaw on
-> pad-picoclaw-asdsa, hermes on pad-hermes-sup).
+> pad-picoclaw-asdsa, hermes on pad-hermes-sup). All four consoles are now
+> published through Paddock (plan 34, 34a-34f done; peer-mode door carry
+> live-verified on pad-test-oc-web).
 
 ## Overview
 
@@ -170,10 +172,10 @@ Then restart the gateway or container (a full process start is required for the
 bind change). Verify with `openclaw gateway status` (shows `bind=lan (0.0.0.0)`
 and the dashboard URL). Env overrides beat the file when both are set.
 
-### Device pairing — the extra step
+### Device pairing — skipped on plain HTTP
 
-After auth succeeds, a **new browser** still must complete a one-time pairing
-approval or it sees `disconnected (1008): pairing required`:
+After auth succeeds, a **new browser** normally still must complete a one-time
+pairing approval or it sees `disconnected (1008): pairing required`:
 
 ```bash
 openclaw devices list
@@ -181,21 +183,26 @@ openclaw devices approve <requestId>
 ```
 
 `openclaw dashboard` on the gateway host opens a short-lived, single-use
-pairing link instead. Once approved, the device is remembered. This is the
-biggest usability unknown for publishing the openclaw console — every browser
-that opens the published URL needs an approval unless it was pre-paired.
-**Status: NOT yet verified live** — the gateway's `device-pair` plugin loads,
-but whether a fresh browser must pair after gateway auth needs a real-browser
-test before the Web tab promises the dashboard end-to-end.
+pairing link instead. **Live-verified 2026-08-10 (real browser):** the pairing
+step is the blocker for publishing over plain HTTP — the gateway's `device-pair`
+plugin **refuses the WS handshake from an insecure context**
+(`cause: control-ui-insecure-auth`), and neither the token gate nor
+`gateway.controlUi.allowInsecureAuth` alone fixes it. Paddock's publish patch
+sets `gateway.controlUi.dangerouslyDisableDeviceAuth: true` (token-only auth,
+device identity skipped), and unpublish restores the pre-publish `controlUi`
+value from the state file.
 
 ### Paddock status
 
-Planned (plan 34): no `webApp` descriptor yet, no gateway-auth patch helper.
-Because the console is gateway-served, the boot hook can only *verify*, never
-start it; auth + `gateway.bind: "lan"` must be patched into `openclaw.json`
-**before** the gateway starts (a runtime config reload does NOT rebind — a full
-gateway start does). Console reachability, token gate, `lan` bind and the
-fail-closed refusal were all verified live on 2026-08-09.
+Implemented (plan 34b, live-verified): `webApp` descriptor — `containerPort:
+18789`, `containerPortEditable: false`, `startable: false`, auth
+`{ target: 'openclaw.json', required: true }`. Because the console is
+gateway-served, the boot hook can only *verify*, never start it (hence
+`startable: false` — no "Start in terminal" button); auth + `gateway.bind:
+"lan"` + the `dangerouslyDisableDeviceAuth` flag are patched into
+`openclaw.json` **before** the gateway starts. A runtime config reload does NOT
+rebind — a full gateway start does. Publish/unpublish roundtrip verified on
+pad-openclaw-work-pls and pad-test-oc-web.
 
 ## picoclaw — Launcher dashboard (web console)
 
@@ -255,10 +262,12 @@ The chat *inside* the dashboard is proxied by the launcher to the gateway's
 
 ### Paddock status
 
-Planned (plan 34): no `webApp` descriptor yet. The console is a **background
-launcher process** (like opencode's web server), so the boot hook starts it and
-the auth is env-based — no config-file patching needed. Live-verified
-2026-08-09.
+Implemented (plan 34c, live-verified): `webApp` descriptor — `containerPort:
+18800`, editable, auth `{ target: 'env', envKey: 'PICOCLAW_LAUNCHER_TOKEN',
+required: false }`. The console is a **background launcher process** (like
+opencode's web server), so the `start-web.sh` boot hook starts it with the
+token pinned and the auth is env-based — no config-file patching needed.
+Publish/unpublish roundtrip + token login verified on pad-picoclaw-asdsa.
 
 ## hermes — Web Dashboard
 
@@ -364,10 +373,18 @@ field.)
 
 ### Paddock status
 
-Planned (plan 34): no `webApp` descriptor and no boot-hook block in the hermes
-`start.sh` (the dashboard is not gateway-started). Auth is env-based
-(embedded in the start command) — no config-file patching needed.
-Live-verified 2026-08-09.
+Implemented (plan 34d, live-verified): `webApp` descriptor — `containerPort:
+9119`, editable, auth `{ target: 'env', required: true }` (the start command
+embeds `HERMES_DASHBOARD_BASIC_AUTH_USERNAME/PASSWORD/_SECRET`, so sessions
+survive restarts). The dashboard is started by the `start-web.sh` boot hook
+(the gateway does not start it). Two hermes-specific gotchas were solved:
+- The data dir is **root-owned** inside the container, so the webui (uid 1000)
+  can't write the hook directly — host-side writes fall back to a one-shot
+  root-helper container of the PAD image.
+- Hermes re-locks `/opt/data` to **0700 on gateway boot** via
+  `secure_parent_dir()` in `hermes_constants.py`, which would break the hook
+  write — the hermes `start.sh` holds it at 755 with a small watchdog loop.
+Login flow (`admin`/password → `/sessions`) verified on pad-hermes-sup.
 
 ## codex and claude — no web console
 

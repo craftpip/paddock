@@ -32,10 +32,20 @@ port, and its auth requirements are detailed in
 > Pico chat WebSocket at `/pico/ws`. The actual web console is the separate
 > launcher dashboard on 18800 (verified live 2026-08-09).
 
-**Currently implemented in the codebase:** opencode and **openclaw** carry a
-`webApp` descriptor (live-verified — openclaw publish/unpublish roundtrip
-tested on pad-openclaw-work-pls 2026-08-10). picoclaw and hermes are still
-planned per driver — see below for the descriptor shape each will use.
+**Currently implemented in the codebase:** all four console-bearing drivers
+carry a `webApp` descriptor — **opencode**, **openclaw**, **picoclaw**, and
+**hermes** — each live-verified end-to-end (publish → auth gate → login →
+unpublish) on test PADs 2026-08-09/10. Notable per-driver mechanics:
+- **openclaw** (`pad-openclaw-work-pls`) — config-file patch via the boot hook
+  + `dangerouslyDisableDeviceAuth` for plain HTTP (see below).
+- **picoclaw** (`pad-picoclaw-asdsa`) — launcher dashboard at 18800, token
+  login, coexists with the gateway.
+- **hermes** (`pad-hermes-sup`) — dashboard at 9119 with basic-auth login.
+  Hermes re-locks its data dir to 0700 on gateway boot, so the published
+  server's `start-web.sh` hook only works through a **root-helper fallback**
+  for the host-side file writes, and the hermes `start.sh` holds the dir at
+  755 with a small watchdog loop (the `secure_parent_dir()` in hermes'
+  `hermes_constants.py` re-tightens it).
 
 ## Driver `webApp` descriptor
 
@@ -44,12 +54,16 @@ webApp: {
   label: 'OpenCode Web',
   docs: 'https://opencode.ai/docs/web/',
   containerPort: 8080,                                  // default in-container port
+  containerPortEditable: true,                          // false => the field renders read-only (openclaw 18789)
+  startable: true,                                      // false => no "Start in terminal" button (openclaw: gateway already runs)
   auth: {
     label: 'Server password',
     hint: 'Optional — protects the web UI with a password.',
+    required: false,                                    // (required)/(optional) shown next to the label
     target: 'env',                                      // env | openclaw.json (see below)
     envKey: 'OPENCODE_SERVER_PASSWORD',                 // for target: 'env'
   },
+  urlToken: true,                                  // console authenticates via URL fragment #token=… (openclaw)
   startCommand({ password = '', containerPort }) {
     // shell command used both for the on-boot hook (start-web.sh) and the
     // terminal "Start" button
@@ -61,10 +75,19 @@ webApp: {
 - **port is NOT uniform** — each driver prefills its own container port. The
   user picks the **host** port. For fixed-port drivers (`containerPortEditable:
   false`, e.g. openclaw's gateway at 18789) the field renders read-only.
+- `startable: false` (openclaw — its console is the already-running gateway)
+  hides the "Start in terminal" button; the button also calls an
+  `expandTerminal` prop first, because the docked terminal auto-collapses in
+  non-commands modes and a collapsed terminal's flush poll is paused (queued
+  `run()` pastes would be silently dropped).
 - Auth `target` is one of: `env` (opencode, picoclaw launcher, hermes — no file
   patch; the password is embedded in the start command via `startCommand`), or
   `openclaw.json` (openclaw, `gateway.auth` + `gateway.bind` — the only driver
   needing a config-file patch, applied by the boot hook before `gateway run`).
+- `auth.urlToken: true` (openclaw) means the console auto-authenticates from a
+  URL fragment — the published link appends `#token=<authToken>` so a fresh
+  browser skips the login gate. Fragments are never sent to the server. Other
+  drivers are NOT flagged, so they never leak a fragment token.
 - `webApp: null` (codex/claude) → the tab renders a read-only empty state:
   no form, no Apply, no auth section.
 
@@ -97,6 +120,10 @@ shapes.
 
 - `instances/<name>/web.json`:
   `{ "containerPort": 8080, "hostPort": 8090 }` (single web app per agent).
+  For token-fragment drivers (openclaw) it also stores **`authToken`** — the
+  published gateway token, written at publish time. `readWebAuth` prefers it
+  over re-reading the agent's (root-owned) config file, which the agent
+  rewrites as root and would `EACCES` the webui on read.
   `meta.env` carries `PORT` (ssh host port), `SSH_CPORT` (ssh container port),
   `ROOT_PASSWORD`, and `EXTRA_PORTS` (`[{"host":8080,"container":8080}]` — a
   JSON array of `{ host, container }`, `[]` when empty).
@@ -123,7 +150,7 @@ shapes.
 
 | Method | Route | Description |
 |--------|-------|-------------|
-| GET | `/api/agents/:name/web` | `{ webApp, active, networkMode, webService, passwordConfigured, startCommand, actualPorts, extraPorts, sshPort, sshContainerPort }`. `webApp` comes from the driver; `actualPorts` from `docker inspect` (the door container in peer mode) so the UI shows if the binding is live. Extra ports + ssh are always reported, even for agent types with no web app. |
+| GET | `/api/agents/:name/web` | `{ webApp, active, networkMode, webService, passwordConfigured, authToken, startCommand, collision, actualPorts, extraPorts, sshPort, sshContainerPort }`. `webApp` comes from the driver; `actualPorts` from `docker inspect` (the door container in peer mode) so the UI shows if the binding is live. `authToken` is the published gateway token for `auth.urlToken` drivers (used for the `#token=` open-link). `startCommand` is the live published command when active, else one built from the draft `?containerPort&password` query (used by "Start in terminal" without a recreate). `collision` is `{ name, hostPort } | null` when a peer-mode agent with a **fixed** container port would clash with another pad on the same peer already publishing that port. Extra ports + ssh are always reported, even for agent types with no web app. |
 | POST | `/api/agents/:name/web` | Body `{ active, hostPort, containerPort, password }`. Validates, then runs the SSE job `update:<name>`: stop if running → write/remove boot hook → `applyWebServices` → `compose up --force-recreate` (plus the door service in peer mode) → exec the start hook → verify the port answers. Returns `202 { ok, job, streaming, action }`. On failure: restore old `web.json` + hook + compose, remove the door, start the container again. |
 
 Validation (shared): `containerPort`/`hostPort` integers 1–65535; host port
@@ -176,6 +203,11 @@ networks:
 - Peer recreated = the pad still needs its existing stale-peer recreate, but the door
   itself is untouched. Verified live: pad restart → boot hook relaunches server → door
   still serves 200.
+- **Fixed-port consoles ride the door too** (live-verified 2026-08-10): publishing
+  openclaw on a peer (pad-test-oc-web → gluetun-nord) carries the gateway's 18789
+  through `<name>-door` — host `:19189` served the Control UI and kept the token
+  auth gate (401/200). Switching the pad back to the default network dropped the
+  door and restored the direct `19189:18789` bind.
 - The peer and its other tenants are never touched, stopped, or edited.
 - Edge case: peer on `network_mode: host` (no docker network to join) → the door uses
   `network_mode: host` and forwards to `127.0.0.1:<containerPort>`.
@@ -200,6 +232,15 @@ peer-shared agent on a unique container port (8080, 8081, …). Same for SSH:
 only one agent can bind container port 22 in the shared namespace, so give each
 a distinct `sshContainerPort`. Live-verified on `pad-opencode-aic` (8081) and
 `pad-opencode-paddock-dev`.
+
+**Fixed container ports make this unavoidable** — openclaw's gateway is 18789
+(`containerPortEditable: false`), so a SECOND peer-shared openclaw cannot pick a
+different container port and would fight the first for the same namespace bind
+(and its door would forward to the winner). The Web tab warns in this case:
+`GET /api/agents/:name/web` returns `collision: { name, hostPort }` for a
+fixed-port peer whose container port is already published by another pad on the
+same peer, and the UI shows a warning banner (no hard block — the user may still
+publish knowing the door will reach the winner's console).
 
 ## Edge cases / decisions
 
@@ -229,7 +270,7 @@ a distinct `sshContainerPort`. Live-verified on `pad-opencode-aic` (8081) and
   `ports:` against actual and reports a missing binding — free coverage for the
   web/ssh/extra ports.
 
-## Per-driver auth patches (planned per driver)
+## Per-driver auth patches
 
 For the full per-console reference — which consoles require a password, where
 it is stored, and exactly how to set it — see
