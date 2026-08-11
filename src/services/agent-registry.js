@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { getDb } = require('./db');
 const { getDriver } = require('./drivers');
-const { workspaceMountInfo, readWebService, readWebAuth } = require('./vm-manager');
+const { workspaceMountInfo, readWebService, readWebAuth, isManagedDoorContainer } = require('./vm-manager');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const INSTANCES_DIR = path.join(WORKSPACE, 'instances');
@@ -255,6 +255,9 @@ function discoverAgents() {
   const entries = fs.readdirSync(INSTANCES_DIR, { withFileTypes: true });
   for (const e of entries) {
     if (!e.isDirectory() || !VM_NAME_RE.test(e.name)) continue;
+    // Forwarding doors belong to their parent PAD. Older versions could leave
+    // an instance-shaped directory behind, so do not promote it into the fleet.
+    if (isManagedDoorContainer(e.name)) continue;
     const vmDir = path.join(INSTANCES_DIR, e.name);
     const metaPath = path.join(vmDir, 'meta.env');
     if (!fs.existsSync(metaPath)) continue;

@@ -4,7 +4,6 @@ import { useConfirm } from '../../lib/confirm'
 import { useToast } from '../../lib/toast'
 import { useAgents } from '../../stores/agents'
 import { webUrlForPort } from '../../lib/web'
-import Tooltip from '../../components/Tooltip'
 import CommandModal from '../../components/CommandModal'
 
 function randomPassword() {
@@ -33,7 +32,6 @@ export default function WebTab({ agent, run, connected, expandTerminal }) {
   const [showPw, setShowPw] = useState(false)
   const [portDraft, setPortDraft] = useState([])
   const [portDirty, setPortDirty] = useState(false)
-  const [sshEnabled, setSshEnabled] = useState(false)
   const [sshPort, setSshPort] = useState('')
   const [sshCport, setSshCport] = useState('22')
   const [sshPassword, setSshPassword] = useState('')
@@ -44,14 +42,17 @@ export default function WebTab({ agent, run, connected, expandTerminal }) {
         setData(d)
         setLoadError('')
         if (d && d.webApp) {
-          setContainerPort(String(d.webApp.containerPort))
-          if (d.webService) setHostPort(d.webService.hostPort)
+          setContainerPort(
+            d.draft?.webContainerPort && d.webApp.containerPortEditable !== false
+              ? d.draft.webContainerPort
+              : String(d.webApp.containerPort),
+          )
+          setHostPort(d.draft?.webHostPort || d.webService?.hostPort || '')
         }
         setPortDraft((d.extraPorts || []).map((p) => ({ ...p })))
         setPortDirty(false)
-        setSshEnabled(!!d.sshPort)
-        setSshPort(d.sshPort || '')
-        setSshCport(d.sshContainerPort || '22')
+        setSshPort(d.draft?.sshHostPort || d.sshPort || '')
+        setSshCport(d.draft?.sshContainerPort || d.sshContainerPort || '22')
         setSshPassword('')
         setShowSshPw(false)
       })
@@ -152,8 +153,8 @@ export default function WebTab({ agent, run, connected, expandTerminal }) {
     return ''
   }
 
-  const portErrors = portDraft.map((p) => ({ host: portIssue(p.host), container: portIssue(p.container) }))
-  const portHasErrors = portErrors.some((e) => e.host || e.container)
+  const portErrors = portDraft.map((p) => portIssue(p.host))
+  const portHasErrors = portErrors.some(Boolean)
 
   async function handlePortsSave() {
     if (portHasErrors) {
@@ -198,23 +199,19 @@ export default function WebTab({ agent, run, connected, expandTerminal }) {
 
   // ── Expose OpenSSH (create parity) ────────────────────────
 
+  const sshEnabled = !!data?.sshPort
   const sshCportEffective = data?.sshContainerPort || '22'
-  const sshDirty =
-    sshEnabled !== !!data?.sshPort ||
-    (sshEnabled && (sshPort.trim() || '') !== (data?.sshPort || '')) ||
-    (sshEnabled && (sshCport.trim() || '22') !== sshCportEffective) ||
-    (sshEnabled && sshPassword.trim() !== '')
 
   async function handleSshSave() {
-    if (sshEnabled && sshPort.trim() && portIssue(sshPort)) {
+    const on = !sshEnabled
+    if (on && sshPort.trim() && portIssue(sshPort)) {
       toast.error(portIssue(sshPort))
       return
     }
-    if (sshEnabled && sshCport.trim() && portIssue(sshCport)) {
+    if (on && sshCport.trim() && portIssue(sshCport)) {
       toast.error(portIssue(sshCport))
       return
     }
-    const on = sshEnabled
     const port = on ? sshPort.trim() : ''
     const cport = on ? sshCport.trim() || '22' : ''
     const ok = await confirm({
@@ -389,13 +386,19 @@ export default function WebTab({ agent, run, connected, expandTerminal }) {
                       {data.passwordConfigured ? 'password protected' : 'no auth'}
                     </span>
                   </div>
-                  <button
-                    onClick={handleApply}
-                    disabled={saving}
-                    className="px-3 py-1.5 bg-danger hover:bg-danger disabled:opacity-50 text-danger-ink rounded-lg text-xs font-medium transition-colors"
-                  >
-                    Unpublish
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-ink-dim">Published</span>
+                    <button
+                      role="switch"
+                      aria-checked={active}
+                      onClick={handleApply}
+                      disabled={saving}
+                      title="Turn off to unpublish the web app (the form comes back pre-filled)"
+                      className="relative w-10 h-6 rounded-full transition-colors shrink-0 disabled:opacity-50 bg-accent"
+                    >
+                      <span className="absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform translate-x-4" />
+                    </button>
+                  </div>
                 </div>
               </>
             ) : (
@@ -446,7 +449,7 @@ export default function WebTab({ agent, run, connected, expandTerminal }) {
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
                       disabled={saving}
-                      placeholder={webApp.auth?.required ? 'Required to bind outside loopback' : 'Leave empty for no auth'}
+                      placeholder={webApp.auth?.required ? 'Required to bind outside loopback' : 'Leave empty to keep the current password'}
                       className="w-full bg-sunken border border-line rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line disabled:opacity-50"
                     />
                     <button
@@ -510,7 +513,7 @@ export default function WebTab({ agent, run, connected, expandTerminal }) {
       )}
 
       {/* Expose OpenSSH */}
-      <section className="bg-panel/60 border border-line rounded-xl p-5">
+      <section className="bg-panel/60 border border-line rounded-xl p-5 space-y-4">
         <div className="flex items-start justify-between gap-4">
           <div>
             <h3 className="text-sm font-medium text-ink-muted">Expose OpenSSH on a host port</h3>
@@ -520,25 +523,48 @@ export default function WebTab({ agent, run, connected, expandTerminal }) {
               agents that share a network namespace, since they can't ALL bind
               port 22. Leave the host port empty to auto-allocate one (starting at 43817). Applying changes recreates the container.
             </p>
-            <p className="text-xs text-ink mt-1.5 font-mono">
-              {data?.sshPort
-                ? `Currently published: host ${data.sshPort} → container ${sshCportEffective} (root login)`
-                : 'Not exposed'}
+            <p className="text-xs text-ink-dim mt-1 max-w-md">
+              {sshEnabled ? (
+                <>
+                  Published at host <span className="font-mono text-ink">{data.sshPort}</span>
+                  {' → '}
+                  container <span className="font-mono text-ink">{sshCportEffective}</span>
+                  {' — '}root login.
+                </>
+              ) : (
+                'Not exposed. Fill in the fields and apply to make it reachable.'
+              )}
             </p>
           </div>
-          <button
-            role="switch"
-            aria-checked={sshEnabled}
-            onClick={() => setSshEnabled(!sshEnabled)}
-            disabled={saving}
-            className={`relative w-10 h-6 rounded-full transition-colors shrink-0 disabled:opacity-50 ${sshEnabled ? 'bg-accent' : 'bg-raised'}`}
-          >
-            <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${sshEnabled ? 'translate-x-4' : ''}`} />
-          </button>
         </div>
 
-        {(sshEnabled || sshDirty) && (
-          <div className="mt-4 space-y-4">
+        {sshEnabled ? (
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-line/60">
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="text-xs text-ink-dim whitespace-nowrap">
+                <span className="font-mono text-ink">{data.sshPort}</span>
+                <span className="text-ink-faint mx-1">→</span>
+                <span className="font-mono text-ink">{sshCportEffective}</span>
+                <span className="text-ink-faint mx-1.5">·</span>
+                root login
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-ink-dim">Exposed</span>
+              <button
+                role="switch"
+                aria-checked={sshEnabled}
+                onClick={handleSshSave}
+                disabled={saving}
+                title="Turn off to stop publishing SSH (the form comes back pre-filled)"
+                className="relative w-10 h-6 rounded-full transition-colors shrink-0 disabled:opacity-50 bg-accent"
+              >
+                <span className="absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform translate-x-4" />
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
             <div className="grid grid-cols-2 gap-4">
               <label className="block">
                 <span className="text-xs text-ink-dim">Host port</span>
@@ -615,102 +641,83 @@ export default function WebTab({ agent, run, connected, expandTerminal }) {
             <div className="flex items-center gap-3">
               <button
                 onClick={handleSshSave}
-                disabled={saving || !sshDirty || (sshEnabled && ((sshPort.trim() && !!portIssue(sshPort)) || (sshCport.trim() && !!portIssue(sshCport))))}
+                disabled={saving}
                 className="px-3 py-1.5 bg-accent hover:bg-accent-hover disabled:opacity-50 text-accent-ink rounded-lg text-xs font-medium transition-colors"
               >
-                Apply SSH & recreate
+                Expose & recreate
               </button>
-              {sshDirty && !saving && (
-                <span className="text-xs text-ink-dim">Unsaved SSH changes</span>
-              )}
             </div>
-          </div>
+          </>
         )}
       </section>
 
-      {/* Additional ports */}
-      <section className="bg-panel/60 border border-line rounded-xl p-5">
-        <div>
-          <h3 className="text-sm font-medium text-ink-muted">Additional ports</h3>
-          <p className="text-xs text-ink-dim mt-1 max-w-md">
-            Host → container TCP port mappings, independent of the web app and SSH port. Applying changes recreates the container.
-          </p>
+      {/* Additional ports (create-parity table) */}
+      <section className="bg-raised border border-line-faint rounded-xl p-5 space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-xs font-medium text-ink-faint uppercase tracking-wider">Additional ports</h3>
+            <p className="text-xs text-ink-dim mt-1 max-w-md">
+              Host → container TCP port mappings, independent of the web app and SSH port. Applying changes recreates the container.
+            </p>
+          </div>
         </div>
 
-        <div className="mt-4 space-y-3">
-          {portDraft.length === 0 && (
-            <p className="text-xs text-ink-dim">No additional ports.</p>
-          )}
-          {portDraft.map((p, i) => (
-            <div key={i} className="space-y-1">
-              <div className="flex items-center gap-3">
-                <span className="w-9 shrink-0" aria-hidden />
-                <label className="w-44 block text-xs text-ink-dim">Host port</label>
-                <span className="w-4 shrink-0" aria-hidden />
-                <label className="w-44 block text-xs text-ink-dim">Container port</label>
-                <span className="w-9 shrink-0" aria-hidden />
-              </div>
-              <div className="flex items-center gap-3">
-                {portIssue(p.host) === '' ? (
-                  <Tooltip text={`Open ${webUrlForPort(p.host)} in a new tab`}>
-                    <a
-                      href={webUrlForPort(p.host)}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="w-9 h-9 grid place-items-center rounded-lg text-accent-text hover:bg-raised shrink-0 transition-colors"
-                    >
-                      ↗
-                    </a>
-                  </Tooltip>
-                ) : (
-                  <span className="w-9 shrink-0" aria-hidden />
-                )}
-                <input type="number" min="1" max="65535" value={p.host}
-                       onChange={(e) => setPort(i, { host: e.target.value })}
-                       className="w-44 bg-raised border border-line-faint rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line font-mono" />
-                <span className="text-ink-faint text-xs select-none" aria-hidden>→</span>
-                <input type="number" min="1" max="65535" value={p.container}
-                       onChange={(e) => setPort(i, { container: e.target.value })}
-                       className="w-44 bg-raised border border-line-faint rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line font-mono" />
-                <Tooltip text="Remove port">
-                  <button type="button"
-                          onClick={() => { setPortDraft((prev) => prev.filter((_, idx) => idx !== i)); setPortDirty(true) }}
-                          className="w-9 h-9 grid place-items-center rounded-lg text-ink-dim hover:text-danger hover:bg-raised shrink-0 transition-colors">✕</button>
-                </Tooltip>
-              </div>
-              <div className="flex items-start gap-3">
-                <span className="w-9 shrink-0" aria-hidden />
-                <div className="w-44">{portErrors[i].host && <p className="text-xs text-danger">{portErrors[i].host}</p>}</div>
-                <span className="w-4 shrink-0" aria-hidden />
-                <div className="w-44">{portErrors[i].container && <p className="text-xs text-danger">{portErrors[i].container}</p>}</div>
-              </div>
+        {portDraft.length === 0 && (
+          <p className="text-xs text-ink-dim">No additional ports.</p>
+        )}
+        {portDraft.length > 0 && (
+          <div className="rounded-lg overflow-hidden border border-line-faint">
+            <div className="bg-sunken text-ink-faint uppercase tracking-wider text-[11px] px-2 py-2 flex items-center gap-2 font-medium">
+              <span className="flex-1 min-w-0">Host port</span>
+              <span className="flex-1 min-w-0">Container port</span>
+              <span className="w-7 shrink-0"></span>
             </div>
-          ))}
-
-          <button type="button"
-                  onClick={() => { setPortDraft((prev) => [...prev, { host: '', container: '' }]); setPortDirty(true) }}
-                  disabled={saving}
-                  className="px-3 py-1.5 bg-raised hover:bg-raised-hover disabled:opacity-50 text-ink rounded-lg text-xs font-medium transition-colors"
-                  title="Add a port">
-            + Add port
-          </button>
-
-          {portHasErrors && (
-            <p className="text-xs text-danger">Fix the invalid port fields before saving.</p>
-          )}
-
-          <div className="flex items-center gap-3">
-            <button
-              onClick={handlePortsSave}
-              disabled={saving || !portDirty || portHasErrors}
-              className="px-3 py-1.5 bg-accent hover:bg-accent-hover disabled:opacity-50 text-accent-ink rounded-lg text-xs font-medium transition-colors"
-              title="Apply port changes">
-              Apply ports & recreate
-            </button>
-            {portDirty && !saving && (
-              <span className="text-xs text-ink-dim">Unsaved port changes</span>
-            )}
+            {portDraft.map((p, i) => (
+              <div key={i} className="border-t border-line-faint flex items-start gap-2 px-2 py-1.5">
+                <div className="flex-1 min-w-0">
+                  <input type="number" min="1" max="65535" value={p.host}
+                         onChange={(e) => setPort(i, { host: e.target.value })}
+                         placeholder="e.g. 9000"
+                         className="w-full h-7 min-w-0 bg-raised border border-line-faint rounded-lg px-2 text-xs font-mono text-ink focus:outline-none focus:border-accent-line placeholder-ink-dim" />
+                  {portErrors[i] && <p className="text-xs text-danger mt-0.5">{portErrors[i]}</p>}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <input type="number" min="1" max="65535" value={p.container}
+                         onChange={(e) => setPort(i, { container: e.target.value })}
+                         placeholder="e.g. 80"
+                         className="w-full h-7 min-w-0 bg-raised border border-line-faint rounded-lg px-2 text-xs font-mono text-ink focus:outline-none focus:border-accent-line placeholder-ink-dim" />
+                </div>
+                <div className="w-7 shrink-0">
+                  <button type="button" onClick={() => { setPortDraft((prev) => prev.filter((_, idx) => idx !== i)); setPortDirty(true) }}
+                          className="w-7 h-7 grid place-items-center rounded-md text-ink-dim hover:text-danger hover:bg-raised transition-colors"
+                          title="Remove port">✕</button>
+                </div>
+              </div>
+            ))}
           </div>
+        )}
+
+        <button type="button"
+                onClick={() => { setPortDraft((prev) => [...prev, { host: '', container: '' }]); setPortDirty(true) }}
+                disabled={saving}
+                className="px-3 py-1.5 bg-raised hover:bg-raised-hover text-ink rounded-lg text-xs font-medium transition-colors">
+          + Add port
+        </button>
+        {portHasErrors && (
+          <p className="text-xs text-danger">Fix the invalid port fields.</p>
+        )}
+
+        <div className="flex items-center gap-3">
+          <button
+            onClick={handlePortsSave}
+            disabled={saving || !portDirty || portHasErrors}
+            className="px-3 py-1.5 bg-accent hover:bg-accent-hover disabled:opacity-50 text-accent-ink rounded-lg text-xs font-medium transition-colors"
+            title="Apply port changes">
+            Apply ports & recreate
+          </button>
+          {portDirty && !saving && (
+            <span className="text-xs text-ink-dim">Unsaved port changes</span>
+          )}
         </div>
       </section>
 

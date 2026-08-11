@@ -751,7 +751,7 @@ app.get('/api/containers', async (req, res) => {
         image: c.Image || '',
         state: (c.State || '').toLowerCase(),
       }))
-      .filter((c) => c.name);
+      .filter((c) => c.name && !vm.isManagedDoorContainer(c.name));
     res.json({ containers: list });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1023,6 +1023,9 @@ app.get('/api/agents/:name/web', async (req, res) => {
       extraPorts,
       sshPort: meta.PORT || '',
       sshContainerPort: vm.readSshCport(name),
+      // Remembered form drafts (plan 39) — last-used ports survive a toggle-off
+      // so the re-published form is pre-filled. Passwords are never returned.
+      draft: vm.readDrafts(name),
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1049,7 +1052,10 @@ app.post('/api/agents/:name/web', async (req, res) => {
     if (turningOn) {
       body.web.hostPort = hostPort;
       if (containerPort) body.web.containerPort = containerPort;
-      if (typeof password === 'string') body.web.password = password;
+      // Empty password = keep the saved one (plan 39): omit the key so
+      // prepareAgentChanges falls back to the existing token/password instead
+      // of clearing optional auth.
+      if (typeof password === 'string' && password.trim()) body.web.password = password;
     }
     await vm.prepareAgentChanges(name, body);
 
@@ -1155,10 +1161,6 @@ app.post('/api/agents/:name/recreate', async (req, res) => {
     const meta = readMeta(name);
     if (!meta.AGENT && !meta.ROOT_PASSWORD) return res.status(404).json({ error: 'Agent not found' });
 
-    const containers = await dockerPsList();
-    const current = containers[name];
-    const wasRunning = current && (current.State || '').toLowerCase() === 'running';
-
     const jobKey = 'update:' + name;
     const job = jobLog.getOrCreateJob(jobKey);
     const log = (stream, text) => jobLog.line(job, stream, text);
@@ -1170,33 +1172,14 @@ app.post('/api/agents/:name/recreate', async (req, res) => {
       registry.setRestarting(name, true);
       try {
         await logStore.capture(name);
-        // Validate the compose BEFORE stopping — a malformed document aborts
-        // with the container still running instead of stranding it stopped.
-        await vm.validateInstanceCompose(name);
-        if (pull || reset) {
-          // Settings "Recreate Container": optional latest-image pull + optional
-          // full user-data wipe, always ending with a force-recreate.
-          await vm.recreateAgent(name, { pull, reset, onLog: log, onStep: step });
-          if (pull) {
-            try {
-              const v = await drivers.getDriver(meta.AGENT || 'openclaw').currentVersion(name);
-              if (v) vm.setMetaFlag(name, 'OPENCLAW_VERSION', v);
-            } catch {}
-          }
-        } else {
-          // Plain recreate (e.g. network peer re-resolve from the health tab).
-          if (wasRunning) {
-            step('stop', 'start');
-            await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 });
-            step('stop', 'end');
-          }
-          log('system', 'Recreating container to re-resolve the network peer…');
-          step('recreate', 'start');
-          await vm.runCompose(name, ['up', '-d', '--no-deps', '--force-recreate', name], { stream: true, onLog: log, timeout: 300000 });
-          step('recreate', 'end');
-          if (!wasRunning) {
-            try { await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 }); } catch {}
-          }
+        // Reuse the consolidated mutation flow so every persisted option and
+        // the owned forwarding door survive a Settings recreate.
+        await vm.applyAgentChanges(name, { pull, reset }, { onLog: log, onStep: step });
+        if (pull) {
+          try {
+            const v = await drivers.getDriver(meta.AGENT || 'openclaw').currentVersion(name);
+            if (v) vm.setMetaFlag(name, 'OPENCLAW_VERSION', v);
+          } catch {}
         }
         registry.dockerPsList(true);
         registry.discoverAgents();

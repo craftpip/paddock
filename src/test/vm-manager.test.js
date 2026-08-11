@@ -60,6 +60,50 @@ describe('vm-manager - Web door compose generation', () => {
     assert.strictEqual(door.network_mode, 'host');
     assert.ok(door.entrypoint.join(' ').includes('TCP:127.0.0.1:8080'));
   });
+
+  it('includes the forwarding door in a peer-networked recreate', () => {
+    const previousWorkspace = process.env.WORKSPACE_ROOT;
+    const previousHostWorkspace = process.env.HOST_WORKSPACE_ROOT;
+    const tmp = `/tmp/recreate-services-${Date.now()}`;
+    process.env.WORKSPACE_ROOT = tmp;
+    process.env.HOST_WORKSPACE_ROOT = tmp;
+    delete require.cache[require.resolve('../services/vm-manager')];
+    const isolatedVm = require('../services/vm-manager');
+    try {
+      const instanceDir = path.join(tmp, 'instances', 'pad-recreate');
+      fs.mkdirSync(instanceDir, { recursive: true });
+      fs.writeFileSync(path.join(instanceDir, 'meta.env'), 'NETWORK=gluetun\n');
+      fs.writeFileSync(path.join(instanceDir, 'web.json'), JSON.stringify({ containerPort: 8080, hostPort: '43818' }));
+      assert.deepStrictEqual(isolatedVm.recreateServices('pad-recreate'), ['pad-recreate', 'pad-recreate-door']);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+      process.env.WORKSPACE_ROOT = previousWorkspace;
+      process.env.HOST_WORKSPACE_ROOT = previousHostWorkspace;
+      delete require.cache[require.resolve('../services/vm-manager')];
+    }
+  });
+
+  it('identifies a forwarding sidecar without hiding a real similarly named PAD', () => {
+    const previousWorkspace = process.env.WORKSPACE_ROOT;
+    const previousHostWorkspace = process.env.HOST_WORKSPACE_ROOT;
+    const tmp = `/tmp/managed-door-${Date.now()}`;
+    process.env.WORKSPACE_ROOT = tmp;
+    process.env.HOST_WORKSPACE_ROOT = tmp;
+    delete require.cache[require.resolve('../services/vm-manager')];
+    const isolatedVm = require('../services/vm-manager');
+    try {
+      fs.mkdirSync(path.join(tmp, 'instances', 'pad-parent'), { recursive: true });
+      fs.writeFileSync(path.join(tmp, 'instances', 'pad-parent', 'meta.env'), 'AGENT=opencode\n');
+      fs.mkdirSync(path.join(tmp, 'instances', 'pad-real-door'), { recursive: true });
+      assert.strictEqual(isolatedVm.isManagedDoorContainer('pad-parent-door'), true);
+      assert.strictEqual(isolatedVm.isManagedDoorContainer('pad-real-door'), false);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+      process.env.WORKSPACE_ROOT = previousWorkspace;
+      process.env.HOST_WORKSPACE_ROOT = previousHostWorkspace;
+      delete require.cache[require.resolve('../services/vm-manager')];
+    }
+  });
 });
 
 describe('vm-manager - pad default-network subnet (pool exhaustion fix)', () => {

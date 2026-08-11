@@ -97,19 +97,33 @@ The tab is organized as three cards (plus a delete note in the web-app card):
 
 1. **Web app publish card** — app label, docs link, **Start in terminal**
    button (pastes `webApp.startCommand(...)` via `run(cmd)` — CommandsPane
-   pattern). Binding form: container port (prefilled; must be a **unique**
-   port when peers share a namespace — see below) + host port. Auth section
-   rendered from `webApp.auth` (secret field masked, generate helper). Plus
-   a **Deactivate** link. **Apply** → `POST /api/agents/:name/web` → Console
-   popup on `streaming` → refetch + toast.
-2. **SSH expose card** — enable/disable toggle + host port (empty =
-   auto-allocate 43817+) + container port (default 22; agents sharing a peer
-   namespace each need a distinct container port) + optional root password
-   (Show/Hide + Generate). "Currently published: host X → container Y" line.
-   Applies through `POST /api/agents/:name/settings`.
-3. **Extra TCP ports card** — add/remove `hostPort→containerPort` mappings.
-   Applies through `POST /api/agents/:name/ports`; peer-mode agents' extra
-   ports ride the door (see below).
+   pattern). **Two states.** *Not published:* the full binding form —
+   container port (prefilled; must be a **unique** port when peers share a
+   namespace — see below) + host port + auth section rendered from
+   `webApp.auth` (secret field masked, generate helper), **no switch**.
+   The form is pre-filled from the last-used draft (see Storage) when one
+   exists. *Published:* a summary line + a **switch** — the switch is the
+   Unpublish control (it replaced the old red Unpublish button); flipping it
+   off unpublishes and the form returns, pre-filled from the draft. **Apply**
+   → `POST /api/agents/:name/web` → Console popup on `streaming` → refetch +
+   toast. The password field placeholder reads "Leave empty to keep the
+   current password" (empty = keep, see Storage).
+2. **SSH expose card** — same two-state design as the web-app card: *not
+   exposed* = the full form (host port, empty = auto-allocate 43817+, +
+   container port (default 22; agents sharing a peer namespace each need a
+   distinct container port) + optional root password (Show/Hide + Generate)),
+   **no switch**, pre-filled from drafts. *Exposed* = a summary line ("host X →
+   container Y · root login") + a **switch**; flipping it off removes the
+   published SSH port and the form returns pre-filled. Applies through
+   `POST /api/agents/:name/settings`.
+3. **Extra TCP ports card** — CreateAgent-parity table: a sunken `Host port` /
+   `Container port` header row, one row per mapping (two `flex-1` inputs +
+   a ✕ remove button, `h-7 text-xs font-mono` inputs), a `+ Add port`
+   button, and host-only validation ("Port is required" under the host
+   input, `Fix the invalid port fields.` + Apply disabled while any row is
+   invalid — exact match to `pages/CreateAgent.jsx:731-785`). Applies
+   through `POST /api/agents/:name/ports`; peer-mode agents' extra ports
+   ride the door (see below).
 
 All three cards share the **live-status pill** (`listening`/`down`) from
 `actualPorts` (docker inspect) and stream their recreate through the same SSE
@@ -126,7 +140,14 @@ shapes.
   rewrites as root and would `EACCES` the webui on read.
   `meta.env` carries `PORT` (ssh host port), `SSH_CPORT` (ssh container port),
   `ROOT_PASSWORD`, and `EXTRA_PORTS` (`[{"host":8080,"container":8080}]` — a
-  JSON array of `{ host, container }`, `[]` when empty).
+  JSON array of `{ host, container }`, `[]` when empty). **Draft persistence:**
+  every apply writes `WEB_HOST_PORT_LAST`, `WEB_CONTAINER_PORT_LAST` (web) and
+  `SSH_HOST_PORT_LAST` (ssh) to `meta.env`. `readDrafts(name)` returns
+  `{ webHostPort, webContainerPort, sshHostPort, sshContainerPort }`
+  (`sshContainerPort` re-read from `SSH_CPORT`); `GET /web` reports it as
+  `draft` and the Web tab pre-fills from it, so toggle-off→on keeps the
+  last-used ports. A removed binding writes no draft key — `setMetaFlag`
+  removes the line on an empty value.
 - `generateInstanceCompose(name, agent, password, port, opts)` gains
   `opts.webService = { containerPort, hostPort }` and emits a `ports:` block:
   `- "<hostPort>:<containerPort>"`. On a network peer it emits the socat door
@@ -150,8 +171,8 @@ shapes.
 
 | Method | Route | Description |
 |--------|-------|-------------|
-| GET | `/api/agents/:name/web` | `{ webApp, active, networkMode, webService, passwordConfigured, authToken, startCommand, collision, actualPorts, extraPorts, sshPort, sshContainerPort }`. `webApp` comes from the driver; `actualPorts` from `docker inspect` (the door container in peer mode) so the UI shows if the binding is live. `authToken` is the published gateway token for `auth.urlToken` drivers (used for the `#token=` open-link). `startCommand` is the live published command when active, else one built from the draft `?containerPort&password` query (used by "Start in terminal" without a recreate). `collision` is `{ name, hostPort } | null` when a peer-mode agent with a **fixed** container port would clash with another pad on the same peer already publishing that port. Extra ports + ssh are always reported, even for agent types with no web app. |
-| POST | `/api/agents/:name/web` | Body `{ active, hostPort, containerPort, password }`. Validates, then runs the SSE job `update:<name>`: stop if running → write/remove boot hook → `applyWebServices` → `compose up --force-recreate` (plus the door service in peer mode) → exec the start hook → verify the port answers. Returns `202 { ok, job, streaming, action }`. On failure: restore old `web.json` + hook + compose, remove the door, start the container again. |
+| GET | `/api/agents/:name/web` | `{ webApp, active, networkMode, webService, passwordConfigured, authToken, startCommand, collision, actualPorts, extraPorts, sshPort, sshContainerPort, draft }`. `webApp` comes from the driver; `actualPorts` from `docker inspect` (the door container in peer mode) so the UI shows if the binding is live. `authToken` is the published gateway token for `auth.urlToken` drivers (used for the `#token=` open-link). `startCommand` is the live published command when active, else one built from the draft `?containerPort&password` query (used by "Start in terminal" without a recreate). `collision` is `{ name, hostPort } | null` when a peer-mode agent with a **fixed** container port would clash with another pad on the same peer already publishing that port. `draft` is `{ webHostPort, webContainerPort, sshHostPort, sshContainerPort }` — last-used ports for form pre-fill. Extra ports + ssh are always reported, even for agent types with no web app. |
+| POST | `/api/agents/:name/web` | Body `{ active, hostPort, containerPort, password }`. `password` is omitted when empty — empty means **keep the current password**, not clear it. Validates, then runs the SSE job `update:<name>`: stop if running → write/remove boot hook → `applyWebServices` → `compose up --force-recreate` (plus the door service in peer mode) → exec the start hook → verify the port answers. Returns `202 { ok, job, streaming, action }`. On failure: restore old `web.json` + hook + compose, remove the door, start the container again. |
 
 Validation (shared): `containerPort`/`hostPort` integers 1–65535; host port
 must not collide with the agent's own ssh port (`meta.env` `PORT`) or any other
@@ -256,8 +277,9 @@ publish knowing the door will reach the winner's console).
   regenerates + `up -d --force-recreate` (which starts it), then stops again.
 - **Apply while the app inside isn't serving yet:** binding is still created;
   the pill shows `down` until the agent starts the server.
-- **Auth cleared:** empty auth field in the form = remove the config key
-  (hermes can't run exposed without it — enforce when hostPort is set).
+- **Password cleared:** empty password field in the form = keep the current
+  password (`POST /api/agents/:name/web` omits `body.web.password` when
+  empty). A new password replaces it.
 - **Delete agent:** removes the container, door, network, + instance dir;
   `web.json`/`meta.env` go with the dir. No extra cleanup.
 - **Door follows the agent on Paddock Start/Stop/Restart:** the Start/Stop/

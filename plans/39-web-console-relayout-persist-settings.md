@@ -1,29 +1,31 @@
 # Web Console Re-layout — Persist Web-Tab Settings (plan 39)
 
-## Status: Proposed (2026-08-10) — 0/5 items, no implementation yet. Design
-drafted from the current live-state-only behavior of `WebTab.jsx` +
-`vm-manager.js`. Requirement from the user: every setting entered in the Web
-tab (OpenSSH expose: host port / container port / password; web console
-publish: host port / password) must **survive a toggle off→on** — the form
-comes back pre-filled. The **password is persisted but always redacted** in
-API responses (never echoed back to the UI; an empty field keeps the saved
-password). The **Additional ports** block must reuse the Create-agent page's
-table-style port UI (`/agents/create`) instead of its own custom row layout.
+## Status: Complete (2026-08-11) — 5/5 items done, implemented + live-verified on
+## `pad-opencode-paddock-dev` (web + SSH switch design) and `pad-opencode-proj`
+## (additional-ports table UI). Design note: the web-console and SSH panels now
+## follow the user's switch philosophy — **not exposed = full form, no switch**
+## (pre-filled from drafts); **exposed = summary card + switch** (ON); flipping
+## the switch off un-exposes and the form returns pre-filled. The switch
+## replaces the old red Unpublish / enable toggle. The Additional ports block
+## now uses the exact CreateAgent table UI (sunken header row + host/container
+## inputs + ✕, "+ Add port", host-only validation with "Port is required").
 
 Progress checklist:
 
-- [ ] Backend: persist "last used" drafts (web host/container port, ssh host
+- [x] Backend: persist "last used" drafts (web host/container port, ssh host
       port) in `meta.env`; written on every web/ssh apply; never cleared by a
       toggle-off; passwords already persist and stay redacted
-- [ ] Backend: `GET /api/agents/:name/web` (and `readSettings`) return the
-      drafts as `draft: { webHostPort, webContainerPort, sshHostPort,
-      sshContainerPort }`; empty web password = keep current (all drivers)
-- [ ] Frontend: `WebTab.jsx` pre-fills host/container ports from drafts on
+- [x] Backend: `GET /api/agents/:name/web` (and `readSettings` via
+      `readWebState`) return the drafts as `draft: { webHostPort,
+      webContainerPort, sshHostPort, sshContainerPort }`; empty web password =
+      keep current (all drivers)
+- [x] Frontend: `WebTab.jsx` pre-fills host/container ports from drafts on
       refresh; password fields stay empty with "keeps current" semantics
-- [ ] Frontend: re-layout the WebTab "Additional ports" block to the
+- [x] Frontend: re-layout the WebTab "Additional ports" block to the
       CreateAgent table UI (sunken header row + host/container inputs + ✕,
-      "+ Add port") — parity with `pages/CreateAgent.jsx:731-785`
-- [ ] SPA build + live verify on a test PAD (toggle on→apply→off→on: ports
+      "+ Add port") — parity with `pages/CreateAgent.jsx:731-785` (done
+      2026-08-11, live-verified on `pad-opencode-proj`)
+- [x] SPA build + live verify on a test PAD (toggle on→apply→off→on: ports
       retained, password still effective though not shown)
 
 ## Goal / user flow

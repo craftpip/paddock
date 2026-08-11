@@ -396,7 +396,12 @@ async function validateInstanceCompose(name) {
  *  `opts.stream` streams output via onLog (build/up); otherwise runCmd. */
 async function runCompose(name, args, opts = {}) {
   await validateInstanceCompose(name);
-  const full = composeCommand(name, ...args);
+  // Some lifecycle callers invoke Compose directly. Ensure a peer-networked
+  // forwarding door is never skipped when force-recreating its agent.
+  const services = args[0] === 'up' && args.includes('--force-recreate') && args.includes(name)
+    ? recreateServices(name).filter((service) => !args.includes(service))
+    : [];
+  const full = composeCommand(name, ...args, ...services);
   if (opts.stream) {
     return runCmdStream('docker', full, { onLog: opts.onLog, timeout: opts.timeout });
   }
@@ -1072,6 +1077,13 @@ function desiredDoors(name) {
   return [{ service: doorName(name), ports }];
 }
 
+/** The agent and its peer-network forwarding door must be recreated together.
+ * `--no-deps` deliberately excludes unrelated peer services, so include the
+ * door explicitly or Compose leaves a missing/stopped door untouched. */
+function recreateServices(name) {
+  return [name, ...desiredDoors(name).map(({ service }) => service)];
+}
+
 /** Name of the docker network a peer container lives on (the door joins it so
  *  it can reach the peer by name). Empty when the peer is host-networked. */
 async function getPeerNetworkName(peer) {
@@ -1743,6 +1755,14 @@ function doorNameRe(name) {
   return new RegExp(`^(${esc}-door|${esc}-web)$`);
 }
 
+/** A forwarding sidecar belongs to an existing parent PAD. A `-door` / `-web`
+ * name is reserved while that parent exists, including stale legacy dirs. */
+function isManagedDoorContainer(name) {
+  const m = /^(.*)-(door|web)$/.exec(name);
+  return !!m
+    && fs.existsSync(path.join(INSTANCES_DIR, m[1], 'meta.env'));
+}
+
 /** List the agent's existing door container names (running or stopped). */
 async function listDoors(name) {
   const re = doorNameRe(name);
@@ -2186,8 +2206,10 @@ async function listContainers() {
     if (!line) continue;
     try {
       const c = JSON.parse(line);
+      const name = Array.isArray(c.Names) ? String(c.Names[0] || '').replace(/^\//, '') : String(c.Names || c.ID || '').replace(/^\//, '');
+      if (isManagedDoorContainer(name)) continue;
       out.push({
-        name: Array.isArray(c.Names) ? String(c.Names[0] || '').replace(/^\//, '') : String(c.Names || c.ID || '').replace(/^\//, ''),
+        name,
         image: c.Image || '',
         state: (c.State || '').toLowerCase(),
       });
@@ -2233,6 +2255,20 @@ async function readSettings(name) {
   };
 }
 
+/** Remembered form drafts (plan 39): the last-used web/ssh host ports survive
+ *  a toggle-off so the next toggle-on re-shows a pre-filled form. Written on
+ *  every apply; never cleared by unpublish/removal. Passwords are NOT drafted
+ *  — they persist separately and stay redacted. */
+function readDrafts(name) {
+  const meta = readMeta(path.join(INSTANCES_DIR, name));
+  return {
+    webHostPort: meta.WEB_HOST_PORT_LAST || '',
+    webContainerPort: meta.WEB_CONTAINER_PORT_LAST || '',
+    sshHostPort: meta.SSH_HOST_PORT_LAST || '',
+    sshContainerPort: readSshCport(name),
+  };
+}
+
 /** Published-web state, shared by `GET /api/agents/:name/web`, `readSettings`
  *  (which embeds it) and the MCP `settings_get` tool. */
 async function readWebState(name) {
@@ -2242,7 +2278,7 @@ async function readWebState(name) {
   const extraPorts = readExtraPorts(name);
   const sshPort = meta.PORT || '';
   const sshContainerPort = readSshCport(name);
-  if (!driver.webApp) return { webApp: null, extraPorts, sshPort, sshContainerPort };
+  if (!driver.webApp) return { webApp: null, extraPorts, sshPort, sshContainerPort, draft: readDrafts(name) };
   const webService = readWebService(name);
   const active = !!webService;
   let password = '';
@@ -2277,6 +2313,7 @@ async function readWebState(name) {
     extraPorts,
     sshPort,
     sshContainerPort,
+    draft: readDrafts(name),
   };
 }
 
@@ -2631,6 +2668,21 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
     return { ok: true, name, action: 'noop', changed: false, summary: [] };
   }
 
+  // ── draft persistence (plan 39): remember the last-used ports so a toggle
+  // off→on re-shows the form pre-filled. Captured *as* a binding is removed
+  // (newWeb/newSshPort empty) so the value survives unpublish/unexpose. Only
+  // set when non-empty — setMetaFlag clears the line on ''.
+  if (webChanged) {
+    const lastHost = newWeb ? String(newWeb.hostPort) : (oldWeb ? String(oldWeb.hostPort) : '');
+    if (lastHost) setMetaFlag(name, 'WEB_HOST_PORT_LAST', lastHost);
+    const lastCport = newWeb ? String(newWeb.containerPort) : (oldWeb ? String(oldWeb.containerPort) : '');
+    if (lastCport) setMetaFlag(name, 'WEB_CONTAINER_PORT_LAST', lastCport);
+  }
+  if (sshChanged) {
+    const lastSsh = newSshPort ? String(newSshPort) : (oldSshPort ? String(oldSshPort) : '');
+    if (lastSsh) setMetaFlag(name, 'SSH_HOST_PORT_LAST', lastSsh);
+  }
+
   try {
     if (ctx.changed) onLog('system', `Applying changes: ${ctx.summary.join(', ')}`);
     else if (opts.reset) onLog('system', 'Resetting the data dir');
@@ -2951,8 +3003,8 @@ module.exports = {
   getNetworkHealth,
   existingServices, startAgent, stopAgent, restartAgent,
   readAgentConfig, redactSecrets, listDoors, startDoors, stopDoors,
-  readWebService, applyWebServices, webHookPath, buildWebHook,
-  writeWebStartHook, removeWebStartHook, doorName, doorPorts, desiredDoors,
+   readWebService, applyWebServices, webHookPath, buildWebHook,
+   writeWebStartHook, removeWebStartHook, doorName, doorPorts, desiredDoors, recreateServices, isManagedDoorContainer,
   readWebAuth, applyWebAuth, removeWebAuth,
   validateWorkspaceMount, workspaceMountInfo, readWorkspaceMount,
   validateExtraVolume, validateExtraVolumes, validateExtraPorts,
@@ -2963,7 +3015,7 @@ module.exports = {
   argsFromDockerfile,
   composeCommand, runCompose, validateInstanceCompose, ensureInstanceBuilds,
   // plan 30 consolidated surface (shared by REST routes + MCP tools)
-  readSettings, readWebState, containerInfo, listContainers,
+  readSettings, readWebState, readDrafts, containerInfo, listContainers,
   prepareAgentChanges, applyAgentChanges,
   validateAgentCreate, createAgent, hostPortInUse,
   INSTANCES_DIR, PREFIX, PREFIX_RE, VM_NAME_RE,
