@@ -520,7 +520,7 @@ export default function CreateAgent() {
                 )}
                 {discovered && (
                   <div className="mt-2 rounded-lg bg-success-soft border border-success-line px-3 py-2 text-xs text-success">
-                    {discovered.count} volume{discovered.count === 1 ? '' : 's'} found in <code className="font-mono">{discovered.project}</code>'s compose file — pre-filled under <span className="font-medium">Optional settings → Additional volumes</span>. Review, edit or remove them before creating.
+                    {discovered.count} volume{discovered.count === 1 ? '' : 's'} found in <code className="font-mono">{discovered.project}</code>'s compose file — pre-filled under <span className="font-medium">Advanced settings → Additional volumes</span>. Review, edit or remove them before creating.
                   </div>
                 )}
                 {hostWorkspaceRoot && wsActive && !wsBrowsable && !discovered && (
@@ -530,77 +530,68 @@ export default function CreateAgent() {
                 )}
               </div>
             )}
-          </div>
 
-          {/* Optional settings — collapsed by default */}
-          <div>
-          <button type="button"
-                  onClick={() => setShowAdvanced(!showAdvanced)}
-                  aria-expanded={showAdvanced}
-                  className={`w-full flex items-center justify-between bg-panel/60 border border-line rounded-xl px-5 py-3.5 text-left hover:border-accent-line transition-colors ${showAdvanced ? 'rounded-b-none border-b-0' : ''}`}>
-            <span className="flex items-center gap-2">
-              <span className="text-sm font-medium text-ink">Optional settings</span>
-              {advancedCount > 0 && (
-                <span className="px-1.5 py-0.5 rounded-full bg-accent/15 text-accent text-xs font-semibold leading-none">
-                  {advancedCount}
-                </span>
-              )}
-            </span>
-            <svg className={`w-4 h-4 text-ink-dim transition-transform ${showAdvanced ? 'rotate-180' : ''}`}
-                 viewBox="0 0 20 20" fill="currentColor">
-              <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
-            </svg>
-          </button>
-          {!showAdvanced && (
-            <p className="text-xs text-ink-dim mt-6 px-1">
-              Custom workspace, docker access, network routing, extra volumes and ports.
-            </p>
-          )}
+            {/* Advanced settings — switch toggle inside the create card */}
+            <div className="border-t border-line pt-4">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <p className="text-sm font-medium text-ink">Advanced settings</p>
+                    {advancedCount > 0 && (
+                      <span className="px-1.5 py-0.5 rounded-full bg-accent/15 text-accent text-xs font-semibold leading-none">
+                        {advancedCount}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-ink-dim mt-1 max-w-md">
+                    Custom workspace path, docker access, network routing, extra volumes and ports.
+                  </p>
+                </div>
+                <button type="button"
+                        role="switch"
+                        aria-checked={showAdvanced}
+                        onClick={() => setShowAdvanced(!showAdvanced)}
+                        className={`relative w-10 h-6 rounded-full transition-colors shrink-0 ${showAdvanced ? 'bg-accent' : 'bg-raised'}`}>
+                  <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${showAdvanced ? 'translate-x-4' : ''}`} />
+                </button>
+              </div>
+            </div>
 
           {showAdvanced && (
-            <div className="bg-panel/60 border border-line border-t-0 rounded-b-xl p-5 space-y-4">
-          {/* Workspace — the container-side path (host source is on the core card) */}
+            <div className="space-y-5">
+          {/* Container workspace path — the host source is on the core card above */}
           {!wsHidden && (
-            <div className="bg-raised border border-line-faint rounded-xl p-5 space-y-4">
-              <div>
-                <h3 className="text-xs font-medium text-ink-faint uppercase tracking-wider">Workspace</h3>
-                <p className="text-xs text-ink-dim mt-1">
-                  The path inside the container where the agent sees the workspace folder. Leave empty to use the driver default.
-                </p>
-              </div>
-
-              <div>
-                <div className="flex items-center justify-between mb-1.5">
-                  <label className="block text-xs font-medium text-ink-faint uppercase tracking-wider">
-                    Container workspace path
-                  </label>
-                  {wsFixed && (
-                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-sunken border border-line-faint text-ink-dim text-[11px] font-medium">
-                      <svg className="w-3 h-3" viewBox="0 0 20 20" fill="currentColor">
-                        <path fillRule="evenodd" d="M10 1a4.5 4.5 0 00-4.5 4.5V9H5a2 2 0 00-2 2v6a2 2 0 002 2h10a2 2 0 002-2v-6a2 2 0 00-2-2h-.5V5.5A4.5 4.5 0 0010 1zm3 8V5.5a3 3 0 10-6 0V9h6z" clipRule="evenodd" />
-                      </svg>
-                      Fixed
-                    </span>
-                  )}
-                </div>
-                <input type="text" value={wsDir}
-                       onChange={(e) => !wsFixed && setWsDir(e.target.value)}
-                       readOnly={wsFixed}
-                       tabIndex={wsFixed ? -1 : 0}
-                       placeholder={defaultWsDir || '/root/.openclaw/workspace'}
-                       className={`w-full rounded-lg px-3 py-2 text-sm font-mono focus:outline-none ${wsFixed
-                         ? 'bg-sunken border border-dashed border-line-faint text-ink-dim cursor-not-allowed'
-                         : 'bg-raised border border-line-faint text-ink focus:border-accent-line'}`} />
+            <div className="border-t border-line pt-4">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-xs font-medium text-ink-faint uppercase tracking-wider">Container workspace path</h3>
                 {wsFixed && (
-                  <p className="text-xs text-ink-dim mt-1">
-                    <span className="text-ink-faint">Locked —</span> fixed by {agentType}, whose CLI requires the workspace at this path.
-                  </p>
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-sunken border border-line-faint text-ink-dim text-[11px] font-medium">
+                    <svg className="w-3 h-3" viewBox="0 0 20 20" fill="currentColor">
+                      <path fillRule="evenodd" d="M10 1a4.5 4.5 0 00-4.5 4.5V9H5a2 2 0 00-2 2v6a2 2 0 002 2h10a2 2 0 002-2v-6a2 2 0 00-2-2h-.5V5.5A4.5 4.5 0 0010 1zm3 8V5.5a3 3 0 10-6 0V9h6z" clipRule="evenodd" />
+                    </svg>
+                    Fixed
+                  </span>
                 )}
-                {wsDirErr && <p className="text-xs text-danger mt-1">{wsDirErr}</p>}
               </div>
-
+              <p className="text-xs text-ink-dim mb-2">
+                The path inside the container where the agent sees the workspace folder. Leave empty to use the driver default.
+              </p>
+              <input type="text" value={wsDir}
+                     onChange={(e) => !wsFixed && setWsDir(e.target.value)}
+                     readOnly={wsFixed}
+                     tabIndex={wsFixed ? -1 : 0}
+                     placeholder={defaultWsDir || '/root/.openclaw/workspace'}
+                     className={`w-full rounded-lg px-3 py-2 text-sm font-mono focus:outline-none ${wsFixed
+                       ? 'bg-sunken border border-dashed border-line-faint text-ink-dim cursor-not-allowed'
+                       : 'bg-raised border border-line-faint text-ink focus:border-accent-line'}`} />
+              {wsFixed && (
+                <p className="text-xs text-ink-dim mt-1">
+                  <span className="text-ink-faint">Locked —</span> fixed by {agentType}, whose CLI requires the workspace at this path.
+                </p>
+              )}
+              {wsDirErr && <p className="text-xs text-danger mt-1">{wsDirErr}</p>}
               {hostWorkspaceRoot && wsActive && !wsBrowsable && (
-                <div className="rounded-lg bg-amber-soft border border-amber-line px-3 py-2 text-xs text-amber">
+                <div className="mt-2 rounded-lg bg-amber-soft border border-amber-line px-3 py-2 text-xs text-amber">
                   Custom workspace → the host file browser won't be available for this agent. Use the running container workspace instead.
                 </div>
               )}
@@ -608,10 +599,10 @@ export default function CreateAgent() {
           )}
 
           {/* Container options — docker + network */}
-          <div className="bg-raised border border-line-faint rounded-xl p-5 space-y-5">
+          <div className="border-t border-line pt-4">
             <h3 className="text-xs font-medium text-ink-faint uppercase tracking-wider">Container options</h3>
 
-            <div className="flex items-start justify-between gap-4">
+            <div className="mt-3 flex items-start justify-between gap-4">
               <div>
                 <p className="text-sm font-medium text-ink">Allow docker in the container</p>
                 <p className="text-xs text-ink-dim mt-1 max-w-md">
@@ -634,7 +625,7 @@ export default function CreateAgent() {
               </p>
             )}
 
-            <div>
+            <div className="mt-4">
               <label className="block text-xs font-medium text-ink-faint mb-1.5 uppercase tracking-wider">Network</label>
               <select value={network} onChange={(e) => setNetwork(e.target.value)}
                       className="w-full sm:w-96 bg-raised border border-line-faint rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line">
@@ -655,7 +646,7 @@ export default function CreateAgent() {
           </div>
 
           {/* Plan 28 + 40: Additional volumes */}
-          <div className="bg-raised border border-line-faint rounded-xl p-5 space-y-4">
+          <div className="border-t border-line pt-4 space-y-4">
             <div className="flex items-center justify-between">
               <div>
                 <h3 className="text-xs font-medium text-ink-faint uppercase tracking-wider">Additional volumes</h3>
@@ -729,7 +720,7 @@ export default function CreateAgent() {
           </div>
 
           {/* Plan 28: Additional ports */}
-          <div className="bg-raised border border-line-faint rounded-xl p-5 space-y-4">
+          <div className="border-t border-line pt-4 space-y-4">
             <div className="flex items-center justify-between">
               <div>
                 <h3 className="text-xs font-medium text-ink-faint uppercase tracking-wider">Additional ports</h3>
