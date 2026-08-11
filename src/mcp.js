@@ -12,6 +12,7 @@ const vm = require('./services/vm-manager');
 const workspace = require('./services/workspace');
 const logStore = require('./services/log-store');
 const containerHealth = require('./services/container-health');
+const { getGuide, getCommandCatalog, listCatalogTypes } = require('./services/llm-guide');
 const { getDb } = require('./services/db');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
@@ -44,9 +45,9 @@ function createNameFor(bare) {
 }
 
 function runCmd(cmd, args, options = {}) {
-  const { timeout = 30000, check = false } = options;
+  const { timeout = 30000, check = false, input } = options;
   return new Promise((resolve, reject) => {
-    execFile(cmd, args || [], { timeout }, (err, stdout, stderr) => {
+    const child = execFile(cmd, args || [], { timeout }, (err, stdout, stderr) => {
       if (err) {
         if (err.killed) {
           reject(new Error(`Command timed out after ${timeout}s: ${cmd} ${(args || []).join(' ')}`));
@@ -61,11 +62,18 @@ function runCmd(cmd, args, options = {}) {
         resolve({ stdout, stderr, code: 0 });
       }
     });
+    // Optional stdin payload (secrets, script bodies). Written verbatim; never
+    // included in any error/result text (plan 35a — the exec secret channel).
+    if (input !== undefined && input !== null) {
+      child.stdin.end(String(input));
+    } else {
+      child.stdin.end();
+    }
   });
 }
 
-async function dockerExec(vmName, cmd, timeout = 30000) {
-  return runCmd('docker', ['exec', '-i', vmName, 'sh', '-lc', cmd], { timeout });
+async function dockerExec(vmName, cmd, timeout = 30000, input) {
+  return runCmd('docker', ['exec', '-i', vmName, 'sh', '-lc', cmd], { timeout, input });
 }
 
 function getUserRole(userId) {
@@ -492,24 +500,50 @@ function registerTools(server) {
   );
 
   server.registerTool(
+    'help',
+    {
+      title: 'How to use Paddock through MCP',
+      description: 'The full "how to use Paddock" guide for an LLM — what Paddock is, the tool surface, caller rules/pitfalls, and numbered workflow recipes. Read this first, then call `agent_commands` for the exact non-interactive command catalog of the PAD type you are targeting.',
+      inputSchema: {},
+    },
+    async () => textResult({ guide: getGuide() })
+  );
+
+  server.registerTool(
+    'agent_commands',
+    {
+      title: 'Non-interactive command catalog for an agent type',
+      description: 'Set B of the command catalog (plan 35a): the non-interactive, LLM-safe commands for one agent type, grouped by category, each with {label, cmd, desc, caveats}. `{key}` placeholders must be filled in by you (shell-quote values). Commands with `credentialInput: "stdin"` take a secret via `exec.stdin` — never put it in the command text. `notUsable` lists interactive-only commands you cannot run headlessly — hand those to the user. Defaults to openclaw.',
+      inputSchema: {
+        type: z.enum(listCatalogTypes()).optional().describe('Agent type (openclaw, opencode, picoclaw, hermes, codex, claude) — default openclaw'),
+      },
+    },
+    async ({ type }) => {
+      const catalog = getCommandCatalog(type);
+      return textResult(catalog);
+    }
+  );
+
+  server.registerTool(
     'exec',
     {
       title: 'Run command in PAD',
-      description: 'Run a shell command inside a PAD container (docker exec). Returns stdout and stderr. Use for `openclaw ...` and other in-container commands.',
+      description: 'Run a shell command inside a PAD container (docker exec). Returns stdout and stderr. Use for `openclaw ...` and other in-container commands. No TTY is allocated — interactive commands hang or fail, so use the non-interactive alternatives from `agent_commands`. Optional `stdin` is written verbatim to the process stdin and is the ONLY safe channel for secrets (API keys, tokens) — it is never echoed back or logged.',
       inputSchema: {
         name: z.string().describe('PAD name'),
         command: z.string().describe('Shell command to run inside the PAD'),
+        stdin: z.string().optional().describe('Optional text written verbatim to the command\'s stdin (secrets only — never place a secret in `command`)'),
         timeout: z.number().int().min(1000).max(600000).optional().describe('Timeout in ms (default 30000)'),
       },
     },
-    async ({ name, command, timeout }) => {
+    async ({ name, command, stdin, timeout }) => {
       requireAccess(currentUser(), name);
       const agent = requireAgent(name);
       const containers = registry.dockerPsList();
       if ((containers[agent.runtime_ref] || '').toString().toLowerCase() !== 'running') {
         throw new McpError(ErrorCode.InvalidRequest, `Container is not running: ${name}`);
       }
-      const r = await dockerExec(agent.runtime_ref, command, timeout || 30000);
+      const r = await dockerExec(agent.runtime_ref, command, timeout || 30000, stdin);
       return textResult({ name, stdout: r.stdout, stderr: r.stderr });
     }
   );

@@ -30,4 +30,32 @@ function listDrivers() {
   }));
 }
 
-module.exports = { getDriver, listDrivers, drivers };
+/** Set B — the non-interactive LLM command catalog for a type (plan 35a).
+ *  Built from the driver's own `llmCommands` (safe non-interactive commands,
+ *  with `{key}` placeholders the LLM fills in) and `notUsable` (interactive-only
+ *  commands the LLM must hand to the human). Falls back to openclaw. */
+function getLlmCatalog(type) {
+  const d = getDriver(type);
+  return {
+    type: d.type,
+    label: d.label,
+    tuiCommand: d.tuiCommand || 'openclaw',
+    groups: (d.llmCommands || []).map((g) => ({
+      title: g.title,
+      commands: (g.commands || []).map((c) => ({
+        label: c.label,
+        cmd: c.cmd,
+        desc: c.desc || '',
+        ...(c.caveats ? { caveats: c.caveats } : {}),
+        ...(c.credentialInput ? { credentialInput: c.credentialInput } : {}),
+      })),
+    })),
+    notUsable: (d.notUsable || []).map((c) => ({
+      label: c.label,
+      cmd: c.cmd,
+      desc: c.desc || '',
+    })),
+  };
+}
+
+module.exports = { getDriver, listDrivers, getLlmCatalog, drivers };

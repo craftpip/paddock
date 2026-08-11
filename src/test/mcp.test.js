@@ -50,6 +50,8 @@ describe('MCP Server - Handshake', () => {
     assert.ok(names.includes('agent_logs'));
     assert.ok(names.includes('config_get'));
     assert.ok(names.includes('settings_get'), 'has settings_get (the single get tool)');
+    assert.ok(names.includes('help'), 'has help (the LLM usage guide)');
+    assert.ok(names.includes('agent_commands'), 'has agent_commands (Set B catalog)');
     assert.ok(!names.includes('web_get'), 'no standalone web_get tool');
   });
 
@@ -73,6 +75,29 @@ describe('MCP Server - Handshake', () => {
     const exec = result.tools.find((t) => t.name === 'exec');
     assert.ok(exec.inputSchema.properties.command, 'exec has command param');
     assert.ok(exec.inputSchema.properties.name, 'exec has name param');
+    assert.ok(exec.inputSchema.properties.stdin, 'exec has stdin param (secret channel)');
+  });
+
+  it('agent_commands catalogs are per-type and safe', async () => {
+    const { getCommandCatalog } = require('../services/llm-guide');
+    for (const type of ['openclaw', 'opencode', 'picoclaw', 'hermes', 'codex', 'claude']) {
+      const c = getCommandCatalog(type);
+      assert.strictEqual(c.type, type, `catalog for ${type}`);
+      assert.ok(Array.isArray(c.groups) && c.groups.length > 0, `${type} has command groups`);
+      assert.ok(Array.isArray(c.notUsable), `${type} has notUsable list`);
+      const all = c.groups.flatMap((g) => g.commands);
+      assert.ok(all.length > 0, `${type} has commands`);
+      const bad = all.find((x) => !x.label || !x.cmd || x.desc === undefined);
+      assert.strictEqual(bad, undefined, `${type} every command has label/cmd/desc`);
+      const cred = all.find((x) => x.credentialInput === 'stdin');
+      if (type === 'openclaw') assert.ok(cred, 'openclaw has a stdin credential command');
+    }
+  });
+
+  it('help returns the guide text', async () => {
+    const result = await client.listTools();
+    const help = result.tools.find((t) => t.name === 'help');
+    assert.ok(help.inputSchema, 'help has a schema');
   });
 
   it('create_agent carries the full create schema', async () => {

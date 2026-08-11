@@ -207,6 +207,105 @@ const HERMES = {
     },
   ],
 
+  /** Set B — the non-interactive LLM command catalog (plan 35a). Safe to run
+   *  without a TTY through the MCP `exec` tool. */
+  llmCommands: [
+    {
+      title: 'Status', commands: [
+        { label: 'Status', cmd: 'hermes status', desc: 'Environment, models, providers, gateway status.' },
+        { label: 'Version', cmd: 'hermes version', desc: 'Hermes version + install info.' },
+        { label: 'Doctor', cmd: 'hermes doctor', desc: 'Diagnose config, MCP security, advisories.' },
+        { label: 'Config check', cmd: 'hermes config check', desc: 'Missing or outdated config.' },
+      ],
+    },
+    {
+      title: 'Model', commands: [
+        { label: 'Current model', cmd: 'hermes config get model.default', desc: 'Print the resolved default model.' },
+        { label: 'Fallbacks', cmd: 'hermes fallback', desc: 'Manage fallback providers.' },
+      ],
+    },
+    {
+      title: 'Auth', commands: [
+        { label: 'List credentials', cmd: 'hermes auth list', desc: 'Pooled provider credentials.' },
+        { label: 'Auth status', cmd: 'hermes auth status {provider}', desc: 'Credential status for a provider.' },
+        { label: 'Logout provider', cmd: 'hermes auth logout {provider}', desc: 'Clear stored auth state for a provider.', caveats: 'Destructive — confirm with the user first.' },
+      ],
+    },
+    {
+      title: 'Gateway', commands: [
+        { label: 'Gateway status', cmd: 'hermes gateway status', desc: 'Is the messaging gateway running?' },
+        { label: 'List profiles', cmd: 'hermes gateway list', desc: 'All profiles + gateway status.' },
+        { label: 'Restart gateway', cmd: 'hermes gateway restart', desc: 'Restart the messaging gateway.', caveats: 'Restarts a live service — confirm with the user first.' },
+      ],
+    },
+    {
+      title: 'Cron', commands: [
+        { label: 'List jobs', cmd: 'hermes cron list', desc: 'All scheduled jobs.' },
+        { label: 'Scheduler status', cmd: 'hermes cron status', desc: 'Is the cron scheduler running?' },
+        { label: 'Pause job', cmd: 'hermes cron pause {job_id}', desc: 'Pause a scheduled job.' },
+        { label: 'Resume job', cmd: 'hermes cron resume {job_id}', desc: 'Resume a paused job.' },
+        { label: 'Remove job', cmd: 'hermes cron remove {job_id}', desc: 'Delete a scheduled job.', caveats: 'Destructive — confirm with the user first.' },
+      ],
+    },
+    {
+      title: 'Skills', commands: [
+        { label: 'List installed', cmd: 'hermes skills list', desc: 'Installed skills.' },
+        { label: 'Search', cmd: 'hermes skills search {query}', desc: 'Search skill registries.' },
+        { label: 'Check updates', cmd: 'hermes skills check', desc: 'Check installed hub skills for updates.' },
+        { label: 'Update skills', cmd: 'hermes skills update', desc: 'Update installed hub skills.', caveats: 'Mutates installed skills — confirm with the user first.' },
+        { label: 'Uninstall', cmd: 'hermes skills uninstall {name}', desc: 'Remove a hub-installed skill.', caveats: 'Destructive — confirm with the user first.' },
+      ],
+    },
+    {
+      title: 'MCP', commands: [
+        { label: 'List servers', cmd: 'hermes mcp list', desc: 'Configured MCP servers.' },
+        { label: 'Catalog', cmd: 'hermes mcp catalog', desc: 'Nous-approved MCP servers installable in one click.' },
+        { label: 'Install from catalog', cmd: 'hermes mcp install {identifier}', desc: 'One-click install a catalog MCP by name.' },
+        { label: 'Add server', cmd: 'hermes mcp add {name}', desc: 'Connect a new MCP server (URL or stdio command).' },
+        { label: 'Remove server', cmd: 'hermes mcp remove {name}', desc: 'Disconnect an MCP server.', caveats: 'Destructive — confirm with the user first.' },
+        { label: 'Test server', cmd: 'hermes mcp test {name}', desc: 'Check a server connection.' },
+      ],
+    },
+    {
+      title: 'Memory', commands: [
+        { label: 'Memory status', cmd: 'hermes memory status', desc: 'Memory store state.' },
+        { label: 'Setup memory', cmd: 'hermes memory setup', desc: 'Configure the memory store.' },
+      ],
+    },
+    {
+      title: 'Sessions', commands: [
+        { label: 'List sessions', cmd: 'hermes sessions list', desc: 'Recent sessions.' },
+        { label: 'Continue last', cmd: 'hermes --continue', desc: 'Resume the most recent session.' },
+        { label: 'Store stats', cmd: 'hermes sessions stats', desc: 'Session store statistics.' },
+      ],
+    },
+    {
+      title: 'Plugins', commands: [
+        { label: 'List plugins', cmd: 'hermes plugins list', desc: 'Installed plugins.' },
+        { label: 'Install', cmd: 'hermes plugins install {identifier}', desc: 'Install from a Git URL or owner/repo.' },
+        { label: 'Enable', cmd: 'hermes plugins enable {name}', desc: 'Enable a disabled plugin.' },
+        { label: 'Disable', cmd: 'hermes plugins disable {name}', desc: 'Disable a plugin without removing it.' },
+      ],
+    },
+    {
+      title: 'Other', commands: [
+        { label: 'Quick backup', cmd: 'hermes backup -q', desc: 'Snapshot critical state (config, db, auth, cron).' },
+        { label: 'View logs', cmd: 'hermes logs -n 100', desc: 'Recent agent logs (last 100 lines).' },
+      ],
+    },
+  ],
+
+  /** Interactive-only hermes commands — no non-interactive form. */
+  notUsable: [
+    { label: 'Pick default model', cmd: 'hermes model', desc: 'Interactive provider/model picker — read `hermes config get model.default` instead.' },
+    { label: 'Add credential', cmd: 'hermes auth add {provider}', desc: 'Interactive key/OAuth prompt.' },
+    { label: 'Setup platforms', cmd: 'hermes gateway setup', desc: 'Interactive channel setup wizard.' },
+    { label: 'Add job', cmd: 'hermes cron create', desc: 'Interactive job creation.' },
+    { label: 'Install skill', cmd: 'hermes skills install', desc: 'Interactive hub install flow.' },
+    { label: 'Run as MCP server', cmd: 'hermes mcp serve', desc: 'Long-running server process — not an exec-able command.' },
+    { label: 'Export sessions', cmd: 'hermes sessions export', desc: 'Interactive export flow.' },
+  ],
+
   /** Current version in a running container; falls back to the built image. */
   async currentVersion(name) {
     try {

@@ -37,6 +37,24 @@ The `commands` field is what renders as the pill buttons on the agent detail
 page's Commands tab; see [tabs/commands.md](../tabs/commands.md) for the full
 mechanism and the per-type button matrix.
 
+### LLM command catalogs (plan 35a)
+
+Every driver also carries **`llmCommands`** (Set B) and **`notUsable`** — the
+source for the MCP `agent_commands` tool. They are curated separately from the
+UI `commands` because some buttons are interactive (TUI, prompt modal) and must
+never be handed to a headless LLM:
+
+- `llmCommands` — `[{ title, commands: [{ label, cmd, desc, caveats?,
+  credentialInput? }] }]`, safe to run without a TTY via the MCP `exec` tool.
+  `{key}` placeholders are filled by the LLM. `credentialInput: "stdin"`
+  commands take a secret via `exec.stdin`.
+- `notUsable` — interactive-only commands with no non-interactive form
+  (`{ label, cmd, desc }`); the guidance tells the LLM to ask the user.
+
+`drivers.getLlmCatalog(type)` serializes both into the `agent_commands`
+response shape. The openclaw catalog is the only one live-verified per-command;
+the others are derived from their CLI's own help output (see the driver files).
+
 ## Openclaw (reference driver)
 
 The driver the framework was built around; `getDriver()` falls back to it for

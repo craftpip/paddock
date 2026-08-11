@@ -503,7 +503,7 @@ terminal and are a trap. Read-only GETs (server chips) stay API-backed.
 
 ### The paddock's own `/mcp` server
 
-Separate from per-agent MCP servers: the webui itself exposes 17 tools over
+Separate from per-agent MCP servers: the webui itself exposes 19 tools over
 `/mcp` (Streamable HTTP) so opencode/Claude Code can manage the fleet. Bearer
 API keys per user; tools reuse the REST ownership rule. See
 `backend/services.md` — API Keys and the section below.

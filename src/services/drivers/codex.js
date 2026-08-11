@@ -102,6 +102,58 @@ const CODEX = {
     },
   ],
 
+  /** Set B — the non-interactive LLM command catalog (plan 35a). Safe to run
+   *  without a TTY through the MCP `exec` tool. */
+  llmCommands: [
+    {
+      title: 'Provider', commands: [
+        { label: 'Login status', cmd: 'codex login status', desc: 'Show current login status.' },
+        { label: 'Logout', cmd: 'codex logout', desc: 'Remove stored credentials.', caveats: 'Destructive — confirm with the user first.' },
+      ],
+    },
+    {
+      title: 'MCP', commands: [
+        { label: 'List servers', cmd: 'codex mcp list', desc: 'Configured MCP servers.' },
+        { label: 'Get server', cmd: 'codex mcp get {name}', desc: 'Show one server config.' },
+        { label: 'Remove server', cmd: 'codex mcp remove {name}', desc: 'Remove an MCP server.', caveats: 'Destructive — confirm with the user first.' },
+        { label: 'OAuth logout', cmd: 'codex mcp logout {name}', desc: 'Clear OAuth credentials for a server.' },
+      ],
+    },
+    {
+      title: 'Session', commands: [
+        { label: 'Continue last', cmd: 'codex resume --last', desc: 'Resume the most recent session.' },
+        { label: 'Code review', cmd: 'codex review', desc: 'Run a non-interactive code review.' },
+      ],
+    },
+    {
+      title: 'Plugin', commands: [
+        { label: 'List plugins', cmd: 'codex plugin list', desc: 'Plugins from configured marketplaces.' },
+        { label: 'Install plugin', cmd: 'codex plugin add {name}', desc: 'Install from a marketplace snapshot.' },
+        { label: 'Remove plugin', cmd: 'codex plugin remove {name}', desc: 'Remove an installed plugin.', caveats: 'Destructive — confirm with the user first.' },
+      ],
+    },
+    {
+      title: 'Health', commands: [
+        { label: 'Doctor', cmd: 'codex doctor', desc: 'Diagnose install, config, auth and runtime health.' },
+      ],
+    },
+    {
+      title: 'Other', commands: [
+        { label: 'Version', cmd: 'codex --version', desc: 'codex version.' },
+        { label: 'Update', cmd: 'codex update', desc: 'Update Codex to the latest version.', caveats: 'Confirm with the user before running.' },
+        { label: 'Help', cmd: 'codex --help', desc: 'codex top-level help.' },
+      ],
+    },
+  ],
+
+  /** Interactive-only codex commands — no non-interactive form. */
+  notUsable: [
+    { label: 'Login', cmd: 'codex login', desc: 'Interactive provider login.' },
+    { label: 'Add MCP server', cmd: 'codex mcp add {name}', desc: 'Interactive MCP add flow.' },
+    { label: 'MCP OAuth login', cmd: 'codex mcp login {name}', desc: 'Interactive OAuth flow.' },
+    { label: 'Marketplaces', cmd: 'codex plugin marketplace', desc: 'Interactive marketplace management.' },
+  ],
+
   /** Current version in a running container; falls back to the built image. */
   async currentVersion(name) {
     try {

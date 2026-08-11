@@ -33,7 +33,7 @@ Container names use the `CONTAINER_PREFIX` from `.env` (`pad` here) — never ha
 ```
 src/
 ├── app.js                    Express server, API routes, WebSocket terminal, auth
-├── mcp.js                    The paddock's own /mcp Streamable HTTP server (17 tools)
+├── mcp.js                    The paddock's own /mcp Streamable HTTP server (19 tools)
 ├── middleware/
 │   ├── auth.js               Session-based auth, CSRF tokens, login/logout
 │   └── rateLimit.js          IP-based rate limiter

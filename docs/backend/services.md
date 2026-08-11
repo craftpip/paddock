@@ -344,7 +344,7 @@ the same owner-scoping as the REST API: admin → all agents, user → owned age
 ## MCP Tools (mcp.js)
 
 `src/mcp.js` mounts the paddock's own MCP server at `/mcp` (Streamable HTTP). It
-exposes 17 tools. Every tool is a thin adapter over the same `src/services/`
+exposes 19 tools. Every tool is a thin adapter over the same `src/services/`
 functions the REST API uses — behavior lives in the services, never in the tool
 handlers (no duplication between REST and MCP).
 
@@ -366,7 +366,9 @@ handlers (no duplication between REST and MCP).
 | `recreate` | The one mutation tool — see below | `vm.applyAgentChanges(name, opts)` |
 | `update` | Alias for `recreate {pull: true}` | `vm.updateAgent(name, { pull: true })` |
 | `delete_agent` | Delete PAD; needs `confirm: true` | `vm.removeVm` + `registry.removeAgentFromDb` |
-| `exec` | Run a shell command in the PAD | `docker exec` |
+| `exec` | Run a shell command in the PAD (optional `stdin`) | `docker exec` |
+| `help` | The "how to use Paddock through MCP" guide (§§1–4, plan 35a) | `llm-guide.js` |
+| `agent_commands` | Set B — non-interactive command catalog for an agent type | `llm-guide.js` → `drivers` `llmCommands` |
 
 Rules:
 
@@ -398,6 +400,26 @@ Rules:
   `Accept: application/json, text/event-stream`. Responses are SSE
   (`event: message` + `data:` JSON lines).
 
+### LLM guidance surface (plan 35a)
+
+Three additions let an LLM drive Paddock headlessly:
+
+- **`help`** — the full usage guide (what Paddock is, the tool surface, caller
+  rules/pitfalls, numbered workflow recipes). Read-only, no args. Lives in
+  `src/services/llm-guide.js` (`GENERAL_GUIDE`), versioned with the code.
+- **`agent_commands`** — Set B of the command catalog: the *non-interactive*
+  commands for one agent type, grouped by category as
+  `{ label, cmd, desc, caveats, credentialInput? }`. `{key}` placeholders are
+  filled by the LLM (shell-quoted). Built from each driver's `llmCommands`
+  via `drivers.getLlmCatalog(type)`; defaults to openclaw. Interactive-only
+  commands that have no headless form sit in `notUsable` — the guidance tells
+  the LLM to hand those to the human.
+- **`exec.stdin`** — optional text written verbatim to the container process
+  stdin. The only sanctioned channel for secrets (API keys, tokens): never
+  place a secret in `command`. `stdin` is never included in tool responses,
+  errors, or logs (see `dockerExec` in `mcp.js`). Commands whose catalog entry
+  has `credentialInput: "stdin"` expect the value there.
+
 ### Design decisions (settled — do not add tools without re-checking the user)
 
 These four rules and the fold decisions below were set when the `/mcp` surface
@@ -413,7 +435,8 @@ was built. Adding a tool that breaks them needs a re-check first.
   `openclaw …` commands (MCP add/remove, skills install) are **not** mirrored
   as API-backed MCP tools — the frontend pastes the command into the docked
   terminal instead (see CommandsPane rule). Only genuinely headless operations
-  get MCP tools.
+  get MCP tools. The LLM reaches the same commands through `exec` + the
+  `agent_commands` catalog, never a backend endpoint.
 - **`config_set` is deliberately absent** — an agent self-editing its own
   config can break itself (destroy agents config, auth, plugins). If ever
   added it must be admin-role scoped or confirm-gated. Default is **no**.

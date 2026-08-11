@@ -114,6 +114,60 @@ const OPENCODE = {
     },
   ],
 
+  /** Set B — the non-interactive LLM command catalog (plan 35a). Safe to run
+   *  without a TTY through the MCP `exec` tool. */
+  llmCommands: [
+    {
+      title: 'Model', commands: [
+        { label: 'List providers', cmd: 'opencode providers list', desc: 'Providers + saved credentials.' },
+        { label: 'Logout provider', cmd: 'opencode providers logout', desc: 'Log out a configured provider.' },
+        { label: 'Available models', cmd: 'opencode models', desc: 'List available models.' },
+        { label: 'Refresh models', cmd: 'opencode models --refresh', desc: 'Refresh the models cache from models.dev.' },
+      ],
+    },
+    {
+      title: 'Session', commands: [
+        { label: 'List sessions', cmd: 'opencode session list', desc: 'Recent sessions.' },
+        { label: 'Token usage', cmd: 'opencode stats', desc: 'Usage + cost statistics.' },
+        { label: 'Export session', cmd: 'opencode export', desc: 'Export session data as JSON.' },
+        { label: 'Delete session', cmd: 'opencode session delete {sessionID}', desc: 'Delete a session by ID.', caveats: 'Destructive — confirm with the user first.' },
+      ],
+    },
+    {
+      title: 'MCP', commands: [
+        { label: 'List servers', cmd: 'opencode mcp list', desc: 'MCP servers + status.' },
+        { label: 'Logout OAuth', cmd: 'opencode mcp logout {name}', desc: 'Remove OAuth credentials for an MCP server.' },
+        { label: 'Debug OAuth', cmd: 'opencode mcp debug {name}', desc: 'Debug the OAuth connection for an MCP server.' },
+      ],
+    },
+    {
+      title: 'Agent', commands: [
+        { label: 'List agents', cmd: 'opencode agent list', desc: 'Available agents.' },
+      ],
+    },
+    {
+      title: 'Plugin', commands: [
+        { label: 'Install plugin', cmd: 'opencode plugin {module}', desc: 'Install an npm plugin module and update config.' },
+      ],
+    },
+    {
+      title: 'Other', commands: [
+        { label: 'Version', cmd: 'opencode --version', desc: 'opencode version.' },
+        { label: 'Debug info', cmd: 'opencode debug info', desc: 'opencode + system info.' },
+        { label: 'Config', cmd: 'opencode debug config', desc: 'Show resolved configuration.' },
+        { label: 'Upgrade', cmd: 'opencode upgrade', desc: 'Upgrade opencode to latest.', caveats: 'Confirm with the user before running.' },
+      ],
+    },
+  ],
+
+  /** Interactive-only opencode commands — no non-interactive form. */
+  notUsable: [
+    { label: 'Login', cmd: 'opencode providers login', desc: 'Interactive provider login.' },
+    { label: 'Add MCP server', cmd: 'opencode mcp add', desc: 'Interactive MCP add flow.' },
+    { label: 'MCP OAuth login', cmd: 'opencode mcp auth', desc: 'Interactive OAuth flow.' },
+    { label: 'Create agent', cmd: 'opencode agent create', desc: 'Interactive agent creation.' },
+  ],
+
   /** Current version in a running container; falls back to the built image. */
   async currentVersion(name) {
     try {

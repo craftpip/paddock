@@ -20,7 +20,7 @@ The PAD Friends Web UI was migrated from EJS + HTMX + Tailwind CDN to a React SP
 ```
 src/
 ├── app.js                 API server (no EJS)
-├── mcp.js                 Paddock's own /mcp server (Streamable HTTP, 17 tools)
+├── mcp.js                 Paddock's own /mcp server (Streamable HTTP, 19 tools)
 ├── routes/agents.js       DEAD CODE — legacy EJS routes, not mounted
 ├── services/              Docker, workspace, VM, drivers, health, log-store, vault, backups (stub)
 ├── middleware/             Auth, rate limit

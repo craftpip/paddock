@@ -115,6 +115,62 @@ const CLAUDE = {
     },
   ],
 
+  /** Set B — the non-interactive LLM command catalog (plan 35a). Safe to run
+   *  without a TTY through the MCP `exec` tool. */
+  llmCommands: [
+    {
+      title: 'Status', commands: [
+        { label: 'Doctor', cmd: 'claude doctor', desc: 'Installation + settings diagnostics.' },
+        { label: 'Auth status', cmd: 'claude auth status', desc: 'Is the session logged in?' },
+        { label: 'Version', cmd: 'claude --version', desc: 'claude version.' },
+      ],
+    },
+    {
+      title: 'Auth', commands: [
+        { label: 'Logout', cmd: 'claude auth logout', desc: 'Log out from your Anthropic account.' },
+      ],
+    },
+    {
+      title: 'Session', commands: [
+        { label: 'Start background agent', cmd: 'claude --bg {prompt}', desc: 'Start a background session with a task prompt.' },
+        { label: 'List background', cmd: 'claude agents --json', desc: 'Active background sessions.' },
+        { label: 'All sessions', cmd: 'claude agents --all --json', desc: 'Background sessions incl. completed ones.' },
+      ],
+    },
+    {
+      title: 'MCP', commands: [
+        { label: 'List servers', cmd: 'claude mcp list', desc: 'Configured MCP servers.' },
+        { label: 'Add server', cmd: 'claude mcp add -t {transport} {name} {commandOrUrl}', desc: 'Add an MCP server — URL for http/sse, command for stdio (transport: stdio|http|sse).', caveats: 'Fully parameterized, non-interactive. Verify afterwards with `claude mcp list`.' },
+        { label: 'Get server', cmd: 'claude mcp get {name}', desc: 'Show details for one server.' },
+        { label: 'Remove server', cmd: 'claude mcp remove {name}', desc: 'Remove an MCP server.', caveats: 'Destructive — confirm with the user first.' },
+        { label: 'Logout from server', cmd: 'claude mcp logout {name}', desc: 'Clear OAuth credentials for an MCP server.' },
+      ],
+    },
+    {
+      title: 'Plugin', commands: [
+        { label: 'List plugins', cmd: 'claude plugin list', desc: 'Installed plugins.' },
+        { label: 'Install', cmd: 'claude plugin install {plugin}', desc: 'Install from a marketplace (plugin@marketplace to pin).' },
+        { label: 'Update', cmd: 'claude plugin update {plugin}', desc: 'Update a plugin (restart required to apply).' },
+        { label: 'Uninstall', cmd: 'claude plugin uninstall {plugin}', desc: 'Remove an installed plugin.', caveats: 'Destructive — confirm with the user first.' },
+      ],
+    },
+    {
+      title: 'Other', commands: [
+        { label: 'Update', cmd: 'claude update', desc: 'Update claude to the latest version.', caveats: 'Confirm with the user before running.' },
+        { label: 'Install stable', cmd: 'claude install stable', desc: 'Reinstall the native binary on the stable channel.' },
+      ],
+    },
+  ],
+
+  /** Interactive-only claude commands — no non-interactive form. */
+  notUsable: [
+    { label: 'Login', cmd: 'claude auth login', desc: 'Interactive account sign-in.' },
+    { label: 'Setup token', cmd: 'claude setup-token', desc: 'Generates a long-lived token via an interactive flow.' },
+    { label: 'Continue last', cmd: 'claude -c', desc: 'Opens the interactive TUI — needs a TTY.' },
+    { label: 'MCP OAuth login', cmd: 'claude mcp login {name}', desc: 'Interactive OAuth flow.' },
+    { label: 'Marketplaces', cmd: 'claude plugin marketplace', desc: 'Interactive marketplace management.' },
+  ],
+
   /** Current version in a running container; falls back to the built image. */
   async currentVersion(name) {
     try {

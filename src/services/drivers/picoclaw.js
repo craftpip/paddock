@@ -132,6 +132,59 @@ const PICOCLAW = {
     },
   ],
 
+  /** Set B — the non-interactive LLM command catalog (plan 35a). Safe to run
+   *  without a TTY through the MCP `exec` tool. */
+  llmCommands: [
+    {
+      title: 'Status', commands: [
+        { label: 'Status', cmd: 'picoclaw status', desc: 'Version, config + workspace status.' },
+        { label: 'Version', cmd: 'picoclaw version', desc: 'picoclaw version.' },
+        { label: 'Default model', cmd: 'picoclaw model', desc: 'Show current default model.' },
+      ],
+    },
+    {
+      title: 'Auth', commands: [
+        { label: 'Auth status', cmd: 'picoclaw auth status', desc: 'Current login state.' },
+        { label: 'Available models', cmd: 'picoclaw auth models', desc: 'Models for configured providers.' },
+        { label: 'Logout', cmd: 'picoclaw auth logout', desc: 'Remove stored credentials.' },
+      ],
+    },
+    {
+      title: 'Cron', commands: [
+        { label: 'List jobs', cmd: 'picoclaw cron list', desc: 'All scheduled jobs.' },
+        { label: 'Enable job', cmd: 'picoclaw cron enable {id}', desc: 'Enable a job by ID.' },
+        { label: 'Disable job', cmd: 'picoclaw cron disable {id}', desc: 'Disable a job by ID.' },
+        { label: 'Remove job', cmd: 'picoclaw cron remove {id}', desc: 'Remove a job by ID.', caveats: 'Destructive — confirm with the user first.' },
+      ],
+    },
+    {
+      title: 'Skills', commands: [
+        { label: 'List installed', cmd: 'picoclaw skills list', desc: 'Installed skills.' },
+        { label: 'Builtin skills', cmd: 'picoclaw skills list-builtin', desc: 'Available builtin skills.' },
+        { label: 'Install builtin', cmd: 'picoclaw skills install-builtin', desc: 'Install all builtin skills to the workspace.' },
+        { label: 'Search', cmd: 'picoclaw skills search', desc: 'Search skills.' },
+        { label: 'Install', cmd: 'picoclaw skills install', desc: 'Install a skill from GitHub.' },
+        { label: 'Show skill', cmd: 'picoclaw skills show {name}', desc: 'Show skill details.' },
+        { label: 'Remove skill', cmd: 'picoclaw skills remove {name}', desc: 'Remove an installed skill.', caveats: 'Destructive — confirm with the user first.' },
+      ],
+    },
+    {
+      title: 'Other', commands: [
+        { label: 'Check updates', cmd: 'picoclaw update', desc: 'Check for GitHub releases.' },
+        { label: 'Migrate dry-run', cmd: 'picoclaw migrate --dry-run', desc: 'Preview openclaw → picoclaw migration.' },
+      ],
+    },
+  ],
+
+  /** Interactive-only picoclaw commands — no non-interactive form. */
+  notUsable: [
+    { label: 'Login', cmd: 'picoclaw auth login', desc: 'Interactive OAuth or token-paste login.' },
+    { label: 'Connect WeChat', cmd: 'picoclaw auth weixin', desc: 'QR-code pairing — interactive.' },
+    { label: 'Connect WeCom', cmd: 'picoclaw auth wecom', desc: 'QR-code scan — interactive.' },
+    { label: 'Start gateway', cmd: 'picoclaw gateway', desc: 'Long-running messaging gateway — not an exec-able command.' },
+    { label: 'Add job', cmd: 'picoclaw cron add', desc: 'Interactive job scheduling.' },
+  ],
+
   /** Current version in a running container; falls back to the built image. */
   async currentVersion(name) {
     try {

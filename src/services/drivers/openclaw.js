@@ -113,6 +113,103 @@ const OPENCLAW = {
     },
   ],
 
+  /** Set B — the non-interactive LLM command catalog (plan 35a). Each command
+   *  is safe to run without a TTY through the MCP `exec` tool. `{key}`
+   *  placeholders are filled by the LLM with shell-quoted values. Commands that
+   *  read a secret from stdin set `credentialInput: 'stdin'` — the value goes
+   *  through `exec.stdin`, never in the command text or a tool result.
+   *  Interactive-only commands (no non-interactive form) live in `notUsable`. */
+  llmCommands: [
+    {
+      title: 'Models', commands: [
+        { label: 'Add provider (API key)', cmd: 'openclaw models auth paste-api-key --provider {provider}', desc: 'Add a provider auth profile from an API key pasted to stdin.', caveats: 'CAUTION: this subcommand REWRITES the whole openclaw.json with auth-only content. Back up the config first (read config_get, store it), then run the command with exec.stdin = the key, then merge the result back so the rest of the config survives. This is the only non-interactive way to add a provider key.', credentialInput: 'stdin' },
+        { label: 'List added providers', cmd: 'openclaw models auth list', desc: 'List saved auth profiles / added providers.' },
+        { label: 'Remove provider', cmd: 'openclaw gateway call models.authLogout --params \'{"provider":"{provider}"}\' --json', desc: 'Delete a provider\'s saved auth profiles (logout).', caveats: 'No undo — the credentials are gone unless re-added.' },
+        { label: 'Check available models', cmd: 'openclaw models list', desc: 'Models you are logged in to.' },
+        { label: 'Check model status', cmd: 'openclaw models status', desc: 'Health check — auth + model status overview.' },
+        { label: 'Set default model', cmd: 'openclaw models set {model}', desc: 'Set the primary model used by this agent (format provider/model).', caveats: 'Cron jobs store the model at creation — when changing a model used by cron, also run `openclaw cron update {id} --model {model}` for each affected job.' },
+      ],
+    },
+    {
+      title: 'MCP', commands: [
+        { label: 'List servers', cmd: 'openclaw mcp list', desc: 'List configured MCP servers.' },
+        { label: 'Add server (HTTP/SSE)', cmd: 'openclaw mcp add {name} --no-probe --url {url} --transport {transport}', desc: 'Add a remote MCP server (transport = streamable-http or sse).', caveats: 'Always pass --no-probe — a live probe can hang without a TTY. Verify afterwards with `openclaw mcp probe {name}`.' },
+        { label: 'Add server (stdio)', cmd: 'openclaw mcp add {name} --no-probe --command {command}', desc: 'Add a local MCP server started by a shell command.', caveats: 'Always pass --no-probe. Verify afterwards with `openclaw mcp probe {name}`.' },
+        { label: 'Remove server', cmd: 'openclaw mcp unset {name}', desc: 'Remove a configured MCP server.' },
+        { label: 'Reload servers', cmd: 'openclaw mcp reload', desc: 'Reload MCP server config without restarting.' },
+        { label: 'Probe server', cmd: 'openclaw mcp probe {name}', desc: 'Test connectivity to a configured server (name optional — probes all).' },
+        { label: 'List server tools', cmd: 'openclaw mcp tools {name}', desc: 'List the tools exposed by a server; supports --include/--exclude filters.' },
+        { label: 'Check server health', cmd: 'openclaw mcp doctor', desc: 'Diagnose MCP server setup.' },
+      ],
+    },
+    {
+      title: 'Skills', commands: [
+        { label: 'List installed skills', cmd: 'openclaw skills list', desc: 'Skills installed / visible to the agent.' },
+        { label: 'Check skills', cmd: 'openclaw skills check', desc: 'Which skills are ready vs missing requirements.' },
+        { label: 'Search skills', cmd: 'openclaw skills search {query}', desc: 'Search the ClawHub catalog.' },
+        { label: 'Install skill', cmd: 'openclaw skills install {ref}', desc: 'Install a skill by @owner/slug or owner/repo@ref.' },
+        { label: 'Update all skills', cmd: 'openclaw skills update --all', desc: 'Update every installed skill.' },
+      ],
+    },
+    {
+      title: 'Memory', commands: [
+        { label: 'Memory status', cmd: 'openclaw memory status', desc: 'Index status + memory availability.' },
+        { label: 'Deep status', cmd: 'openclaw memory status --deep', desc: 'Probe vector store, embedding provider, semantic search.' },
+        { label: 'Index memory', cmd: 'openclaw memory index', desc: 'Incremental indexing for all agents.' },
+        { label: 'Reindex (force)', cmd: 'openclaw memory index --force', desc: 'Full reindex — drops and rebuilds the vector store.', caveats: 'Destructive — confirm with the user before running.' },
+        { label: 'Search memory', cmd: 'openclaw memory search {query}', desc: 'Semantic search of indexed memory.' },
+        { label: 'Promote memories', cmd: 'openclaw memory promote --apply', desc: 'Rank short-term memories and append top entries to MEMORY.md.', caveats: 'Mutates MEMORY.md — confirm with the user first.' },
+      ],
+    },
+    {
+      title: 'Messaging', commands: [
+        { label: 'List channels', cmd: 'openclaw channels list --all', desc: 'List configured + available channels.' },
+        { label: 'Check channel status', cmd: 'openclaw channels status --probe', desc: 'Live transport + audit check per account.' },
+        { label: 'Check channel capabilities', cmd: 'openclaw channels capabilities', desc: 'What each channel supports.' },
+        { label: 'View channel logs', cmd: 'openclaw channels logs --lines 100', desc: 'Recent channel runtime logs.' },
+        { label: 'View channel routing', cmd: 'openclaw agents bindings', desc: 'Which agent owns which channel.' },
+      ],
+    },
+    {
+      title: 'Config', commands: [
+        { label: 'Validate config', cmd: 'openclaw config validate', desc: 'Check config against schema.' },
+        { label: 'Show config path', cmd: 'openclaw config file', desc: 'Show the active config path.' },
+      ],
+    },
+    {
+      title: 'Security', commands: [
+        { label: 'Run audit', cmd: 'openclaw security audit', desc: 'Cold security audit.' },
+        { label: 'Run deep audit', cmd: 'openclaw security audit --deep', desc: 'Audit with live probes.' },
+        { label: 'Run lint checks', cmd: 'openclaw doctor --lint', desc: 'Read-only health checks.' },
+        { label: 'Run deep scan', cmd: 'openclaw doctor --deep', desc: 'Scan system services for extra gateway installs.' },
+      ],
+    },
+    {
+      title: 'Doctor', commands: [
+        { label: 'Run doctor', cmd: 'openclaw doctor', desc: 'Health check — diagnose system status.' },
+        { label: 'Run lint checks', cmd: 'openclaw doctor --lint', desc: 'Read-only CI-style checks.' },
+        { label: 'Run deep scan', cmd: 'openclaw doctor --deep', desc: 'Scan for extra gateways.' },
+        { label: 'Compact SQLite', cmd: 'openclaw doctor --state-sqlite compact', desc: 'Compact the SQLite state store.', caveats: 'Destructive-ish maintenance — stop the agent first and confirm with the user.' },
+      ],
+    },
+    {
+      title: 'Diagnostics', commands: [
+        { label: 'Check agent status', cmd: 'openclaw status', desc: 'Agent overview + gateway state.' },
+        { label: 'Check gateway status', cmd: 'openclaw gateway status', desc: 'Gateway bind, port + connectivity.' },
+      ],
+    },
+  ],
+
+  /** Interactive-only openclaw commands with no non-interactive form — the
+   *  guidance tells the LLM to ask the human to run these in the terminal. */
+  notUsable: [
+    { label: 'Add provider (interactive)', cmd: 'openclaw configure --section model', desc: 'Interactive TUI (login, OAuth, device code) — use the non-interactive `models auth paste-api-key` instead.' },
+    { label: 'Add/remove channel', cmd: 'openclaw configure --section channels', desc: 'Interactive — no clean non-interactive replacement.' },
+    { label: 'Configure skills', cmd: 'openclaw configure --section skills', desc: 'Interactive.' },
+    { label: 'OAuth/device login', cmd: 'openclaw models auth login', desc: 'Runs provider OAuth/device flows — needs a TTY.' },
+    { label: 'Interactive auth helper', cmd: 'openclaw models auth add', desc: 'Interactive helper — use paste-api-key instead.' },
+  ],
+
   /** Current version in a running container; falls back to reading it from the
    *  built image if the container is down. Returns '' when unknown. */
   async currentVersion(name) {
