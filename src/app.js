@@ -1173,8 +1173,10 @@ app.post('/api/agents/:name/recreate', async (req, res) => {
       try {
         await logStore.capture(name);
         // Reuse the consolidated mutation flow so every persisted option and
-        // the owned forwarding door survive a Settings recreate.
-        await vm.applyAgentChanges(name, { pull, reset }, { onLog: log, onStep: step });
+        // the owned forwarding door survive a Settings recreate. `force: true`
+        // makes a bare recreate (nothing changed) still stop + force-recreate
+        // the container and its door — otherwise it would be a no-op.
+        await vm.applyAgentChanges(name, { pull, reset, force: true }, { onLog: log, onStep: step });
         if (pull) {
           try {
             const v = await drivers.getDriver(meta.AGENT || 'openclaw').currentVersion(name);

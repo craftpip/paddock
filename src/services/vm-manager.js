@@ -2661,10 +2661,13 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
 
   const purePull = !!opts.pull && !ctx.changed && !opts.reset;
   const keepUpThroughBuild = purePull; // pure update keeps the old container up
+  // A bare `force` recreate (no option changes) must still stop + force-recreate
+  // the container (and its forwarding door) so a missing/stale door comes back.
+  const forceRecreate = !!opts.force && !ctx.changed && !opts.pull && !opts.reset;
   let touched = false;
   let runningNow = wasRunning;
 
-  if (!ctx.changed && !opts.pull && !opts.reset) {
+  if (!ctx.changed && !opts.pull && !opts.reset && !opts.force) {
     return { ok: true, name, action: 'noop', changed: false, summary: [] };
   }
 
@@ -2686,6 +2689,8 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
   try {
     if (ctx.changed) onLog('system', `Applying changes: ${ctx.summary.join(', ')}`);
     else if (opts.reset) onLog('system', 'Resetting the data dir');
+    else if (opts.pull) onLog('system', 'Updating to the latest image');
+    else if (forceRecreate) onLog('system', 'Recreating the container');
     else onLog('system', 'Updating to the latest image');
 
     // ── 1. persist the web binding + start hook (+ config auth for openclaw) ──

@@ -464,7 +464,7 @@ function registerTools(server) {
         throw new McpError(ErrorCode.InvalidRequest, 'Refusing to reset without confirm: true (wipes the data dir).');
       }
       const log = [];
-      const result = await vm.applyAgentChanges(name, args, {
+      const result = await vm.applyAgentChanges(name, { ...args, force: true }, {
         onLog: (type, msg) => log.push(`[${type}] ${msg}`),
         onStep: () => {},
       });
