@@ -58,4 +58,31 @@ function getLlmCatalog(type) {
   };
 }
 
-module.exports = { getDriver, listDrivers, getLlmCatalog, drivers };
+/** Paddock MCP server operations for a type (plan 35b). Serializes the
+ *  driver's `mcp` object into capability descriptors + prebuilt shell commands
+ *  for the current Paddock MCP URL. `{ key, ... }` in a command is the secret
+ *  placeholder the frontend replaces with the pasted API key (or, for
+ *  `read-rsp` bootstraps, the terminal prompt). Falls back to openclaw. */
+function getMcp(type, url) {
+  const d = getDriver(type);
+  const mcp = d.mcp || openclaw.mcp;
+  const build = (kind) => {
+    const fn = mcp[`build${kind}`];
+    return typeof fn === 'function' ? fn.call(mcp, { url }) : null;
+  };
+  return {
+    type: d.type,
+    label: d.label,
+    url,
+    serverName: mcp.serverName || 'paddock',
+    capabilities: mcp.capabilities || {},
+    commands: {
+      connect: build('Connect'),
+      disconnect: build('Disconnect'),
+      inspect: build('Inspect'),
+      test: build('Test'),
+    },
+  };
+}
+
+module.exports = { getDriver, listDrivers, getLlmCatalog, getMcp, drivers };

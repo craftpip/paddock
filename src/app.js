@@ -16,6 +16,7 @@ const vault = require('./services/vault');
 const registry = require('./services/agent-registry');
 const vm = require('./services/vm-manager');
 const drivers = require('./services/drivers');
+const { getPaddockMcpUrl } = require('./services/paddock-mcp');
 const jobLog = require('./services/job-log');
 const apiKeys = require('./services/api-keys');
 const containerHealth = require('./services/container-health');
@@ -629,19 +630,11 @@ app.post('/api/profile/keys', csrfCheck, (req, res) => {
   if (!/^[A-Za-z0-9]{3,64}$/.test(trimmedName)) return res.status(400).json({ error: 'Key name must be 3-64 letters or numbers' });
 
   try {
-    const allowedScopes = ['default', 'read', 'control'];
-    let scopesStr = 'default';
-    if (scopes) {
-      const list = Array.isArray(scopes) ? scopes : String(scopes).split(',').map((s) => s.trim());
-      const unknown = list.filter((s) => !allowedScopes.includes(s));
-      if (unknown.length) return res.status(400).json({ error: `Unknown scope(s): ${unknown.join(', ')}` });
-      if (!list.length) return res.status(400).json({ error: 'At least one scope required' });
-      scopesStr = [...new Set(list)].join(',');
-    }
+    const scopesStr = apiKeys.validateScopes(scopes === undefined ? 'default' : scopes);
     const { key, row } = apiKeys.create(req.session.userId, trimmedName, scopesStr);
     res.json({ key, ...row });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(400).json({ error: e.message });
   }
 });
 
@@ -1368,10 +1361,17 @@ app.get('/api/agent-types', (req, res) => {
 
 /** Command groups for one agent type — the "buttons" on the Commands tab
  *  live in the driver, not in the frontend bundle. tuiCommand is the command
- *  that launches the agent's interactive TUI (openclaw / opencode / …). */
+ *  that launches the agent's interactive TUI (openclaw / opencode / …). Also
+ *  serves the Paddock MCP connect/disconnect block (plan 35b). */
 app.get('/api/agent-types/:type/commands', (req, res) => {
   const driver = drivers.getDriver(req.params.type);
-  res.json({ type: driver.type, commands: driver.commands, tuiCommand: driver.tuiCommand || 'openclaw' });
+  const paddockMcpUrl = getPaddockMcpUrl();
+  res.json({
+    type: driver.type,
+    commands: driver.commands,
+    tuiCommand: driver.tuiCommand || 'openclaw',
+    mcp: drivers.getMcp(req.params.type, paddockMcpUrl),
+  });
 });
 
 // ─── Agent API ──────────────────────────────────────────────

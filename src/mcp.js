@@ -102,6 +102,75 @@ function requireAccess(user, agentName) {
   }
 }
 
+// ─── API-key grants (plan 35b) ──────────────────────────────────
+// Fine-grained keys restrict the fleet an agent can reach (target grant) and
+// the tools it may invoke (tool grant). Both are enforced HERE, before the
+// owner/admin checks, so a restricted admin key stays restricted.
+
+const READ_TOOLS = new Set([
+  'list_agents', 'get_agent', 'agent_logs', 'config_get', 'settings_get',
+  'health', 'workspace_list', 'workspace_read', 'help', 'agent_commands',
+]);
+
+const TOOL_GRANT_FOR = {
+  start_agent: 'lifecycle',
+  stop_agent: 'lifecycle',
+  restart_agent: 'lifecycle',
+  create_agent: 'create',
+  delete_agent: 'delete',
+  update: 'recreate',
+  recreate: 'recreate',
+  reset: 'reset', // recreate with reset:true only
+};
+
+function keyGrants(user) {
+  const scopes = (user && user.scopes) || [];
+  return {
+    full: scopes.includes('default') || scopes.includes('control'),
+    readOnly: scopes.includes('read'),
+    tools: new Set(scopes.filter((s) => s.startsWith('tools:')).map((s) => s.slice('tools:'.length))),
+    target: scopes.find((s) => s.startsWith('target:agent:')), // undefined = all owned
+  };
+}
+
+/** The target grant admits this agent name? Restricted keys see only their
+ *  target PAD; unrestricted keys (or target:owned) see all owned agents. */
+function targetAllowed(user, agentName) {
+  if (!agentName || !user) return true;
+  const { target } = keyGrants(user);
+  if (!target) return true;
+  return target === `target:agent:${agentName}`;
+}
+
+/** Tool grant admits this tool for this agent? The base for fine-grained keys
+ *  is read + workspace + exec; mutating tools need their opt-in grant. */
+function toolAllowed(user, tool, agentName) {
+  if (!user) return true;
+  const g = keyGrants(user);
+  if (g.full) return targetAllowed(user, agentName);
+  if (g.readOnly) return READ_TOOLS.has(tool) && targetAllowed(user, agentName);
+  if (READ_TOOLS.has(tool) || tool === 'exec' || tool === 'workspace_write') {
+    return targetAllowed(user, agentName);
+  }
+  const grant = TOOL_GRANT_FOR[tool];
+  if (!grant) return targetAllowed(user, agentName);
+  return g.tools.has(grant) && targetAllowed(user, agentName);
+}
+
+/** Gate every tool: target grant, then owner/admin, then tool grant.
+ *  create_agent has no pre-existing row to owner-check, so it only runs the
+ *  grant checks (the key's owner becomes the new agent's owner). */
+function requireTool(user, tool, agentName) {
+  const name = agentName || '';
+  if (!targetAllowed(user, name)) {
+    throw new McpError(ErrorCode.InvalidRequest, `Not permitted by API key target grant: ${name || 'this action'}`);
+  }
+  if (tool !== 'create_agent') requireAccess(user, name);
+  if (!toolAllowed(user, tool, name)) {
+    throw new McpError(ErrorCode.InvalidRequest, `Not permitted by API key tool grant: ${tool}`);
+  }
+}
+
 function requireAgent(agentName) {
   const agent = registry.getAgent(agentName);
   if (!agent) throw new McpError(ErrorCode.InvalidRequest, `Agent not found: ${agentName}`);
@@ -125,7 +194,7 @@ function registerTools(server) {
     async (args) => {
       const user = currentUser();
       const agents = registry.discoverAgents()
-        .filter((a) => !user || canAccess(user, a.name))
+        .filter((a) => !user || (canAccess(user, a.name) && targetAllowed(user, a.name)))
         .map((a) => ({
           name: a.name,
           status: a.status,
@@ -148,7 +217,7 @@ function registerTools(server) {
       },
     },
     async ({ name, logs }) => {
-      requireAccess(currentUser(), name);
+      requireTool(currentUser(), 'get_agent', name);
       const agent = requireAgent(name);
       if (!logs) return textResult(agent);
       await logStore.capture(agent.name);
@@ -167,7 +236,7 @@ function registerTools(server) {
       },
     },
     async ({ name, tail }) => {
-      requireAccess(currentUser(), name);
+      requireTool(currentUser(), 'agent_logs', name);
       const agent = requireAgent(name);
       await logStore.capture(agent.name);
       const logs = logStore.readLogs(agent.name, Math.min(tail || 100, 5000));
@@ -183,7 +252,7 @@ function registerTools(server) {
       inputSchema: { name: z.string().describe('PAD name') },
     },
     async ({ name }) => {
-      requireAccess(currentUser(), name);
+      requireTool(currentUser(), 'config_get', name);
       const agent = requireAgent(name);
       return textResult({ name, ...vm.readAgentConfig(agent) });
     }
@@ -197,7 +266,7 @@ function registerTools(server) {
       inputSchema: { name: z.string().describe('PAD name') },
     },
     async ({ name }) => {
-      requireAccess(currentUser(), name);
+      requireTool(currentUser(), 'settings_get', name);
       requireAgent(name);
       const [settings, availableNetworks] = await Promise.all([
         vm.readSettings(name),
@@ -215,7 +284,7 @@ function registerTools(server) {
       inputSchema: { name: z.string().describe('PAD name') },
     },
     async ({ name }) => {
-      requireAccess(currentUser(), name);
+      requireTool(currentUser(), 'health', name);
       requireAgent(name);
       const report = await containerHealth.checkContainerHealth(name);
       return textResult(report);
@@ -233,7 +302,7 @@ function registerTools(server) {
       },
     },
     async ({ name, path: relPath }) => {
-      requireAccess(currentUser(), name);
+      requireTool(currentUser(), 'workspace_list', name);
       const agent = requireAgent(name);
       const listing = workspace.listDir(agent.name, relPath || '/');
       return textResult({ name, ...listing });
@@ -251,7 +320,7 @@ function registerTools(server) {
       },
     },
     async ({ name, path: relPath }) => {
-      requireAccess(currentUser(), name);
+      requireTool(currentUser(), 'workspace_read', name);
       const agent = requireAgent(name);
       const stat = workspace.statFile(agent.name, relPath);
       if (!stat) throw new McpError(ErrorCode.InvalidRequest, `File not found: ${relPath}`);
@@ -275,7 +344,7 @@ function registerTools(server) {
       },
     },
     async ({ name, path: relPath, content }) => {
-      requireAccess(currentUser(), name);
+      requireTool(currentUser(), 'workspace_write', name);
       const agent = requireAgent(name);
       const result = workspace.writeFile(agent.name, relPath, content);
       return textResult({ name, path: relPath, ...result });
@@ -290,7 +359,7 @@ function registerTools(server) {
       inputSchema: { name: z.string().describe('PAD name') },
     },
     async ({ name }) => {
-      requireAccess(currentUser(), name);
+      requireTool(currentUser(), 'start_agent', name);
       requireAgent(name);
       await vm.startAgent(name);
       registry.dockerPsList(true);
@@ -307,7 +376,7 @@ function registerTools(server) {
       inputSchema: { name: z.string().describe('PAD name') },
     },
     async ({ name }) => {
-      requireAccess(currentUser(), name);
+      requireTool(currentUser(), 'stop_agent', name);
       requireAgent(name);
       await vm.stopAgent(name);
       registry.dockerPsList(true);
@@ -324,7 +393,7 @@ function registerTools(server) {
       inputSchema: { name: z.string().describe('PAD name') },
     },
     async ({ name }) => {
-      requireAccess(currentUser(), name);
+      requireTool(currentUser(), 'restart_agent', name);
       requireAgent(name);
       await vm.restartAgent(name);
       registry.dockerPsList(true);
@@ -372,6 +441,7 @@ function registerTools(server) {
       if (!fullName) {
         throw new McpError(ErrorCode.InvalidRequest, `Invalid agent name: ${args.name}`);
       }
+      requireTool(user, 'create_agent', fullName);
       const log = [];
       try {
         await vm.createAgent(fullName, {
@@ -415,7 +485,7 @@ function registerTools(server) {
       },
     },
     async ({ name, confirm }) => {
-      requireAccess(currentUser(), name);
+      requireTool(currentUser(), 'delete_agent', name);
       requireAgent(name);
       if (confirm !== true) {
         throw new McpError(ErrorCode.InvalidRequest, 'Refusing to delete without confirm: true (destructive, no undo).');
@@ -466,10 +536,13 @@ function registerTools(server) {
     },
     async (args) => {
       const { name } = args;
-      requireAccess(currentUser(), name);
+      requireTool(currentUser(), 'recreate', name);
       requireAgent(name);
       if (args.reset && args.confirm !== true) {
         throw new McpError(ErrorCode.InvalidRequest, 'Refusing to reset without confirm: true (wipes the data dir).');
+      }
+      if (args.reset) {
+        requireTool(currentUser(), 'reset', name);
       }
       const log = [];
       const result = await vm.applyAgentChanges(name, { ...args, force: true }, {
@@ -490,7 +563,7 @@ function registerTools(server) {
       inputSchema: { name: z.string().describe('PAD name') },
     },
     async ({ name }) => {
-      requireAccess(currentUser(), name);
+      requireTool(currentUser(), 'update', name);
       requireAgent(name);
       await vm.updateAgent(name, { pull: true });
       registry.dockerPsList(true);
@@ -537,7 +610,7 @@ function registerTools(server) {
       },
     },
     async ({ name, command, stdin, timeout }) => {
-      requireAccess(currentUser(), name);
+      requireTool(currentUser(), 'exec', name);
       const agent = requireAgent(name);
       const containers = registry.dockerPsList();
       if ((containers[agent.runtime_ref] || '').toString().toLowerCase() !== 'running') {
@@ -618,4 +691,4 @@ function mountMcp(app) {
   app.use('/mcp', router);
 }
 
-module.exports = { mountMcp, authenticateRequest, registerTools, createServer, SERVER_NAME, SERVER_VERSION };
+module.exports = { mountMcp, authenticateRequest, registerTools, createServer, SERVER_NAME, SERVER_VERSION, keyGrants, targetAllowed, toolAllowed, requireTool };

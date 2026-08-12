@@ -1,6 +1,7 @@
 const { execFile } = require('child_process');
 const crypto = require('crypto');
 const { imageFor } = require('../instance-image');
+const { sq, bootstrap } = require('./mcp-util');
 
 function runCmd(cmd, args, options = {}) {
   const { timeout = 120000 } = options;
@@ -305,6 +306,61 @@ const HERMES = {
     { label: 'Run as MCP server', cmd: 'hermes mcp serve', desc: 'Long-running server process — not an exec-able command.' },
     { label: 'Export sessions', cmd: 'hermes sessions export', desc: 'Interactive export flow.' },
   ],
+
+  /** Paddock MCP server operations (plan 35b). `hermes mcp add` has no
+   *  non-interactive header flag (it probes live and prompts), so connect
+   *  patches config.yaml directly. Hermes' own schema: top-level
+   *  `mcp_servers.<name> = {url, headers: {Authorization: "Bearer ${MCP_<NAME>_API_KEY}"}}`
+   *  with the secret persisted in `$HERMES_HOME/.env` (live-verified in
+   *  hermes_cli/mcp_config.py: `_env_key_for_server`). For 'paddock' the env
+   *  key is MCP_PADDOCK_API_KEY and the header template is interpolated at
+   *  connect time. Config lives at /opt/data/config.yaml (HERMES_HOME=/opt/data);
+   *  pyyaml is present in the venv. */
+  mcp: {
+    serverName: 'paddock',
+    capabilities: { list: true, add: 'configPatch', remove: 'configPatch', test: true },
+    buildConnect({ url }) {
+      const urlLiteral = JSON.stringify(url);
+      const envKey = 'MCP_PADDOCK_API_KEY';
+      const headerTmpl = `Bearer $${'{' + envKey + '}'}`;
+      const script = [
+        'import os,yaml',
+        "p='/opt/data/config.yaml'",
+        "c=yaml.safe_load(open(p)) if os.path.exists(p) else {}",
+        `c.setdefault('mcp_servers',{})['paddock']={'url':${urlLiteral},'headers':{'Authorization':'${headerTmpl}'}};`,
+        "yaml.safe_dump(c,open(p,'w'),default_flow_style=False,sort_keys=False)",
+        "e='/opt/data/.env'",
+        "lines=open(e).read().splitlines() if os.path.exists(e) else []",
+        `lines=[l for l in lines if not l.startswith('${envKey}=')]`,
+        `lines.append('${envKey}='+os.environ['PADDOCK_MCP_TOKEN'])`,
+        "open(e,'w').write('\\n'.join(lines)+'\\n')",
+      ].join('\n');
+      return bootstrap(`python3 -c ${sq(script)}`);
+    },
+    buildDisconnect() {
+      const envKey = 'MCP_PADDOCK_API_KEY';
+      const script = [
+        'import os,yaml',
+        "p='/opt/data/config.yaml'",
+        "c=yaml.safe_load(open(p)) if os.path.exists(p) else {}",
+        "if c and 'mcp_servers' in c:",
+        "  c['mcp_servers'].pop('paddock',None)",
+        "  if not c['mcp_servers']: c.pop('mcp_servers',None)",
+        "  yaml.safe_dump(c,open(p,'w'),default_flow_style=False,sort_keys=False)",
+        "e='/opt/data/.env'",
+        "if os.path.exists(e):",
+        `  lines=[l for l in open(e).read().splitlines() if not l.startswith('${envKey}=')]`,
+        "  open(e,'w').write('\\n'.join(lines)+('\\n' if lines else ''))",
+      ].join('\n');
+      return `python3 -c ${sq(script)}`;
+    },
+    buildInspect() {
+      return `hermes mcp list`;
+    },
+    buildTest() {
+      return `hermes mcp test ${this.serverName}`;
+    },
+  },
 
   /** Current version in a running container; falls back to the built image. */
   async currentVersion(name) {

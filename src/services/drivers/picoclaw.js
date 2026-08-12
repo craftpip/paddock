@@ -1,5 +1,6 @@
 const { execFile } = require('child_process');
 const { imageFor } = require('../instance-image');
+const { sq, bootstrap } = require('./mcp-util');
 
 function runCmd(cmd, args, options = {}) {
   const { timeout = 120000 } = options;
@@ -184,6 +185,45 @@ const PICOCLAW = {
     { label: 'Start gateway', cmd: 'picoclaw gateway', desc: 'Long-running messaging gateway — not an exec-able command.' },
     { label: 'Add job', cmd: 'picoclaw cron add', desc: 'Interactive job scheduling.' },
   ],
+
+  /** Paddock MCP server operations (plan 35b). The installed picoclaw v0.2.5
+   *  has NO `mcp` CLI group, so every operation is a parser-based patch of
+   *  `config.json` (`tools.mcp.enabled` + `tools.mcp.servers.<name>`, shape
+   *  verified live). Config lives at /root/.picoclaw/config.json. */
+  mcp: {
+    serverName: 'paddock',
+    capabilities: { list: true, add: 'configPatch', remove: 'configPatch', test: false },
+    buildConnect({ url }) {
+      const script = [
+        "const fs=require('fs');const p='/root/.picoclaw/config.json';",
+        'let c={};try{c=JSON.parse(fs.readFileSync(p,"utf8"))}catch(e){}',
+        'c.tools=c.tools||{};c.tools.mcp=c.tools.mcp||{};',
+        'c.tools.mcp.enabled=true;c.tools.mcp.servers=c.tools.mcp.servers||{};',
+        `c.tools.mcp.servers.paddock={type:"http",url:${JSON.stringify(url)},headers:{Authorization:"Bearer "+process.env.PADDOCK_MCP_TOKEN}};`,
+        'fs.writeFileSync(p,JSON.stringify(c,null,2));',
+      ].join('\n');
+      return bootstrap(`node -e ${sq(script)}`);
+    },
+    buildDisconnect() {
+      const script = [
+        "const fs=require('fs');const p='/root/.picoclaw/config.json';",
+        'let c={};try{c=JSON.parse(fs.readFileSync(p,"utf8"))}catch(e){}',
+        'if(c.tools&&c.tools.mcp&&c.tools.mcp.servers){',
+        '  delete c.tools.mcp.servers.paddock;',
+        '  if(Object.keys(c.tools.mcp.servers).length===0){delete c.tools.mcp.servers;c.tools.mcp.enabled=false;}',
+        '}',
+        'fs.writeFileSync(p,JSON.stringify(c,null,2));',
+      ].join('\n');
+      return `node -e ${sq(script)}`;
+    },
+    buildInspect() {
+      const script = "const c=require('/root/.picoclaw/config.json');console.log(JSON.stringify((c.tools&&c.tools.mcp)||{enabled:false,servers:{}},null,2));";
+      return `node -e ${sq(script)}`;
+    },
+    buildTest() {
+      return null;
+    },
+  },
 
   /** Current version in a running container; falls back to the built image. */
   async currentVersion(name) {

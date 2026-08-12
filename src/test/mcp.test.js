@@ -3,7 +3,8 @@ const assert = require('node:assert');
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { InMemoryTransport } = require('@modelcontextprotocol/sdk/inMemory.js');
 const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
-const { registerTools, authenticateRequest, SERVER_NAME, SERVER_VERSION } = require('../mcp');
+const { registerTools, authenticateRequest, SERVER_NAME, SERVER_VERSION, targetAllowed, toolAllowed, requireTool } = require('../mcp');
+const apiKeys = require('../services/api-keys');
 
 function buildServer() {
   const server = new McpServer(
@@ -129,5 +130,87 @@ describe('MCP Server - Auth', () => {
       authenticateRequest({ headers: { authorization: 'Bearer not-a-key' }, query: {} }),
       null
     );
+  });
+});
+
+describe('MCP Server - API key grants (plan 35b)', () => {
+  const user = (scopes) => ({ userId: 'u1', role: 'user', scopes });
+
+  it('scope validation accepts the grant grammar', () => {
+    assert.strictEqual(apiKeys.validateScopes('default'), 'default');
+    assert.strictEqual(apiKeys.validateScopes(['target:agent:pad-test-agents']), 'target:agent:pad-test-agents');
+    assert.strictEqual(apiKeys.validateScopes(['tools:lifecycle', 'target:owned']), 'tools:lifecycle,target:owned');
+    assert.strictEqual(apiKeys.validateScopes(['tools:create', 'tools:delete', 'tools:reset']), 'tools:create,tools:delete,tools:reset');
+    assert.strictEqual(apiKeys.validateScopes(['read', 'target:agent:pad-test-agents']), 'read,target:agent:pad-test-agents');
+    assert.throws(() => apiKeys.validateScopes(['default', 'tools:delete']), /cannot be combined/);
+    assert.throws(() => apiKeys.validateScopes(['read', 'tools:lifecycle']), /read cannot be combined/);
+    assert.throws(() => apiKeys.validateScopes(['tools:nonsense']), /Unknown tool grant/);
+    assert.throws(() => apiKeys.validateScopes(['target:agent:NOT-A-VALID-NAME']), /Invalid target PAD name/);
+    assert.throws(() => apiKeys.validateScopes(['bogus']), /Unknown scope/);
+    assert.throws(() => apiKeys.validateScopes([]), /At least one scope/);
+  });
+
+  it('target grant admits only its own agent', () => {
+    const restricted = user(['target:agent:pad-test-agents']);
+    assert.strictEqual(targetAllowed(restricted, 'pad-test-agents'), true);
+    assert.strictEqual(targetAllowed(restricted, 'pad-other'), false);
+    assert.strictEqual(targetAllowed(user(['target:owned']), 'pad-other'), true);
+    assert.strictEqual(targetAllowed(user(['default']), 'pad-other'), true);
+  });
+
+  it('base fine-grained keys get read + workspace + exec, not mutations', () => {
+    const base = user(['target:agent:pad-test-agents']);
+    assert.strictEqual(toolAllowed(base, 'list_agents', 'pad-test-agents'), true);
+    assert.strictEqual(toolAllowed(base, 'get_agent', 'pad-test-agents'), true);
+    assert.strictEqual(toolAllowed(base, 'workspace_write', 'pad-test-agents'), true);
+    assert.strictEqual(toolAllowed(base, 'exec', 'pad-test-agents'), true);
+    assert.strictEqual(toolAllowed(base, 'start_agent', 'pad-test-agents'), false);
+    assert.strictEqual(toolAllowed(base, 'recreate', 'pad-test-agents'), false);
+    assert.strictEqual(toolAllowed(base, 'create_agent', 'pad-test-agents'), false);
+    assert.strictEqual(toolAllowed(base, 'delete_agent', 'pad-test-agents'), false);
+  });
+
+  it('opt-in tool grants unlock the matching mutations', () => {
+    const lifecycle = user(['tools:lifecycle']);
+    assert.strictEqual(toolAllowed(lifecycle, 'start_agent', 'pad-x'), true);
+    assert.strictEqual(toolAllowed(lifecycle, 'stop_agent', 'pad-x'), true);
+    assert.strictEqual(toolAllowed(lifecycle, 'restart_agent', 'pad-x'), true);
+    assert.strictEqual(toolAllowed(lifecycle, 'delete_agent', 'pad-x'), false);
+
+    const recreate = user(['tools:recreate']);
+    assert.strictEqual(toolAllowed(recreate, 'recreate', 'pad-x'), true);
+    assert.strictEqual(toolAllowed(recreate, 'update', 'pad-x'), true);
+    assert.strictEqual(toolAllowed(recreate, 'reset', 'pad-x'), false);
+
+    const everything = user(['tools:lifecycle', 'tools:recreate', 'tools:create', 'tools:delete', 'tools:reset']);
+    for (const t of ['start_agent', 'stop_agent', 'restart_agent', 'create_agent', 'delete_agent', 'recreate', 'update', 'reset']) {
+      assert.strictEqual(toolAllowed(everything, t, 'pad-x'), true, `${t} allowed`);
+    }
+  });
+
+  it('read scope strips exec and workspace writes', () => {
+    const read = user(['read', 'target:agent:pad-test-agents']);
+    assert.strictEqual(toolAllowed(read, 'config_get', 'pad-test-agents'), true);
+    assert.strictEqual(toolAllowed(read, 'health', 'pad-test-agents'), true);
+    assert.strictEqual(toolAllowed(read, 'workspace_read', 'pad-test-agents'), true);
+    assert.strictEqual(toolAllowed(read, 'workspace_write', 'pad-test-agents'), false);
+    assert.strictEqual(toolAllowed(read, 'exec', 'pad-test-agents'), false);
+    assert.strictEqual(toolAllowed(read, 'start_agent', 'pad-test-agents'), false);
+  });
+
+  it('default/control keys are unrestricted', () => {
+    for (const s of ['default', 'control']) {
+      const full = user([s]);
+      assert.strictEqual(toolAllowed(full, 'delete_agent', 'pad-other'), true, `${s} delete`);
+      assert.strictEqual(toolAllowed(full, 'exec', 'pad-other'), true, `${s} exec`);
+    }
+  });
+
+  it('requireTool throws on grant violations (even for admins)', () => {
+    const adminLifecycle = { userId: 'u1', role: 'admin', scopes: ['tools:lifecycle'] };
+    assert.throws(() => requireTool(adminLifecycle, 'delete_agent', 'pad-test-agents'), /tool grant/);
+    const adminTarget = { userId: 'u1', role: 'admin', scopes: ['target:agent:pad-x'] };
+    assert.throws(() => requireTool(adminTarget, 'get_agent', 'pad-other'), /target grant/);
+    assert.strictEqual(toolAllowed(adminTarget, 'get_agent', 'pad-x'), true);
   });
 });

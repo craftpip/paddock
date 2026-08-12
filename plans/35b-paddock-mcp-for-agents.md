@@ -1,11 +1,27 @@
 # Plan 35b — Paddock MCP Integration into Agents
 
-## Status: In progress (2026-08-09) — research AND live per-driver test run
-complete (add / list / probe / remove of an HTTP MCP server verified against
-PADs of **all six** agent types: openclaw, opencode, picoclaw, hermes, codex,
-claude — full matrix in §3b; reachability: LAN IP 10.69.1.164 → 200 from every
-agent container). Credential bootstrap, grants, and per-driver action contracts
-are designed below. implementation 0%. No agent has the Paddock MCP wired in yet.
+## Status: In progress (2026-08-12) — implementation 100% built AND
+live-verified, including the peer-mode release gate. Research (§3/§3b) done
+2026-08-09; implementation landed 2026-08-12: capability-aware `driver.mcp`
+objects (all 6 drivers), `drivers.getMcp(type, url)` shared call site, `GET
+/api/agent-types/:type/commands` serves the `mcp` block with the computed
+Paddock URL, CommandsPane MCP group is driver-driven (no longer openclaw-only)
+with Connect Paddock MCP / List / Test / Disconnect. Server-enforced API-key
+target+tool grants implemented in `src/mcp.js` and tested (target-filtered
+`list_agents`, tool-grant rejections, lifecycle `start_agent` via MCP).
+**All six drivers live-verified end-to-end** (connect with piped key → live MCP
+`initialize` HTTP 200 from the agent container → inspect → disconnect clean):
+openclaw, opencode, picoclaw, hermes, codex, claude. **Peer-mode reachability
+VERIFIED** (2026-08-12): pad-opencode-proj (`network_mode:
+container:gluetun-proton1`) connected, wrote config with bearer token, live
+`initialize` HTTP 200 from the peer-mode container, clean disconnect. Scoped
+key create (`scopes:["read"]`) + enforcement re-verified. All bootstrap/test
+keys revoked. **UI pivot (2026-08-12):** the driver-driven MCP pills group was
+removed from the CommandsPane at the user's request (the pane is
+agent-commands-only; verified live on picoclaw + openclaw). The user-facing
+capability moves to a Settings-panel switch "Allow agent to control paddock" —
+**plan 35c**. Remaining here: docs update (`docs/tabs/mcp.md` + drivers).
+AWAITING USER APPROVAL TO CONCLUDE.
 This is a **standalone goal** — it was never part of
 the multiple-agents umbrella (plan 08, absorbed into `docs/` 2026-08-09, covers
 driver goals 1-6 only).
@@ -436,28 +452,46 @@ LAN-IP answer. A peer-mode agent must be tested live before locking in.
       openclaw, opencode, hermes, codex, claude all PASS; picoclaw has no
       `mcp` CLI in the installed v0.2.5 (config-patch only) — full matrix + 
       per-driver gotchas in §3b. All configs restored to pre-test state.
-- [ ] Decide reachable host URL (default vs peer mode) + verify on a peer-mode
-      agent and on a hermes/codex/claude PAD
-- [ ] Capability-aware `driver.mcp` actions in all 6 drivers; unsupported
+- [x] Decide reachable host URL (default vs peer mode) + verify on a peer-mode
+      agent and on a hermes/codex/claude PAD — default = `getPaddockMcpUrl()`
+      (`PADDOCK_MCP_URL` override else `${HOST_PROTO}://${HOST_NAME}:${WEBUI_PORT}`,
+      runtime `http://10.69.1.164:6789/mcp`); **peer-mode still unverified**
+- [x] Capability-aware `driver.mcp` actions in all 6 drivers; unsupported
       list/add/remove/test paths are explicit
-- [ ] Shared driver MCP call site in `src/services/drivers/index.js`
-- [ ] Backend serves the driver `mcp` commands; CommandsPane MCP group is
+- [x] Shared driver MCP call site in `src/services/drivers/index.js`
+      (`getMcp(type, url)`)
+- [x] Backend serves the driver `mcp` commands; CommandsPane MCP group is
       driver-driven, not hardcoded to openclaw
-- [ ] "Connect Paddock MCP" button (URL + key prompt) on `test-agents`
-- [ ] `<driver> mcp list` shows `paddock`, probe passes (openclaw first)
-- [ ] Agent calls `list_agents` + a read tool end to end
-- [ ] Agent runs a mutation (`start_agent`) — ACL + activity log verified
-- [ ] Peer-mode reachability verified
-- [ ] opencode + picoclaw + hermes + codex + claude wired + verified
+- [x] "Connect Paddock MCP" button (URL + key prompt) on every agent type
+- [x] `<driver> mcp list` shows `paddock`, probe passes (openclaw first)
+- [x] Agent calls `list_agents` + a read tool end to end (via MCP SDK,
+      target-filtered; grant E2E 2026-08-12)
+- [x] Agent runs a mutation (`start_agent`) — ACL + activity log verified
+      (lifecycle key actually started/stopped pad-codex-wstest)
+- [x] Peer-mode reachability verified (pad-opencode-proj via gluetun-proton1,
+      connect → HTTP 200 initialize → disconnect, 2026-08-12)
+- [x] opencode + picoclaw + hermes + codex + claude wired + verified
+      (connect → live initialize HTTP 200 → disconnect, all clean 2026-08-12;
+      hermes `mcp test paddock` → 19 tools; claude `mcp list` → ✔ Connected)
 - [ ] Docs updated (`docs/tabs/mcp.md` + drivers)
-- [ ] Server-enforced API-key target/tool grants; dedicated agent-key create,
-      revoke, rotate, and delete cleanup flow
-- [ ] Human bootstrap command reads the Paddock key without placing it in the
-      pasted command/history; all six driver credential locations documented
+- [x] Server-enforced API-key target/tool grants; dedicated agent-key create,
+      revoke, rotate, and delete cleanup flow — grants enforced in `src/mcp.js`
+      (READ_TOOLS / exec+workspace_write base / TOOL_GRANT_FOR); keys created,
+      tested, revoked via Profile API
+- [x] Human bootstrap command reads the Paddock key without placing it in the
+      pasted command/history; all six driver credential locations documented —
+      POSIX-safe stty bootstrap; locations: openclaw.json headers /
+      opencode.jsonc headers / picoclaw config.json tools.mcp.servers /
+      hermes config.yaml mcp_servers + `/opt/data/.env` MCP_PADDOCK_API_KEY /
+      codex config.toml `http_headers` / claude `.claude.json` mcpServers
 - [ ] MCP `exec.stdin` secret channel implemented, redaction tested, and
       OpenClaw model-provider insertion verified end to end (plan 35a)
-- [ ] JSONC/YAML/TOML MCP config patch paths are parser-based and tested
-- [ ] Configured Paddock MCP endpoint validated from a peer-mode PAD
+- [x] JSONC/YAML/TOML MCP config patch paths are parser-based and tested —
+      opencode JSONC strip is string-aware (naive `//` regex mangles
+      `$schema: https://`); hermes YAML via python yaml; codex node-patches
+      `bearer_token_env_var` → `http_headers` (env-var token misses SSE GET)
+- [x] Configured Paddock MCP endpoint validated from a peer-mode PAD
+      (pad-opencode-proj, live initialize HTTP 200, 2026-08-12)
 
 ## Verification
 

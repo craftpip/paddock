@@ -1,5 +1,6 @@
 const { execFile } = require('child_process');
 const { imageFor } = require('../instance-image');
+const { sq, bootstrap } = require('./mcp-util');
 
 function runCmd(cmd, args, options = {}) {
   const { timeout = 120000 } = options;
@@ -153,6 +154,47 @@ const CODEX = {
     { label: 'MCP OAuth login', cmd: 'codex mcp login {name}', desc: 'Interactive OAuth flow.' },
     { label: 'Marketplaces', cmd: 'codex plugin marketplace', desc: 'Interactive marketplace management.' },
   ],
+
+  /** Paddock MCP server operations (plan 35b). `codex mcp add` has NO inline
+   *  header flag and NO non-interactive flag in this build (live-verified:
+   *  `codex mcp add <name> --url <url> [--bearer-token-env-var <ENV>]`).
+   *  `bearer_token_env_var` only attaches the token to POSTs, NOT the SSE GET
+   *  stream (401 against servers that authenticate every request — ours does),
+   *  so connect registers the server then patches config.toml to swap
+   *  `bearer_token_env_var` for a static `http_headers` (sent on every request,
+   *  per OpenAI codex docs). The literal token is stored in config.toml —
+   *  equivalent to openclaw storing it in openclaw.json. Config at
+   *  /root/.codex/config.toml; `[mcp_servers.<name>]` shape confirmed live.
+   *  No python in the image → patch is a node script. */
+  mcp: {
+    serverName: 'paddock',
+    capabilities: { list: true, add: 'command', remove: 'command', test: true },
+    buildConnect({ url }) {
+      const patch = [
+        "const fs=require('fs');",
+        "const p='/root/.codex/config.toml';",
+        'let t=fs.readFileSync(p,"utf8");',
+        'const tok=process.env.PADDOCK_MCP_TOKEN;',
+        'const line="http_headers = { Authorization = \\"Bearer "+tok+"\\" }";',
+        't=t.replace(/bearer_token_env_var\\s*=\\s*"[^"]*"/g,line);',
+        'fs.writeFileSync(p,t);',
+      ].join('\n');
+      const inner = [
+        `codex mcp add ${this.serverName} --url ${sq(url)} --bearer-token-env-var PADDOCK_MCP_TOKEN`,
+        `node -e ${sq(patch)}`,
+      ].join('\n');
+      return bootstrap(inner);
+    },
+    buildDisconnect() {
+      return `codex mcp remove ${this.serverName}`;
+    },
+    buildInspect() {
+      return `codex mcp list`;
+    },
+    buildTest() {
+      return `codex mcp get ${this.serverName}`;
+    },
+  },
 
   /** Current version in a running container; falls back to the built image. */
   async currentVersion(name) {

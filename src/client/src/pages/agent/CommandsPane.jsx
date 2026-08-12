@@ -1,9 +1,7 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { api } from '../../lib/api'
 import { usePrompt } from '../../lib/prompt'
-import { useConfirm } from '../../lib/confirm'
 import { useToast } from '../../lib/toast'
-
 /**
  * Commands — the "home" mode of an agent page.
  *
@@ -182,110 +180,6 @@ function ModelsFlow({ agent, query, run, prompt, connected }) {
         <Pill key={x.label} label={x.label} desc={x.desc} cmd={x.cmd} color={COLORS.info.pill}
               disabled={!connected}
               onClick={() => (x.click ? x.click() : run(x.cmd, x))} />
-      ))}
-    </>
-  )
-}
-
-// ─── MCP ─────────────────────────────────────────────────────────
-
-function McpFlow({ agent, query, run, prompt, connected }) {
-  const [servers, setServers] = useState([])
-  const confirm = useConfirm()
-  const toast = useToast()
-
-  function load() {
-    api(`/api/agents/${agent.name}/mcp`).then((d) => setServers(d.servers || [])).catch(() => {})
-  }
-  useEffect(load, [agent.name])
-
-  const serverHint = servers.length
-    ? 'Configured servers: ' + servers.map((s) => s.name).join(', ')
-    : 'No servers configured — run "List" first.'
-
-  // Single-quote a value so it survives the shell in the terminal.
-  const sq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'"
-
-  const pills = [
-    { cmd: 'openclaw mcp list', label: 'List servers', desc: 'List configured MCP servers' },
-    { label: 'Add server', desc: 'Paste an "openclaw mcp add" command into the terminal', click: async () => {
-      const v = await prompt({
-        title: 'Add MCP server',
-        message: 'Name the server, pick how the agent should connect, then give it a URL (remote) or command (local).\n\nThis pastes the openclaw command into the terminal for you to run.',
-        confirmText: 'Add server',
-        fields: [
-          { key: 'name', label: 'Server name', placeholder: 'e.g. filesystem', hint: 'Name used in config and tools (mcp__<name>__*).' },
-          { key: 'transport', label: 'Transport', type: 'select', defaultValue: 'streamable-http', options: [
-            { value: 'streamable-http', label: 'Streamable HTTP — remote server URL' },
-            { value: 'sse', label: 'SSE — remote server URL' },
-            { value: 'stdio', label: 'Stdio — local command' },
-          ], hint: 'How the agent connects to the server.' },
-          { key: 'url', label: 'URL', placeholder: 'https://mcp.example.com/mcp', hint: 'HTTP/HTTPS endpoint of the remote MCP server.', when: (v) => v.transport !== 'stdio' },
-          { key: 'command', label: 'Command', placeholder: 'npx -y @modelcontextprotocol/server-filesystem /path', hint: 'Command plus arguments that start a local server process.', when: (v) => v.transport === 'stdio' },
-          { key: 'testConnection', label: 'Test MCP connection', type: 'checkbox', defaultValue: true, checkLabel: 'Run a connectivity check after adding', hint: 'When checked, openclaw probes the new server after adding so you see if it connects.' },
-        ],
-      })
-      if (!v?.name) return
-      let cmd = `openclaw mcp add ${v.name}`
-      if (v.testConnection === false) cmd += ' --no-probe'
-      if (v.transport === 'stdio') {
-        if (!v.command) { toast.error('A command is required for stdio servers.'); return }
-        cmd += ` --command ${sq(v.command)}`
-      } else {
-        if (!v.url) { toast.error('A URL is required for HTTP servers.'); return }
-        cmd += ` --url ${sq(v.url)} --transport ${sq(v.transport)}`
-      }
-      run(cmd)
-    } },
-    { label: 'Remove server', desc: 'Paste an "openclaw mcp unset" command into the terminal', click: async () => {
-      const v = await prompt({
-        title: 'Remove MCP server',
-        message: 'Which MCP server should we remove?',
-        confirmText: 'Remove server',
-        danger: true,
-        fields: [{ key: 'name', label: 'Server name', placeholder: 'e.g. filesystem', hint: serverHint }],
-      })
-      if (!v?.name) return
-      removeServer(v.name)
-    } },
-    { cmd: 'openclaw mcp reload', label: 'Reload servers', desc: 'Refresh — reload server config' },
-    { label: 'List tools', desc: 'Probe a server\'s tools — or all servers if left blank', click: async () => {
-      const v = await prompt({
-        title: 'List MCP tools',
-        message: 'Which MCP server should we probe? Leave blank to probe all configured servers.',
-        confirmText: 'Probe',
-        fields: [{
-          key: 'name', label: 'Server name (optional)', placeholder: 'e.g. filesystem',
-          hint: serverHint,
-        }],
-      })
-      if (v?.name) run(`openclaw mcp probe ${v.name}`)
-      else run('openclaw mcp probe')
-    } },
-    { cmd: 'openclaw mcp doctor', label: 'Check server health', desc: 'Health check — diagnose MCP server setup' },
-  ]
-  const groupHit = matches(query, 'MCP', 'mcp', 'server')
-  const visible = pills.filter((x) => groupHit || matches(query, x.label, x.cmd, x.desc))
-  if (query && !groupHit && visible.length === 0) return null
-
-  async function removeServer(name) {
-    const ok = await confirm({
-      title: 'Remove MCP server',
-      message: `Remove "${name}"?`,
-      danger: true,
-      confirmText: 'Remove',
-    })
-    if (!ok) return
-    run(`openclaw mcp unset ${name}`)
-  }
-
-  return (
-    <>
-      <GroupLabel color="success" title="MCP" />
-      {visible.map((x) => (
-        <Pill key={x.label} label={x.label} desc={x.desc} cmd={x.cmd} color={COLORS.success.pill}
-              disabled={!connected}
-              onClick={() => (x.click ? x.click() : run(x.cmd))} />
       ))}
     </>
   )
@@ -710,7 +604,7 @@ export default function CommandsPane({ agent, termRef, run, connected }) {
   const [tuiCommand, setTuiCommand] = useState('openclaw')
   const prompt = usePrompt()
 
-  // The Messaging/Models/MCP/Skills flows below are openclaw-only (their
+  // The Messaging/Models/Skills/Memory flows below are openclaw-only (their
   // commands and backing APIs are openclaw's). Other agent types render only
   // their driver-provided groups.
   const isOpenclaw = agent?.agent_type === 'openclaw'
@@ -778,7 +672,6 @@ export default function CommandsPane({ agent, termRef, run, connected }) {
         <div className="flex flex-wrap items-center gap-1.5">
           {isOpenclaw && <MessagingFlow query={query} run={run} connected={connected} />}
           {isOpenclaw && <ModelsFlow agent={agent} query={query} run={run} prompt={prompt} connected={connected} />}
-          {isOpenclaw && <McpFlow agent={agent} query={query} run={run} prompt={prompt} connected={connected} />}
           {isOpenclaw && <SkillsFlow agent={agent} query={query} run={run} prompt={prompt} connected={connected} />}
           {isOpenclaw && <MemoryFlow agent={agent} query={query} run={run} prompt={prompt} connected={connected} />}
           {driverGroups.map((g) => (

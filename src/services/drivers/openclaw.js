@@ -1,5 +1,6 @@
 const { execFile } = require('child_process');
 const { imageFor } = require('../instance-image');
+const { sq, bootstrap } = require('./mcp-util');
 
 function runCmd(cmd, args, options = {}) {
   const { timeout = 120000 } = options;
@@ -209,6 +210,34 @@ const OPENCLAW = {
     { label: 'OAuth/device login', cmd: 'openclaw models auth login', desc: 'Runs provider OAuth/device flows — needs a TTY.' },
     { label: 'Interactive auth helper', cmd: 'openclaw models auth add', desc: 'Interactive helper — use paste-api-key instead.' },
   ],
+
+  /** Paddock MCP server operations (plan 35b). buildConnect returns a command
+   *  that reads the Paddock API key at the terminal (`read -rsp`), so the key
+   *  never lands in the pasted command, shell history, or frontend state.
+   *  --no-probe: a live probe fires an authenticated round-trip the user may
+   *  not expect; verify with `openclaw mcp probe` instead. */
+  mcp: {
+    serverName: 'paddock',
+    capabilities: { list: true, add: 'command', remove: 'command', test: true },
+    buildConnect({ url }) {
+      const name = this.serverName;
+      return bootstrap(
+        `openclaw mcp add ${name} --url ${sq(url)} --transport streamable-http --header "Authorization=Bearer $PADDOCK_MCP_TOKEN" --no-probe`
+      );
+    },
+    buildDisconnect() {
+      // Live-verified gotcha: the first `unset` can occasionally no-op and not
+      // remove the server — retry on failure so the second identical call
+      // actually removes it.
+      return `openclaw mcp unset ${this.serverName} || openclaw mcp unset ${this.serverName} || true`;
+    },
+    buildInspect() {
+      return `openclaw mcp list`;
+    },
+    buildTest() {
+      return `openclaw mcp probe ${this.serverName}`;
+    },
+  },
 
   /** Current version in a running container; falls back to reading it from the
    *  built image if the container is down. Returns '' when unknown. */

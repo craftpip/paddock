@@ -1299,7 +1299,7 @@ async function recreateAgent(name, { pull = false, reset = false, onLog = () => 
     onStep('reset', 'start');
     try { await runCmd('docker', ['rm', '-f', name], { timeout: 30000 }); } catch {}
     const agentDir = path.join(instDir, agent);
-    if (fs.existsSync(agentDir)) fs.rmSync(agentDir, { recursive: true, force: true });
+    await removeInstanceDir(name, agentDir, path.join(HOST_WORKSPACE, 'instances', name, agent));
     fs.mkdirSync(agentDir, { recursive: true });
     seedBuildDir(name, agent, { installDocker: allowDocker });
     // Preserve the COMPLETE persisted binding set (mirrors resetVm).
@@ -1607,34 +1607,45 @@ async function createAgent(name, opts = {}) {
   });
 }
 
-/** Remove an instance directory even when its data is root-owned. Agent
- *  containers run as root and write their data dir as root; the webui runs as
- *  uid 1000 and cannot unlink files inside root-owned directories, so a plain
- *  `fs.rmSync` throws EACCES. On EACCES/EPERM the deletion finishes through a
- *  one-shot root helper container built from our own webui image — the daemon
- *  resolves the bind by HOST path (`HOST_WORKSPACE`), not the webui's
- *  `/workspace` namespace. Falls back to a clear, actionable error. */
-async function removeInstanceDir(name, instDir) {
+/** Remove an instance directory (or an agent data dir inside it) even when its
+ *  data is root-owned. Agent containers run as root and write their data dir as
+ *  root; the webui runs as uid 1000 and cannot unlink files inside root-owned
+ *  directories, so a plain `fs.rmSync` throws EACCES. On EACCES/EPERM the
+ *  deletion finishes through a one-shot root helper container built from our
+ *  own webui image — the daemon resolves the bind by HOST path
+ *  (`HOST_WORKSPACE`), not the webui's `/workspace` namespace. `hostInstDir`
+ *  defaults to the whole `<name>` instance dir; callers wiping just an agent
+ *  data dir pass its host path. Falls back to a clear, actionable error. */
+async function removeInstanceDir(name, instDir, hostInstDir) {
   if (!fs.existsSync(instDir)) return;
+  const hostDir = hostInstDir || path.join(HOST_WORKSPACE, 'instances', name);
   try {
     fs.rmSync(instDir, { recursive: true, force: true });
     return;
   } catch (e) {
     if (e.code !== 'EACCES' && e.code !== 'EPERM') throw e;
   }
-  const hostInstDir = path.join(HOST_WORKSPACE, 'instances', name);
   try {
     // Delete the MOUNT'S CONTENTS, not the mountpoint itself — `rm -rf /d`
     // fails with EACCES "Device or resource busy" because /d is the bind
     // target. `find -delete` clears the root-owned files; the empty dir is
     // then rmdir'd by the webui (the parent is uid-1000-owned).
-    await runCmd('docker', ['run', '--rm', '-v', `${hostInstDir}:/d`, '--entrypoint', 'find', 'paddock-webui:latest', '/d', '-mindepth', '1', '-delete'], { timeout: 120000 });
+    await runCmd('docker', ['run', '--rm', '-v', `${hostDir}:/d`, '--entrypoint', 'find', 'paddock-webui:latest', '/d', '-mindepth', '1', '-delete'], { timeout: 120000 });
   } catch {
     throw new Error(
-      `Deleting '${name}' failed: the instance data is root-owned and the privileged cleanup could not remove it. Run this on the host: chown -R 1000:1000 ${hostInstDir}`
+      `Cleanup of '${name}' failed: the instance data is root-owned and the privileged cleanup could not remove it. Run this on the host: chown -R 1000:1000 ${hostDir}`
     );
   }
-  if (fs.existsSync(instDir)) fs.rmSync(instDir, { recursive: true, force: true });
+  if (fs.existsSync(instDir)) {
+    try {
+      fs.rmSync(instDir, { recursive: true, force: true });
+    } catch (e) {
+      if (e.code !== 'EACCES' && e.code !== 'EPERM') throw e;
+      throw new Error(
+        `Cleanup of '${name}' failed: the instance data is root-owned and the privileged cleanup could not remove it. Run this on the host: chown -R 1000:1000 ${hostDir}`
+      );
+    }
+  }
 }
 
 async function removeVm(name) {
@@ -1695,7 +1706,7 @@ async function resetVm(name) {
 
   try { await runCmd('docker', ['rm', '-f', name], { timeout: 30000 }); } catch {}
   const agentDir = path.join(instDir, agent);
-  if (fs.existsSync(agentDir)) fs.rmSync(agentDir, { recursive: true, force: true });
+  await removeInstanceDir(name, agentDir, path.join(HOST_WORKSPACE, 'instances', name, agent));
   fs.mkdirSync(agentDir, { recursive: true });
 
   const pw = meta.ROOT_PASSWORD || name.replace(PREFIX_RE, '');
@@ -2740,7 +2751,7 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
       onStep('reset', 'start');
       try { await runCmd('docker', ['rm', '-f', name], { timeout: 30000 }); } catch {}
       const agentDir = path.join(instDir, agentType);
-      if (fs.existsSync(agentDir)) fs.rmSync(agentDir, { recursive: true, force: true });
+      await removeInstanceDir(name, agentDir, path.join(HOST_WORKSPACE, 'instances', name, agentType));
       fs.mkdirSync(agentDir, { recursive: true });
       onStep('reset', 'end');
       runningNow = false;

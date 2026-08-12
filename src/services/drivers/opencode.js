@@ -1,5 +1,6 @@
 const { execFile } = require('child_process');
 const { imageFor } = require('../instance-image');
+const { sq, bootstrap } = require('./mcp-util');
 
 function runCmd(cmd, args, options = {}) {
   const { timeout = 120000 } = options;
@@ -167,6 +168,42 @@ const OPENCODE = {
     { label: 'MCP OAuth login', cmd: 'opencode mcp auth', desc: 'Interactive OAuth flow.' },
     { label: 'Create agent', cmd: 'opencode agent create', desc: 'Interactive agent creation.' },
   ],
+
+  /** Paddock MCP server operations (plan 35b). opencode has no `mcp remove` in
+   *  the installed build, so disconnect edits the global jsonc config
+   *  (`/root/.opencode/config/opencode/opencode.jsonc`, confirmed live). Remote
+   *  add does not probe at add time — no `--no-probe` equivalent needed. */
+  mcp: {
+    serverName: 'paddock',
+    capabilities: { list: true, add: 'command', remove: 'configPatch', test: false },
+    buildConnect({ url }) {
+      const name = this.serverName;
+      // opencode --header takes `KEY=VALUE` (equals form); remote-only.
+      return bootstrap(
+        `opencode mcp add ${name} --url ${sq(url)} --header "Authorization=Bearer $PADDOCK_MCP_TOKEN"`
+      );
+    },
+    buildDisconnect() {
+      // Remove the paddock entry by patching opencode's global jsonc config.
+      // Comment stripping is string-aware: a naive /\/\// regex mangles
+      // `"$schema": "https://..."` URLs. We re-serialize as plain JSON.
+      const script = [
+        "const fs=require('fs');const p='/root/.opencode/config/opencode/opencode.jsonc';",
+        "if(!fs.existsSync(p))process.exit(0);",
+        "function strip(s){let o='',q=!1,i=0;while(i<s.length){const c=s[i],n=s[i+1];if(q){if(c==='\\\\'){o+=c+n;i+=2;continue}o+=c;if(c==='\"')q=!1;i++;continue}if(c==='\"'){q=!0;o+=c;i++;continue}if(c==='/'&&n==='/'){while(i<s.length&&s[i]!=='\\n')i++;continue}if(c==='/'&&n==='*'){i+=2;while(i<s.length&&!(s[i]==='*'&&s[i+1]==='/'))i++;i+=2;continue}o+=c;i++}return o}",
+        'const c=JSON.parse(strip(fs.readFileSync(p,"utf8")));',
+        'if(c.mcp){delete c.mcp.paddock;if(Object.keys(c.mcp).length===0)delete c.mcp;}',
+        'fs.writeFileSync(p,JSON.stringify(c,null,2));',
+      ].join('\n');
+      return `node -e ${sq(script)}`;
+    },
+    buildInspect() {
+      return `opencode mcp list`;
+    },
+    buildTest() {
+      return null;
+    },
+  },
 
   /** Current version in a running container; falls back to the built image. */
   async currentVersion(name) {

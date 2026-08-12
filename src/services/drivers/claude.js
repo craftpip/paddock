@@ -1,5 +1,6 @@
 const { execFile } = require('child_process');
 const { imageFor } = require('../instance-image');
+const { sq, bootstrap } = require('./mcp-util');
 
 function runCmd(cmd, args, options = {}) {
   const { timeout = 120000 } = options;
@@ -170,6 +171,33 @@ const CLAUDE = {
     { label: 'MCP OAuth login', cmd: 'claude mcp login {name}', desc: 'Interactive OAuth flow.' },
     { label: 'Marketplaces', cmd: 'claude plugin marketplace', desc: 'Interactive marketplace management.' },
   ],
+
+  /** Paddock MCP server operations (plan 35b). claude has a native
+   *  non-interactive add with an inline header: `claude mcp add --transport
+   *  http <name> <url> --header 'Authorization: Bearer <key>' --scope user`
+   *  (writes `~/.claude.json`; `mcp list/get/remove` also exist — verified in
+   *  pad-test-claude). `--no-input` avoids any extra prompts. The key is read
+   *  into the session env by bootstrap() and interpolated by the shell, so it
+   *  never appears in the pasted command. */
+  mcp: {
+    serverName: 'paddock',
+    capabilities: { list: true, add: 'command', remove: 'command', test: false },
+    buildConnect({ url }) {
+      const name = this.serverName;
+      return bootstrap(
+        `claude mcp add --transport http ${name} ${sq(url)} --header "Authorization: Bearer $PADDOCK_MCP_TOKEN" --scope user`
+      );
+    },
+    buildDisconnect() {
+      return `claude mcp remove ${this.serverName}`;
+    },
+    buildInspect() {
+      return `claude mcp list`;
+    },
+    buildTest() {
+      return null;
+    },
+  },
 
   /** Current version in a running container; falls back to the built image. */
   async currentVersion(name) {
