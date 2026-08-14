@@ -168,7 +168,8 @@ compose/container preview in the create form.
   the existing user-level precedent (`/opt/data`, runs as its own user, start.sh
   chowns to it).
 
-**Delivery paths (decision point, default = drop-privilege entrypoint):**
+**Delivery paths (decision made with plan 41 in view — see "Relation to plan
+41" below):**
 
 1. **Drop-privilege entrypoint (v1 default):** the container keeps its root
    boot (chpasswd, sshd_config, sshd, start-web hooks all run as today), then
@@ -182,6 +183,56 @@ compose/container preview in the create form.
    `/home/<user>` (or `/root` chowned to `PUID`); SSH logs in as the container
    user instead of root. Per-driver image rework — the "full non-root support"
    path the idea called out.
+
+**Ownership principle — universal, not location-based (user directive):** every
+process that writes on the user's behalf must run as (or chown to) the
+designated user. The workspace folder does not matter — default mount, custom
+mount, anywhere. There are THREE writers inside an agent container:
+
+1. **Agent daemon** (openclaw gateway / opencode / …) — the actual file
+   editor. User mode drops it via setpriv → every file it creates is
+   `PUID`-owned, wherever it writes. This is the ONLY mechanism that keeps new
+   writes correct; a chown sweep fixes existing files but cannot outrun a
+   process still running as root.
+2. **Web terminal** — `docker exec <pad> sh -lc` with no `-u`
+   (src/app.js:200), so it runs as the container default user (root). In user
+   mode this must become `docker exec -u <PUID>:<PGID>` (and the tmux attach
+   path in app.js), else anything typed in the terminal still lands root-owned
+   in the workspace.
+3. **SSH** — root login, kept as the admin door by design (unchanged).
+
+Because every writer runs as the designated user, ownership is correct **by
+construction** in every folder — including custom plan-24 workspaces outside
+`instances/`, which need no special handling and no sweep entry. The Phase 5
+boot sweep exists only to heal LEGACY root-owned data under `instances/` +
+`src/data/`; it is not needed for ongoing correctness.
+
+**Relation to plan 41 (dev containers) — ONE non-root mechanism, not two:**
+plan 41's "Non-root agent containers" section (items 32–36) is the SAME
+machinery as Phase 7. If built independently, the two plans would ship
+conflicting designs (different user name, different dataDir scheme, plan 41
+forcing all pads non-root vs 43's per-PAD choice). Resolution:
+
+- **Phase 7 builds the shared foundation in plan-41's shape:** user-mode pads
+  get a `pad` user at `PUID:PGID` + passwordless sudoers drop-in (plan 41
+  items 32/35), compose emits `user: "${PUID}:${PGID}"` with `HOME=/home/pad`
+  (item 33), and the daemon + terminal drop to `PUID` (setpriv / `-u`). Plan
+  41 then only has to map `containerUser`/`remoteUser` → `USER_MODE` — its own
+  user-building items collapse.
+- **dataDir stays put (chmod 755 `/root`), the `/home/pad` remap is NOT a
+  prerequisite.** Plan 41's item 34 (move `/root/.<agent>` →
+  `/home/pad/.<agent>`) is a large driver-wide change. The real blocker for a
+  non-root daemon is just that `/root` is mode 700 — a PUID process cannot
+  even traverse into the bind-mounted config. `chmod 755 /root` in the image
+  + PUID-owned mount contents (boot sweep) fixes it with zero driver churn.
+  The remap stays a possible later cleanup inside plan 41, not a dependency
+  of plan 43.
+- **Plan 41 items absorbed here:** its removeVm simplification (item 36) is
+  Phase 4; its "convert existing root-run PADs" problem (open question 5) is
+  solved by the Phase 2/5 boot sweep. Both shrink to zero in plan 41.
+- **Sequencing:** 43 Phases 1–6 (pure webui/root work) → 43 Phase 7 lands
+  per-PAD user mode → plan 41 rides on it, adding only devcontainer.json
+  field mapping + lifecycle commands.
 
 **Backend:** `createVm` accepts `userMode: 'root'|'user'` → persisted as meta
 `USER_MODE` → compose gains `user:` for the user pick; `readSettings` exposes
@@ -209,6 +260,11 @@ host user cannot read.
   `ensureOwned` on created dirs
 - **Modified** `src/vm-builds/*/start.sh` (Phase 7) — drop-privilege entrypoint
   for user-mode pads
+- **Modified** `src/vm-builds/*/Dockerfile` (Phase 7) — `pad` user at
+  `PUID:PGID` + sudoers drop-in + `chmod 755 /root` (shared with plan 41)
+- **Modified** `src/app.js` (Phase 7) — terminal `docker exec` gains
+  `-u <PUID>:<PGID>` for user-mode pads (both the direct run and tmux attach
+  paths) so terminal-typed file changes are user-owned too
 - **Modified** `src/client/src/pages/create` + Settings (Phase 7) — Container
   user segmented control, compose preview, mode toggle
 - **Modified** docs + AGENTS.md (see Phase 6)
@@ -221,7 +277,8 @@ host user cannot read.
 - [ ] Phase 4 — wipe/delete simplified, root-owner workarounds stripped
 - [ ] Phase 5 — agent data sweep verified per driver
 - [ ] Phase 6 — docs, tests, E2E proof
-- [ ] Phase 7 — per-agent Container user option (backend + UI + start.sh)
+- [ ] Phase 7 — per-agent Container user option (backend + UI + start.sh +
+      user-mode terminal exec)
 
 ## Verification
 
@@ -248,6 +305,9 @@ docker exec -e GUARD_PROJECT_ROOT= -e GUARD_INSTANCES_PARENT= \
   `PUID`, chowning its data dir to `PUID` could break first boot. Verified
   expectation: hermes is the only candidate; its uid in our image must match
   `PUID` (default 1000). Fallback: exclude that driver from the sweep.
+- **Custom workspace mounts need no special handling** — since every writer
+  runs as the designated user, ownership is correct by construction wherever
+  the agent writes.
 - **Security trade-off (accepted):** node runs as root, widening the blast
   radius of any webui exploit to the bind-mounted `/workspace`. The webui
   already holds the docker socket (root-equivalent container control), so the
@@ -257,8 +317,8 @@ docker exec -e GUARD_PROJECT_ROOT= -e GUARD_INSTANCES_PARENT= \
   keep writing their data as root mid-run; the sweep normalizes ownership, it
   does not stop root agents from writing root files. Only pads the user creates
   in **user mode** (Phase 7) get a truly non-root agent daemon.
-- **Phase 7 delivery path (open):** drop-privilege entrypoint (default) vs
-  whole-container non-root. The strict mode is the larger, per-driver image
-  rework; the entrypoint achieves user-level daemons with a `start.sh` change.
-  Revisit after Phases 1–6 land and the plan's data-ownership guarantees are
-  live.
+- **Phase 7 delivery path (DECIDED for plan-41 alignment):** drop-privilege
+  entrypoint as v1 (root boot keeps chpasswd/sshd/start-web; daemon + terminal
+  drop to `PUID`), with the image gaining the `pad` user + sudoers up front so
+  plan 41's `containerUser` can reuse it. dataDir stays `/root/.<agent>` with
+  `chmod 755 /root`; the `/home/pad` remap is deferred to plan 41.

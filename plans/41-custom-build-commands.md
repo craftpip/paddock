@@ -85,6 +85,16 @@ separate from the once-only post-create.
 
 ## Non-root agent containers (PUID/PGID user)
 
+> **NOTE (2026-08-15): the non-root mechanism is now specified in plan 43
+> (Phase 7 — per-PAD "Container user: Root / User").** Plan 43 lands the shared
+> foundation — `pad` user at PUID/PGID + sudoers, compose `user:`,
+> `HOME=/home/pad`, drop-privilege daemon + terminal exec as PUID, boot-sweep
+> chown — and this plan reuses it: `containerUser`/`remoteUser` maps onto
+> `USER_MODE`. The dataDir `/home/pad` remap (items 32–35 below) is DEFERRED /
+> optional; plan 43 uses `chmod 755 /root` + PUID-owned mounts instead.
+> Items 36–37 (removeVm simplification, tests) are largely absorbed by plan 43
+> Phases 4 + 6.
+
 Today agent containers run as **root**, so anything they write into the bind-
 mounted workspace becomes root-owned on the host — the user's IDE can open it
 but not save without sudo. Fix: run the container as the host user's
