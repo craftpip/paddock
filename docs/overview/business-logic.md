@@ -129,14 +129,16 @@ The frontend polls agent state — no HTMX.
 
 **Root-owned data:** agent containers run as root and write root-owned files
 into the (webui-owned) instance dir, so a plain `fs.rmSync` from the webui
-(uid 1000) throws `EACCES`. `removeVm` now catches `EACCES`/`EPERM` and finishes
-the deletion with a one-shot root helper container built from our own
-`paddock-webui:latest` image (the daemon resolves the bind by HOST path, not
-the webui's `/workspace` namespace). The helper clears the mount's *contents*
-(`find /d -mindepth 1 -delete`), never the mountpoint itself — `rm -rf /d`
-fails with EACCES "Device or resource busy" because `/d` is a bind target. The
-empty dir is then removed by the webui (its parent is uid-1000-owned). If even
-that fails, the delete errors with the exact host `chown` command to run.
+(uid 1000) throws `EACCES`. The wipe therefore **always runs with root access**
+via a one-shot root helper container built from our own `paddock-webui:latest`
+image (the daemon resolves the bind by HOST path, not the webui's
+`/workspace` namespace) — this covers deletes (`removeVm`) *and* every data-dir
+reset (`resetVm`, `recreateAgent`, the `applyAgentChanges` reset). The helper
+clears the mount's *contents* (`find /d -mindepth 1 -delete`), never the
+mountpoint itself — `rm -rf /d` fails with EACCES "Device or resource busy"
+because `/d` is a bind target. After the helper exits the mount is released and
+the webui removes the now-empty dir (its parent is uid-1000-owned). If that
+fails, the delete errors with the exact host `chown` command to run.
 Existing pads with root-owned data were normalized once with
 `chown -R node:node instances/`.
 

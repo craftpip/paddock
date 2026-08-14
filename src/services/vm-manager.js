@@ -1607,29 +1607,24 @@ async function createAgent(name, opts = {}) {
   });
 }
 
-/** Remove an instance directory (or an agent data dir inside it) even when its
- *  data is root-owned. Agent containers run as root and write their data dir as
- *  root; the webui runs as uid 1000 and cannot unlink files inside root-owned
- *  directories, so a plain `fs.rmSync` throws EACCES. On EACCES/EPERM the
- *  deletion finishes through a one-shot root helper container built from our
- *  own webui image — the daemon resolves the bind by HOST path
- *  (`HOST_WORKSPACE`), not the webui's `/workspace` namespace. `hostInstDir`
- *  defaults to the whole `<name>` instance dir; callers wiping just an agent
- *  data dir pass its host path. Falls back to a clear, actionable error. */
+/** Remove an instance directory (or an agent data dir inside it) — the wipe
+ *  ALWAYS runs with root access. Agent containers run as root and write their
+ *  data dir as root; the webui runs as uid 1000 and cannot unlink files inside
+ *  root-owned directories (EACCES), so a plain `fs.rmSync` is never enough. The
+ *  wipe goes through a one-shot root helper container built from our own webui
+ *  image — the daemon resolves the bind by HOST path (`HOST_WORKSPACE`), not
+ *  the webui's `/workspace` namespace. `hostInstDir` defaults to the whole
+ *  `<name>` instance dir; callers wiping just an agent data dir pass its host
+ *  path. Falls back to a clear, actionable error. */
 async function removeInstanceDir(name, instDir, hostInstDir) {
   if (!fs.existsSync(instDir)) return;
   const hostDir = hostInstDir || path.join(HOST_WORKSPACE, 'instances', name);
   try {
-    fs.rmSync(instDir, { recursive: true, force: true });
-    return;
-  } catch (e) {
-    if (e.code !== 'EACCES' && e.code !== 'EPERM') throw e;
-  }
-  try {
     // Delete the MOUNT'S CONTENTS, not the mountpoint itself — `rm -rf /d`
     // fails with EACCES "Device or resource busy" because /d is the bind
-    // target. `find -delete` clears the root-owned files; the empty dir is
-    // then rmdir'd by the webui (the parent is uid-1000-owned).
+    // target. `find -delete` clears root-owned files; after the helper exits
+    // the mount is released and the webui rmdir's the now-empty dir (rmdir
+    // needs write on the PARENT, which is uid-1000-owned).
     await runCmd('docker', ['run', '--rm', '-v', `${hostDir}:/d`, '--entrypoint', 'find', 'paddock-webui:latest', '/d', '-mindepth', '1', '-delete'], { timeout: 120000 });
   } catch {
     throw new Error(
