@@ -41,11 +41,10 @@ unpublish) on test PADs 2026-08-09/10. Notable per-driver mechanics:
 - **picoclaw** (`pad-picoclaw-asdsa`) — launcher dashboard at 18800, token
   login, coexists with the gateway.
 - **hermes** (`pad-hermes-sup`) — dashboard at 9119 with basic-auth login.
-  Hermes re-locks its data dir to 0700 on gateway boot, so the published
-  server's `start-web.sh` hook only works through a **root-helper fallback**
-  for the host-side file writes, and the hermes `start.sh` holds the dir at
-  755 with a small watchdog loop (the `secure_parent_dir()` in hermes'
-  `hermes_constants.py` re-tightens it).
+  Hermes re-locks its data dir to 0700 on gateway boot, so the hermes
+  `start.sh` holds it at 755 with a small watchdog loop (the
+  `secure_parent_dir()` in hermes' `hermes_constants.py` re-tightens it); the
+  webui runs as root, so it can write the hook regardless.
 
 ## Driver `webApp` descriptor
 
@@ -136,8 +135,9 @@ shapes.
   `{ "containerPort": 8080, "hostPort": 8090 }` (single web app per agent).
   For token-fragment drivers (openclaw) it also stores **`authToken`** — the
   published gateway token, written at publish time. `readWebAuth` prefers it
-  over re-reading the agent's (root-owned) config file, which the agent
-  rewrites as root and would `EACCES` the webui on read.
+  over re-reading the agent's config file on the hot path (the webui runs as
+  root and *can* read the config directly, so this is a consistency choice,
+  not an access workaround).
   `meta.env` carries `PORT` (ssh host port), `SSH_CPORT` (ssh container port),
   `ROOT_PASSWORD`, and `EXTRA_PORTS` (`[{"host":8080,"container":8080}]` — a
   JSON array of `{ host, container }`, `[]` when empty). **Draft persistence:**

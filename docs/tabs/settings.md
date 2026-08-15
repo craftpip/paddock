@@ -44,6 +44,44 @@ Raw docker (docker CLI + host socket). Toggling mounts `/var/run/docker.sock:/va
 - Guard rail: if the image has no docker CLI (`docker exec <name> sh -lc 'command -v docker'` fails while the container runs), the toggle errors with "The image has no docker CLI — rebuild the image to enable docker access". The toggle writes `INSTALL_DOCKER=1` to the instance `build.env` and rebuilds the per-instance image with that arg automatically. Most agent images don't ship the CLI by default (hermes ships it — the rebuild is a verified no-op there).
 - The "Install Paddock MCP" toggle is intentionally **not implemented** — see docs/tabs/mcp.md; the two were split by decision on 2026-08-04.
 
+### 3b. Container user (Root / Local user) (plan 43 Phase 7)
+
+Per-PAD choice of which user the agent **daemon and terminal** run as. Root (the
+default) is the legacy behavior; Local user drops them to the `pad` user
+(`PUID:PGID`, 1000:1000) so every file the agent writes — in the data dir, the
+workspace, anywhere — is user-owned on the host by construction.
+
+- Persisted as `USER_MODE=user|(absent)` in `meta.env`; the generated compose
+  emits `USER_MODE: 'user'` into the service environment (not `user:` — the
+  container keeps its root boot, see below)
+- **How it works (drop-privilege entrypoint):** the container still boots as
+  root (chpasswd, sshd config, sshd, `start-web.sh` hooks all unchanged), then
+  the user-mode branch of `start.sh` re-`chown -R 1000:1000` the data dir (so
+  workspace dirs the root boot recreated stay writable) and `exec setpriv
+  --reuid 1000 --regid 1000 --clear-groups` (fallback `su -s /bin/bash pad`)
+  the keeper. SSH stays the root admin door.
+- **Terminal/exec runs as the pad user too:** the terminal's tmux setup,
+  attach, and exec (`termUserArgs` in app.js) add `-u 1000:1000 -e HOME=/root`
+  for user-mode pads, so the tmux socket (`/tmp/tmux-1000`), the shell, and
+  every file typed in the terminal all belong to the pad user. The Engine-API
+  attach exec sets the same `User` + `HOME=/root`.
+- **`HOME=/root` is kept on purpose** — the agent CLIs (openclaw, opencode, …)
+  resolve their config/workspace via `$HOME`, and `/root/.<agent>` is the
+  bind-mounted data dir. The images `chmod 755 /root` so the pad user can
+  traverse it; the PS1 hook adds a HISTFILE guard for the unwritable
+  `/root/.bash_history`.
+- **Switching mode on an existing pad** runs the shared settings flow (confirm
+  → rebuild if needed → recreate → restore prior stopped state). If the image
+  lacks the pad user (`imageHasPadUser` runs `id pad`), the toggle rebuilds it
+  first via `ensureUserModeBuildFiles` — regenerates `start.sh` from the shared
+  template when the `__PAD_USER_MODE__` marker is missing, and surgically
+  injects the pad-user block into the (user-editable) Dockerfile.
+- **hermes is excluded** — it already runs its daemon as its own user
+  (`/opt/data`, uid 10000); the control is hidden in Settings and disabled
+  with an explanation in the create form.
+- New pads in user mode run their setup steps as `-u 1000:1000`, so config
+  files are born user-owned.
+
 ### 4. Container Health Checkup
 
 Runs a generic, driver-agnostic Docker-level checkup: diffs the **declared** compose settings (`docker compose config --format json`) against the **actual** container (`docker inspect`). Works on stopped containers too — while down it reports *why* (exit code, OOM-kill, stale network peer, etc.).

@@ -29,4 +29,20 @@ export PICOCLAW_GATEWAY_HOST=0.0.0.0
 if [ -f /root/.picoclaw/start-web.sh ]; then
     bash /root/.picoclaw/start-web.sh || true
 fi
-picoclaw gateway -E || tail -f /dev/null
+# PAD USER drop (plan 43 Phase 7): USER_MODE=user pads run the foreground
+# daemon as the `pad` user (PUID:PGID=1000:1000) so every file the agent
+# writes is user-owned. The root boot above is unaffected; only the daemon
+# drops. setpriv when available, else su. __PAD_USER_MODE__
+drop_to_pad() {
+  if command -v setpriv >/dev/null 2>&1; then
+    exec setpriv --reuid 1000 --regid 1000 --clear-groups -- "$@"
+  else
+    exec su -s /bin/sh pad -c "$*"
+  fi
+}
+if [ "$USER_MODE" = "user" ]; then
+    chown -R 1000:1000 /root/.picoclaw 2>/dev/null || true
+    drop_to_pad picoclaw gateway -E || tail -f /dev/null
+else
+    picoclaw gateway -E || tail -f /dev/null
+fi

@@ -4,6 +4,7 @@ const { execFile, execFileSync } = require('child_process');
 const { runCmdStream } = require('./cmd');
 const { getDriver, drivers } = require('./drivers');
 const { imageFor, legacySharedImage, buildDir, buildEnvPath, readBuildEnv, setBuildEnv, argsFromDockerfile } = require('./instance-image');
+const { ensureOwned, normalizeTree, isSelfManagedAgentData, USER_UID, USER_GID } = require('./ownership');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const HOST_WORKSPACE = process.env.HOST_WORKSPACE_ROOT || WORKSPACE;
@@ -340,6 +341,7 @@ function seedBuildDir(name, agent, opts = {}) {
     if (!fs.existsSync(buildEnvPath(name))) {
       setBuildEnv(name, installDocker ? { INSTALL_DOCKER: '1' } : {});
     }
+    normalizeTree(dir);
     return dir;
   }
   if (fs.existsSync(tpl)) {
@@ -353,6 +355,7 @@ function seedBuildDir(name, agent, opts = {}) {
   if (!fs.existsSync(buildEnvPath(name))) {
     setBuildEnv(name, installDocker ? { INSTALL_DOCKER: '1' } : {});
   }
+  normalizeTree(dir);
   return dir;
 }
 
@@ -761,9 +764,15 @@ function generateInstanceCompose(name, agent, password, port, opts = {}) {
     }
   }
   if (network) service.network_mode = `container:${network}`;
+  // USER_MODE=user (plan 43 Phase 7) tells the baked start.sh to drop the
+  // foreground daemon to the `pad` user (PUID:PGID) via setpriv/su. The
+  // container still boots as root (chpasswd/sshd/start-web hooks need it); only
+  // the daemon runs user-level. Absent/empty = root mode (legacy default).
+  const userMode = (readMeta(path.join(INSTANCES_DIR, name)).USER_MODE || '').trim();
   service.environment = {
     TZ: 'Asia/Kolkata',
     ROOT_PASSWORD: password || '',
+    ...(userMode === 'user' ? { USER_MODE: 'user' } : {}),
     // Only relevant while SSH is exposed: tells the baked start.sh which port
     // sshd should LISTEN on inside the container (default 22). Agents sharing a
     // network namespace need distinct container ports, not just distinct host
@@ -839,6 +848,7 @@ function writeInstanceCompose(name, agent, password, port, opts = {}) {
   const composePath = instanceComposePath(name);
   fs.mkdirSync(path.dirname(composePath), { recursive: true });
   fs.writeFileSync(composePath, yaml);
+  ensureOwned(composePath);
 }
 
 /** Set or clear one KEY=VALUE line in an instance's meta.env (preserves the
@@ -852,6 +862,7 @@ function setMetaFlag(name, key, value) {
     if (re.test(content)) {
       content = content.replace(re, '').replace(/\n{3,}/g, '\n\n').trim() + '\n';
       fs.writeFileSync(metaPath, content);
+      ensureOwned(metaPath);
     }
     return;
   }
@@ -862,6 +873,7 @@ function setMetaFlag(name, key, value) {
     content = content.replace(/\s*$/, '') + '\n' + line + '\n';
   }
   fs.writeFileSync(metaPath, content);
+  ensureOwned(metaPath);
 }
 
 /** Apply settings (docker socket mount, network join) to an instance's compose
@@ -903,7 +915,10 @@ async function applySettings(name, opts = {}) {
 
   if (wsMount && wsMount.webuiVisible) {
     const view = containerViewOf(wsMount.host);
-    if (view && !fs.existsSync(view)) fs.mkdirSync(view, { recursive: true });
+    if (view && !fs.existsSync(view)) {
+      fs.mkdirSync(view, { recursive: true });
+      ensureOwned(view);
+    }
   }
   if (wsMount) {
     setMetaFlag(name, 'WORKSPACE_HOST', wsMount.host);
@@ -947,6 +962,13 @@ async function applySettings(name, opts = {}) {
   if (opts.sshPassword !== undefined) {
     sshPw = String(opts.sshPassword).replace(/[\r\n]/g, '');
     setMetaFlag(name, 'ROOT_PASSWORD', sshPw);
+  }
+
+  // Container user (plan 43 Phase 7): written BEFORE the compose regen so the
+  // generator emits USER_MODE=user for user-mode pads (the baked start.sh
+  // drops the daemon to the pad user). '' clears the flag (root mode).
+  if (opts.userMode !== undefined) {
+    setMetaFlag(name, 'USER_MODE', opts.userMode === 'user' ? 'user' : '');
   }
 
   writeInstanceCompose(name, agent, sshPw, sshPort, { allowDocker, network, webService, webPeerNetwork });
@@ -1025,6 +1047,7 @@ async function applyWebServices(name, webService) {
       hostPort: webService.hostPort,
       authToken: webService.authToken || '',
     }, null, 2));
+    ensureOwned(p);
   } else if (fs.existsSync(p)) {
     fs.rmSync(p);
   }
@@ -1103,62 +1126,21 @@ function webHookPath(name, agent) {
   return path.join(INSTANCES_DIR, name, agent, 'start-web.sh');
 }
 
-/** One-shot root-helper node script that writes/removes the start-web.sh hook
- *  inside the bind-mounted agent data dir from a container (agent data dirs can
- *  be non-webui-owned — hermes chowns /opt/data to its hermes user on boot, and
- *  openclaw/opencode rewrite files as root). `write` base64-decodes the content
- *  from argv[2], writes 0755, and chowns to 1000 so later native reads work;
- *  `remove` deletes it. Exits non-zero on failure. */
-const WEB_HOOK_HELPER_SCRIPT = `const fs=require('fs');
-const op=process.argv[1];
-const p='/d/start-web.sh';
-try{
-  if(op==='write'){
-    const content=Buffer.from(process.argv[2]||'','base64').toString('utf8');
-    fs.writeFileSync(p, content, {mode:0o755});
-    fs.chownSync(p,1000,1000);
-  }else if(op==='remove'){
-    if(fs.existsSync(p)) fs.rmSync(p);
-  }else{ process.stderr.write('badop'); process.exit(4); }
-}catch(e){ process.stderr.write(String(e&&e.message||e)); process.exit(2); }
-`;
-
-/** Run the hook write/remove through a one-shot root helper of our own image
- *  (host-path bind), matching the patchOpenclawConfigViaHelper / removeVm
- *  pattern for non-webui-owned instance data. */
-async function webHookViaHelper(name, agent, op, content) {
-  const hostDir = path.join(HOST_WORKSPACE, 'instances', name, agent);
-  const arg = op === 'write' ? Buffer.from(content).toString('base64') : '';
-  await runCmd('docker', [
-    'run', '--rm', '-v', `${hostDir}:/d`, '--entrypoint', 'node',
-    'paddock-webui:latest', '-e', WEB_HOOK_HELPER_SCRIPT, op, arg,
-  ], { timeout: 60000 });
-}
-
-/** Write (or remove) the web start hook for an agent. Falls back to a root
- *  helper container when the agent data dir is not webui-writable. */
+/** Write (or remove) the web start hook for an agent. The webui runs as root
+ *  (plan 43), so it writes the hook directly — the old root-helper fallback is
+ *  gone. */
 async function writeWebStartHook(name, agent, content) {
   const p = webHookPath(name, agent);
   fs.mkdirSync(path.dirname(p), { recursive: true });
-  try {
-    fs.writeFileSync(p, content, { mode: 0o755 });
-    return;
-  } catch (e) {
-    if (e.code !== 'EACCES') throw e;
-  }
-  await webHookViaHelper(name, agent, 'write', content);
+  ensureOwned(path.dirname(p));
+  fs.writeFileSync(p, content, { mode: 0o755 });
+  ensureOwned(p);
 }
 
 async function removeWebStartHook(name, agent) {
   const p = webHookPath(name, agent);
   if (!fs.existsSync(p)) return;
-  try {
-    fs.rmSync(p);
-    return;
-  } catch (e) {
-    if (e.code !== 'EACCES') throw e;
-  }
-  await webHookViaHelper(name, agent, 'remove');
+  fs.rmSync(p);
 }
 
 /** The sshd-listen-port block the start.sh templates now ship. start.sh reads
@@ -1211,6 +1193,7 @@ function ensureWebStartBlock(name, agent) {
   if (!re.test(content)) return false;
   content = content.replace(re, webStartBlock(agent) + '$1');
   fs.writeFileSync(p, content, { mode: 0o755 });
+  ensureOwned(p);
   return true;
 }
 
@@ -1229,7 +1212,113 @@ function ensureSshStartBlock(name) {
   if (!re.test(content)) return false;
   content = content.replace(re, SSH_START_BLOCK + '$1');
   fs.writeFileSync(p, content, { mode: 0o755 });
+  ensureOwned(p);
   return true;
+}
+
+// ─── User-mode (Container user) build-file support (plan 43 Phase 7) ────────
+// The `pad` user + daemon-drop block live in the build templates now, so NEW
+// pads get them at create time. Existing root-mode pads toggled to user mode
+// need them injected into their OWN build files before a rebuild. `start.sh`
+// is machine-managed (the webui already injects SSH/web blocks into it), so it
+// is REGENERATED from the template when it lacks the marker; the Dockerfile is
+// the user's editable surface (plan 41) so only the pad-user block is injected.
+
+const PAD_USER_MARKER = '__PAD_USER_MODE__';
+
+/** Universal pad-user block — works on both apt (debian) and apk (alpine)
+ *  bases; idempotent. Creates a `pad` user at PUID:PGID (1000:1000), installs
+ *  sudo when the base doesn't ship it (toggled pads keep their ORIGINAL package
+ *  list, so the rule alone would be useless there), grants passwordless sudo,
+ *  and chmod's /root 755 so a uid-1000 daemon can traverse into its
+ *  bind-mounted /root/.<agent> config. */
+const PAD_USER_DOCKERFILE_BLOCK = `# PAD USER (plan 43 Phase 7) — pad at PUID:PGID + passwordless sudo + chmod 755 /root. ${PAD_USER_MARKER}
+RUN if command -v apk >/dev/null 2>&1; then \\
+      addgroup -g 1000 pad 2>/dev/null; adduser -D -u 1000 -G pad -h /home/pad -s /bin/bash pad 2>/dev/null || true; \\
+    else \\
+      groupadd -g 1000 pad 2>/dev/null || true; \\
+      (id pad >/dev/null 2>&1 || useradd -m -o -u 1000 -g 1000 -s /bin/bash pad 2>/dev/null) || useradd -m -o -u 1000 -s /bin/bash pad 2>/dev/null || true; \\
+    fi; \\
+    chmod 755 /root; \\
+    if ! command -v sudo >/dev/null 2>&1; then \\
+      if command -v apk >/dev/null 2>&1; then apk add --no-cache sudo; else DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends sudo; fi; \\
+    fi; \\
+    echo 'ALL ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/pad && chmod 440 /etc/sudoers.d/pad
+`;
+
+/** Ensure a pad's OWN build files can build a user-mode image: regenerate
+ *  start.sh from the template when it lacks the drop block, and inject the
+ *  pad-user block into the Dockerfile when it lacks the marker (or replace a
+ *  stale pre-existing block with the canonical one — the block is
+ *  machine-managed, so upgrades propagate). Returns true when anything changed
+ *  (caller must rebuild the image). */
+function ensureUserModeBuildFiles(name, agent) {
+  let changed = false;
+  const dir = buildDir(name);
+  if (!fs.existsSync(dir)) return false;
+
+  const start = path.join(dir, 'start.sh');
+  if (fs.existsSync(start)) {
+    const content = fs.readFileSync(start, 'utf8');
+    if (!content.includes(PAD_USER_MARKER)) {
+      const tpl = path.join(buildTemplateDir(agent), 'start.sh');
+      if (fs.existsSync(tpl)) {
+        const fresh = fs.readFileSync(tpl, 'utf8');
+        if (fresh.includes(PAD_USER_MARKER)) {
+          fs.writeFileSync(start, fresh, { mode: 0o755 });
+          ensureOwned(start);
+          changed = true;
+        }
+      }
+    }
+  }
+
+  const df = path.join(dir, 'Dockerfile');
+  if (fs.existsSync(df)) {
+    const content = fs.readFileSync(df, 'utf8');
+    const markerIdx = content.indexOf(PAD_USER_MARKER);
+    if (markerIdx === -1) {
+      // Inject before the first COPY start.sh (or ENTRYPOINT), else append.
+      const lines = content.split('\n');
+      let idx = lines.findIndex((l) => /^COPY start\.sh/.test(l.trim()) || /^ENTRYPOINT/.test(l.trim()));
+      if (idx < 0) idx = lines.length;
+      lines.splice(idx, 0, PAD_USER_DOCKERFILE_BLOCK.trimEnd());
+      fs.writeFileSync(df, lines.join('\n'));
+      ensureOwned(df);
+      changed = true;
+    } else {
+      // Replace an existing pad-user block with the canonical one so upgrades
+      // to the block (rule shape, sudo self-install) propagate on next rebuild.
+      const startIdx = content.lastIndexOf('# PAD USER', markerIdx);
+      const chmodAt = content.indexOf('chmod 440 /etc/sudoers.d/pad', markerIdx);
+      if (startIdx >= 0 && chmodAt >= 0) {
+        let end = content.indexOf('\n', chmodAt);
+        if (end < 0) end = content.length;
+        const oldBlock = content.slice(startIdx, end);
+        if (oldBlock.trim() !== PAD_USER_DOCKERFILE_BLOCK.trimEnd()) {
+          const fresh = content.slice(0, startIdx) + PAD_USER_DOCKERFILE_BLOCK.trimEnd() + '\n' + content.slice(end + 1);
+          fs.writeFileSync(df, fresh);
+          ensureOwned(df);
+          changed = true;
+        }
+      }
+    }
+  }
+  return changed;
+}
+
+/** Whether the built image (or running container) has the `pad` user baked in
+ *  (i.e. it can run a user-mode pad). Used by `applyAgentChanges` to decide
+ *  whether toggling Container user needs a rebuild. */
+async function imageHasPadUser(name, image, wasRunning) {
+  try {
+    const r = wasRunning
+      ? await runCmd('docker', ['exec', name, 'sh', '-lc', 'id -u pad'], { timeout: 15000 })
+      : await runCmd('docker', ['run', '--rm', '--entrypoint', 'sh', image, '-lc', 'id -u pad'], { timeout: 30000 });
+    return !!r.stdout && /^\d+$/.test((r.stdout || '').trim());
+  } catch {
+    return false;
+  }
 }
 
 /** Rebuild the image (--pull to redownload the base) and recreate the
@@ -1299,8 +1388,9 @@ async function recreateAgent(name, { pull = false, reset = false, onLog = () => 
     onStep('reset', 'start');
     try { await runCmd('docker', ['rm', '-f', name], { timeout: 30000 }); } catch {}
     const agentDir = path.join(instDir, agent);
-    await removeInstanceDir(name, agentDir, path.join(HOST_WORKSPACE, 'instances', name, agent));
+    await removeInstanceDir(name, agentDir);
     fs.mkdirSync(agentDir, { recursive: true });
+    ensureOwned(agentDir);
     seedBuildDir(name, agent, { installDocker: allowDocker });
     // Preserve the COMPLETE persisted binding set (mirrors resetVm).
     const webService = readWebService(name);
@@ -1341,6 +1431,7 @@ async function createVm(name, options = {}) {
     workspaceHost = '', workspaceDir = '',
     allowDocker = false, network = '',
     extraVolumes = null, extraPorts = null,
+    userMode = '',
   } = options;
 
   if (existingServices().has(name)) {
@@ -1387,6 +1478,8 @@ async function createVm(name, options = {}) {
 
   const agentDataDir = path.join(instDir, agent);
   fs.mkdirSync(agentDataDir, { recursive: true });
+  ensureOwned(instDir);
+  ensureOwned(agentDataDir);
   onLog('system', `Created instance directory: ${instDir}`);
 
   // Create the host workspace source up front so a fresh mount has somewhere to
@@ -1397,6 +1490,7 @@ async function createVm(name, options = {}) {
     const view = containerViewOf(wsMount.host);
     if (view && !fs.existsSync(view)) {
       fs.mkdirSync(view, { recursive: true });
+      ensureOwned(view);
       onLog('system', `Created workspace source: ${wsMount.host}`);
     }
   }
@@ -1433,6 +1527,7 @@ async function createVm(name, options = {}) {
         }
       }
       onLog('system', `Cloned workspace from ${src}`);
+      normalizeTree(agentDataDir, (dir) => isSelfManagedAgentData(dir, INSTANCES_DIR));
     } else {
       throw new Error(`Source workspace for '${src}' not found`);
     }
@@ -1441,6 +1536,7 @@ async function createVm(name, options = {}) {
     const srcBuildDir = buildDir(src);
     if (fs.existsSync(srcBuildDir)) {
       fs.cpSync(srcBuildDir, buildDir(name), { recursive: true });
+      normalizeTree(buildDir(name));
       onLog('system', `Cloned build files from ${src}`);
     }
     // The clone inherits the source's build.env; the docker toggle still needs
@@ -1455,6 +1551,10 @@ async function createVm(name, options = {}) {
   if (finalCport !== DEFAULT_SSH_CPORT) metaTxt += `SSH_CPORT=${finalCport}\n`;
   metaTxt += `DOCKER=${allowDocker ? '1' : '0'}\n`;
   if (network) metaTxt += `NETWORK=${network}\n`;
+  // Container user (plan 43 Phase 7): USER_MODE=user makes the daemon run as
+  // the `pad` user (PUID:PGID) so agent-written files are user-owned by
+  // construction. Written BEFORE the compose regen below (it reads the flag).
+  if (userMode === 'user') metaTxt += `USER_MODE=user\n`;
   // Workspace mount flags MUST be written before writeInstanceCompose — the
   // compose generator reads them from meta to emit the extra bind.
   if (wsMount) metaTxt += `WORKSPACE_HOST=${wsMount.host}\nWORKSPACE_DIR=${wsMount.container}\n`;
@@ -1463,6 +1563,7 @@ async function createVm(name, options = {}) {
   if (extraVols.length) metaTxt += `EXTRA_VOLUMES=${JSON.stringify(extraVols)}\n`;
   if (extraPs.length) metaTxt += `EXTRA_PORTS=${JSON.stringify(extraPs)}\n`;
   fs.writeFileSync(path.join(instDir, 'meta.env'), metaTxt);
+  ensureOwned(path.join(instDir, 'meta.env'));
 
   // Peer mode: resolve the peer's bridge network so the socat door (SSH + extra
   // ports) is emitted on the right network — the host-mode door fallback would
@@ -1499,6 +1600,10 @@ async function createVm(name, options = {}) {
 
   const driver = getDriver(agent);
   const setupSteps = driver.setupSteps || [];
+  // User-mode pads run their setup steps as the pad user (PUID:PGID) so the
+  // config files they write are born user-owned — a root-run setup would leave
+  // root-owned files the user-level daemon then can't overwrite.
+  const userArgs = userMode === 'user' ? ['-u', `${USER_UID}:${USER_GID}`] : [];
   if (setupSteps.length && !skipSetup) {
     onStep('setup', 'start');
     let allReady = true;
@@ -1506,7 +1611,7 @@ async function createVm(name, options = {}) {
       let ready = false;
       for (let i = 0; i < 15; i++) {
         try {
-          await runCmdStream('docker', ['exec', name, step.cmd, ...(step.args || [])], { onLog, timeout: 60000 });
+          await runCmdStream('docker', ['exec', ...userArgs, name, step.cmd, ...(step.args || [])], { onLog, timeout: 60000 });
           ready = true;
           break;
         } catch {
@@ -1546,10 +1651,14 @@ async function validateAgentCreate(name, opts = {}) {
     agent = 'openclaw', sshEnabled = false, port = '', sshContainerPort = '',
     workspaceHost = '', workspaceDir = '', network = '',
     extraVolumes = null, extraPorts = null,
+    userMode = '',
   } = opts;
 
   if (!VM_NAME_RE.test(name)) throw new Error('Invalid agent name');
   if (!drivers[agent]) throw new Error(`Unknown agent type '${agent}'`);
+  if (userMode === 'user' && agent === 'hermes') {
+    throw new Error('Hermes already runs its daemon as its own user (/opt/data, uid 10000) — the Container user option does not apply');
+  }
 
   if (network) {
     if (network === name) throw new Error('Cannot route an agent through itself');
@@ -1607,40 +1716,13 @@ async function createAgent(name, opts = {}) {
   });
 }
 
-/** Remove an instance directory (or an agent data dir inside it) — the wipe
- *  ALWAYS runs with root access. Agent containers run as root and write their
- *  data dir as root; the webui runs as uid 1000 and cannot unlink files inside
- *  root-owned directories (EACCES), so a plain `fs.rmSync` is never enough. The
- *  wipe goes through a one-shot root helper container built from our own webui
- *  image — the daemon resolves the bind by HOST path (`HOST_WORKSPACE`), not
- *  the webui's `/workspace` namespace. `hostInstDir` defaults to the whole
- *  `<name>` instance dir; callers wiping just an agent data dir pass its host
- *  path. Falls back to a clear, actionable error. */
-async function removeInstanceDir(name, instDir, hostInstDir) {
+/** Remove an instance directory (or an agent data dir inside it). The webui
+ *  container runs as root (plan 43), so a plain `fs.rmSync` can always delete
+ *  the data — the old root-helper-container wipe and EACCES/EPERM handling are
+ *  gone. */
+async function removeInstanceDir(name, instDir) {
   if (!fs.existsSync(instDir)) return;
-  const hostDir = hostInstDir || path.join(HOST_WORKSPACE, 'instances', name);
-  try {
-    // Delete the MOUNT'S CONTENTS, not the mountpoint itself — `rm -rf /d`
-    // fails with EACCES "Device or resource busy" because /d is the bind
-    // target. `find -delete` clears root-owned files; after the helper exits
-    // the mount is released and the webui rmdir's the now-empty dir (rmdir
-    // needs write on the PARENT, which is uid-1000-owned).
-    await runCmd('docker', ['run', '--rm', '-v', `${hostDir}:/d`, '--entrypoint', 'find', 'paddock-webui:latest', '/d', '-mindepth', '1', '-delete'], { timeout: 120000 });
-  } catch {
-    throw new Error(
-      `Cleanup of '${name}' failed: the instance data is root-owned and the privileged cleanup could not remove it. Run this on the host: chown -R 1000:1000 ${hostDir}`
-    );
-  }
-  if (fs.existsSync(instDir)) {
-    try {
-      fs.rmSync(instDir, { recursive: true, force: true });
-    } catch (e) {
-      if (e.code !== 'EACCES' && e.code !== 'EPERM') throw e;
-      throw new Error(
-        `Cleanup of '${name}' failed: the instance data is root-owned and the privileged cleanup could not remove it. Run this on the host: chown -R 1000:1000 ${hostDir}`
-      );
-    }
-  }
+  fs.rmSync(instDir, { recursive: true, force: true });
 }
 
 async function removeVm(name) {
@@ -1701,8 +1783,9 @@ async function resetVm(name) {
 
   try { await runCmd('docker', ['rm', '-f', name], { timeout: 30000 }); } catch {}
   const agentDir = path.join(instDir, agent);
-  await removeInstanceDir(name, agentDir, path.join(HOST_WORKSPACE, 'instances', name, agent));
+  await removeInstanceDir(name, agentDir);
   fs.mkdirSync(agentDir, { recursive: true });
+  ensureOwned(agentDir);
 
   const pw = meta.ROOT_PASSWORD || name.replace(PREFIX_RE, '');
   const port = meta.PORT || '';
@@ -1934,63 +2017,6 @@ function readWebOpenclawState(name, driver) {
   }
 }
 
-/** One-shot root-helper node script that patches the bind-mounted openclaw
- *  config from inside a container (agent data dirs are root-owned; the webui
- *  cannot open them). `apply` saves the pre-publish gateway bind/auth, sets
- *  bind lan + auth token, then chowns config + state to node so later native
- *  reads/writes work. `remove` restores the saved bind/auth and drops the
- *  state file. Exits non-zero on failure (2 unreadable config, 3 no state). */
-const OPENCLAW_WEB_PATCH_SCRIPT = `const fs=require('fs');
-const op=process.argv[1];
-const cfg='/d/openclaw.json';
-const st='/d/web-openclaw.json';
-let d;
-try { d=JSON.parse(fs.readFileSync(cfg,'utf8')); }
-catch(e){ process.stderr.write('read:'+e.message); process.exit(2); }
-let gw=(d.gateway&&typeof d.gateway==='object')?d.gateway:{};
-if(op==='apply'){
-  if(!fs.existsSync(st)){
-    fs.writeFileSync(st,JSON.stringify({
-      bind:gw.bind||'',
-      auth:gw.auth!==undefined?gw.auth:null,
-      controlUi:gw.controlUi!==undefined?gw.controlUi:null
-    },null,2));
-  }
-  d.gateway={...gw,bind:'lan',auth:{mode:'token',token:process.argv[2]||''},
-    controlUi:{dangerouslyDisableDeviceAuth:true}};
-}else if(op==='remove'){
-  let saved;
-  try{ saved=JSON.parse(fs.readFileSync(st,'utf8')); }
-  catch(e){ process.stderr.write('nostate'); process.exit(3); }
-  if(saved.bind) gw.bind=saved.bind; else delete gw.bind;
-  if(saved.auth) gw.auth=saved.auth; else delete gw.auth;
-  if(saved.controlUi) gw.controlUi=saved.controlUi; else delete gw.controlUi;
-  if(Object.keys(gw).length) d.gateway=gw; else delete d.gateway;
-}else{ process.stderr.write('badop'); process.exit(4); }
-fs.writeFileSync(cfg,JSON.stringify(d,null,2)+'\\n');
-fs.chownSync(cfg,1000,1000);
-try{ fs.chownSync(st,1000,1000); }catch{}
-`;
-
-/** Run the openclaw config patch through a one-shot root helper of our own
- *  image (host-path bind), matching the removeInstanceDir pattern for
- *  root-owned instance data. Throws with a clear, actionable message. */
-async function patchOpenclawConfigViaHelper(name, driver, op, password) {
-  const hostDir = path.join(HOST_WORKSPACE, 'instances', name, driver.type);
-  try {
-    await runCmd('docker', [
-      'run', '--rm', '-v', `${hostDir}:/d`, '--entrypoint', 'node',
-      'paddock-webui:latest', '-e', OPENCLAW_WEB_PATCH_SCRIPT, op, password || '',
-    ], { timeout: 60000 });
-    return true;
-  } catch (e) {
-    throw new Error(
-      `Could not ${op === 'apply' ? 'patch' : 'restore'} openclaw.json for web publishing ` +
-      `(the file is root-owned). Run this on the host: chown 1000:1000 ${driverConfigPath(name, driver)}`
-    );
-  }
-}
-
 /** Apply the web-publish auth before the container is recreated. Only
  *  'openclaw.json'-target drivers need this: the openclaw gateway reads
  *  gateway.bind / gateway.auth from the config on startup, so the config must
@@ -1998,8 +2024,8 @@ async function patchOpenclawConfigViaHelper(name, driver, op, password) {
  *  drivers embed the secret in the start-web.sh hook and need nothing here.
  *  The pre-publish gateway bind + auth are saved to a state file so unpublish
  *  restores exactly those fields without reverting unrelated config edits.
- *  Idempotent. No-op when the driver needs no config patch. Root-owned configs
- *  are patched through a root helper container. */
+ *  Idempotent. No-op when the driver needs no config patch. The webui runs as
+ *  root (plan 43), so the config is read/written directly — no helper. */
 async function applyWebAuth(name, driver, password, { preserveState = false } = {}) {
   const auth = driver.webApp && driver.webApp.auth;
   if (!auth || auth.target !== 'openclaw.json') return;
@@ -2009,7 +2035,6 @@ async function applyWebAuth(name, driver, password, { preserveState = false } = 
   try {
     d = JSON.parse(fs.readFileSync(configPath, 'utf8'));
   } catch (e) {
-    if (e.code === 'EACCES') return patchOpenclawConfigViaHelper(name, driver, 'apply', password);
     throw new Error(`Cannot patch openclaw.json for web publish: ${e.message}`);
   }
   const gw = (d.gateway && typeof d.gateway === 'object') ? d.gateway : {};
@@ -2025,27 +2050,22 @@ async function applyWebAuth(name, driver, password, { preserveState = false } = 
         auth: gw.auth !== undefined ? gw.auth : null,
         controlUi: gw.controlUi !== undefined ? gw.controlUi : null,
       }, null, 2));
+      ensureOwned(statePath);
     }
   }
   // Paddock publishes over plain HTTP; the Control UI requires a device
   // identity in a secure context otherwise, so disable that check (token-only
   // auth). Restored to the pre-publish value by removeWebAuth.
   d.gateway = { ...gw, bind: 'lan', auth: { mode: 'token', token: String(password || '') }, controlUi: { dangerouslyDisableDeviceAuth: true } };
-  try {
-    fs.writeFileSync(configPath, JSON.stringify(d, null, 2) + '\n');
-  } catch (e) {
-    throw new Error(
-      `Cannot write openclaw.json to publish the web app (${e.code || e.message}). ` +
-      `If the file is root-owned, fix it on the host: chown 1000:1000 ${configPath}`
-    );
-  }
+  fs.writeFileSync(configPath, JSON.stringify(d, null, 2) + '\n');
+  ensureOwned(configPath);
 }
 
 /** Undo a web-publish config patch: restore the saved pre-publish gateway
  *  `bind` + `auth` (preserving any unrelated config edits made while
  *  published) and drop the state file. No-op for drivers that need no patch or
- *  when nothing was patched. Root-owned configs are restored through a root
- *  helper container. */
+ *  when nothing was patched. The webui runs as root (plan 43), so the config
+ *  is restored directly. */
 async function removeWebAuth(name, driver) {
   const auth = driver.webApp && driver.webApp.auth;
   if (!auth || auth.target !== 'openclaw.json') return;
@@ -2064,11 +2084,9 @@ async function removeWebAuth(name, driver) {
     if (saved.controlUi) gw.controlUi = saved.controlUi; else delete gw.controlUi;
     if (Object.keys(gw).length) d.gateway = gw; else delete d.gateway;
     fs.writeFileSync(configPath, JSON.stringify(d, null, 2) + '\n');
+    ensureOwned(configPath);
     try { fs.rmSync(webOpenclawStatePath(name, driver)); } catch {}
   } catch (e) {
-    if (e.code === 'EACCES') {
-      return patchOpenclawConfigViaHelper(name, driver, 'remove', '');
-    }
     // Unreadable for another reason — keep the state file so a later attempt
     // (or manual fix) can still restore the original bind/auth.
     console.error(`removeWebAuth could not restore openclaw.json for ${name}:`, e.message);
@@ -2248,6 +2266,7 @@ async function readSettings(name) {
   const web = await readWebState(name);
   return {
     allowDocker: meta.DOCKER === '1',
+    userMode: meta.USER_MODE === 'user' ? 'user' : 'root',
     network: meta.NETWORK || '',
     sshPort: meta.PORT || '',
     sshContainerPort: readSshCport(name),
@@ -2451,6 +2470,7 @@ async function prepareAgentChanges(name, opts = {}) {
   const oldVols = readExtraVolumes(name);
   const oldPorts = readExtraPorts(name);
   const oldMount = readWorkspaceMount(name, agentType);
+  const oldUserMode = meta.USER_MODE === 'user' ? 'user' : '';
   // The existing secret even when NOT yet published: openclaw's token lives in
   // openclaw.json and outlives unpublishes, so a fresh publish can reuse it
   // instead of demanding the user retype it. Env-target drivers have no hook
@@ -2459,6 +2479,17 @@ async function prepareAgentChanges(name, opts = {}) {
 
   if (opts.reset && opts.confirm === false) {
     throw new Error('Refusing to reset without confirm: true (wipes the data dir).');
+  }
+
+  // ── container user (root | user) ──
+  let newUserMode = oldUserMode;
+  let userModeChanged = false;
+  if (opts.userMode !== undefined) {
+    newUserMode = opts.userMode === 'user' ? 'user' : '';
+    if (newUserMode === 'user' && agentType === 'hermes') {
+      throw new Error('Hermes already runs its daemon as its own user (/opt/data, uid 10000) — the Container user option does not apply');
+    }
+    userModeChanged = newUserMode !== oldUserMode;
   }
 
   // ── docker socket ──
@@ -2610,7 +2641,8 @@ async function prepareAgentChanges(name, opts = {}) {
   }
 
   const changed = dockerChanged || networkChanged || workspaceChanged || volumesChanged
-    || sshChanged || sshCportChanged || passwordChanged || portsChanged || webChanged;
+    || sshChanged || sshCportChanged || passwordChanged || portsChanged || webChanged
+    || userModeChanged;
 
   const summary = [];
   if (dockerChanged) summary.push(`allowDocker=${newAllow}`);
@@ -2622,6 +2654,7 @@ async function prepareAgentChanges(name, opts = {}) {
   if (passwordChanged) summary.push('ssh password set');
   if (portsChanged) summary.push(newPorts.length ? `extraPorts=${newPorts.map((p) => `${p.host}→${p.container}`).join(', ')}` : 'extraPorts=none');
   if (webChanged) summary.push(newWeb ? `web=${newWeb.hostPort}→${newWeb.containerPort}` : 'web=off');
+  if (userModeChanged) summary.push(`containerUser=${newUserMode || 'root'}`);
 
   let reason = 'recreate';
   if (webChanged) reason = 'web';
@@ -2631,15 +2664,16 @@ async function prepareAgentChanges(name, opts = {}) {
   else if (sshChanged || sshCportChanged || passwordChanged) reason = 'ssh';
   else if (workspaceChanged) reason = 'workspace';
   else if (volumesChanged) reason = 'volumes';
+  else if (userModeChanged) reason = 'user';
 
   return {
     instDir, meta, agentType, driver, wasRunning,
     oldAllow, oldNetwork, oldSshPort, oldSshCport, oldRootPw, oldWeb, oldVols, oldPorts, oldMount,
-    oldWebPassword,
+    oldWebPassword, oldUserMode,
     newAllow, newNetwork, newSshPort, newSshCport, newRootPw, wsMount, newVols, newPorts, newWeb,
-    newWebPassword,
+    newWebPassword, newUserMode,
     dockerChanged, networkChanged, sshChanged, sshCportChanged, passwordChanged,
-    workspaceChanged, volumesChanged, portsChanged, webChanged,
+    workspaceChanged, volumesChanged, portsChanged, webChanged, userModeChanged,
     changed, summary, reason,
     effectiveWeb: webChanged ? newWeb : oldWeb,
   };
@@ -2661,8 +2695,9 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
     oldAllow, oldNetwork, oldSshPort, oldSshCport, oldRootPw,
     oldWeb, oldVols, oldPorts, oldMount,
     newAllow, newNetwork, newSshPort, newSshCport, newRootPw,
-    wsMount, newVols, newPorts, newWeb,
+    wsMount, newVols, newPorts, newWeb, newUserMode,
     networkChanged, sshChanged, sshCportChanged, passwordChanged, webChanged,
+    userModeChanged,
   } = ctx;
 
   const purePull = !!opts.pull && !ctx.changed && !opts.reset;
@@ -2703,13 +2738,14 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
     if (webChanged) {
       const p = webServicePath(name);
       if (newWeb) {
-        // Persist the auth token too (webui-owned) — the config file is often
-        // root-owned and unreadable by the webui after the agent rewrites it.
+        // Persist the auth token too (webui-owned) — stable across recreates
+        // even when the agent rewrites its config.
         fs.writeFileSync(p, JSON.stringify({
           containerPort: newWeb.containerPort,
           hostPort: String(newWeb.hostPort),
           authToken: driver.webApp.auth && driver.webApp.auth.urlToken ? String(ctx.newWebPassword || '') : '',
         }, null, 2));
+        ensureOwned(p);
         // Patch the config before the recreate (openclaw gateway reads
         // gateway.bind/auth on startup); env-target drivers need nothing here.
         applyWebAuth(name, driver, ctx.newWebPassword);
@@ -2737,6 +2773,7 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
         ...(sshChanged ? { sshPort: newSshPort } : {}),
         ...(sshCportChanged ? { sshCport: newSshCport } : {}),
         ...(passwordChanged ? { sshPassword: newRootPw } : {}),
+        ...(userModeChanged ? { userMode: newUserMode } : {}),
       });
     }
     await validateInstanceCompose(name);
@@ -2746,8 +2783,9 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
       onStep('reset', 'start');
       try { await runCmd('docker', ['rm', '-f', name], { timeout: 30000 }); } catch {}
       const agentDir = path.join(instDir, agentType);
-      await removeInstanceDir(name, agentDir, path.join(HOST_WORKSPACE, 'instances', name, agentType));
+      await removeInstanceDir(name, agentDir);
       fs.mkdirSync(agentDir, { recursive: true });
+      ensureOwned(agentDir);
       onStep('reset', 'end');
       runningNow = false;
     }
@@ -2785,7 +2823,13 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
         webRebuild = ensureWebStartBlock(name, agentType);
       }
     }
-    const needRebuildFinal = !!opts.pull || needRebuild || sshRebuild || webRebuild;
+    let userRebuild = false;
+    if (userModeChanged && newUserMode === 'user') {
+      if (!(await imageHasPadUser(name, image, runningNow))) {
+        userRebuild = ensureUserModeBuildFiles(name, agentType);
+      }
+    }
+    const needRebuildFinal = !!opts.pull || needRebuild || sshRebuild || webRebuild || userRebuild;
     if (needRebuildFinal) {
       const why = opts.pull
         ? 'Updating to the latest base image'
@@ -2793,7 +2837,9 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
           ? 'Image has no docker CLI'
           : sshRebuild
             ? 'start.sh must learn the custom SSH container port'
-            : 'start.sh must learn the web start hook';
+            : webRebuild
+              ? 'start.sh must learn the web start hook'
+              : 'Image needs the user-mode (pad user + drop) support';
       onLog('system', `${why} — rebuilding the image, then recreating…`);
       await updateAgent(name, { pull: !!opts.pull, onLog, onStep });
     } else {
@@ -2876,6 +2922,7 @@ async function rollbackAgentChanges(name, ctx, touched, onLog) {
   const driver = getDriver(agentType);
   if (oldWeb) {
     fs.writeFileSync(p, JSON.stringify({ containerPort: oldWeb.containerPort, hostPort: String(oldWeb.hostPort) }, null, 2));
+    ensureOwned(p);
     // The old password is the pre-change one (ctx.oldWebPassword), not the
     // current config value — a failed apply may already have patched it. Keep
     // the saved pre-publish state so a later unpublish still restores the
@@ -3021,6 +3068,7 @@ module.exports = {
   validateExtraVolume, validateExtraVolumes, validateExtraPorts,
   readExtraVolumes, readExtraPorts, readSshCport, ensureSshStartBlock, autoSshPort,
   imageHasDockerCli, imageHasSshPortSupport,
+  ensureUserModeBuildFiles, imageHasPadUser,
   imageFor, seedBuildDir, buildDir, buildEnvPath,
   readBuildEnv, setBuildEnv,
   argsFromDockerfile,

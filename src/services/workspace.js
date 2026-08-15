@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
 const { getAgent } = require('./agent-registry');
+const { ensureOwned } = require('./ownership');
 
 const MAX_UPLOAD_SIZE = 100 * 1024 * 1024; // 100MB
 
@@ -204,6 +205,7 @@ async function writeFile(agentId, relativePath, content, scope) {
     if (stat.isDirectory()) throw new Error('Cannot write to directory');
   }
   fs.writeFileSync(absPath, content, 'utf8');
+  ensureOwned(absPath);
   return {
     name: path.basename(absPath),
     size: Buffer.byteLength(content, 'utf8'),
@@ -239,6 +241,7 @@ async function writeFileB64(agentId, dirPath, fileName, buffer, scope) {
   requireHostBrowsable(agent);
   const destDir = resolveHostPath(agent.workspace_root, dirPath || '/');
   fs.writeFileSync(path.join(destDir, safeName), buffer);
+  ensureOwned(path.join(destDir, safeName));
   return { ok: true };
 }
 
@@ -268,6 +271,7 @@ async function createDirectories(agentId, dirPath, scope) {
   requireHostBrowsable(agent);
   const absPath = resolveHostPath(agent.workspace_root, dirPath || '/');
   fs.mkdirSync(absPath, { recursive: true });
+  ensureOwned(absPath);
   return { ok: true };
 }
 
@@ -283,6 +287,7 @@ async function createFolder(agentId, relativePath, folderName, scope) {
   const target = path.join(parentPath, safeName);
   if (fs.existsSync(target)) throw new Error('Folder already exists');
   fs.mkdirSync(target, { recursive: true });
+  ensureOwned(target);
   return { path: path.join(relativePath || '/', safeName) };
 }
 

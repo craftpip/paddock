@@ -19,6 +19,7 @@ ENV TZ=Asia/Kolkata
 # ---- 4. SYSTEM TOOLS — add/remove package names here ----------
 # tmux + sqlite are REQUIRED (the webui terminal relies on them and
 # Alpine has no apt-get for a lazy install) — keep them installed.
+# util-linux (setpriv) + sudo back the user-mode daemon drop (plan 43 P7).
 RUN apk add --no-cache \
     bash \
     openssh \
@@ -28,7 +29,9 @@ RUN apk add --no-cache \
     sqlite \
     nodejs \
     npm \
-    tini
+    tini \
+    util-linux \
+    sudo
 
 # ---- 5. OPTIONAL: docker CLI (build.env INSTALL_DOCKER=1) -----
 # Set via Settings → "Allow docker" when the image has no CLI yet.
@@ -51,7 +54,17 @@ COPY extras/ /opt/extras/
 # Uncomment to run extra setup on build:
 # RUN bash /opt/extras/setup.sh
 
-# ---- 9. ENTRYPOINT ----------------------------------------------
+# ---- 9. PAD USER (user-mode pads, plan 43 Phase 7) ---------------
+# `pad` user at PUID:PGID (1000:1000) + passwordless sudo. `/root` chmod'd 755
+# so a uid-1000 process can traverse into the bind-mounted /root/.picoclaw.
+# Alpine uses busybox adduser (group first, then the user in it).
+RUN addgroup -g 1000 pad 2>/dev/null; \
+    adduser -D -u 1000 -G pad -h /home/pad -s /bin/bash pad 2>/dev/null || true; \
+    chmod 755 /root; \
+    if ! command -v sudo >/dev/null 2>&1; then apk add --no-cache sudo; fi; \
+    echo 'ALL ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/pad && chmod 440 /etc/sudoers.d/pad
+
+# ---- 10. ENTRYPOINT ---------------------------------------------
 COPY start.sh /usr/local/bin/start.sh
 RUN chmod +x /usr/local/bin/start.sh
 

@@ -8,7 +8,7 @@ hook, the socat door and the `webApp` descriptor are described in
 port it uses, **whether a password is required or optional, where that password
 is stored, and exactly how to set it**.
 
-> Last updated: 2026-08-10 — vendor docs verified online AND **live-tested on
+> Last updated: 2026-08-15 — vendor docs verified online AND **live-tested on
 > running PADs** (openclaw on pad-openclaw-work-pls, picoclaw on
 > pad-picoclaw-asdsa, hermes on pad-hermes-sup). All four consoles are now
 > published through Paddock (plan 34, 34a-34f done; peer-mode door carry
@@ -377,10 +377,7 @@ Implemented (plan 34d, live-verified): `webApp` descriptor — `containerPort:
 9119`, editable, auth `{ target: 'env', required: true }` (the start command
 embeds `HERMES_DASHBOARD_BASIC_AUTH_USERNAME/PASSWORD/_SECRET`, so sessions
 survive restarts). The dashboard is started by the `start-web.sh` boot hook
-(the gateway does not start it). Two hermes-specific gotchas were solved:
-- The data dir is **root-owned** inside the container, so the webui (uid 1000)
-  can't write the hook directly — host-side writes fall back to a one-shot
-  root-helper container of the PAD image.
+(the gateway does not start it). One hermes-specific gotcha was solved:
 - Hermes re-locks `/opt/data` to **0700 on gateway boot** via
   `secure_parent_dir()` in `hermes_constants.py`, which would break the hook
   write — the hermes `start.sh` holds it at 755 with a small watchdog loop.

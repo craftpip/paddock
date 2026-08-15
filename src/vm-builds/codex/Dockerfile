@@ -27,6 +27,7 @@ RUN apt-get update && \
     tmux \
     sqlite3 \
     tini \
+    sudo \
     # ^ ADD or REMOVE package lines above this point
     && rm -rf /var/lib/apt/lists/*
 
@@ -54,7 +55,17 @@ COPY extras/ /opt/extras/
 # Uncomment to run extra setup on build:
 # RUN bash /opt/extras/setup.sh
 
-# ---- 9. ENTRYPOINT ----------------------------------------------
+# ---- 9. PAD USER (user-mode pads, plan 43 Phase 7) ---------------
+# `pad` user at PUID:PGID (1000:1000) + passwordless sudo. `/root` chmod'd 755
+# so a uid-1000 process can traverse into the bind-mounted /root/.codex.
+# node base images already ship a uid-1000 account (`node`) — `-o` tolerates it.
+RUN groupadd -g 1000 pad 2>/dev/null || true; \
+    (id pad >/dev/null 2>&1 || useradd -m -o -u 1000 -g 1000 -s /bin/bash pad 2>/dev/null) || useradd -m -o -u 1000 -s /bin/bash pad 2>/dev/null || true; \
+    chmod 755 /root; \
+    if ! command -v sudo >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends sudo; fi; \
+    echo 'ALL ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/pad && chmod 440 /etc/sudoers.d/pad
+
+# ---- 10. ENTRYPOINT ---------------------------------------------
 COPY start.sh /usr/local/bin/start.sh
 RUN chmod +x /usr/local/bin/start.sh
 

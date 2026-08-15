@@ -731,4 +731,58 @@ describe('vm-manager - extra volumes & ports (plan 28)', () => {
       assert.strictEqual(vm.autoSshPort(), '43818');
     });
   });
+
+  it('ensureUserModeBuildFiles injects the canonical pad-user block and regenerates start.sh', () => {
+    withTmp((TMP, vm) => {
+      const build = path.join(TMP, 'instances', 'pad-um', 'build');
+      fs.mkdirSync(build, { recursive: true });
+      const df = path.join(build, 'Dockerfile');
+      fs.writeFileSync(df,
+        '# base\n' +
+        'COPY start.sh /usr/local/bin/start.sh\n' +
+        'RUN chmod +x /usr/local/bin/start.sh\n' +
+        'ENTRYPOINT ["/usr/bin/tini"]\n');
+      fs.writeFileSync(path.join(build, 'start.sh'), '#!/bin/sh\ntail -f /dev/null\n', { mode: 0o755 });
+
+      assert.strictEqual(vm.ensureUserModeBuildFiles('pad-um', 'opencode'), true, 'files changed on first pass');
+
+      const dockerfile = fs.readFileSync(df, 'utf8');
+      assert.ok(dockerfile.includes('__PAD_USER_MODE__'), 'marker injected');
+      assert.ok(dockerfile.includes("ALL ALL=(ALL) NOPASSWD:ALL"), 'passwordless rule for any uid-1000 name');
+      assert.ok(dockerfile.includes('apt-get install -y --no-install-recommends sudo'), 'block self-installs sudo');
+      assert.ok(dockerfile.includes('COPY start.sh /usr/local/bin/start.sh\n'), 'COPY line intact after injection');
+      assert.ok(!/padCOPY/.test(dockerfile), 'no fused block/directive lines');
+
+      const startSh = fs.readFileSync(path.join(build, 'start.sh'), 'utf8');
+      assert.ok(startSh.includes('__PAD_USER_MODE__'), 'start.sh regenerated with the drop block');
+
+      assert.strictEqual(vm.ensureUserModeBuildFiles('pad-um', 'opencode'), false, 'second pass is idempotent');
+    });
+  });
+
+  it('ensureUserModeBuildFiles replaces a stale pad-user block without mangling following lines', () => {
+    withTmp((TMP, vm) => {
+      const build = path.join(TMP, 'instances', 'pad-um2', 'build');
+      fs.mkdirSync(build, { recursive: true });
+      const df = path.join(build, 'Dockerfile');
+      // Stale block: old `pad ALL=` rule shape, no sudo self-install.
+      fs.writeFileSync(df,
+        '# PAD USER (plan 43 Phase 7) — pad at PUID:PGID + sudoers + chmod 755 /root. __PAD_USER_MODE__\n' +
+        'RUN if command -v apk >/dev/null 2>&1; then addgroup -g 1000 pad 2>/dev/null || true; \\\n' +
+        '    else groupadd -g 1000 pad 2>/dev/null || true; fi; \\\n' +
+        "    if command -v sudo >/dev/null 2>&1; then echo 'pad ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/pad && chmod 440 /etc/sudoers.d/pad; fi\n" +
+        'COPY start.sh /usr/local/bin/start.sh\n' +
+        'RUN chmod +x /usr/local/bin/start.sh\n');
+
+      assert.strictEqual(vm.ensureUserModeBuildFiles('pad-um2', 'opencode'), true, 'stale block replaced');
+
+      const dockerfile = fs.readFileSync(df, 'utf8');
+      assert.ok(dockerfile.includes("ALL ALL=(ALL) NOPASSWD:ALL"), 'rule upgraded to username-independent form');
+      assert.ok(!dockerfile.includes("echo 'pad ALL="), 'old pad-keyed rule gone');
+      assert.ok(dockerfile.includes('apt-get install -y --no-install-recommends sudo'), 'sudo self-install present');
+      assert.ok(dockerfile.includes('COPY start.sh /usr/local/bin/start.sh\n'), 'COPY directive survived replacement');
+      assert.ok(dockerfile.includes('\nRUN chmod +x /usr/local/bin/start.sh'), 'following RUN intact');
+      assert.ok(!/padCOPY/.test(dockerfile), 'no fused block/directive lines');
+    });
+  });
 });

@@ -202,6 +202,45 @@ export default function SettingsTab({ agent }) {
     }
   }
 
+  // ── Container user (plan 43 Phase 7) ──────────────────────
+
+  async function handleUserModeChange(mode) {
+    if (mode === (settings.userMode || 'root')) return
+    const toUser = mode === 'user'
+    const ok = await confirm({
+      title: toUser ? 'Run as the pad user' : 'Run as root',
+      message: toUser
+        ? `This will stop and recreate ${agent.name} so the agent daemon and terminal run as the pad user (${'PUID'}:${'PGID'}). Every file the agent writes becomes user-owned on the host. SSH stays the root admin door.`
+        : `This will stop and recreate ${agent.name} so the agent daemon runs as root again (legacy default).`,
+      confirmText: toUser ? 'Switch to pad user & recreate' : 'Switch to root & recreate',
+      cancelText: 'Cancel',
+    })
+    if (!ok) return
+    setSaving(true)
+    if (agent.status === 'running') updateAgentStatus(agent.name, 'restarting')
+    try {
+      const d = await api(`/api/agents/${agent.name}/settings`, { method: 'POST', body: { userMode: mode } })
+      if (d && d.streaming) {
+        setModal({
+          key: `usermode-${Date.now()}`,
+          title: toUser ? `Switching ${agent.name} to the pad user` : `Switching ${agent.name} to root`,
+          onDone: () => {
+            refresh()
+            fetchAgents()
+            toast.success(toUser ? 'Agent now runs as the pad user' : 'Agent now runs as root')
+          },
+        })
+      } else {
+        setSettings(d)
+        toast.success(toUser ? 'Agent now runs as the pad user' : 'Agent now runs as root')
+        setSaving(false)
+      }
+    } catch (err) {
+      toast.error(err.error || err.message || 'Failed to change the container user')
+      setSaving(false)
+    }
+  }
+
   // ── Network ───────────────────────────────────────────────
 
   async function handleNetworkChange(network) {
@@ -650,6 +689,36 @@ export default function SettingsTab({ agent }) {
           </p>
         )}
       </section>
+
+      {/* 4b. Container user — root vs the pad user */}
+      {agent.agent_type !== 'hermes' && (
+        <section className="bg-panel/60 border border-line rounded-xl p-5">
+          <h3 className="text-sm font-medium text-ink-muted">Container user</h3>
+          <p className="text-xs text-ink-dim mt-1 max-w-md">
+            The agent daemon and terminal run as the pad user ({'PUID'}:{'PGID'}), so every file they write is
+            user-owned on the host. SSH stays the root admin door.
+          </p>
+          <div className="mt-3 inline-flex rounded-lg border border-line-faint bg-sunken p-0.5">
+            <button type="button"
+                    onClick={() => handleUserModeChange('root')}
+                    disabled={saving}
+                    className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors disabled:opacity-50 ${(settings?.userMode || 'root') === 'root' ? 'bg-accent text-white' : 'text-ink-dim hover:text-ink'}`}>
+              Root
+            </button>
+            <button type="button"
+                    onClick={() => handleUserModeChange('user')}
+                    disabled={saving}
+                    className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors disabled:opacity-50 ${settings?.userMode === 'user' ? 'bg-accent text-white' : 'text-ink-dim hover:text-ink'}`}>
+              Local user
+            </button>
+          </div>
+          {settings?.userMode === 'user' && (
+            <p className="mt-3 text-xs text-warning/90 bg-warning-soft border border-warning-line/60 rounded-lg px-3 py-2">
+              Changing to root or to another setting below will stop and recreate the container.
+            </p>
+          )}
+        </section>
+      )}
 
       {/* 5. Network */}
       <section className="bg-panel/60 border border-line rounded-xl p-5">

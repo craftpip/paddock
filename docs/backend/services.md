@@ -1,6 +1,6 @@
 # Backend Services
 
-> Last updated: 2026-08-09
+> Last updated: 2026-08-15
 
 ## PAD Discovery (agent-registry.js)
 
@@ -117,10 +117,14 @@ and its own image tag (`paddock-vm-<name>:latest`). See
 `services/instance-image.js` below.
 
 **Functions:**
-- `createVm(name, { agent, mode, skipSetup, workspaceHost, workspaceDir, allowDocker, network, sshEnabled, port, sshCport, password, extraVolumes, extraPorts, onLog, onStep })` — full streaming creation flow with SSH host/container port allocation. Emits steps via `onStep('build'|'up'|'setup', 'start'|'end'|'error')` and feeds command output through `onLog(stream, text)`. Seeds the instance build dir from the shared template (`seedBuildDir`). `mode: 'fresh'` only — clone-from-backup was removed with the generic backup system.
-- `validateAgentCreate(name, opts)` — the shared create **pre-flight**: name/agent-type, network peer exists+running, extra volumes/ports, SSH container port, workspace mount, and the async cross-agent host-port sweep all abort (throw) before anything is created. Returns `{ sshHostPort, sshCport, wsMount }` normalized for `createVm`.
+- `createVm(name, { agent, mode, skipSetup, workspaceHost, workspaceDir, allowDocker, network, sshEnabled, port, sshCport, password, extraVolumes, extraPorts, userMode, onLog, onStep })` — full streaming creation flow with SSH host/container port allocation. Emits steps via `onStep('build'|'up'|'setup', 'start'|'end'|'error')` and feeds command output through `onLog(stream, text)`. Seeds the instance build dir from the shared template (`seedBuildDir`). `mode: 'fresh'` only — clone-from-backup was removed with the generic backup system. `userMode: 'user'` (plan 43 Phase 7) writes `USER_MODE=user` to `meta.env` and runs the setup steps as `-u <USER_UID>:<USER_GID>` so config files are born user-owned.
+- `validateAgentCreate(name, opts)` — the shared create **pre-flight**: name/agent-type, network peer exists+running, extra volumes/ports, SSH container port, workspace mount, and the async cross-agent host-port sweep all abort (throw) before anything is created. Rejects `userMode: 'user'` for hermes (already runs as its own user). Returns `{ sshHostPort, sshCport, wsMount }` normalized for `createVm`.
 - `createAgent(name, opts)` — `validateAgentCreate` then `createVm` (mode `fresh`, port/sshCport/workspace normalized). The single create path behind both `POST /api/agents/create` and the MCP `create_agent` tool.
-- `removeInstanceDir(name, instDir, hostInstDir?)` — remove a directory; the wipe **always runs with root access**. A plain `fs.rmSync` is never enough because agent containers run as root and write their data dir as root — the webui (uid 1000) cannot unlink files inside root-owned directories (`EACCES`). The wipe goes through a one-shot root helper container built from our own image (the daemon resolves the bind by HOST path, not the webui's `/workspace` namespace). The helper clears the mount's **contents** — `docker run --rm -v <hostInstDir>:/d --entrypoint find paddock-webui:latest /d -mindepth 1 -delete` — never `rm -rf /d`, which fails on the bind mountpoint ("Device or resource busy"); after the helper exits the mount is released and the webui rmdir's the now-empty dir (rmdir needs write on the parent, which is uid-1000-owned). If that fails it throws the exact host `chown -R 1000:1000 <dir>` to run. `hostInstDir` defaults to the whole `<name>` instance dir; callers wiping just an agent data dir pass its host path (`<HOST_WORKSPACE>/instances/<name>/<agent>`). Used by `removeVm` (delete), `resetVm`, `recreateAgent` and the `applyAgentChanges` reset — every wipe of the instance/agent data dir.
+- `removeInstanceDir(name, instDir)` — a plain `fs.rmSync(instDir, { recursive:
+  true, force: true })`. No helper container and no `EACCES` handling: the
+  webui runs as root (plan 43), so it can always delete root-owned agent data.
+  Used by `removeVm` (delete), `resetVm`, `recreateAgent` and the
+  `applyAgentChanges` reset — every wipe of the instance/agent data dir.
 - `removeVm(name)` — `docker rm -f` the agent **and** its door (`<name>-door`/`<name>-web`), remove the compose network (`<name>_default`), delete the instance dir via `removeInstanceDir(name, instDir)`. Delete also runs `docker rmi paddock-vm-<name>:latest` then `pruneDanglingImages`.
 - `pruneDanglingImages(onLog)` — `docker image prune -f` (dangling `<none>` layers only, never images a container references). Runs at the end of create, rebuild (`updateAgent`/`recreateAgent`) and delete to reclaim the layers each `docker compose build` orphans when it retags the per-PAD image; reports reclaimed space via `onLog`, never throws.
 - `resetVm(name)` — remove container + wipe data + recreate + compose up; the compose regen reads the full persisted binding set from `meta.env`/`web.json` (docker, network, web, extra volumes/ports, workspace) so a reset never drops a bind
@@ -128,10 +132,10 @@ and its own image tag (`paddock-vm-<name>:latest`). See
  - `generateInstanceCompose(name, agent, password, port, { allowDocker, network, sshCport, workspaceHost, workspaceDir, extraVolumes, extraPorts, webService, webPeerNetwork })` — builds the compose as a structured JS object and serializes it with `JSON.stringify(..., null, 2)` (JSON is valid YAML) — never hand-concatenated YAML. `allowDocker` adds the `/var/run/docker.sock` volume, `network` adds `network_mode: container:<name>`, `extraPorts`/`webService`/`sshCport` produce `ports:` bindings (or door mappings in peer mode), `workspaceHost`/`workspaceDir` add a second volume line. Named-volume rows (plan 40 D5) emit their service mount **and** a top-level `volumes:` section — `external: true` when the volume already exists, a fresh-volume declaration otherwise (so never-started projects work on first up). When the pad has a persisted `SUBNET` in `meta.env`, the compose also declares `networks.default` with that explicit subnet (merged alongside any door `webbridge` network) — see the pad subnet pool note below. Builds from `instances/<name>/build` with `image: paddock-vm-<name>:latest`; the `build.args:` block is generated from the instance Dockerfile's `ARG` lines (values interpolated from the instance `build.env`).
  - `writeInstanceCompose(name, agent, password, port, opts)` — write the serialized compose to disk. Calls `ensurePadSubnet(name)` first so a never-started pad is assigned its fixed `/24` (persisted as meta `SUBNET`) before the generator reads it.
  - **Pad subnet pool** — the host daemon's `default-address-pools` are finite (`192.168.0.0/16` at `/20`, plus the stock `172.16.0.0/12`). When every slot is taken, `docker compose up` for a new pad dies with `all predefined address pools have been fully subnetted` — the subnet is unspecified, so the daemon tries to allocate from the pool. New pads sidestep the pools: `ensurePadSubnet` carves the lowest free `/24` from `10.200.0.0/16` (256 pads; disjoint from the pools and the office LAN) and persists it as meta `SUBNET`, and the generated compose declares it explicitly. Existing pads' networks are never touched — when `<name>_default` already exists, `ensurePadSubnet` returns empty and the compose stays subnet-less so a regen can't force a disruptive network recreate. Deleting a pad (`removeVm`) removes `<name>_default` and frees its `/24`.
- - `applySettings(name, { allowDocker, network, sshPort, sshCport, workspaceHost, workspaceDir, extraVolumes, extraPorts, password })` — regenerates compose + writes the changed `meta.env` keys (`DOCKER`, `NETWORK`, `PORT`, `SSH_CPORT`, `ROOT_PASSWORD`, `WORKSPACE_*`, `EXTRA_PORTS`, `EXTRA_VOLUMES`, `SUBNET`); returns the new state. **Async** — reads the active `web.json` binding itself and regenerates with `webService` + the resolved `webPeerNetwork` for the new network, so a network/docker-toggle change never drops a published web app.
-- `applyAgentChanges(name, opts, { onLog, onStep })` — the **consolidated mutation flow**: settings POST, web/ports POST, and the MCP `recreate` tool all funnel through it (stop → regen → reconcile door → up → boot hooks → verify → rollback on failure)
+ - `applySettings(name, { allowDocker, userMode, network, sshPort, sshCport, workspaceHost, workspaceDir, extraVolumes, extraPorts, password })` — regenerates compose + writes the changed `meta.env` keys (`DOCKER`, `USER_MODE`, `NETWORK`, `PORT`, `SSH_CPORT`, `ROOT_PASSWORD`, `WORKSPACE_*`, `EXTRA_PORTS`, `EXTRA_VOLUMES`, `SUBNET`); returns the new state. **Async** — reads the active `web.json` binding itself and regenerates with `webService` + the resolved `webPeerNetwork` for the new network, so a network/docker-toggle change never drops a published web app.
+- `applyAgentChanges(name, opts, { onLog, onStep })` — the **consolidated mutation flow**: settings POST, web/ports POST, and the MCP `recreate` tool all funnel through it (stop → regen → reconcile door → up → boot hooks → verify → rollback on failure). Detects `userModeChanged` (via `prepareAgentChanges`); switching an existing pad to user mode triggers `ensureUserModeBuildFiles` + an image rebuild when `imageHasPadUser` reports the current image lacks the pad user, then the normal recreate. Summary line reports `containerUser=<mode>`, reason `'user'`.
 - `updateAgent(name, { onLog, onStep })` — streams `docker compose --env-file <instance>/build/build.env -f <compose> build --pull <name>` (900s) then `up -d --no-deps --force-recreate <name>` (300s); steps `build`/`recreate`. No forced build args — the image is per-PAD, so the rebuild reads the instance Dockerfile + `build.env` directly.
-- `readSettings(name)` — the full settings + published-web + ports picture shared by `GET /api/agents/:name/settings` and the MCP `settings_get` tool (`{ allowDocker, network, sshPort, sshContainerPort, image, version, networkHealth, workspaceMount, extraVolumes, extraPorts, web }`)
+- `readSettings(name)` — the full settings + published-web + ports picture shared by `GET /api/agents/:name/settings` and the MCP `settings_get` tool (`{ allowDocker, userMode, network, sshPort, sshContainerPort, image, version, networkHealth, workspaceMount, extraVolumes, extraPorts, web }`). `userMode` is `'user'` or `'root'` from meta `USER_MODE`.
 - `containerInfo(name)` — live `docker inspect` detail for the Container Info popup (mounts, published ports, env keys, raw JSON)
 - `readWebService(name)` / `webServicePath(name)` — read/`web.json` path (per-agent published web binding `{ containerPort, hostPort }`; null when absent)
 - `applyWebServices(name, webService)` — **async**. Set (truthy) or clear (`null`) the published web app: writes `web.json`, regenerates the compose with the `ports:` binding — or the socat door service when the agent routes through a network peer (see `tabs/web.md`). Returns `{ agent, webService }`. Does NOT stop/recreate — the route does that as an SSE job.
@@ -149,6 +153,7 @@ and its own image tag (`paddock-vm-<name>:latest`). See
 - `readExtraPorts(name)` / `readExtraVolumes(name)` / `validateExtraPorts(...)` / `validateExtraVolumes(...)` — extra TCP port + volume management (plan 28). Extra volumes are `{ host, container, readonly }` binds or `{ type: 'volume', name, container, readonly, external }` named-volume entries (plan 40 D5)
 - `setMetaFlag(name, key, value)` — writes/clears a `KEY=VALUE` line in `meta.env` preserving other lines (empty value **removes** the line)
 - `seedBuildDir(name, agent, { installDocker })` — idempotently copies `src/vm-builds/<type>/` → `instances/<name>/build/`, seeds `extras/.gitkeep` + `build.env`; never overwrites existing build files
+- `ensureUserModeBuildFiles(name, agent)` / `imageHasPadUser(name, image, wasRunning)` — the existing-pad user-mode upgrade (plan 43 Phase 7). `imageHasPadUser` runs `docker run --rm --entrypoint <sh> <image> -c 'id -u pad'` (via `id -u pad` inside the image) to tell whether the pad-user build files are baked in. When they are not, `ensureUserModeBuildFiles` (a) regenerates the instance `build/start.sh` **from the shared template** when the `__PAD_USER_MODE__` marker is missing (start.sh is machine-managed, so it is safe to overwrite) and (b) injects the universal pad-user block (`PAD_USER_DOCKERFILE_BLOCK` — `groupadd`/`useradd` + `chmod 755 /root` + a **`sudo` self-install guard** (`apt-get install sudo` / `apk add sudo` when missing) + `ALL ALL=(ALL) NOPASSWD:ALL` sudoers, covering both apt and apk images) into the instance Dockerfile before the `COPY start.sh`/`ENTRYPOINT` line. The block is machine-managed: a **stale pre-existing block is replaced with the canonical one** (so rule/installer upgrades propagate), never the whole file clobbered — the rest of the Dockerfile stays the user's editable surface (plan 41). The `ALL ALL=` (username-independent) form matters because base images ship their own uid-1000 account (`node` in node:20-slim) that wins `sudo`'s uid→name lookup; the self-install matters because toggled pads build from their ORIGINAL (pre-sudo) package list. Callers must rebuild the image after.
 - `composeCommand(name, ...args)` — `docker compose --env-file <instance>/build/build.env -f <compose> ...` prefix used by every per-instance compose invocation (skips the env-file when the build dir is missing)
 - `validateInstanceCompose(name)` — pre-flight gate: runs `docker compose ... config --quiet` (parse + schema + interpolation, no side effects) and throws with the parser output on failure. Call **before** stopping/recreating a PAD so a malformed document aborts with the container still running.
 - `runCompose(name, args, opts)` — validates via `validateInstanceCompose` then runs the compose `build`/`up` command. Every per-instance compose action goes through it (or an explicit early `validateInstanceCompose` in the settings/ports/web/recreate routes), so a bad document never reaches `docker compose up`.
@@ -277,6 +282,37 @@ maintenance empty state and legacy archives in `backups/` are not restorable.
 
 Business logic: See `overview/business-logic.md` — Backup and Restore.
 
+## Ownership (ownership.js)
+
+The webui container runs as **root** (plan 43), so every file it writes is
+root-owned by default — but the user's files must stay `PUID:PGID`-owned. This
+module is the chown-on-create discipline that keeps user files owned by the
+user despite the root process.
+
+**Functions:**
+- `ensureOwned(p)` — `fs.chownSync(p, USER_UID, USER_GID)` when not already
+  owned (cheap `stat` compare). No-op on missing paths, never throws. Called
+  right after every webui create site (instance dir, `meta.env`,
+  `docker-compose.yml`, `web.json`, publish state files, `logs/`,
+  `src/data/app.db*`) — one call after each create, never batched, so a crash
+  between create and chown cannot leave a root-owned file.
+- `normalizeTree(root, skipDir?)` — recursive chown of a tree. Symlinks are
+  never followed. `skipDir` (predicate, called on each dir) prunes a subtree.
+- `ensureDataOwned()` / `ensureDbOwned()` — normalize `src/data/`; the latter
+  re-runs after the DB is opened because a fresh `app.db*` from a root process
+  is root-owned.
+- `isSelfManagedAgentData(dir, instancesRoot)` — depth-exact test for agent
+  data dirs (`<instancesRoot>/<pad>/<agent>`) whose driver manages its own
+  ownership. Only **hermes** today: its gateway drops to uid 10000 and
+  `chown -R hermes:hermes /opt/data` on every boot, so chowning its data to
+  `PUID` is undone at the next boot anyway. The boot sweep and the clone path
+  pass this as the `skipDir` predicate; a pad *named* `hermes` or a workspace
+  folder named `hermes` is not excluded.
+
+`app.js` runs `ensureDataOwned()` + DB init at boot, then a background
+`normalizeTree(INSTANCES_DIR, hermes-skip)` — the automatic replacement for the
+old manual `chown -R node:node instances/` runbook.
+
 ## Database (db.js)
 
 SQLite wrapper for `src/data/app.db`. Tables are created on first access (auto-initialization).
@@ -360,7 +396,7 @@ handlers (no duplication between REST and MCP).
 | `workspace_list` | List a workspace dir | `workspace.listDir` |
 | `workspace_read` | Read a text file (≤256KB) | `workspace.statFile/readFile` |
 | `workspace_write` | Write a file | `workspace.writeFile` |
-| `create_agent` | Create a PAD (full create flow); needs `confirm: true` | `vm.validateAgentCreate` + `vm.createAgent` |
+| `create_agent` | Create a PAD (full create flow); needs `confirm: true`; accepts `userMode: 'root'|'user'` (plan 43 Phase 7, hermes always root) | `vm.validateAgentCreate` + `vm.createAgent` |
 | `start_agent` | Start container + socat door | `vm.startAgent(name)` |
 | `stop_agent` | Stop container + door | `vm.stopAgent(name)` |
 | `restart_agent` | Restart container + door | `vm.restartAgent(name)` |

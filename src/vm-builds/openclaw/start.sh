@@ -20,8 +20,29 @@ fi
 if [ -f /root/.openclaw/start-web.sh ]; then
     bash /root/.openclaw/start-web.sh || true
 fi
+# PAD USER drop (plan 43 Phase 7): USER_MODE=user pads run the foreground
+# daemon as the `pad` user (PUID:PGID=1000:1000) so every file the agent
+# writes is user-owned. The root boot above is unaffected; only the daemon
+# drops. setpriv when available, else su. __PAD_USER_MODE__
+drop_to_pad() {
+  if command -v setpriv >/dev/null 2>&1; then
+    exec setpriv --reuid 1000 --regid 1000 --clear-groups -- "$@"
+  else
+    exec su -s /bin/bash pad -c "$*"
+  fi
+}
+DAEMON_ARGS=""
 if [ -f /root/.openclaw/openclaw.json ] && grep -q '"gateway"' /root/.openclaw/openclaw.json 2>/dev/null; then
-    openclaw gateway run || tail -f /dev/null
+    DAEMON_ARGS=""
 else
-    openclaw gateway run --allow-unconfigured || tail -f /dev/null
+    DAEMON_ARGS="--allow-unconfigured"
+fi
+if [ "$USER_MODE" = "user" ]; then
+    # Data dir is bind-mounted from the host, where Paddock keeps it
+    # PUID:PGID-owned — re-chown anything the root boot recreated (workspace
+    # dirs, etc.) so the dropped daemon can write everywhere it needs.
+    chown -R 1000:1000 /root/.openclaw 2>/dev/null || true
+    drop_to_pad openclaw gateway run $DAEMON_ARGS || tail -f /dev/null
+else
+    openclaw gateway run $DAEMON_ARGS || tail -f /dev/null
 fi

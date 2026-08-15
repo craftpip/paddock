@@ -19,6 +19,24 @@ fi
 if [ -f /root/.opencode/start-web.sh ]; then
     bash /root/.opencode/start-web.sh || true
 fi
-# opencode has no gateway daemon — keep the container alive so the terminal
-# stays usable.
-tail -f /dev/null
+# PAD USER drop (plan 43 Phase 7): USER_MODE=user pads run the foreground
+# keeper as the `pad` user (PUID:PGID=1000:1000) so files created in the
+# terminal are user-owned. The root boot above is unaffected. __PAD_USER_MODE__
+drop_to_pad() {
+  if command -v setpriv >/dev/null 2>&1; then
+    exec setpriv --reuid 1000 --regid 1000 --clear-groups -- "$@"
+  else
+    exec su -s /bin/bash pad -c "$*"
+  fi
+}
+if [ "$USER_MODE" = "user" ]; then
+    # opencode has no gateway daemon — keep the container alive so the terminal
+    # stays usable. Re-chown the data dir so the dropped user can write
+    # everywhere (workspace dirs created during the root boot).
+    chown -R 1000:1000 /root/.opencode 2>/dev/null || true
+    drop_to_pad tail -f /dev/null || tail -f /dev/null
+else
+    # opencode has no gateway daemon — keep the container alive so the terminal
+    # stays usable.
+    tail -f /dev/null
+fi

@@ -23,6 +23,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
+const { ensureOwned } = require('./ownership');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const INSTANCES_DIR = path.join(WORKSPACE, 'instances');
@@ -63,7 +64,9 @@ function readMeta(name) {
 function writeMeta(name, meta) {
   try {
     fs.mkdirSync(logDir(name), { recursive: true });
+    ensureOwned(logDir(name));
     fs.writeFileSync(metaFile(name), JSON.stringify(meta));
+    ensureOwned(metaFile(name));
   } catch {}
 }
 
@@ -143,7 +146,11 @@ async function capture(name) {
     if (!next.lines.length && !migratingMillisecondCursor) return;
 
     fs.mkdirSync(logDir(name), { recursive: true });
-    if (next.lines.length) fs.appendFileSync(logFile(name), next.lines.join('\n') + '\n');
+    ensureOwned(logDir(name));
+    if (next.lines.length) {
+      fs.appendFileSync(logFile(name), next.lines.join('\n') + '\n');
+      ensureOwned(logFile(name));
+    }
     meta.lastTs = next.lastTs;
     meta.lastTsLines = next.lastTsLines;
     writeMeta(name, meta);

@@ -8,7 +8,7 @@ claude — is an equal citizen backed by one driver module in
 the concrete field values, command groups, and operational gotchas for each
 type, discovered and verified in real containers.
 
-> Last updated: 2026-08-09
+> Last updated: 2026-08-15
 
 ## Quick reference
 
@@ -194,7 +194,10 @@ Gotchas:
   root** — a root-owned empty bind mount fails the first boot with
   `PermissionError: /opt/data/logs`. `start.sh` runs `chown -R hermes:hermes
   /opt/data` first (mirrors the s6 chown the official entrypoint does). This
-  is the #1 hermes gotcha.
+  is the #1 hermes gotcha. Because hermes owns its own data (uid 10000, not
+  `PUID`), the webui ownership sweep skips hermes data dirs
+  (`isSelfManagedAgentData` in `services/ownership.js`) — chowning them to
+  `PUID` would just be undone at the next boot.
 - The base image already ships the docker CLI (`/usr/bin/docker`, 26.1.5) — the
   `INSTALL_DOCKER=1` rebuild is a verified no-op for hermes.
 - `hermes model` is interactive-only (needs a TTY); `hermes --version` vs

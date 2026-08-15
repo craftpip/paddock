@@ -1,6 +1,6 @@
 # Operations
 
-> Last updated: 2026-08-09
+> Last updated: 2026-08-15
 
 ## Agent Lifecycle
 
@@ -99,24 +99,21 @@ The compose service is `webui`, container name `paddock`.
 
 ### Runtime File Ownership
 
-The webui runs as numeric UID/GID `1000:1000`, configured by `PUID` and
-`PGID` in `.env`. Docker stores these numeric IDs on bind-mounted files; the
-host and container each resolve them to their own local account names. No host
-account name is added to or exposed inside the container.
+The webui container runs as **root** (no `user:` in `docker-compose.yml`) so it
+has root control of the host filesystem and Docker. `PUID` and `PGID` in `.env`
+are no longer the process identity — they are the **chown targets** the webui
+uses for every file it creates on the user's behalf (`ownership.js`). Docker
+stores these numeric IDs on bind-mounted files; the host and container each
+resolve them to their own local account names. `docker-compose.yml` includes
+`1000:1000` fallbacks if `PUID` or `PGID` are not supplied.
 
-`docker-compose.yml` includes `1000:1000` fallbacks if `PUID` or `PGID` are
-not supplied. The container image makes `/home` writable by UID `1000` and
-sets `HOME=/home`, giving tools such as Docker CLI a container-local user
-directory.
-
-The webui also has supplementary group `DOCKER_GID` (currently `988`) so it
-can access the mounted `/var/run/docker.sock`. Socket access is equivalent to
-host-root-level Docker control and is required for the webui to manage PADs.
-
-Files created by the webui in project bind mounts use UID/GID `1000:1000`.
-Files created by the Docker daemon, Docker-managed volumes, or individual PAD
-agent containers can use different ownership because they are created by
-different processes.
+Files created by the webui in project bind mounts are `chown`ed to
+`PUID:PGID`. Files created by the Docker daemon, Docker-managed volumes, or
+individual PAD agent containers can use different ownership because they are
+created by different processes — agent containers run as root, so their data
+is root-owned until the webui's boot sweep re-normalizes it to `PUID:PGID`
+(hermes data dirs excepted, since hermes manages its own ownership). See
+[backend/services.md](../backend/services.md) for the ownership module.
 
 ### Vite Dev Server (HMR)
 

@@ -1,6 +1,6 @@
 # Business Logic
 
-> Last updated: 2026-08-09
+> Last updated: 2026-08-15
 
 ## PAD Discovery and State
 
@@ -127,20 +127,33 @@ The frontend polls agent state — no HTMX.
 4. `rm -rf instances/<name>/` (recursive delete, via `removeInstanceDir`)
 5. `registry.removeAgentFromDb(name)` — deletes the `agents` row plus its activity/sessions rows
 
-**Root-owned data:** agent containers run as root and write root-owned files
-into the (webui-owned) instance dir, so a plain `fs.rmSync` from the webui
-(uid 1000) throws `EACCES`. The wipe therefore **always runs with root access**
-via a one-shot root helper container built from our own `paddock-webui:latest`
-image (the daemon resolves the bind by HOST path, not the webui's
-`/workspace` namespace) — this covers deletes (`removeVm`) *and* every data-dir
-reset (`resetVm`, `recreateAgent`, the `applyAgentChanges` reset). The helper
-clears the mount's *contents* (`find /d -mindepth 1 -delete`), never the
-mountpoint itself — `rm -rf /d` fails with EACCES "Device or resource busy"
-because `/d` is a bind target. After the helper exits the mount is released and
-the webui removes the now-empty dir (its parent is uid-1000-owned). If that
-fails, the delete errors with the exact host `chown` command to run.
-Existing pads with root-owned data were normalized once with
-`chown -R node:node instances/`.
+**Instance data ownership:** the webui container runs as **root** (it needs
+root control of the host filesystem and the docker socket to manage PADs), so
+wipes and config reads/writes always work — `removeInstanceDir` is a plain
+`fs.rmSync(instDir, { recursive: true, force: true })`, no helper container and
+no `EACCES`. Everything the webui *creates* for the user (`instances/<pad>/`,
+`meta.env`, `docker-compose.yml`, `web.json`, `logs/`, `src/data/app.db*`) is
+explicitly `chown`ed back to `PUID:PGID` (`ownership.ensureOwned`, see
+[backend/services.md](../backend/services.md)). Historical root-owned data
+self-heals: a background boot sweep runs `normalizeTree` over `instances/` +
+`src/data/`, replacing the old manual `chown -R node:node instances/` runbook.
+Agent containers still run as root and write root-owned files mid-run; the
+sweep re-normalizes them at every webui boot. The one exception is **hermes**:
+its gateway drops to uid 10000 and re-`chown`s `/opt/data` on every boot, so
+`normalizeTree` skips hermes data dirs (`isSelfManagedAgentData`).
+
+**Per-PAD "Container user" (plan 43 Phase 7):** the sweep only *fixes* legacy
+root-owned files — it cannot keep up with a process that still runs as root.
+For new correctness, pads can opt into **user mode** (`USER_MODE=user`), where
+the agent daemon *and* the web terminal run as the `pad` user (`PUID:PGID`,
+1000:1000) so every file the agent writes is user-owned **by construction**,
+in any folder (data dir, default or custom plan-24 workspace). The container
+keeps its root boot (chpasswd, sshd, `start-web.sh` hooks) and the daemon
+drops via `setpriv`/`su` (`start.sh` user branch re-`chown -R 1000:1000` the
+data dir first, so workspace dirs the root boot recreated stay writable);
+SSH stays the root admin door. This is the same shared foundation plan 41's
+non-root dev containers ride on. See [backend/services.md](../backend/services.md)
+and [tabs/settings.md](../tabs/settings.md) for the plumbing and the toggle.
 
 **Image cleanup:** each PAD builds its own `paddock-vm-<name>:latest` tag.
 Deleting a PAD also runs `docker rmi paddock-vm-<name>:latest`. Every image
@@ -375,6 +388,17 @@ full write-up.
 2. Server resolves the session cookie and requires a valid authenticated session (admin, or owner of the PAD) **before** any Docker inspection or exec — skipped only when `AUTO_LOGIN=true`
 3. `ensureTmuxSession()` — idempotent per connect: lazy tmux install on old images (`apt-get install -y tmux`, cached in a `tmuxReady` set), run the session with `bash` when the image has it (falls back to the default shell), hook colored PS1 into `/root/.bashrc`, write `/root/.tmux.conf` (`smcup@:rmcup@` so output accumulates on the normal screen), create the session if missing (`tmux new-session -d`), bump `history-limit` to 10000
 4. Attach via dockerode: `container.exec({ Tty: true, Env: ['TERM=xterm-256color', 'LANG=C.UTF-8'], Cmd: ['tmux', 'attach-session', '-t', <id>] })` → `exec.start({ hijack: true })`. Docker allocates a **real PTY**
+
+**User-mode pads (plan 43 Phase 7):** a pad with `USER_MODE=user` runs the
+whole terminal stack as the `pad` user. Every tmux/exec `docker exec` gains
+`-u <USER_UID>:<USER_GID> -e HOME=/root` (`termUserArgs` in app.js), and the
+dockerode attach exec sets `User: <uid>:<gid>` + `Env: ['HOME=/root', …]`.
+The tmux socket therefore lives at `/tmp/tmux-1000` (matching the pad-user
+session created by the boot flow), the shell runs as uid 1000, and files typed
+in the terminal are user-owned on the host. Root-mode pads are untouched
+(socket `/tmp/tmux-0`). The PS1 hook stays a root-written `/root/.bashrc`
+entry (root-owned config), read by the pad-user shell through the chmod'd-755
+`/root`; a HISTFILE guard silences the unwritable `.bash_history` warning.
 5. Fresh connections first replay the pane history (`tmux capture-pane -t <session> -p -e -S -10000`, LF → CRLF) so scrollback survives refresh
 6. Two-way piping:
    - Client → Server: raw keystroke bytes; resize arrives as a double-NUL-framed JSON control frame (`\x00\x00{type:'resize',cols,rows}`) — no `JSON.parse` on keystrokes
@@ -470,21 +494,19 @@ the door on a network change, drops it when leaving peer mode (BEFORE the agent
 recreate, so the new `ports:` bind doesn't hit "port already allocated"),
 re-execs the boot hook, and re-verifies the server.
 
-### Known limitation: root-owned instance data
+### Ownership model: root control, user-owned files
 
-Agent containers run as **root**, so their data dirs
-(`instances/<name>/<agent>/` — `openclaw.json`, hermes `/opt/data`, etc.) are
-root-owned. The webui runs as uid 1000 and hits `EACCES` on direct reads and
-writes. Current mitigations: a one-shot root-helper container for web-hook and
-config patches and for deletes, and `web.json` persisting the openclaw gateway
-token so `readWebAuth` never needs to re-read the root-owned config.
-**Accepted as a temporary state only** — the intended direction is to make
-instance data **user-owned** (run agent containers as a non-root user). That is
-a cross-cutting change: every per-type `Dockerfile`/`start.sh` (user accounts,
-`HOME`, permissions), the compose `user:`/`group_add` wiring, the root-helper
-paths (they exist *because* of root ownership and should become unnecessary),
-and any tooling that assumes container-root (e.g. the openclaw CLI writing
-config under `/root/.openclaw`).
+The webui container runs as **root** — it needs root-level control of the host
+filesystem (bind-mounted `/workspace`) and the docker socket to manage PADs.
+So it can always read/write agent data and always wipe it. Because a root
+process creates root-owned files by default, everything the webui writes on the
+user's behalf is chown-on-created back to `PUID:PGID`
+(`src/services/ownership.js`: `ensureOwned` after every create site). A boot
+sweep (`normalizeTree` over `src/data/` and `instances/`) heals historical
+root-owned data; hermes data dirs are skipped because hermes manages its own
+ownership (uid 10000). `web.json` still persists the openclaw gateway token so
+`readWebAuth` never has to read the config on the hot path, but that is now a
+consistency choice, not an access workaround.
 
 
 ---

@@ -46,6 +46,9 @@ export default function CreateAgent() {
   const [extraVolumes, setExtraVolumes] = useState([])
   const [extraPorts, setExtraPorts] = useState([])
   const [showAdvanced, setShowAdvanced] = useState(false)
+  // Plan 43 Phase 7: Container user (root | user) — daemon + terminal run as
+  // the pad user (PUID:PGID) so agent-written files are user-owned.
+  const [userMode, setUserMode] = useState('root')
 
   const [phase, setPhase] = useState(() => (urlName ? 'creating' : 'idle')) // idle | creating | done | failed
   const [lines, setLines] = useState([])
@@ -301,6 +304,7 @@ export default function CreateAgent() {
   const advancedCount = [
     wsActive,
     allowDocker,
+    userMode === 'user',
     network,
     extraVolumes.some((v) => v.host && v.container),
     extraPorts.some((p) => p.host),
@@ -410,6 +414,7 @@ export default function CreateAgent() {
           network,
           extraVolumes: vols,
           extraPorts: ports,
+          userMode,
         },
       })
       setPhase('creating')
@@ -624,6 +629,38 @@ export default function CreateAgent() {
                 ⚠ The docker socket is host-root equivalent — this agent can control the entire host.
               </p>
             )}
+
+            {/* Container user (plan 43 Phase 7): root vs the pad user */}
+            <div className="mt-4">
+              <div className="flex items-center justify-between">
+                <label className="block text-xs font-medium text-ink-faint mb-1.5 uppercase tracking-wider">Container user</label>
+                <span className="text-[11px] text-ink-dim">pad uid {prefix === 'vm' ? '1000:1000' : 'PUID:PGID'}</span>
+              </div>
+              <div className="inline-flex rounded-lg border border-line-faint bg-sunken p-0.5">
+                <button type="button"
+                        onClick={() => setUserMode('root')}
+                        className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${userMode === 'root' ? 'bg-accent text-white' : 'text-ink-dim hover:text-ink'}`}>
+                  Root
+                </button>
+                <button type="button"
+                        disabled={agentType === 'hermes'}
+                        onClick={() => setUserMode('user')}
+                        className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${userMode === 'user' ? 'bg-accent text-white' : 'text-ink-dim hover:text-ink'} ${agentType === 'hermes' ? 'opacity-40 cursor-not-allowed' : ''}`}>
+                  Local user
+                </button>
+              </div>
+              {agentType === 'hermes' ? (
+                <p className="text-xs text-ink-dim mt-1.5">
+                  Hermes already runs its daemon as its own user (/opt/data) — the option does not apply.
+                </p>
+              ) : (
+                <p className="text-xs text-ink-dim mt-1.5">
+                  {userMode === 'user'
+                    ? 'The agent daemon and terminal run as the pad user — every file they write is user-owned on the host. SSH stays the root admin door.'
+                    : 'The agent daemon runs as root (legacy default). Choose Local user to run agent processes as the pad user.'}
+                </p>
+              )}
+            </div>
 
             <div className="mt-4">
               <label className="block text-xs font-medium text-ink-faint mb-1.5 uppercase tracking-wider">Network</label>

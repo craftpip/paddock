@@ -5,10 +5,8 @@ services:
     image: paddock-webui:latest
     container_name: paddock
     restart: unless-stopped
-    # Numeric IDs avoid adding a host-named account inside the container.
-    user: "${PUID:-1000}:${PGID:-1000}"
-    group_add:
-      - "${DOCKER_GID:-988}"
+    # Runs as root (plan 43) so the webui has root control over the host FS
+    # and Docker; PUID/PGID are the chown targets for user files (ownership.js).
     ports:
       - "6789:6789"
       - "5173:5173"

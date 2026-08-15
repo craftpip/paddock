@@ -19,6 +19,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { ensureOwned } = require('./ownership');
 
 /** Resolved each call so runtime env overrides (tests) take effect. */
 function instancesDir() {
@@ -86,6 +87,7 @@ function setBuildEnv(name, kv) {
     }
   }
   fs.writeFileSync(p, content);
+  ensureOwned(p);
 }
 
 /** Extract `ARG <NAME>[=<default>]` lines from a Dockerfile. Returns

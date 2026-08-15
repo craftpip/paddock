@@ -165,7 +165,13 @@ collapsed Optional settings accordion:
      `editable` ones.
   2. **Container options** — "Allow docker in the container" toggle (docker.sock
      + CLI, rebuilds the image at create) and a Network dropdown of running
-     containers (peer routing via `network_mode: container:`).
+     containers (peer routing via `network_mode: container:`), plus the
+     **Container user** segmented control (Root / Local user, plan 43 Phase 7).
+     Local user runs the agent daemon + terminal as the `pad` user
+     (`PUID:PGID`) so every file the agent writes is user-owned on the host;
+     it persists as `USER_MODE=user` in `meta.env` (see
+     `tabs/settings.md`). The control is disabled for hermes (already runs as
+     its own user).
   3. **Additional volumes** — dynamic rows, each with a **type select**
      (Bind / Named volume), source-or-name input, container path, and readonly
      checkbox. Named-volume rows hint at discovery: "Attaches the existing

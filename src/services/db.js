@@ -2,6 +2,8 @@ const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
 
+const { ensureDbOwned } = require('./ownership');
+
 const DB_PATH = path.join(__dirname, '..', 'data', 'app.db');
 
 let _db = null;
@@ -13,6 +15,9 @@ function getDb() {
   _db.pragma('journal_mode = WAL');
   _db.pragma('foreign_keys = ON');
   migrate(_db);
+  // The webui runs as root (plan 43); a fresh db / new wal-shm would be
+  // root-owned, so chown them back to PUID/PGID right after open.
+  ensureDbOwned();
   return _db;
 }
 

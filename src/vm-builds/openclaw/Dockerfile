@@ -31,6 +31,7 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.l
     jq \
     python3 \
     tmux \
+    sudo \
     # ^ ADD or REMOVE package lines above this point
     && rm -rf /var/lib/apt/lists/*
 
@@ -56,7 +57,20 @@ COPY extras/ /opt/extras/
 # Uncomment to run extra setup on build:
 # RUN bash /opt/extras/setup.sh
 
-# ---- 9. ENTRYPOINT ----------------------------------------------
+# ---- 9. PAD USER (user-mode pads, plan 43 Phase 7) ---------------
+# A `pad` user at PUID:PGID (1000:1000) + passwordless sudo, so a pad can run
+# its daemon as a non-root user (`USER_MODE=user`; start.sh drops via setpriv).
+# `/root` is chmod'd 755 so a uid-1000 process can traverse into the bind-
+# mounted /root/.openclaw config — the mount CONTENTS are PUID-owned (webui
+# chowns on create + the boot sweep heals), so the pad user owns its files.
+# `-o` tolerates base images that already ship a uid-1000 account.
+RUN groupadd -g 1000 pad 2>/dev/null || true; \
+    (id pad >/dev/null 2>&1 || useradd -m -o -u 1000 -g 1000 -s /bin/bash pad 2>/dev/null) || useradd -m -o -u 1000 -s /bin/bash pad 2>/dev/null || true; \
+    chmod 755 /root; \
+    if ! command -v sudo >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends sudo; fi; \
+    echo 'ALL ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/pad && chmod 440 /etc/sudoers.d/pad
+
+# ---- 10. ENTRYPOINT ---------------------------------------------
 COPY start.sh /usr/local/bin/start.sh
 RUN chmod +x /usr/local/bin/start.sh
 

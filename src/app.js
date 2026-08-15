@@ -21,6 +21,8 @@ const jobLog = require('./services/job-log');
 const apiKeys = require('./services/api-keys');
 const containerHealth = require('./services/container-health');
 const logStore = require('./services/log-store');
+const ownership = require('./services/ownership');
+const { USER_UID, USER_GID } = ownership;
 const { getDb } = require('./services/db');
 const { runCmdStream } = require('./services/cmd');
 const { setupSession, getSessionFromCookie, requireAuth, requireAdmin, csrfToken, csrfCheck, hashPassword, verifyPassword, checkNeedsSetup } = require('./middleware/auth');
@@ -197,7 +199,25 @@ async function getAllVms() {
 }
 
 async function dockerExec(vmName, cmd, timeout = 30000) {
-  return runCmd('docker', ['exec', '-i', vmName, 'sh', '-lc', cmd], { timeout });
+  return runCmd('docker', ['exec', '-i', ...termUserArgs(vmName), vmName, 'sh', '-lc', cmd], { timeout });
+}
+
+// ─── User-mode (Container user) exec helpers (plan 43 Phase 7) ──────────────
+// A pad with meta USER_MODE=user runs its daemon + terminal as the `pad` user
+// (PUID:PGID=1000:1000) so every file it writes is user-owned by construction.
+// Root-mode pads (the default) are unaffected. User-mode execs get
+// `-u <uid>:<gid>` and keep HOME=/root — the agent CLIs (openclaw, opencode,
+// ...) resolve their config/workspace via $HOME, and /root/.<agent> is the
+// bind-mounted data dir. The hooks (.bashrc/.tmux.conf) stay at /root and are
+// written by ROOT execs (they're root-owned config files); the pad-user shells
+// read them via the chmod'd-755 /root. A HISTFILE guard in the PS1 hook keeps
+// bash from whining about the unwritable /root/.bash_history for uid 1000.
+
+/** Extra `docker exec` args ([] for root-mode pads) running a command as the
+ *  pad user. */
+function termUserArgs(vmName) {
+  const meta = readMeta(vmName);
+  return meta.USER_MODE === 'user' ? ['-u', `${USER_UID}:${USER_GID}`, '-e', 'HOME=/root'] : [];
 }
 
 // ─── Terminal sessions (persistent tmux shells inside the PAD) ─────────────
@@ -245,19 +265,19 @@ function safeSessionName(s) {
  * `[t]mux` avoids pkill matching its own wrapping shell command line. */
 async function sweepStaleAttaches(vmName, session) {
   try {
-    await runCmd('docker', ['exec', vmName, 'sh', '-lc', `pkill -f '[t]mux attach-session -t ${session}' 2>/dev/null || true`], { timeout: 10000, check: false });
+    await runCmd('docker', ['exec', ...termUserArgs(vmName), vmName, 'sh', '-lc', `pkill -f '[t]mux attach-session -t ${session}' 2>/dev/null || true`], { timeout: 10000, check: false });
   } catch {}
 }
 
 async function containerHasTmux(vmName) {
-  const r = await runCmd('docker', ['exec', vmName, 'sh', '-lc', 'command -v tmux'], { timeout: 15000, check: false });
+  const r = await runCmd('docker', ['exec', ...termUserArgs(vmName), vmName, 'sh', '-lc', 'command -v tmux'], { timeout: 15000, check: false });
   return r.code === 0;
 }
 
 const sqliteReady = new Set(); // PAD names where sqlite3 is confirmed present
 
 async function containerHasSqlite(vmName) {
-  const r = await runCmd('docker', ['exec', vmName, 'sh', '-lc', 'command -v sqlite3'], { timeout: 15000, check: false });
+  const r = await runCmd('docker', ['exec', ...termUserArgs(vmName), vmName, 'sh', '-lc', 'command -v sqlite3'], { timeout: 15000, check: false });
   return r.code === 0;
 }
 
@@ -301,10 +321,13 @@ async function ensureTmux(vmName) {
  *  server env, not the attach exec env, so the old PS1-on-exec trick is moot. */
 async function ensureTmuxSession(vmName, session, cols, rows) {
   await ensureTmux(vmName);
+  // The hooks write ROOT-owned config files (/root/.bashrc, /root/.tmux.conf)
+  // so they run as the container root even for user-mode pads; the pad-user
+  // shells read them (HOME=/root, /root is chmod 755 in user-mode images).
   await runCmd(
     'docker',
     ['exec', vmName, 'sh', '-lc',
-      `grep -q '__PAD_PS1__' /root/.bashrc 2>/dev/null || echo "export PS1='\\[\\e[1;36m\\]\\u@\\h\\[\\e[0m\\]:\\w\\$ '  # __PAD_PS1__" >> /root/.bashrc`],
+      `grep -q '__PAD_PS1__' /root/.bashrc 2>/dev/null || echo -e "export PS1='\\[\\e[1;36m\\]\\u@\\h\\[\\e[0m\\]:\\w\\$ '\\n[ -w \"\${HOME}/.bash_history\" ] || HISTFILE=/tmp/pad_history  # __PAD_PS1__" >> /root/.bashrc`],
     { timeout: 15000, check: false }
   );
   // tmux attach switches the client to the alternate screen, which has no
@@ -318,28 +341,28 @@ async function ensureTmuxSession(vmName, session, cols, rows) {
       `grep -q '__PAD_TMUX_V2__' /root/.tmux.conf 2>/dev/null || echo "set -ga terminal-overrides ',xterm-256color:smcup@:rmcup@'  # __PAD_TMUX_V2__" >> /root/.tmux.conf`],
     { timeout: 15000, check: false }
   );
-  const has = await runCmd('docker', ['exec', vmName, 'tmux', 'has-session', '-t', session], { timeout: 15000, check: false });
+  const has = await runCmd('docker', ['exec', ...termUserArgs(vmName), vmName, 'tmux', 'has-session', '-t', session], { timeout: 15000, check: false });
   if (has.code !== 0) {
     const c = Math.max(40, Math.min(400, parseInt(cols, 10) || 120));
     const r = Math.max(12, Math.min(120, parseInt(rows, 10) || 32));
     // Prefer bash over the image's default shell: busybox ash (Alpine images,
     // e.g. picoclaw) echoes `^C` with an extra newline on Ctrl+C, leaving a
     // blank line before the next prompt. bash emits a clean single newline.
-    const bash = await runCmd('docker', ['exec', vmName, 'sh', '-lc', 'command -v bash'], { timeout: 15000, check: false });
+    const bash = await runCmd('docker', ['exec', ...termUserArgs(vmName), vmName, 'sh', '-lc', 'command -v bash'], { timeout: 15000, check: false });
     const shellCmd = bash.code === 0 && bash.stdout.trim() ? bash.stdout.trim() : null;
     const args = ['tmux', 'new-session', '-d', '-s', session, '-x', String(c), '-y', String(r)];
     if (shellCmd) args.push(shellCmd);
-    await runCmd('docker', ['exec', vmName, ...args], { timeout: 20000, check: false });
+    await runCmd('docker', ['exec', ...termUserArgs(vmName), vmName, ...args], { timeout: 20000, check: false });
   }
   // Keep enough history that a fresh attach has something real to replay.
-  await runCmd('docker', ['exec', vmName, 'sh', '-lc', `tmux set-option -g history-limit ${TMUX_HISTORY} 2>/dev/null || true`], { timeout: 15000, check: false });
+  await runCmd('docker', ['exec', ...termUserArgs(vmName), vmName, 'sh', '-lc', `tmux set-option -g history-limit ${TMUX_HISTORY} 2>/dev/null || true`], { timeout: 15000, check: false });
   // The webui draws its own session chrome — a tmux status bar in the pane
   // would only duplicate it (the green `[main] 0:bash` line). Kill it globally
   // so the pane shows pure app output. Idempotent: no-op on later connects.
-  await runCmd('docker', ['exec', vmName, 'sh', '-lc', 'tmux set-option -g status off 2>/dev/null || true'], { timeout: 15000, check: false });
+  await runCmd('docker', ['exec', ...termUserArgs(vmName), vmName, 'sh', '-lc', 'tmux set-option -g status off 2>/dev/null || true'], { timeout: 15000, check: false });
   await runCmd(
     'docker',
-    ['exec', vmName, 'sh', '-lc',
+    ['exec', ...termUserArgs(vmName), vmName, 'sh', '-lc',
       `tmux show-options -gqv terminal-overrides | grep -Fq 'xterm-256color:smcup@:rmcup@' || tmux set-option -ga terminal-overrides ',xterm-256color:smcup@:rmcup@'`],
     { timeout: 15000, check: false }
   );
@@ -349,7 +372,7 @@ async function listTmuxSessions(vmName) {
   await ensureTmux(vmName);
   // tmux 3.3a converts `\t` inside `-F` formats into `_`, so use a `|`
   // delimiter (session names are restricted to [a-zA-Z0-9._-], never `|`).
-  const r = await runCmd('docker', ['exec', vmName, 'tmux', 'list-sessions', '-F', '#{session_name}|#{session_attached}|#{session_created}'], { timeout: 15000, check: false });
+  const r = await runCmd('docker', ['exec', ...termUserArgs(vmName), vmName, 'tmux', 'list-sessions', '-F', '#{session_name}|#{session_attached}|#{session_created}'], { timeout: 15000, check: false });
   const sessions = [];
   for (const line of (r.stdout || '').split('\n')) {
     const [name, attached, created] = line.split('|');
@@ -361,7 +384,7 @@ async function listTmuxSessions(vmName) {
 
 async function killTmuxSession(vmName, session) {
   await ensureTmux(vmName);
-  const r = await runCmd('docker', ['exec', vmName, 'tmux', 'kill-session', '-t', session], { timeout: 15000, check: false });
+  const r = await runCmd('docker', ['exec', ...termUserArgs(vmName), vmName, 'tmux', 'kill-session', '-t', session], { timeout: 15000, check: false });
   if (r.code !== 0 && !/can't find|no such|no server/i.test(String(r.stderr))) {
     throw new Error(String(r.stderr || 'tmux kill-session failed').trim());
   }
@@ -2070,7 +2093,7 @@ app.get('/api/vault/:id/decrypt', requireAdmin, (req, res) => {
 // ─── API: Create Agent ──────────────────────────────────────
 
 app.post('/api/agents/create', async (req, res) => {
-  const { name, agent, assign_to, workspace_host, workspace_dir, allowDocker, network, sshEnabled, port, sshContainerPort, password, extraVolumes, extraPorts } = req.body;
+  const { name, agent, assign_to, workspace_host, workspace_dir, allowDocker, network, sshEnabled, port, sshContainerPort, password, extraVolumes, extraPorts, userMode } = req.body;
   if (!name) return res.status(400).json({ error: 'Name is required' });
   if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
   if (registry.getAgent(name)) return res.status(409).json({ error: 'Agent already exists' });
@@ -2091,6 +2114,7 @@ app.post('/api/agents/create', async (req, res) => {
       network: network || '',
       extraVolumes,
       extraPorts,
+      userMode: userMode === 'user' ? 'user' : '',
     });
   } catch (e) {
     return res.status(400).json({ error: e.message });
@@ -2118,6 +2142,7 @@ app.post('/api/agents/create', async (req, res) => {
         password: typeof password === 'string' ? password : '',
         extraVolumes,
         extraPorts,
+        userMode: userMode === 'user' ? 'user' : '',
         onLog: log,
         onStep: step,
       });
@@ -2198,12 +2223,12 @@ app.post('/api/agents/:name/onboard', async (req, res) => {
 
   try {
     if (bot_token) {
-      await runCmd('docker', ['exec', name, 'openclaw', 'channels', 'add', '--channel', 'telegram', '--token', bot_token], { timeout: 30000 });
-      await runCmd('docker', ['exec', name, 'openclaw', 'config', 'set', 'channels.telegram.allowFrom', JSON.stringify([user_id || process.env.DEFAULT_ALLOW_FROM || '532156945'])], { timeout: 15000 });
-      await runCmd('docker', ['exec', name, 'openclaw', 'config', 'set', 'channels.telegram.dmPolicy', 'allowlist'], { timeout: 15000 });
+      await runCmd('docker', ['exec', ...termUserArgs(name), name, 'openclaw', 'channels', 'add', '--channel', 'telegram', '--token', bot_token], { timeout: 30000 });
+      await runCmd('docker', ['exec', ...termUserArgs(name), name, 'openclaw', 'config', 'set', 'channels.telegram.allowFrom', JSON.stringify([user_id || process.env.DEFAULT_ALLOW_FROM || '532156945'])], { timeout: 15000 });
+      await runCmd('docker', ['exec', ...termUserArgs(name), name, 'openclaw', 'config', 'set', 'channels.telegram.dmPolicy', 'allowlist'], { timeout: 15000 });
     }
     if (api_key_provider && api_key_value) {
-      await runCmd('docker', ['exec', '-i', name, 'openclaw', 'models', 'auth', 'paste-api-key', '--provider', api_key_provider], { input: api_key_value, timeout: 30000 });
+      await runCmd('docker', ['exec', '-i', ...termUserArgs(name), name, 'openclaw', 'models', 'auth', 'paste-api-key', '--provider', api_key_provider], { input: api_key_value, timeout: 30000 });
     }
     res.json({ ok: true, message: 'Onboard complete' });
   } catch (e) {
@@ -2329,6 +2354,21 @@ app.use((err, req, res, next) => {
 });
 
 // ─── Boot ───────────────────────────────────────────────────
+
+// Plan 43: the webui container runs as root, so ownership of user files must
+// be normalized at boot — BEFORE the db is opened (a fresh db created by a
+// root process would be root-owned; db.js also re-chowns after open).
+ownership.ensureDataOwned();
+getDb();
+// Idempotent background sweep over instances/ — heals any historical
+// root-owned pad data without blocking startup (replaces the manual
+// `chown -R node:node instances/` runbook).
+setImmediate(() => {
+  try {
+    ownership.normalizeTree(INSTANCES_DIR, (dir) =>
+      ownership.isSelfManagedAgentData(dir, INSTANCES_DIR));
+  } catch {}
+});
 
 const server = app.listen(6789, () => console.log('VM WebUI listening on port 6789'));
 
@@ -2488,7 +2528,7 @@ wss.on('connection', async (ws, req) => {
     try {
       const hist = await runCmd(
         'docker',
-        ['exec', vmName, 'sh', '-lc', `tmux capture-pane -t ${session} -p -e -S -${TMUX_HISTORY} 2>/dev/null`],
+        ['exec', ...termUserArgs(vmName), vmName, 'sh', '-lc', `tmux capture-pane -t ${session} -p -e -S -${TMUX_HISTORY} 2>/dev/null`],
         { timeout: 20000, check: false }
       );
       if (hist.code === 0 && hist.stdout && ws.readyState === ws.OPEN) {
@@ -2502,6 +2542,7 @@ wss.on('connection', async (ws, req) => {
 
     try {
       const container = dockerClient.getContainer(vmName);
+      const userMeta = readMeta(vmName);
       dockerExec = await container.exec({
         AttachStdin: true,
         AttachStdout: true,
@@ -2510,7 +2551,10 @@ wss.on('connection', async (ws, req) => {
         // LANG is required: without a UTF-8 locale tmux assumes the client
         // cannot do Unicode and substitutes every non-ASCII glyph with `_`
         // (TUI bullets ● ◆ ○ ↑/↓ • all arrive as underscores).
-        Env: ['TERM=xterm-256color', 'LANG=C.UTF-8'],
+        // User-mode pads (plan 43 Phase 7) attach as the `pad` user so the
+        // tmux socket/user match the session created by ensureTmuxSession.
+        ...(userMeta.USER_MODE === 'user' ? { User: `${USER_UID}:${USER_GID}` } : {}),
+        Env: ['TERM=xterm-256color', 'LANG=C.UTF-8', ...(userMeta.USER_MODE === 'user' ? ['HOME=/root'] : [])],
         // Attach to the persistent tmux session instead of spawning a throwaway
         // `bash -i`. On WS close the attach client dies but the session stays,
         // so reloads and tab switches pick up exactly where they left off.
