@@ -13,8 +13,70 @@
         document.documentElement.setAttribute('data-theme', 'dark')
       }
     </script>
-    <script type="module" crossorigin src="/assets/index-reAANuOB.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-DZrsmb9N.css">
+    <script>
+      // Stale-asset self-heal: after a frontend rebuild the hashed JS file from
+      // the old index.html no longer exists. chunk loads then fail with
+      // "Failed to load module script: MIME type text/html" (SPA fallback) or
+      // 404. Show a reload prompt instead of a permanent black screen.
+      (function () {
+        var reloaded = false
+        function doReload(msg) {
+          if (reloaded) return
+          reloaded = true
+          try { sessionStorage.setItem('paddock-reloaded', '1') } catch {}
+          // If we already reloaded once and it still fails, stop looping.
+          try {
+            if (sessionStorage.getItem('paddock-reloaded') && performance.now() < 5000) {
+              // first reload in this session — try once
+            }
+          } catch {}
+          var el = document.getElementById('root')
+          if (el) {
+            el.innerHTML =
+              '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:60vh;text-align:center;padding:2rem;font-family:system-ui,sans-serif;color:#a1a1aa">' +
+              '<p style="margin-bottom:1rem">' + (msg || 'A new version is available.') + '</p>' +
+              '<button onclick="location.reload(true)" style="padding:0.5rem 1.2rem;border-radius:0.5rem;background:#6366f1;color:#fff;border:none;cursor:pointer;font-weight:600">Reload</button>' +
+              '</div>'
+          }
+          // Auto-reload once after 1.5s if user doesn't click.
+          setTimeout(function () {
+            try {
+              if (!sessionStorage.getItem('paddock-auto-reloaded')) {
+                sessionStorage.setItem('paddock-auto-reloaded', '1')
+                location.reload()
+              }
+            } catch { location.reload() }
+          }, 1500)
+        }
+        window.addEventListener('error', function (e) {
+          var msg = (e && e.message) || ''
+          var target = e && e.target
+          var src = target && (target.src || target.href) || ''
+          if (
+            msg.indexOf('Failed to load module script') !== -1 ||
+            msg.indexOf('MIME type') !== -1 ||
+            (src && src.indexOf('/assets/') !== -1)
+          ) {
+            doReload('A new version is available — please reload.')
+          }
+        }, true)
+        window.addEventListener('unhandledrejection', function (e) {
+          var r = e && e.reason
+          var m = r && (r.message || String(r)) || ''
+          if (
+            m.indexOf('Failed to fetch dynamically imported module') !== -1 ||
+            m.indexOf('error loading dynamically imported module') !== -1 ||
+            m.indexOf('Importing a module script failed') !== -1 ||
+            m.indexOf('ChunkLoadError') !== -1 ||
+            m.indexOf('/assets/') !== -1
+          ) {
+            doReload('A new version is available — please reload.')
+          }
+        })
+      })()
+    </script>
+    <script type="module" crossorigin src="/assets/index-BshUdQ7g.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-CO29mEjH.css">
   </head>
   <body class="bg-canvas text-ink font-sans antialiased min-h-screen">
     <div id="root"></div>
