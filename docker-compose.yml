@@ -14,7 +14,7 @@ services:
       - .:/workspace:rw
       - ./src:/app:rw
       - /www2:/www2:ro
-      - /www1:/www1:ro
+      - /www1:/www1
       - /var/run/docker.sock:/var/run/docker.sock:ro
     env_file:
       - .env

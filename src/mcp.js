@@ -412,6 +412,7 @@ function registerTools(server) {
         agent: z.enum(['openclaw', 'opencode', 'picoclaw', 'hermes', 'codex']).optional().describe('Agent type (default openclaw)'),
         confirm: z.boolean().describe('Must be true to create — heavy and adds a new agent to the fleet'),
         userMode: z.enum(['root', 'user']).optional().describe('Container user: "root" (default) or "user" — user runs the agent daemon + terminal as the pad user (PUID:PGID) so agent-written files are user-owned. Not applicable to hermes (it already runs as its own user).'),
+        generateDevContainer: z.boolean().optional().describe('Generate .devcontainer/devcontainer.json in the workspace when it has none (default true) — the portable mirror of the pad, marked x-paddock.generated'),
         allowDocker: z.boolean().optional().describe('Mount the host docker socket + CLI into the container'),
         network: z.string().optional().describe('Network peer container to route through'),
         sshEnabled: z.boolean().optional().describe('Expose OpenSSH'),
@@ -457,7 +458,8 @@ function registerTools(server) {
           workspaceDir: args.workspaceDir || '',
           extraVolumes: args.extraVolumes,
           extraPorts: args.extraPorts,
-          userMode: args.userMode === 'user' ? 'user' : '',
+          userMode: args.userMode,
+          generateDevContainer: args.generateDevContainer !== false,
           onLog: (type, msg) => log.push(`[${type}] ${msg}`),
           onStep: () => {},
         });

@@ -25,13 +25,27 @@ function fmtTime(ts) {
 export default function CreateAgent() {
   const navigate = useNavigate()
   const { name: urlName } = useParams()
-  const [name, setName] = useState('')
-  const [agentType, setAgentType] = useState('openclaw')
+
+  const DRAFT_KEY = 'createAgentDraft'
+  const [name, setName] = useState(() => {
+    if (!urlName) try { return JSON.parse(sessionStorage.getItem(DRAFT_KEY))?.name || '' } catch {}
+    return ''
+  })
+  const [agentType, setAgentType] = useState(() => {
+    if (!urlName) try { return JSON.parse(sessionStorage.getItem(DRAFT_KEY))?.agentType || 'openclaw' } catch {}
+    return 'openclaw'
+  })
   const [agentTypes, setAgentTypes] = useState([])
   const [prefix, setPrefix] = useState('vm')
   const [hostWorkspaceRoot, setHostWorkspaceRoot] = useState('')
-  const [wsHost, setWsHost] = useState('')
-  const [wsDir, setWsDir] = useState('')
+  const [wsHost, setWsHost] = useState(() => {
+    if (!urlName) try { return JSON.parse(sessionStorage.getItem(DRAFT_KEY))?.wsHost || '' } catch {}
+    return ''
+  })
+  const [wsDir, setWsDir] = useState(() => {
+    if (!urlName) try { return JSON.parse(sessionStorage.getItem(DRAFT_KEY))?.wsDir || '' } catch {}
+    return ''
+  })
   // Plan 40: path autocomplete + compose volume pre-fill
   const [wsProbe, setWsProbe] = useState(null) // {exists, writable, forbidden, compose}
   const [suggestions, setSuggestions] = useState([])
@@ -41,14 +55,56 @@ export default function CreateAgent() {
 
   // Plan 28 options
   const [containers, setContainers] = useState([])
-  const [allowDocker, setAllowDocker] = useState(false)
-  const [network, setNetwork] = useState('')
-  const [extraVolumes, setExtraVolumes] = useState([])
-  const [extraPorts, setExtraPorts] = useState([])
-  const [showAdvanced, setShowAdvanced] = useState(false)
+  const [allowDocker, setAllowDocker] = useState(() => {
+    if (!urlName) try { return JSON.parse(sessionStorage.getItem(DRAFT_KEY))?.allowDocker || false } catch {}
+    return false
+  })
+  const [network, setNetwork] = useState(() => {
+    if (!urlName) try { return JSON.parse(sessionStorage.getItem(DRAFT_KEY))?.network || '' } catch {}
+    return ''
+  })
+  const [extraVolumes, setExtraVolumes] = useState(() => {
+    if (!urlName) try { return JSON.parse(sessionStorage.getItem(DRAFT_KEY))?.extraVolumes || [] } catch {}
+    return []
+  })
+  const [extraPorts, setExtraPorts] = useState(() => {
+    if (!urlName) try { return JSON.parse(sessionStorage.getItem(DRAFT_KEY))?.extraPorts || [] } catch {}
+    return []
+  })
+  const [showAdvanced, setShowAdvanced] = useState(() => {
+    if (!urlName) try { return JSON.parse(sessionStorage.getItem(DRAFT_KEY))?.showAdvanced || false } catch {}
+    return false
+  })
   // Plan 43 Phase 7: Container user (root | user) — daemon + terminal run as
   // the pad user (PUID:PGID) so agent-written files are user-owned.
-  const [userMode, setUserMode] = useState('root')
+  const [userMode, setUserMode] = useState(() => {
+    if (!urlName) try { return JSON.parse(sessionStorage.getItem(DRAFT_KEY))?.userMode || 'root' } catch {}
+    return 'root'
+  })
+  // Plan 41: build commands + post-create commands (devcontainer pre-fill)
+  const [buildCommands, setBuildCommands] = useState(() => {
+    if (!urlName) try { return JSON.parse(sessionStorage.getItem(DRAFT_KEY))?.buildCommands || '' } catch {}
+    return ''
+  })
+  const [postCreate, setPostCreate] = useState(() => {
+    if (!urlName) try { return JSON.parse(sessionStorage.getItem(DRAFT_KEY))?.postCreate || '' } catch {}
+    return ''
+  })
+  const [postStart, setPostStart] = useState(() => {
+    if (!urlName) try { return JSON.parse(sessionStorage.getItem(DRAFT_KEY))?.postStart || '' } catch {}
+    return ''
+  })
+  const [postAttach, setPostAttach] = useState(() => {
+    if (!urlName) try { return JSON.parse(sessionStorage.getItem(DRAFT_KEY))?.postAttach || '' } catch {}
+    return ''
+  })
+  const [devContainer, setDevContainer] = useState(null) // {found, filePath, name, ...}
+  // Plan 41 item 20: generate a `.devcontainer/devcontainer.json` mirror in the
+  // workspace when it has none (default on).
+  const [generateDevContainer, setGenerateDevContainer] = useState(() => {
+    if (!urlName) try { return JSON.parse(sessionStorage.getItem(DRAFT_KEY))?.generateDevContainer ?? true } catch {}
+    return true
+  })
 
   const [phase, setPhase] = useState(() => (urlName ? 'creating' : 'idle')) // idle | creating | done | failed
   const [lines, setLines] = useState([])
@@ -60,6 +116,13 @@ export default function CreateAgent() {
   const acTimer = useRef(null)
   const discTimer = useRef(null)
   const acIndexRef = useRef(-1)
+  // Plan 41 item 17: whether the user has manually picked the Container user
+  // toggle. The devcontainer probe may default it to 'user' for a non-root
+  // workspace, but only while untouched — an explicit pick always wins.
+  const userModeTouched = useRef(false)
+  // Whether the user has manually typed into the Container workspace path input.
+  // Prevents auto-fill logic from overwriting their edit.
+  const wsDirTouched = useRef(false)
 
   useEffect(() => {
     api('/api/config').then(cfg => {
@@ -87,6 +150,26 @@ export default function CreateAgent() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlName])
+
+  // Reset wsDir manual-edit flag when agent type changes so auto-fill logic
+  // re-runs with the new type's defaults (devcontainer workspaceFolder or same-path).
+  useEffect(() => {
+    wsDirTouched.current = false
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentType])
+
+  // Clear lifecycle drafts and re-probe when agent type changes — the
+  // previous agent's translated commands would be wrong for the new agent
+  // (plan 45). Skips the initial mount so sessionStorage drafts survive.
+  const agentTypeInitRef = useRef(true)
+  useEffect(() => {
+    if (agentTypeInitRef.current) { agentTypeInitRef.current = false; return }
+    setPostCreate('')
+    setPostStart('')
+    setPostAttach('')
+    if (wsHost.trim()) probeDevContainer(wsHost.trim())
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentType])
 
   // Progress URL (/agents/create/:name): resume the create job stream on
   // refresh — the job events live server-side, so reconnect and replay.
@@ -160,7 +243,13 @@ export default function CreateAgent() {
       if (String(r.path) === q.trim()) p = r
     } catch {}
     setWsProbe(p)
-    if (!p || !p.exists || !p.compose) return
+    if (!p || !p.exists || !p.compose) {
+      // No compose project: still look for a devcontainer.json (plan 41) so the
+      // post-create box can pre-fill from the workspace's own spec file.
+      const foundDc = await probeDevContainer(q)
+      if (!foundDc) autoFillWsDirFromHost(q)
+      return
+    }
     try {
       const d = await api(`/api/paths/volumes?path=${encodeURIComponent(q)}`)
       if (String(d.path) !== q.trim()) return
@@ -180,6 +269,102 @@ export default function CreateAgent() {
         })
       }
     } catch {}
+    const foundDc = await probeDevContainer(q)
+    if (!foundDc) autoFillWsDirFromHost(q)
+  }
+
+  // Plan 41: when the picked workspace ships a devcontainer.json, pre-fill the
+  // post-create box from its lifecycle commands (spec order onCreate →
+  // updateContent → postCreate) with a badge. Only when the user hasn't typed
+  // into the box yet — an edit keeps their text.
+  async function probeDevContainer(q) {
+    setDevContainer(null)
+    if (!q.startsWith('/')) return false
+    let d = null
+    try {
+      const r = await api(`/api/paths/devcontainer?path=${encodeURIComponent(q)}`)
+      if (r.found) d = r
+    } catch {}
+    if (!d) return false
+    setDevContainer(d)
+    // Devcontainer lifecycle commands are authored against the devcontainer's
+    // workspace mount (its `workspaceFolder`, or the `/workspace` convention).
+    // The PAD mounts the same project at its OWN container workspace path
+    // (driver-fixed, e.g. openclaw's /root/.openclaw/workspace) — so translate
+    // the workspace-root paths in the pre-filled commands, or they fail inside
+    // the container (e.g. `cd /workspace/app` → ENOENT).
+    const padWs = (driverWsDir || (wsFixed ? wsDir : (wsDir || wsHost)) || '').trim()
+    // Whole-token translation: replace a workspace root ONLY when it starts a
+    // path token (preceded by start/whitespace/quote/;/&/|/(/= — never by a
+    // path char). Without the "not preceded by /.-word" guard, re-probing an
+    // already-synced mirror would match the /workspace INSIDE an already
+    // translated path (e.g. /root/.openclaw/workspace/app) and double it into
+    // /root/.openclaw/root/.openclaw/workspace/app (plan 45).
+    const translateRoot = (cmd, root) => {
+      const esc = root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      return cmd.replace(new RegExp(`(^|[^/.\\w-])${esc}(?=[/\\s"';&|)$])`, 'g'), `$1${padWs}`)
+    }
+    const dcCmdForPad = (cmd) => {
+      if (!cmd || !padWs || padWs === '/workspace') return cmd
+      let out = cmd
+      if (d.workspaceFolder && d.workspaceFolder !== '/workspace' && d.workspaceFolder !== padWs) {
+        out = translateRoot(out, d.workspaceFolder)
+      }
+      out = out.replace(/(^|[^/.\w-])\/workspace(?=[/\s"';&|)$])/g, `$1${padWs}`)
+      return out
+    }
+    const joined = [d.onCreateCommand, d.updateContentCommand, d.postCreateCommand]
+      .filter(Boolean)
+      .join('\n')
+    if (joined.trim()) {
+      setPostCreate((prev) => (prev.trim() ? prev : dcCmdForPad(joined.trim())))
+    }
+    if ((d.postStartCommand || '').trim()) {
+      setPostStart((prev) => (prev.trim() ? prev : dcCmdForPad(d.postStartCommand)))
+    }
+    if ((d.postAttachCommand || '').trim()) {
+      setPostAttach((prev) => (prev.trim() ? prev : dcCmdForPad(d.postAttachCommand)))
+    }
+    // item 17: a devcontainer declaring a non-root remoteUser/containerUser
+    // means the pad should run as the pad user. Seed the Container user toggle
+    // to 'user' — only while the user hasn't manually picked one.
+    if (!userModeTouched.current && d.userMode === 'user') {
+      setUserMode('user')
+    }
+    // Auto-fill the container workspace path from the driver's default when
+    // the user hasn't manually typed into it. Use the driver's workspaceDir
+    // (not the mirror's workspaceFolder which is agent-specific from the last
+    // sync and would give the wrong path for a different agent type — plan 45).
+    if (!wsFixed && !wsDirTouched.current && driverWsDir) {
+      setWsDir(driverWsDir)
+    }
+    // Auto-fill additional ports from the devcontainer's forwardPorts.
+    // Format: "8080", "host:container", "ip:host:container" (with optional /proto).
+    if (d.forwardPorts && d.forwardPorts.length) {
+      const parsed = d.forwardPorts.map((fp) => {
+        const raw = String(fp).split('/')[0]; // strip /tcp /udp
+        const parts = raw.split(':');
+        if (parts.length >= 2) {
+          return { host: parts[parts.length - 2], container: parts[parts.length - 1] };
+        }
+        return { host: parts[0], container: parts[0] };
+      }).filter((p) => p.host && p.container);
+      if (parsed.length) {
+        setExtraPorts((prev) => (prev.length ? prev : parsed))
+      }
+    }
+    return true
+  }
+
+  // Auto-fill the container workspace path from the host source when no
+  // devcontainer declared a workspaceFolder. Uses the one-to-one mount
+  // convention (container path = host path) for absolute paths outside
+  // the instances folder.
+  function autoFillWsDirFromHost(hostPath) {
+    if (wsFixed || wsDirTouched.current) return
+    const h = (hostPath || '').trim()
+    if (!h.startsWith('/') || h.startsWith('instances/')) return
+    setWsDir(h)
   }
 
   function onWsKeyDown(e) {
@@ -308,6 +493,8 @@ export default function CreateAgent() {
     network,
     extraVolumes.some((v) => v.host && v.container),
     extraPorts.some((p) => p.host),
+    buildCommands.trim() ? true : false,
+    postCreate.trim() ? true : false,
   ].filter(Boolean).length
 
   function closeStream() {
@@ -327,7 +514,9 @@ export default function CreateAgent() {
         const data = JSON.parse(e.data)
         if (data.state === 'start') {
           let cmd
-          if (data.step === 'setup') {
+          if (data.cmd) {
+            cmd = data.cmd
+          } else if (data.step === 'setup') {
             // The real setup command lives in the agent driver; fall back to
             // the openclaw default only if the registry hasn't loaded yet.
             cmd = setupCmdFor(currentType, job) || STEP_COMMANDS.setup(job)
@@ -356,6 +545,7 @@ export default function CreateAgent() {
       closeStream()
       setRunningCmd('')
       setPhase('done')
+      try { sessionStorage.removeItem(DRAFT_KEY) } catch {}
     })
 
     // Server-sent error event (has data) vs connection loss (no data — the
@@ -415,9 +605,21 @@ export default function CreateAgent() {
           extraVolumes: vols,
           extraPorts: ports,
           userMode,
+          buildCommands: buildCommands.trim(),
+          postCreate: postCreate.trim(),
+          postStart: postStart.trim(),
+          postAttach: postAttach.trim(),
+          generateDevContainer,
         },
       })
       setPhase('creating')
+      try {
+        sessionStorage.setItem(DRAFT_KEY, JSON.stringify({
+          name, agentType, prefix, wsHost, wsDir, allowDocker, network,
+          extraVolumes, extraPorts, showAdvanced, userMode,
+          buildCommands, postCreate, postStart, postAttach, generateDevContainer,
+        }))
+      } catch {}
       navigate('/agents/create/' + result.job, { replace: true })
     } catch (err) {
       setError(err.error || err.message || 'Failed to create agent')
@@ -431,6 +633,8 @@ export default function CreateAgent() {
     setError('')
     setLines([])
     setRunningCmd('')
+    userModeTouched.current = false
+    try { sessionStorage.removeItem(DRAFT_KEY) } catch {}
     navigate('/agents/create')
   }
 
@@ -487,7 +691,7 @@ export default function CreateAgent() {
               <div className="border-t border-line pt-4">
                 <div className="flex items-center justify-between mb-1.5">
                   <label htmlFor="ws-host" className="block text-xs font-medium text-ink-faint uppercase tracking-wider">
-                    Workspace source folder
+                    Host workspace path
                   </label>
                   <span className="text-[11px] text-ink-faint">The project your agent works on</span>
                 </div>
@@ -497,7 +701,22 @@ export default function CreateAgent() {
                          onKeyDown={onWsKeyDown}
                          onBlur={() => setTimeout(() => setSuggestOpen(false), 150)}
                          placeholder={defaultWsHost}
-                         className="w-full bg-raised border border-line-faint rounded-lg px-3 py-2.5 text-sm font-mono text-ink focus:outline-none focus:border-accent-line focus:ring-1 focus:ring-accent-line placeholder-ink-dim" />
+                         className="w-full bg-raised border border-line-faint rounded-lg pl-3 pr-9 py-2.5 text-sm font-mono text-ink focus:outline-none focus:border-accent-line focus:ring-1 focus:ring-accent-line placeholder-ink-dim" />
+                  {hostWorkspaceRoot && !wsHidden && !wsFixed && wsHost.trim().startsWith('/') && !wsHost.trim().startsWith('instances/') && (
+                    <button type="button"
+                            onClick={() => { wsDirTouched.current = true; setWsDir(wsHost.trim()) }}
+                            title={wsDir === wsHost.trim() ? 'Paths are synced' : 'Sync container path to this path'}
+                            className={`absolute right-1.5 top-1/2 -translate-y-1/2 w-6 h-6 flex items-center justify-center rounded transition-colors ${
+                              wsDir === wsHost.trim() && wsDir
+                                ? 'bg-success text-white'
+                                : 'text-ink-faint hover:bg-sunken hover:text-ink'
+                            }`}>
+                      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+                        <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+                      </svg>
+                    </button>
+                  )}
                   {suggestOpen && suggestions.length > 0 && (
                     <div className="absolute z-20 mt-1 w-full max-h-60 overflow-auto bg-raised border border-line rounded-lg shadow-xl">
                       {suggestions.map((s, i) => (
@@ -526,11 +745,6 @@ export default function CreateAgent() {
                 {discovered && (
                   <div className="mt-2 rounded-lg bg-success-soft border border-success-line px-3 py-2 text-xs text-success">
                     {discovered.count} volume{discovered.count === 1 ? '' : 's'} found in <code className="font-mono">{discovered.project}</code>'s compose file — pre-filled under <span className="font-medium">Advanced settings → Additional volumes</span>. Review, edit or remove them before creating.
-                  </div>
-                )}
-                {hostWorkspaceRoot && wsActive && !wsBrowsable && !discovered && (
-                  <div className="mt-2 rounded-lg bg-amber-soft border border-amber-line px-3 py-2 text-xs text-amber">
-                    Custom workspace → the host file browser won't be available for this agent. Use the running container workspace instead.
                   </div>
                 )}
               </div>
@@ -581,25 +795,37 @@ export default function CreateAgent() {
               <p className="text-xs text-ink-dim mb-2">
                 The path inside the container where the agent sees the workspace folder. Leave empty to use the driver default.
               </p>
-              <input type="text" value={wsDir}
-                     onChange={(e) => !wsFixed && setWsDir(e.target.value)}
-                     readOnly={wsFixed}
-                     tabIndex={wsFixed ? -1 : 0}
-                     placeholder={defaultWsDir || '/root/.openclaw/workspace'}
-                     className={`w-full rounded-lg px-3 py-2 text-sm font-mono focus:outline-none ${wsFixed
-                       ? 'bg-sunken border border-dashed border-line-faint text-ink-dim cursor-not-allowed'
-                       : 'bg-raised border border-line-faint text-ink focus:border-accent-line'}`} />
+              <div className="relative">
+                <input type="text" value={wsDir}
+                       onChange={(e) => { if (!wsFixed) { wsDirTouched.current = true; setWsDir(e.target.value) } }}
+                       readOnly={wsFixed}
+                       tabIndex={wsFixed ? -1 : 0}
+                       placeholder={defaultWsDir || '/root/.openclaw/workspace'}
+                       className={`w-full rounded-lg text-sm font-mono focus:outline-none ${wsFixed
+                         ? 'bg-sunken border border-dashed border-line-faint text-ink-dim cursor-not-allowed px-3 py-2'
+                         : 'bg-raised border border-line-faint text-ink focus:border-accent-line pl-3 pr-9 py-2'}`} />
+                {!wsFixed && wsHost.trim().startsWith('/') && !wsHost.trim().startsWith('instances/') && (
+                  <button type="button"
+                          onClick={() => { wsDirTouched.current = true; setWsDir(wsHost.trim()) }}
+                          title={wsDir === wsHost.trim() ? 'Paths are synced' : 'Sync container path to this path'}
+                          className={`absolute right-1.5 top-1/2 -translate-y-1/2 w-6 h-6 flex items-center justify-center rounded transition-colors ${
+                            wsDir === wsHost.trim() && wsDir
+                              ? 'bg-success text-white'
+                              : 'text-ink-faint hover:bg-sunken hover:text-ink'
+                          }`}>
+                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+                      <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+                    </svg>
+                  </button>
+                )}
+              </div>
               {wsFixed && (
                 <p className="text-xs text-ink-dim mt-1">
                   <span className="text-ink-faint">Locked —</span> fixed by {agentType}, whose CLI requires the workspace at this path.
                 </p>
               )}
               {wsDirErr && <p className="text-xs text-danger mt-1">{wsDirErr}</p>}
-              {hostWorkspaceRoot && wsActive && !wsBrowsable && (
-                <div className="mt-2 rounded-lg bg-amber-soft border border-amber-line px-3 py-2 text-xs text-amber">
-                  Custom workspace → the host file browser won't be available for this agent. Use the running container workspace instead.
-                </div>
-              )}
             </div>
           )}
 
@@ -638,13 +864,13 @@ export default function CreateAgent() {
               </div>
               <div className="inline-flex rounded-lg border border-line-faint bg-sunken p-0.5">
                 <button type="button"
-                        onClick={() => setUserMode('root')}
+                        onClick={() => { userModeTouched.current = true; setUserMode('root') }}
                         className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${userMode === 'root' ? 'bg-accent text-white' : 'text-ink-dim hover:text-ink'}`}>
                   Root
                 </button>
                 <button type="button"
                         disabled={agentType === 'hermes'}
-                        onClick={() => setUserMode('user')}
+                        onClick={() => { userModeTouched.current = true; setUserMode('user') }}
                         className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${userMode === 'user' ? 'bg-accent text-white' : 'text-ink-dim hover:text-ink'} ${agentType === 'hermes' ? 'opacity-40 cursor-not-allowed' : ''}`}>
                   Local user
                 </button>
@@ -810,6 +1036,87 @@ export default function CreateAgent() {
             {hasPortErrors && (
               <p className="text-xs text-danger">Fix the invalid port fields.</p>
             )}
+          </div>
+
+          {/* Plan 41: Build & lifecycle commands */}
+          <div className="border-t border-line pt-4 space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-xs font-medium text-ink-faint uppercase tracking-wider">Build &amp; lifecycle commands</h3>
+                <p className="text-xs text-ink-dim mt-1 max-w-md">
+                  Dockerfile lines inserted into this PAD's own image (run on every build), and bash lines run once after creation (post-create), on every start (post-start), and on every terminal attach (post-attach).
+                </p>
+              </div>
+              {devContainer && (
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-sunken border border-line-faint text-ink-dim text-[11px] font-medium">
+                  from .devcontainer/devcontainer.json
+                </span>
+              )}
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-ink-faint mb-1.5 uppercase tracking-wider">Build commands (Dockerfile)</label>
+              <textarea value={buildCommands} onChange={(e) => setBuildCommands(e.target.value)}
+                        rows={3}
+                        spellCheck={false}
+                        placeholder={'RUN apt-get install -y vim\n# or an ARG line, picked up by the next build'}
+                        className="w-full rounded-lg px-3 py-2 text-sm font-mono bg-raised border border-line-faint text-ink focus:outline-none focus:border-accent-line focus:ring-1 focus:ring-accent-line placeholder-ink-dim" />
+              <p className="text-xs text-ink-dim mt-1">
+                Runs inside <code className="text-ink-faint font-mono">instances/&lt;name&gt;/build/Dockerfile</code> on every image build. A <code className="text-ink-faint font-mono">FROM</code> line here fails the build (the current container stays up).
+              </p>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-ink-faint mb-1.5 uppercase tracking-wider">Post-create commands (bash)</label>
+              <textarea value={postCreate} onChange={(e) => setPostCreate(e.target.value)}
+                        rows={3}
+                        spellCheck={false}
+                        placeholder={'npm install\n# project setup, run once after the container boots'}
+                        className="w-full rounded-lg px-3 py-2 text-sm font-mono bg-raised border border-line-faint text-ink focus:outline-none focus:border-accent-line focus:ring-1 focus:ring-accent-line placeholder-ink-dim" />
+              <p className="text-xs text-ink-dim mt-1">
+                Runs once in the running container (project mounted, services up) after creation. Pre-filled from the workspace's <code className="text-ink-faint font-mono">devcontainer.json</code> when present — edit freely.
+              </p>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-ink-faint mb-1.5 uppercase tracking-wider">Post-start commands (bash)</label>
+              <textarea value={postStart} onChange={(e) => setPostStart(e.target.value)}
+                        rows={3}
+                        spellCheck={false}
+                        placeholder={'service cron start\n# runs on every container start'}
+                        className="w-full rounded-lg px-3 py-2 text-sm font-mono bg-raised border border-line-faint text-ink focus:outline-none focus:border-accent-line focus:ring-1 focus:ring-accent-line placeholder-ink-dim" />
+              <p className="text-xs text-ink-dim mt-1">
+                Runs on every container start (baked into <code className="text-ink-faint font-mono">start.sh</code>). Pre-filled from <code className="text-ink-faint font-mono">postStartCommand</code> in the workspace's devcontainer.
+              </p>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-ink-faint mb-1.5 uppercase tracking-wider">Post-attach commands (bash)</label>
+              <textarea value={postAttach} onChange={(e) => setPostAttach(e.target.value)}
+                        rows={3}
+                        spellCheck={false}
+                        placeholder={'echo "terminal attached"\n# runs on every terminal attach'}
+                        className="w-full rounded-lg px-3 py-2 text-sm font-mono bg-raised border border-line-faint text-ink focus:outline-none focus:border-accent-line focus:ring-1 focus:ring-accent-line placeholder-ink-dim" />
+              <p className="text-xs text-ink-dim mt-1">
+                Runs on every terminal attach inside this PAD (workspace/project mounted). Pre-filled from <code className="text-ink-faint font-mono">postAttachCommand</code> in the workspace's devcontainer.
+              </p>
+            </div>
+
+            {/* Plan 41 item 20: generate a devcontainer mirror in the workspace */}
+            <label className="flex items-start gap-2.5 rounded-lg border border-line-faint bg-sunken/50 px-3 py-2.5 cursor-pointer select-none">
+              <input type="checkbox"
+                     checked={generateDevContainer}
+                     onChange={(e) => setGenerateDevContainer(e.target.checked)}
+                     className="mt-0.5 w-3.5 h-3.5 accent-accent" />
+              <span>
+                <span className="block text-xs font-medium text-ink">
+                  Generate <code className="text-ink-faint font-mono">.devcontainer/devcontainer.json</code> for this workspace
+                </span>
+                <span className="block text-xs text-ink-dim mt-0.5">
+                  When the workspace has no devcontainer, writes one mirroring this pad's settings (workspace folder, lifecycle commands, env, volumes, ports, user), marked <code className="text-ink-faint font-mono">x-paddock.generated</code>. {devContainer ? 'This workspace already ships a devcontainer — it is never overwritten.' : 'Leave on to keep the workspace openable as a dev container.'}
+                </span>
+              </span>
+            </label>
           </div>
             </div>
           )}

@@ -786,3 +786,663 @@ describe('vm-manager - extra volumes & ports (plan 28)', () => {
     });
   });
 });
+
+describe('vm-manager - lifecycle scripts (plan 41)', () => {
+  function withTmp(fn) {
+    const TMP = '/tmp/p41life-' + Date.now() + '-' + Math.floor(Math.random() * 1e6);
+    const prevWs = process.env.WORKSPACE_ROOT;
+    const prevHost = process.env.HOST_WORKSPACE_ROOT;
+    process.env.WORKSPACE_ROOT = TMP;
+    process.env.HOST_WORKSPACE_ROOT = TMP;
+    delete require.cache[require.resolve('../services/vm-manager')];
+    const vm = require('../services/vm-manager');
+    try {
+      fn(TMP, vm);
+    } finally {
+      fs.rmSync(TMP, { recursive: true, force: true });
+      process.env.WORKSPACE_ROOT = prevWs;
+      process.env.HOST_WORKSPACE_ROOT = prevHost;
+      delete require.cache[require.resolve('../services/vm-manager')];
+    }
+  }
+
+  it('readPostCreate/readPostStart/readPostAttach return empty when absent', () => {
+    withTmp((TMP, vm) => {
+      assert.strictEqual(vm.readPostCreate('pad-lc'), '');
+      assert.strictEqual(vm.readPostStart('pad-lc'), '');
+      assert.strictEqual(vm.readPostAttach('pad-lc'), '');
+    });
+  });
+
+  it('writePostStartScript writes an executable script; empty text removes it', () => {
+    withTmp((TMP, vm) => {
+      const p = vm.postStartScriptPath('pad-lc');
+      assert.ok(!fs.existsSync(p));
+      vm.writePostStartScript('pad-lc', 'echo hello');
+      assert.ok(fs.readFileSync(p, 'utf8').includes('echo hello'), 'script body written');
+      assert.strictEqual(fs.statSync(p).mode & 0o111, 0o111, 'script is executable');
+      assert.strictEqual(vm.readPostStart('pad-lc'), 'echo hello', 'reader strips the shebang');
+      vm.writePostStartScript('pad-lc', '');
+      assert.ok(!fs.existsSync(p), 'empty write removes the file');
+      assert.strictEqual(vm.readPostStart('pad-lc'), '');
+    });
+  });
+
+  it('hasLifecycleScripts is true when any of the three scripts exists', () => {
+    withTmp((TMP, vm) => {
+      assert.ok(!vm.hasLifecycleScripts('pad-lc'));
+      vm.writePostAttachScript('pad-lc', 'echo attached');
+      assert.ok(vm.hasLifecycleScripts('pad-lc'), 'post-attach alone is enough');
+      assert.ok(!vm.hasLifecycleScripts('pad-other'));
+    });
+  });
+
+  it('postAttachScriptPath + readPostAttach roundtrip', () => {
+    withTmp((TMP, vm) => {
+      vm.writePostAttachScript('pad-lc', 'echo attach');
+      assert.strictEqual(vm.readPostAttach('pad-lc'), 'echo attach');
+      assert.ok(vm.postAttachScriptPath('pad-lc').endsWith(path.join('build', 'post-attach.sh')));
+    });
+  });
+
+  it('ensurePostStartBlock injects the hook into an instance start.sh and is idempotent', () => {
+    withTmp((TMP, vm) => {
+      const build = path.join(TMP, 'instances', 'pad-lc', 'build');
+      fs.mkdirSync(build, { recursive: true });
+      // Old template: sshd line, no post-start hook.
+      fs.writeFileSync(path.join(build, 'start.sh'),
+        '#!/bin/bash\n' +
+        '/usr/sbin/sshd &\n' +
+        'exec something\n', { mode: 0o755 });
+
+      assert.strictEqual(vm.ensurePostStartBlock('pad-lc'), true, 'hook injected');
+      const content = fs.readFileSync(path.join(build, 'start.sh'), 'utf8');
+      assert.ok(content.includes('/build/post-start.sh'), 'post-start hook present');
+      assert.ok(content.includes('/usr/sbin/sshd &'), 'sshd line preserved');
+
+      assert.strictEqual(vm.ensurePostStartBlock('pad-lc'), false, 'second pass is idempotent');
+    });
+  });
+
+  it('ensurePostStartBlock leaves an already-hooked start.sh alone', () => {
+    withTmp((TMP, vm) => {
+      const build = path.join(TMP, 'instances', 'pad-lc', 'build');
+      fs.mkdirSync(build, { recursive: true });
+      fs.writeFileSync(path.join(build, 'start.sh'),
+        '#!/bin/bash\n' +
+        '/usr/sbin/sshd &\n' +
+        'if [ -f /build/post-start.sh ]; then bash /build/post-start.sh || true; fi\n');
+      assert.strictEqual(vm.ensurePostStartBlock('pad-lc'), false, 'no double-injection');
+    });
+  });
+
+  it('generateInstanceCompose mounts /build when lifecycle scripts exist', () => {
+    withTmp((TMP, vm) => {
+      const instDir = path.join(TMP, 'instances', 'pad-lc');
+      fs.mkdirSync(instDir, { recursive: true });
+      fs.writeFileSync(path.join(instDir, 'meta.env'), 'AGENT=opencode\nROOT_PASSWORD=pw\n');
+      // No scripts → no /build mount.
+      let compose = JSON.parse(vm.generateInstanceCompose('pad-lc', 'opencode', 'pw', ''));
+      const volStr = JSON.stringify(compose.services['pad-lc'].volumes || []);
+      assert.ok(!volStr.includes('/build'), 'no /build mount without lifecycle scripts');
+
+      vm.writePostCreateScript('pad-lc', 'echo hi');
+      compose = JSON.parse(vm.generateInstanceCompose('pad-lc', 'opencode', 'pw', ''));
+      const volStr2 = JSON.stringify(compose.services['pad-lc'].volumes || []);
+      assert.ok(volStr2.includes('/build'), '/build mount present with a lifecycle script');
+    });
+  });
+});
+
+describe('vm-manager - devcontainer plan (plan 41 items 12-16)', () => {
+  // Guard suite is ON here (GUARD_* unset by the test invocation), and /tmp is
+  // a system dir — use /var/padtest-* so workspaces + their devcontainer mounts
+  // pass the system-dir guards.
+  function withTmp(fn) {
+    const TMP = '/var/padtest-' + Date.now() + '-' + Math.floor(Math.random() * 1e6);
+    const prevWs = process.env.WORKSPACE_ROOT;
+    const prevHost = process.env.HOST_WORKSPACE_ROOT;
+    process.env.WORKSPACE_ROOT = TMP;
+    process.env.HOST_WORKSPACE_ROOT = TMP;
+    delete require.cache[require.resolve('../services/vm-manager')];
+    const vm = require('../services/vm-manager');
+    try {
+      fn(TMP, vm);
+    } finally {
+      fs.rmSync(TMP, { recursive: true, force: true });
+      process.env.WORKSPACE_ROOT = prevWs;
+      process.env.HOST_WORKSPACE_ROOT = prevHost;
+      delete require.cache[require.resolve('../services/vm-manager')];
+    }
+  }
+
+  function makeWorkspace(TMP, extra) {
+    const ws = path.join(TMP, 'ws');
+    fs.mkdirSync(path.join(ws, '.devcontainer'), { recursive: true });
+    fs.writeFileSync(path.join(ws, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+      name: 'test',
+      workspaceFolder: '/workspace',
+      environment: { FOO: 'bar', ROOT_PASSWORD: 'evil' },
+      mounts: [{ source: './api', target: '/api', readOnly: true }],
+      runArgs: ['--cap-add=SYS_PTRACE', '--sysctl', 'net.core.somaxconn=511', '--ulimit=nofile=1024:2048'],
+      forwardPorts: [45678],
+      ...extra,
+    }));
+    return ws;
+  }
+
+  it('readDevContainerPlan returns null when no plan was persisted', () => {
+    withTmp((TMP, vm) => {
+      fs.mkdirSync(path.join(TMP, 'instances', 'pad-dc'), { recursive: true });
+      fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'), 'AGENT=opencode\n');
+      assert.strictEqual(vm.readDevContainerPlan('pad-dc'), null);
+    });
+  });
+
+  it('resolveDevContainerPlan honors workspaceFolder/env/mounts/runArgs/forwardPorts', () => {
+    withTmp((TMP, vm) => {
+      const ws = makeWorkspace(TMP);
+      fs.mkdirSync(path.join(TMP, 'instances', 'pad-dc'), { recursive: true });
+      fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'), 'AGENT=opencode\n');
+      const wsMount = vm.validateWorkspaceMount('pad-dc', 'opencode', ws, '/root/.opencode/workspace');
+      const plan = vm.resolveDevContainerPlan('pad-dc', 'opencode', wsMount, { allocatePorts: true });
+
+      assert.strictEqual(plan.workspaceFolder, '/workspace', 'workspaceFolder honored (editable driver, default target)');
+      assert.deepStrictEqual(plan.environment, { FOO: 'bar' }, 'protected env keys dropped');
+      assert.strictEqual(plan.volumes.length, 1);
+      assert.strictEqual(plan.volumes[0].host, path.join(ws, 'api'));
+      assert.strictEqual(plan.volumes[0].container, '/api');
+      assert.strictEqual(plan.volumes[0].readonly, true);
+      assert.deepStrictEqual(plan.runArgs.caps, ['SYS_PTRACE']);
+      assert.deepStrictEqual(plan.runArgs.sysctls, { 'net.core.somaxconn': '511' });
+      assert.deepStrictEqual(plan.runArgs.ulimits, { nofile: { soft: 1024, hard: 2048 } });
+      assert.strictEqual(plan.ports.length, 1);
+      assert.strictEqual(plan.ports[0].container, '45678');
+      assert.strictEqual(plan.ports[0].host, '45678', 'free container port reused');
+      assert.strictEqual(plan.ports[0].protocol, 'tcp');
+      assert.strictEqual(plan.ports[0].label, '');
+    });
+  });
+
+  it('does NOT honor workspaceFolder for a custom (non-default) mount target or non-editable drivers', () => {
+    withTmp((TMP, vm) => {
+      const ws = makeWorkspace(TMP);
+      fs.mkdirSync(path.join(TMP, 'instances', 'pad-dc'), { recursive: true });
+      fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'), 'AGENT=opencode\n');
+      const custom = vm.validateWorkspaceMount('pad-dc', 'opencode', ws, '/custom/ws');
+      assert.strictEqual(vm.resolveDevContainerPlan('pad-dc', 'opencode', custom, { allocatePorts: false }).workspaceFolder, '', 'custom target wins over workspaceFolder');
+
+      // openclaw has a fixed workspace — workspaceFolder is never honored.
+      fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'), 'AGENT=openclaw\n');
+      const fixed = vm.validateWorkspaceMount('pad-dc', 'openclaw', ws, '/root/.openclaw/workspace');
+      assert.strictEqual(vm.resolveDevContainerPlan('pad-dc', 'openclaw', fixed, { allocatePorts: false }).workspaceFolder, '');
+    });
+  });
+
+  it('rejects a mount that reaches project internals outside the workspace', () => {
+    withTmp((TMP, vm) => {
+      const ws = makeWorkspace(TMP, { mounts: [{ source: '../secrets', target: '/secrets' }] });
+      fs.mkdirSync(path.join(TMP, 'instances', 'pad-dc'), { recursive: true });
+      fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'), 'AGENT=opencode\n');
+      const wsMount = vm.validateWorkspaceMount('pad-dc', 'opencode', ws, '/root/.opencode/workspace');
+      assert.throws(() => vm.resolveDevContainerPlan('pad-dc', 'opencode', wsMount, { allocatePorts: false }), /project internals/);
+    });
+  });
+
+  it('allows a mount source outside the project root', () => {
+    withTmp((TMP, vm) => {
+      const ws = makeWorkspace(TMP, { mounts: [{ source: '/srv/padtest', target: '/data' }] });
+      fs.mkdirSync(path.join(TMP, 'instances', 'pad-dc'), { recursive: true });
+      fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'), 'AGENT=opencode\n');
+      const wsMount = vm.validateWorkspaceMount('pad-dc', 'opencode', ws, '/root/.opencode/workspace');
+      const plan = vm.resolveDevContainerPlan('pad-dc', 'opencode', wsMount, { allocatePorts: false });
+      assert.deepStrictEqual(plan.volumes, [{ host: '/srv/padtest', container: '/data', readonly: false }]);
+    });
+  });
+
+  it('rejects unsupported runArgs', () => {
+    withTmp((TMP, vm) => {
+      const ws = makeWorkspace(TMP, { runArgs: ['--privileged'] });
+      fs.mkdirSync(path.join(TMP, 'instances', 'pad-dc'), { recursive: true });
+      fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'), 'AGENT=opencode\n');
+      const wsMount = vm.validateWorkspaceMount('pad-dc', 'opencode', ws, '/root/.opencode/workspace');
+      assert.throws(() => vm.resolveDevContainerPlan('pad-dc', 'opencode', wsMount, { allocatePorts: false }), /Unsupported devcontainer runArg/);
+    });
+  });
+
+  it('captures remoteUser/containerUser as the pad user-mode preference (item 17)', () => {
+    withTmp((TMP, vm) => {
+      fs.mkdirSync(path.join(TMP, 'instances', 'pad-dc'), { recursive: true });
+      fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'), 'AGENT=opencode\n');
+
+      // Non-root remoteUser → the pad should run as the pad user.
+      const ws1 = makeWorkspace(TMP, { remoteUser: 'node' });
+      const m1 = vm.validateWorkspaceMount('pad-dc', 'opencode', ws1, '/root/.opencode/workspace');
+      const p1 = vm.resolveDevContainerPlan('pad-dc', 'opencode', m1, { allocatePorts: false });
+      assert.strictEqual(p1.remoteUser, 'node');
+      assert.strictEqual(p1.userMode, 'user', 'non-root remoteUser → user mode');
+
+      // containerUser wins over remoteUser (spec precedence).
+      const ws2 = makeWorkspace(TMP, { containerUser: '1000', remoteUser: 'root' });
+      const m2 = vm.validateWorkspaceMount('pad-dc', 'opencode', ws2, '/root/.opencode/workspace');
+      const p2 = vm.resolveDevContainerPlan('pad-dc', 'opencode', m2, { allocatePorts: false });
+      assert.strictEqual(p2.containerUser, '1000');
+      assert.strictEqual(p2.userMode, 'user', 'containerUser wins over remoteUser');
+
+      // Explicit root → root mode.
+      const ws3 = makeWorkspace(TMP, { containerUser: 'root' });
+      const m3 = vm.validateWorkspaceMount('pad-dc', 'opencode', ws3, '/root/.opencode/workspace');
+      const p3 = vm.resolveDevContainerPlan('pad-dc', 'opencode', m3, { allocatePorts: false });
+      assert.strictEqual(p3.userMode, 'root', 'explicit root containerUser → root mode');
+
+      // No user declared → no preference.
+      const ws4 = makeWorkspace(TMP);
+      const m4 = vm.validateWorkspaceMount('pad-dc', 'opencode', ws4, '/root/.opencode/workspace');
+      const p4 = vm.resolveDevContainerPlan('pad-dc', 'opencode', m4, { allocatePorts: false });
+      assert.strictEqual(p4.userMode, '', 'no user declared → no preference');
+    });
+  });
+
+  it('effectiveUserMode: explicit toggle wins; plan preference seeds the default; hermes stays root', () => {
+    withTmp((TMP, vm) => {
+      const plan = { userMode: 'user' };
+      // Explicit caller value always wins (web form toggle / MCP arg).
+      assert.strictEqual(vm.effectiveUserMode('user', plan, 'opencode'), 'user');
+      assert.strictEqual(vm.effectiveUserMode('', plan, 'opencode'), '', 'explicit root wins over plan preference');
+      assert.strictEqual(vm.effectiveUserMode('root', plan, 'opencode'), '', 'MCP root arg wins');
+      // Omitted → plan preference seeds the default.
+      assert.strictEqual(vm.effectiveUserMode(undefined, plan, 'opencode'), 'user');
+      assert.strictEqual(vm.effectiveUserMode(undefined, { userMode: '' }, 'opencode'), '', 'no plan preference → root');
+      // hermes is always root-mode.
+      assert.strictEqual(vm.effectiveUserMode(undefined, plan, 'hermes'), '', 'hermes ignores the plan preference');
+      assert.strictEqual(vm.effectiveUserMode('user', plan, 'hermes'), 'user', 'explicit hermes user mode still passes through (guard is at validation)');
+    });
+  });
+
+  it('generates a .devcontainer mirror at create time when the workspace has none (item 18)', () => {
+    withTmp((TMP, vm) => {
+      const ws = path.join(TMP, 'ws');
+      fs.mkdirSync(ws, { recursive: true });
+      fs.mkdirSync(path.join(TMP, 'instances', 'pad-dc'), { recursive: true });
+      fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'),
+        `AGENT=opencode\nUSER_MODE=user\nWORKSPACE_HOST=${ws}\nWORKSPACE_DIR=/root/.opencode/workspace\n`);
+      const wsMount = vm.validateWorkspaceMount('pad-dc', 'opencode', ws, '/root/.opencode/workspace');
+      const extraVols = vm.validateExtraVolumes('pad-dc', 'opencode', [{ host: path.join(ws, 'data'), container: '/data' }]);
+      const extraPs = vm.validateExtraPorts([{ host: 4300, container: 4300 }], { sshPort: '' });
+
+      const target = vm.generateWorkspaceDevContainer('pad-dc', 'opencode', wsMount, {
+        postCreate: 'npm install',
+        postStart: 'started',
+        postAttach: 'attached',
+        extraVols, extraPs,
+        userMode: 'user',
+      });
+      assert.strictEqual(target, path.join(ws, '.devcontainer', 'devcontainer.json'));
+      const doc = JSON.parse(fs.readFileSync(target, 'utf8'));
+      assert.strictEqual(doc['x-paddock'].generated, true, 'marked as generated');
+      assert.strictEqual(doc.workspaceFolder, '/root/.opencode/workspace');
+      assert.strictEqual(doc.postCreateCommand, 'npm install');
+      assert.strictEqual(doc.postStartCommand, 'started');
+      assert.strictEqual(doc.postAttachCommand, 'attached');
+      assert.deepStrictEqual(doc.mounts, [`${path.join(ws, 'data')}:/data`]);
+      assert.deepStrictEqual(doc.forwardPorts, ['4300']);
+      assert.strictEqual(doc.remoteUser, 'pad', 'user-mode pad → remoteUser pad');
+    });
+  });
+
+  it('generation skips when disabled, a devcontainer exists, no workspace, or missing dir', () => {
+    withTmp((TMP, vm) => {
+      const ws = path.join(TMP, 'ws');
+      fs.mkdirSync(ws, { recursive: true });
+      fs.mkdirSync(path.join(TMP, 'instances', 'pad-dc'), { recursive: true });
+      fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'),
+        `AGENT=opencode\nWORKSPACE_HOST=${ws}\nWORKSPACE_DIR=/root/.opencode/workspace\n`);
+      const wsMount = vm.validateWorkspaceMount('pad-dc', 'opencode', ws, '/root/.opencode/workspace');
+
+      assert.strictEqual(vm.generateWorkspaceDevContainer('pad-dc', 'opencode', wsMount, { enabled: false }), null, 'disabled → nothing written');
+      assert.ok(!fs.existsSync(path.join(ws, '.devcontainer')), 'no file created when disabled');
+
+      makeWorkspace(TMP);
+      assert.strictEqual(vm.generateWorkspaceDevContainer('pad-dc', 'opencode', wsMount, {}), null, 'workspace already has a devcontainer → skip');
+
+      assert.strictEqual(vm.generateWorkspaceDevContainer('pad-dc', 'opencode', null, {}), null, 'no workspace mount → null');
+
+      const ghost = vm.validateWorkspaceMount('pad-dc', 'opencode', path.join(TMP, 'nope'), '/root/.opencode/workspace');
+      assert.strictEqual(vm.generateWorkspaceDevContainer('pad-dc', 'opencode', ghost, {}), null, 'missing workspace dir → null');
+    });
+  });
+
+  it('syncDevContainer regenerates a generated mirror wholesale after pad changes (item 19)', () => {
+    withTmp((TMP, vm) => {
+      const ws = path.join(TMP, 'ws');
+      fs.mkdirSync(ws, { recursive: true });
+      fs.mkdirSync(path.join(TMP, 'instances', 'pad-dc'), { recursive: true });
+      fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'),
+        `AGENT=opencode\nUSER_MODE=user\nWORKSPACE_HOST=${ws}\nWORKSPACE_DIR=/root/.opencode/workspace\n`);
+      const wsMount = vm.validateWorkspaceMount('pad-dc', 'opencode', ws, '/root/.opencode/workspace');
+      vm.generateWorkspaceDevContainer('pad-dc', 'opencode', wsMount, { postCreate: 'echo first', userMode: 'user' });
+      const dcFile = path.join(ws, '.devcontainer', 'devcontainer.json');
+
+      // Pad changes: edited lifecycle commands + a new extra volume and port.
+      vm.writePostCreateScript('pad-dc', 'echo updated');
+      vm.writePostStartScript('pad-dc', 'started now');
+      const extraVols = vm.validateExtraVolumes('pad-dc', 'opencode', [{ host: path.join(ws, 'data'), container: '/data', readonly: true }]);
+      const extraPs = vm.validateExtraPorts([{ host: 4300, container: 4300 }], { sshPort: '' });
+      fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'),
+        `AGENT=opencode\nUSER_MODE=user\nWORKSPACE_HOST=${ws}\nWORKSPACE_DIR=/root/.opencode/workspace\nEXTRA_VOLUMES=${JSON.stringify(extraVols)}\nEXTRA_PORTS=${JSON.stringify(extraPs)}\n`);
+
+      const synced = vm.syncDevContainer('pad-dc', 'opencode', wsMount);
+      assert.strictEqual(synced, dcFile);
+      const doc = JSON.parse(fs.readFileSync(dcFile, 'utf8'));
+      assert.strictEqual(doc['x-paddock'].generated, true);
+      assert.strictEqual(doc.postCreateCommand, 'echo updated', 'edited lifecycle command written back');
+      assert.strictEqual(doc.postStartCommand, 'started now');
+      assert.strictEqual(doc.postAttachCommand, undefined, 'cleared post-attach removed on regen');
+      assert.deepStrictEqual(doc.mounts, [`${path.join(ws, 'data')}:/data:ro`]);
+      assert.deepStrictEqual(doc.forwardPorts, ['4300']);
+      assert.strictEqual(doc.remoteUser, 'pad', 'user-mode pad → remoteUser pad');
+    });
+  });
+
+  it('syncDevContainer updates mapped fields on a project-authored file and preserves the rest', () => {
+    withTmp((TMP, vm) => {
+      const ws = makeWorkspace(TMP, {
+        name: 'project',
+        features: { 'ghcr.io/devcontainers/features/node:1': {} },
+        postCreateCommand: 'echo original',
+      });
+      fs.mkdirSync(path.join(TMP, 'instances', 'pad-dc'), { recursive: true });
+      const wsMount = vm.validateWorkspaceMount('pad-dc', 'opencode', ws, '/root/.opencode/workspace');
+      const plan = vm.resolveDevContainerPlan('pad-dc', 'opencode', wsMount, { allocatePorts: false });
+      fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'),
+        `AGENT=opencode\nWORKSPACE_HOST=${ws}\nWORKSPACE_DIR=/root/.opencode/workspace\nDC_PLAN=${JSON.stringify(plan)}\n`);
+      const dcFile = path.join(ws, '.devcontainer', 'devcontainer.json');
+
+      // Pad changes: edited post-create + a new extra volume and port.
+      vm.writePostCreateScript('pad-dc', 'npm ci');
+      const extraVols = vm.validateExtraVolumes('pad-dc', 'opencode', [{ host: path.join(ws, 'data'), container: '/data' }]);
+      const extraPs = vm.validateExtraPorts([{ host: 4301, container: 4301 }], { sshPort: '' });
+      fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'),
+        `AGENT=opencode\nWORKSPACE_HOST=${ws}\nWORKSPACE_DIR=/root/.opencode/workspace\nDC_PLAN=${JSON.stringify(plan)}\nEXTRA_VOLUMES=${JSON.stringify(extraVols)}\nEXTRA_PORTS=${JSON.stringify(extraPs)}\n`);
+
+      vm.syncDevContainer('pad-dc', 'opencode', wsMount);
+      const doc = JSON.parse(fs.readFileSync(dcFile, 'utf8'));
+      assert.strictEqual(doc.postCreateCommand, 'npm ci', 'edited lifecycle command written back');
+      assert.strictEqual(doc.name, 'project', 'non-mapped field preserved');
+      assert.deepStrictEqual(doc.features, { 'ghcr.io/devcontainers/features/node:1': {} }, 'features preserved');
+      assert.strictEqual(doc.workspaceFolder, '/workspace', 'declared workspaceFolder kept (identity)');
+      assert.strictEqual(doc['x-paddock'], undefined, 'not marked generated');
+      assert.ok(doc.mounts.some((m) => m.endsWith('data:/data')), 'pad extra volume appended to mounts');
+      assert.ok(doc.forwardPorts.includes('4301'), 'pad extra port appended to forwardPorts');
+      assert.strictEqual(doc.environment.FOO, 'bar', 'devcontainer-originated env preserved');
+
+      // Clearing the pad's post-create removes the mapped field.
+      vm.writePostCreateScript('pad-dc', '');
+      vm.syncDevContainer('pad-dc', 'opencode', wsMount);
+      const doc2 = JSON.parse(fs.readFileSync(dcFile, 'utf8'));
+      assert.strictEqual(doc2.postCreateCommand, undefined, 'cleared lifecycle command removed from the mirror');
+    });
+  });
+
+  it('syncDevContainer leaves a devcontainer the pad never adopted untouched', () => {
+    withTmp((TMP, vm) => {
+      const ws = makeWorkspace(TMP);
+      fs.mkdirSync(path.join(TMP, 'instances', 'pad-dc'), { recursive: true });
+      fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'),
+        `AGENT=opencode\nWORKSPACE_HOST=${ws}\nWORKSPACE_DIR=/root/.opencode/workspace\n`);
+      const wsMount = vm.validateWorkspaceMount('pad-dc', 'opencode', ws, '/root/.opencode/workspace');
+      const dcFile = path.join(ws, '.devcontainer', 'devcontainer.json');
+      const before = fs.readFileSync(dcFile, 'utf8');
+      assert.strictEqual(vm.syncDevContainer('pad-dc', 'opencode', wsMount), null, 'no DC_PLAN + not generated → skip');
+      assert.strictEqual(fs.readFileSync(dcFile, 'utf8'), before, 'file untouched');
+    });
+  });
+
+  it('devContainerStatus reports the card state for a generated / project-authored / missing file (item 20)', () => {
+    withTmp((TMP, vm) => {
+      const ws = path.join(TMP, 'ws');
+      fs.mkdirSync(ws, { recursive: true });
+      fs.mkdirSync(path.join(TMP, 'instances', 'pad-dc'), { recursive: true });
+      fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'),
+        `AGENT=opencode\nUSER_MODE=user\nWORKSPACE_HOST=${ws}\nWORKSPACE_DIR=/root/.opencode/workspace\n`);
+      const wsMount = vm.validateWorkspaceMount('pad-dc', 'opencode', ws, '/root/.opencode/workspace');
+
+      // Missing: no devcontainer in the workspace yet.
+      let st = vm.devContainerStatus('pad-dc');
+      assert.strictEqual(st.state, 'missing');
+      assert.strictEqual(st.found, false);
+      assert.strictEqual(st.regenerate, true, 'regenerate is always available');
+      assert.strictEqual(st.sync, false, 'nothing to sync when missing');
+      assert.ok(st.target.includes('"workspaceFolder": "/root/.opencode/workspace"'), 'target shows what would be written');
+      assert.strictEqual(st.content, '', 'no current content when missing');
+
+      // Generated: mirror written → state flips, sync becomes available. The
+      // post-create script is persisted first — generation options are
+      // transient, so the status target (from the pad's stored config) only
+      // matches after the script exists, exactly as in the real create flow.
+      vm.writePostCreateScript('pad-dc', 'npm install');
+      vm.generateWorkspaceDevContainer('pad-dc', 'opencode', wsMount, { postCreate: 'npm install', userMode: 'user' });
+      st = vm.devContainerStatus('pad-dc');
+      assert.strictEqual(st.state, 'generated');
+      assert.strictEqual(st.generated, true);
+      assert.strictEqual(st.found, true);
+      assert.strictEqual(st.filePath, path.join(ws, '.devcontainer', 'devcontainer.json'));
+      assert.strictEqual(st.sync, true, 'a generated file can be re-synced');
+      assert.ok(st.content.includes('"postCreateCommand": "npm install"'));
+      assert.strictEqual(st.content, st.target, 'generated file already matches the pad — diff is empty');
+
+      // Pad edits a lifecycle command → target diverges from current content.
+      vm.writePostCreateScript('pad-dc', 'npm ci');
+      st = vm.devContainerStatus('pad-dc');
+      assert.ok(st.content.includes('npm install'), 'current file still has the old command');
+      assert.ok(st.target.includes('npm ci'), 'target reflects the pad now');
+      assert.notStrictEqual(st.content, st.target);
+    });
+  });
+
+  it('devContainerStatus flags project-authored files and only syncs adopted ones', () => {
+    withTmp((TMP, vm) => {
+      const ws = makeWorkspace(TMP, { name: 'project' });
+      fs.mkdirSync(path.join(TMP, 'instances', 'pad-dc'), { recursive: true });
+      fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'),
+        `AGENT=opencode\nWORKSPACE_HOST=${ws}\nWORKSPACE_DIR=/root/.opencode/workspace\n`);
+      const wsMount = vm.validateWorkspaceMount('pad-dc', 'opencode', ws, '/root/.opencode/workspace');
+      const dcFile = path.join(ws, '.devcontainer', 'devcontainer.json');
+
+      // Not adopted (no DC_PLAN): project-authored + sync disabled.
+      let st = vm.devContainerStatus('pad-dc');
+      assert.strictEqual(st.state, 'project-authored');
+      assert.strictEqual(st.sync, false, 'pad never adopted it → no sync');
+      assert.strictEqual(st.regenerate, true, 'regenerate still available (explicit clobber)');
+      assert.ok(st.content.includes('"name":"project"'), 'current content is the project file');
+      assert.ok(st.target.includes('"workspaceFolder": "/root/.opencode/workspace"'), 'target is the pad mirror');
+
+      // Adopt it via a persisted plan → sync becomes available.
+      const plan = vm.resolveDevContainerPlan('pad-dc', 'opencode', wsMount, { allocatePorts: false });
+      fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'),
+        `AGENT=opencode\nWORKSPACE_HOST=${ws}\nWORKSPACE_DIR=/root/.opencode/workspace\nDC_PLAN=${JSON.stringify(plan)}\n`);
+      st = vm.devContainerStatus('pad-dc');
+      assert.strictEqual(st.state, 'project-authored');
+      assert.strictEqual(st.sync, true, 'adopted project file is syncable');
+      assert.strictEqual(st.filePath, dcFile);
+    });
+  });
+
+  it('devContainerStatus is missing when the pad has no custom workspace or no instance dir', () => {
+    withTmp((TMP, vm) => {
+      const ws = path.join(TMP, 'ws');
+      fs.mkdirSync(ws, { recursive: true });
+      fs.mkdirSync(path.join(TMP, 'instances', 'pad-dc'), { recursive: true });
+      fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'), 'AGENT=opencode\n');
+
+      let st = vm.devContainerStatus('pad-dc');
+      assert.strictEqual(st.state, 'missing');
+      assert.strictEqual(st.workspacePath, '', 'no workspace mount → no path');
+      assert.strictEqual(st.regenerate, true, 'button stays enabled but no-ops without a workspace');
+      assert.strictEqual(vm.devContainerStatus('pad-ghost'), null, 'unknown instance → null');
+    });
+  });
+
+  it('regenerateDevContainer creates or rewrites the mirror wholesale (item 20)', () => {
+    withTmp((TMP, vm) => {
+      const ws = path.join(TMP, 'ws');
+      fs.mkdirSync(ws, { recursive: true });
+      fs.mkdirSync(path.join(TMP, 'instances', 'pad-dc'), { recursive: true });
+      fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'),
+        `AGENT=opencode\nUSER_MODE=user\nWORKSPACE_HOST=${ws}\nWORKSPACE_DIR=/root/.opencode/workspace\n`);
+      const wsMount = vm.validateWorkspaceMount('pad-dc', 'opencode', ws, '/root/.opencode/workspace');
+
+      // Creates the file when missing.
+      const created = vm.regenerateDevContainer('pad-dc', 'opencode');
+      assert.strictEqual(created, path.join(ws, '.devcontainer', 'devcontainer.json'));
+      let doc = JSON.parse(fs.readFileSync(created, 'utf8'));
+      assert.strictEqual(doc['x-paddock'].generated, true);
+      assert.strictEqual(doc.workspaceFolder, '/root/.opencode/workspace');
+      assert.strictEqual(doc.remoteUser, 'pad');
+
+      // Rewrites a project-authored file wholesale (explicit user action).
+      const projectWs = path.join(TMP, 'ws2');
+      fs.mkdirSync(path.join(projectWs, '.devcontainer'), { recursive: true });
+      fs.writeFileSync(path.join(projectWs, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+        name: 'keepme',
+        features: { x: {} },
+        workspaceFolder: '/workspace',
+      }));
+      const projectMount = vm.validateWorkspaceMount('pad-dc', 'opencode', projectWs, '/root/.opencode/workspace');
+      fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'),
+        `AGENT=opencode\nUSER_MODE=user\nWORKSPACE_HOST=${projectWs}\nWORKSPACE_DIR=/root/.opencode/workspace\n`);
+      const rewritten = vm.regenerateDevContainer('pad-dc', 'opencode');
+      assert.strictEqual(rewritten, path.join(projectWs, '.devcontainer', 'devcontainer.json'));
+      doc = JSON.parse(fs.readFileSync(rewritten, 'utf8'));
+      assert.strictEqual(doc.name, 'Paddock agent workspace', 'custom name replaced');
+      assert.strictEqual(doc['x-paddock'].generated, true);
+      assert.strictEqual(doc.features, undefined, 'custom features clobbered');
+      assert.strictEqual(doc.workspaceFolder, '/root/.opencode/workspace', 'pad workspaceFolder used');
+      assert.strictEqual(projectMount.host, projectWs, 'sanity: mounts differ between the two workspaces');
+    });
+  });
+
+  it('devcontainer flow works for every custom-workspace agent type (fixed + editable)', () => {
+    const types = ['openclaw', 'picoclaw', 'opencode', 'codex', 'claude'];
+    const { getDriver } = require('../services/drivers');
+    withTmp((TMP, vm) => {
+      for (const agent of types) {
+        const dir = getDriver(agent).workspaceDir;
+        const ws = path.join(TMP, `ws-${agent}`);
+        fs.mkdirSync(ws, { recursive: true });
+        fs.mkdirSync(path.join(TMP, 'instances', 'pad-dc'), { recursive: true });
+        fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'),
+          `AGENT=${agent}\nWORKSPACE_HOST=${ws}\nWORKSPACE_DIR=${dir}\n`);
+        const wsMount = vm.validateWorkspaceMount('pad-dc', agent, ws, dir);
+        assert.strictEqual(wsMount.container, dir, `${agent}: mount resolves the driver's workspace path`);
+
+        // Missing → regenerate creates the mirror with the driver's folder.
+        let st = vm.devContainerStatus('pad-dc');
+        assert.strictEqual(st.state, 'missing', `${agent}: no devcontainer yet`);
+        assert.strictEqual(st.workspacePath, ws, `${agent}: workspace resolved`);
+        const created = vm.regenerateDevContainer('pad-dc', agent);
+        assert.strictEqual(created, path.join(ws, '.devcontainer', 'devcontainer.json'), `${agent}: mirror created`);
+        let doc = JSON.parse(fs.readFileSync(created, 'utf8'));
+        assert.strictEqual(doc['x-paddock'].generated, true, `${agent}: marked generated`);
+        assert.strictEqual(doc.workspaceFolder, dir, `${agent}: workspaceFolder = driver workspaceDir`);
+
+        // Pad change → sync writes back.
+        vm.writePostCreateScript('pad-dc', `echo ${agent}`);
+        st = vm.devContainerStatus('pad-dc');
+        assert.strictEqual(st.state, 'generated', `${agent}: generated state`);
+        assert.ok(st.target.includes(`echo ${agent}`), `${agent}: target reflects the pad now`);
+        const synced = vm.syncDevContainer('pad-dc', agent, wsMount);
+        assert.strictEqual(synced, created, `${agent}: sync wrote the file`);
+        doc = JSON.parse(fs.readFileSync(created, 'utf8'));
+        assert.strictEqual(doc.postCreateCommand, `echo ${agent}`, `${agent}: lifecycle command written back`);
+
+        fs.rmSync(path.join(ws, '.devcontainer'), { recursive: true, force: true });
+      }
+    });
+  });
+
+  it('hermes (workspaceCapability none) degrades gracefully — no workspace, no mirror', () => {
+    withTmp((TMP, vm) => {
+      fs.mkdirSync(path.join(TMP, 'instances', 'pad-dc'), { recursive: true });
+      fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'), 'AGENT=hermes\n');
+
+      const st = vm.devContainerStatus('pad-dc');
+      assert.strictEqual(st.state, 'missing', 'no custom workspace');
+      assert.strictEqual(st.workspacePath, '', 'hermes has no workspace mount at all');
+      assert.strictEqual(st.filePath, '');
+      assert.strictEqual(st.sync, false, 'nothing to sync');
+      assert.strictEqual(vm.regenerateDevContainer('pad-dc', 'hermes'), null, 'regenerate no-ops');
+      assert.strictEqual(vm.syncDevContainer('pad-dc', 'hermes', null), null, 'sync no-ops');
+    });
+  });
+
+  it('persisted forwardPorts keep their allocated host port across re-resolves; taken ports get a fresh one', () => {
+    withTmp((TMP, vm) => {
+      const ws = makeWorkspace(TMP);
+      fs.mkdirSync(path.join(TMP, 'instances', 'pad-dc'), { recursive: true });
+      fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'), 'AGENT=opencode\n');
+      const wsMount = vm.validateWorkspaceMount('pad-dc', 'opencode', ws, '/root/.opencode/workspace');
+
+      // Another agent publishes host 45678 → the forwardPort cannot reuse it.
+      const other = path.join(TMP, 'instances', 'pad-other');
+      fs.mkdirSync(other, { recursive: true });
+      fs.writeFileSync(path.join(other, 'docker-compose.yml'), '{"services":{"pad-other":{"ports":["45678:80"]}}}');
+      const plan = vm.resolveDevContainerPlan('pad-dc', 'opencode', wsMount, { allocatePorts: true });
+      assert.notStrictEqual(plan.ports[0].host, '45678', 'conflicting container port gets a fresh host port');
+
+      // Persist the plan, drop the competitor → re-resolve keeps the mapping.
+      fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'), `AGENT=opencode\nDC_PLAN=${JSON.stringify(plan)}\n`);
+      fs.rmSync(other, { recursive: true, force: true });
+      const plan2 = vm.resolveDevContainerPlan('pad-dc', 'opencode', wsMount, { allocatePorts: true });
+      assert.strictEqual(plan2.ports[0].host, plan.ports[0].host, 'previously allocated host port is kept');
+
+      // Validation passes skip allocation entirely.
+      const plan3 = vm.resolveDevContainerPlan('pad-dc', 'opencode', wsMount, { allocatePorts: false });
+      assert.strictEqual(plan3.ports[0].host, '45678', 'validation pass leaves the container port untouched');
+    });
+  });
+
+  it('generateInstanceCompose applies the persisted plan (folder/env/mounts/runArgs/ports)', () => {
+    withTmp((TMP, vm) => {
+      const ws = makeWorkspace(TMP);
+      fs.mkdirSync(path.join(TMP, 'instances', 'pad-dc'), { recursive: true });
+      const plan = {
+        filePath: path.join(ws, '.devcontainer', 'devcontainer.json'),
+        hasDevContainer: true,
+        workspaceFolder: '/workspace',
+        environment: { FOO: 'bar' },
+        volumes: [{ host: path.join(ws, 'api'), container: '/api', readonly: true }],
+        runArgs: { caps: ['SYS_PTRACE'], ulimits: { nofile: { soft: 1024, hard: 2048 } }, sysctls: { 'net.core.somaxconn': '511' }, envFiles: [] },
+        ports: [{ container: '4200', host: '4200', protocol: 'tcp', label: 'App' }],
+      };
+      fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'),
+        `AGENT=opencode\nROOT_PASSWORD=pw\nWORKSPACE_HOST=${ws}\nWORKSPACE_DIR=/root/.opencode/workspace\nDC_PLAN=${JSON.stringify(plan)}\n`);
+
+      const compose = JSON.parse(vm.generateInstanceCompose('pad-dc', 'opencode', 'pw', '22001'));
+      const svc = compose.services['pad-dc'];
+      assert.ok(svc.volumes.some((v) => v === `${ws}:/workspace`), 'workspaceFolder overrides the mount target');
+      assert.strictEqual(svc.working_dir, '/workspace');
+      assert.ok(svc.volumes.some((v) => v === `${path.join(ws, 'api')}:/api:ro`), 'devcontainer mount emitted');
+      assert.deepStrictEqual(svc.ports, ['22001:22', '4200:4200/tcp'], 'forwardPort published alongside SSH');
+      assert.strictEqual(svc.environment.FOO, 'bar', 'devcontainer env merged');
+      assert.strictEqual(svc.environment.ROOT_PASSWORD, 'pw', 'internal env not clobbered');
+      assert.deepStrictEqual(svc.cap_add, ['SYS_PTRACE']);
+      assert.deepStrictEqual(svc.ulimits, { nofile: { soft: 1024, hard: 2048 } });
+      assert.deepStrictEqual(svc.sysctls, { 'net.core.somaxconn': '511' });
+
+      // Stored WORKSPACE_DIR ≠ driver default → the plan's folder is ignored.
+      fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'),
+        `AGENT=opencode\nROOT_PASSWORD=pw\nWORKSPACE_HOST=${ws}\nWORKSPACE_DIR=/custom/ws\nDC_PLAN=${JSON.stringify(plan)}\n`);
+      const compose2 = JSON.parse(vm.generateInstanceCompose('pad-dc', 'opencode', 'pw', ''));
+      const svc2 = compose2.services['pad-dc'];
+      assert.strictEqual(svc2.working_dir, '/custom/ws', 'custom target wins');
+      assert.ok(!svc2.volumes.some((v) => v.endsWith(':/workspace')), 'no /workspace override when custom target set');
+
+      // ForwardPorts ride the socat door in peer mode (TCP only).
+      const doorCompose = JSON.parse(vm.generateInstanceCompose('pad-dc', 'opencode', 'pw', '22001', { network: 'gluetun-global' }));
+      const door = doorCompose.services['pad-dc-door'];
+      assert.ok(door, 'door present in peer mode');
+      assert.ok(door.entrypoint.join(' ').includes('TCP-LISTEN:4200'), 'forwardPort forwarded through the door');
+    });
+  });
+});

@@ -8,6 +8,77 @@ import CommandModal from '../../components/CommandModal'
 import HealthCheckModal from '../../components/HealthCheckModal'
 import ContainerInfoModal from '../../components/ContainerInfoModal'
 
+// Minimal line diff for the Dev Container card preview (plan 41 item 20) —
+// no diff library in the bundle. LCS-based, capped at 500 lines per side.
+function lineDiff(a, b) {
+  const cap = (s) => (s || '').replace(/\n$/, '').split('\n')
+  let aLines = cap(a)
+  let bLines = cap(b)
+  const truncated = aLines.length > 500 || bLines.length > 500
+  aLines = aLines.slice(0, 500)
+  bLines = bLines.slice(0, 500)
+  const m = aLines.length
+  const n = bLines.length
+  const dp = Array.from({ length: m + 1 }, () => new Uint32Array(n + 1))
+  for (let i = m - 1; i >= 0; i--) {
+    for (let j = n - 1; j >= 0; j--) {
+      dp[i][j] = aLines[i] === bLines[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1])
+    }
+  }
+  const out = []
+  let i = 0
+  let j = 0
+  let sameRun = 0
+  const flush = () => {
+    if (sameRun > 0) {
+      out.push({ t: 'same', s: '', n: sameRun })
+      sameRun = 0
+    }
+  }
+  while (i < m && j < n) {
+    if (aLines[i] === bLines[j]) { sameRun++; i++; j++ }
+    else {
+      flush()
+      if (dp[i + 1][j] >= dp[i][j + 1]) { out.push({ t: 'del', s: aLines[i] }); i++ }
+      else { out.push({ t: 'add', s: bLines[j] }); j++ }
+    }
+  }
+  flush()
+  while (i < m) { out.push({ t: 'del', s: aLines[i] }); i++ }
+  while (j < n) { out.push({ t: 'add', s: bLines[j] }); j++ }
+  if (truncated) out.push({ t: 'more', s: '' })
+  return out
+}
+
+function DiffPreview({ from, to }) {
+  const rows = lineDiff(from, to)
+  const changes = rows.filter((r) => r.t === 'add' || r.t === 'del').length
+  if (changes === 0) {
+    return <p className="text-xs text-success mt-1">In sync — the file already matches the pad's settings.</p>
+  }
+  return (
+    <div className="rounded-lg border border-line-faint bg-sunken overflow-hidden">
+      <div className="max-h-64 overflow-y-auto">
+        <pre className="text-[11px] leading-5 font-mono py-1.5 px-2">
+          {rows.map((r, idx) =>
+            r.t === 'same' ? (
+              <span key={idx} className="block text-ink-dim/50">
+                {r.n > 1 ? `⋯ ${r.n} identical lines` : r.n === 1 ? '…' : ''}
+              </span>
+            ) : r.t === 'more' ? (
+              <span key={idx} className="block text-ink-dim italic">… truncated at 500 lines</span>
+            ) : (
+              <span key={idx} className={`block ${r.t === 'add' ? 'text-success' : 'text-danger'}`}>
+                {r.t === 'add' ? '+' : '-'}{r.s}
+              </span>
+            ),
+          )}
+        </pre>
+      </div>
+    </div>
+  )
+}
+
 export default function SettingsTab({ agent }) {
   const navigate = useNavigate()
   const confirm = useConfirm()
@@ -32,8 +103,21 @@ export default function SettingsTab({ agent }) {
   const [wsDir, setWsDir] = useState('')
   const [volDraft, setVolDraft] = useState([])
   const [volDirty, setVolDirty] = useState(false)
+  // Plan 41: build commands + post-create commands
+  const [buildDraft, setBuildDraft] = useState('')
+  const [postCreateDraft, setPostCreateDraft] = useState('')
+  const [postStartDraft, setPostStartDraft] = useState('')
+  const [postAttachDraft, setPostAttachDraft] = useState('')
+  const [buildDirty, setBuildDirty] = useState(false)
+  const [postCreateDirty, setPostCreateDirty] = useState(false)
+  const [postStartDirty, setPostStartDirty] = useState(false)
+  const [postAttachDirty, setPostAttachDirty] = useState(false)
   const [recreateInfo, setRecreateInfo] = useState(null)
   const [containerInfoModal, setContainerInfoModal] = useState(null)
+  // Plan 41 item 20: the "Dev Container" card state
+  const [dcInfo, setDcInfo] = useState(null)
+  const [dcLoading, setDcLoading] = useState(false)
+  const [dcAction, setDcAction] = useState('')
 
   function refresh() {
     api(`/api/agents/${agent.name}/settings`)
@@ -57,12 +141,21 @@ export default function SettingsTab({ agent }) {
       .finally(() => setHealthLoading(false))
   }
 
+  function fetchDevContainer() {
+    setDcLoading(true)
+    api(`/api/agents/${agent.name}/devcontainer`)
+      .then(setDcInfo)
+      .catch(() => setDcInfo(null))
+      .finally(() => setDcLoading(false))
+  }
+
   useEffect(() => {
     refresh()
     refreshHealth()
     api('/api/containers')
       .then((d) => setContainers(d.containers || []))
       .catch(() => {})
+    fetchDevContainer()
     api('/api/config')
       .then((c) => {
         if (c.hostWorkspaceRoot) setHostWorkspaceRoot(c.hostWorkspaceRoot)
@@ -88,6 +181,15 @@ export default function SettingsTab({ agent }) {
     // Sync the additional volumes draft once (do not clobber while editing).
     setVolDraft((settings.extraVolumes || []).map((v) => ({ ...v })))
     setVolDirty(false)
+    // Sync the build/post-create/post-start/post-attach drafts once (do not clobber while editing).
+    setBuildDraft(settings.buildCommands || '')
+    setPostCreateDraft(settings.postCreate || '')
+    setPostStartDraft(settings.postStart || '')
+    setPostAttachDraft(settings.postAttach || '')
+    setBuildDirty(false)
+    setPostCreateDirty(false)
+    setPostStartDirty(false)
+    setPostAttachDirty(false)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings, driverInfo, agent.name])
 
@@ -545,6 +647,105 @@ export default function SettingsTab({ agent }) {
     }
   }
 
+  // ── Build & post-create commands (plan 41) ─────────────────
+
+  async function handleBuildPostCreateSave() {
+    const bc = buildDraft
+    const pc = postCreateDraft
+    const ps = postStartDraft
+    const pa = postAttachDraft
+    const body = {}
+    if (buildDirty) body.buildCommands = bc
+    if (postCreateDirty) body.postCreate = pc
+    if (postStartDirty) body.postStart = ps
+    if (postAttachDirty) body.postAttach = pa
+    if (Object.keys(body).length === 0) return
+    const changes = []
+    if (buildDirty) changes.push(bc ? 'build commands updated (image rebuild)' : 'build commands cleared (image rebuild)')
+    if (postCreateDirty) changes.push(pc ? 'post-create updated (re-run after recreate)' : 'post-create cleared')
+    if (postStartDirty) changes.push(ps ? 'post-start updated (runs on every container start)' : 'post-start cleared')
+    if (postAttachDirty) changes.push(pa ? 'post-attach updated (runs on every terminal attach)' : 'post-attach cleared')
+    const ok = await confirm({
+      title: 'Apply build & lifecycle commands',
+      message: `This will stop and recreate ${agent.name}.\n\n${changes.join('\n')}\n\nBuild commands are baked into the image (a rebuild), post-create re-runs in the finished container, post-start runs on every start, post-attach runs on every terminal attach.`,
+      confirmText: 'Apply & recreate',
+      cancelText: 'Cancel',
+    })
+    if (!ok) return
+    setSaving(true)
+    if (agent.status === 'running') updateAgentStatus(agent.name, 'restarting')
+    try {
+      const d = await api(`/api/agents/${agent.name}/settings`, { method: 'POST', body })
+      if (d && d.streaming) {
+        setModal({
+          key: `build-${Date.now()}`,
+          title: `Applying build & lifecycle commands for ${agent.name}`,
+          onDone: () => {
+            refresh()
+            fetchAgents()
+            toast.success('Build & lifecycle commands applied')
+          },
+        })
+      } else {
+        setSettings(d)
+        toast.success('Build & lifecycle commands applied')
+        setSaving(false)
+      }
+    } catch (err) {
+      toast.error(err.error || err.message || 'Failed to update build & lifecycle commands')
+      setSaving(false)
+    }
+  }
+
+  // ── Dev Container (plan 41 item 20) ───────────────────────
+
+  async function handleDcSync() {
+    const ok = await confirm({
+      title: 'Sync dev container',
+      message: dcInfo?.generated
+        ? `Rewrites ${dcInfo.filePath} from ${agent.name}'s current settings (workspace folder, lifecycle commands, env, volumes, ports, user).`
+        : `Writes the mapped fields (workspace folder, lifecycle commands, env, volumes, ports) from ${agent.name}'s settings into ${dcInfo?.filePath}, preserving every other field. The container is not recreated.`,
+      confirmText: 'Sync',
+      cancelText: 'Cancel',
+    })
+    if (!ok) return
+    setDcAction('sync')
+    try {
+      const d = await api(`/api/agents/${agent.name}/devcontainer/sync`, { method: 'POST' })
+      setDcInfo(d)
+      toast.success('Dev container synced')
+    } catch (err) {
+      toast.error(err.error || err.message || 'Failed to sync dev container')
+    } finally {
+      setDcAction('')
+    }
+  }
+
+  async function handleDcRegenerate() {
+    const ok = await confirm({
+      title: dcInfo?.found ? 'Regenerate dev container' : 'Generate dev container',
+      message: dcInfo?.found
+        ? dcInfo?.generated
+          ? `Rewrites ${dcInfo.filePath} wholesale from ${agent.name}'s current settings, discarding any manual edits. The container is not recreated.`
+          : `This file is project-authored. Regenerating OVERWRITES it entirely with a Paddock-generated mirror (marked x-paddock.generated) — your custom fields will be lost. The container is not recreated.`
+        : `Creates ${dcInfo?.workspacePath || 'the workspace'}/.devcontainer/devcontainer.json as a mirror of ${agent.name}'s current settings. The container is not recreated.`,
+      danger: !!dcInfo?.found && !dcInfo?.generated,
+      confirmText: dcInfo?.found ? 'Regenerate' : 'Generate',
+      cancelText: 'Cancel',
+    })
+    if (!ok) return
+    setDcAction('regenerate')
+    try {
+      const d = await api(`/api/agents/${agent.name}/devcontainer/regenerate`, { method: 'POST' })
+      setDcInfo(d)
+      toast.success(dcInfo?.found ? 'Dev container regenerated' : 'Dev container generated')
+    } catch (err) {
+      toast.error(err.error || err.message || 'Failed to regenerate dev container')
+    } finally {
+      setDcAction('')
+    }
+  }
+
   return (
     <div className="max-w-3xl space-y-6">
       {loadError && <p className="text-danger text-sm">{loadError}</p>}
@@ -888,11 +1089,6 @@ export default function SettingsTab({ agent }) {
                 )}
               </div>
 
-              {hostWorkspaceRoot && !wsBrowsable && (
-                <div className="rounded-lg bg-warning-soft border border-warning-line/70 px-3 py-2 text-xs text-warning">
-                  Custom workspace → the host file browser won't be available for this agent. Use the running container workspace instead.
-                </div>
-              )}
               <p className="text-xs text-ink-dim">
                 A custom workspace is a separate bind mount, outside the agent's data folder.
               </p>
@@ -907,6 +1103,159 @@ export default function SettingsTab({ agent }) {
           )}
         </section>
       )}
+
+      {/* 5e. Build & lifecycle commands (plan 41) */}
+      <section className="bg-panel/60 border border-line rounded-xl p-5">
+        <div>
+          <h3 className="text-sm font-medium text-ink-muted">Build &amp; lifecycle commands</h3>
+          <p className="text-xs text-ink-dim mt-1 max-w-md">
+            Dockerfile lines baked into this PAD's image (every rebuild) and bash lines run at the container lifecycle: once after recreate (post-create), on every start (post-start), and on every terminal attach (post-attach).
+          </p>
+        </div>
+
+        <div className="mt-4 space-y-4">
+          <div>
+            <label className="block text-xs font-medium text-ink-faint mb-1.5 uppercase tracking-wider">Build commands (Dockerfile)</label>
+            <textarea value={buildDraft}
+                      onChange={(e) => { setBuildDraft(e.target.value); setBuildDirty(true) }}
+                      rows={3}
+                      spellCheck={false}
+                      placeholder={'RUN apt-get install -y vim'}
+                      className="w-full rounded-lg px-3 py-2 text-sm font-mono bg-raised border border-line-faint text-ink focus:outline-none focus:border-accent-line focus:ring-1 focus:ring-accent-line placeholder-ink-dim" />
+            <p className="text-xs text-ink-dim mt-1">
+              Lives in <code className="text-ink-faint font-mono">instances/{agent.name}/build/Dockerfile</code>. A change rebuilds the image (a <code className="text-ink-faint font-mono">FROM</code> line here fails the build — the current container stays up).
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-ink-faint mb-1.5 uppercase tracking-wider">Post-create commands (bash)</label>
+            <textarea value={postCreateDraft}
+                      onChange={(e) => { setPostCreateDraft(e.target.value); setPostCreateDirty(true) }}
+                      rows={3}
+                      spellCheck={false}
+                      placeholder={'npm install'}
+                      className="w-full rounded-lg px-3 py-2 text-sm font-mono bg-raised border border-line-faint text-ink focus:outline-none focus:border-accent-line focus:ring-1 focus:ring-accent-line placeholder-ink-dim" />
+            <p className="text-xs text-ink-dim mt-1">
+              Runs once in the running container (project mounted, services up) after a recreate.
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-ink-faint mb-1.5 uppercase tracking-wider">Post-start commands (bash)</label>
+            <textarea value={postStartDraft}
+                      onChange={(e) => { setPostStartDraft(e.target.value); setPostStartDirty(true) }}
+                      rows={3}
+                      spellCheck={false}
+                      placeholder={'service cron start'}
+                      className="w-full rounded-lg px-3 py-2 text-sm font-mono bg-raised border border-line-faint text-ink focus:outline-none focus:border-accent-line focus:ring-1 focus:ring-accent-line placeholder-ink-dim" />
+            <p className="text-xs text-ink-dim mt-1">
+              Runs on every container start (baked into <code className="text-ink-faint font-mono">start.sh</code>). Enabling it on an older image rebuilds it once so the hook is baked in.
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-ink-faint mb-1.5 uppercase tracking-wider">Post-attach commands (bash)</label>
+            <textarea value={postAttachDraft}
+                      onChange={(e) => { setPostAttachDraft(e.target.value); setPostAttachDirty(true) }}
+                      rows={3}
+                      spellCheck={false}
+                      placeholder={'echo "attached"'}
+                      className="w-full rounded-lg px-3 py-2 text-sm font-mono bg-raised border border-line-faint text-ink focus:outline-none focus:border-accent-line focus:ring-1 focus:ring-accent-line placeholder-ink-dim" />
+            <p className="text-xs text-ink-dim mt-1">
+              Runs on every terminal attach inside this PAD (workspace/project mounted). No image change needed.
+            </p>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleBuildPostCreateSave}
+              disabled={saving || (!buildDirty && !postCreateDirty && !postStartDirty && !postAttachDirty)}
+              className="px-3 py-1.5 bg-accent hover:bg-accent-hover disabled:opacity-50 text-accent-ink rounded-lg text-xs font-medium transition-colors"
+            >
+              Apply &amp; recreate
+            </button>
+            {(buildDirty || postCreateDirty || postStartDirty || postAttachDirty) && !saving && (
+              <span className="text-xs text-ink-dim">Unsaved build/lifecycle changes</span>
+            )}
+          </div>
+        </div>
+      </section>
+
+      {/* 5f. Dev Container (plan 41 item 20) */}
+      <section className="bg-panel/60 border border-line rounded-xl p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-sm font-medium text-ink-muted">Dev Container</h3>
+            <p className="text-xs text-ink-dim mt-1 max-w-md">
+              The workspace's <code className="text-ink-faint font-mono">devcontainer.json</code> is the portable mirror of this pad. Settings changes (volumes, ports, env, lifecycle commands) are written back into it automatically — these buttons push them manually, no container recreate.
+            </p>
+          </div>
+          {dcInfo && (
+            <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-medium border whitespace-nowrap shrink-0 ${
+              dcInfo.state === 'generated'
+                ? 'bg-accent-soft text-accent-text border-accent-line/60'
+                : dcInfo.state === 'project-authored'
+                  ? 'bg-raised text-ink border-line'
+                  : 'bg-sunken text-ink-dim border-line-faint'
+            }`}>
+              {dcInfo.state === 'generated'
+                ? 'Generated'
+                : dcInfo.state === 'project-authored'
+                  ? 'Project-authored'
+                  : 'Missing'}
+            </span>
+          )}
+        </div>
+
+        <div className="mt-4">
+          <p className="text-xs text-ink-faint font-mono break-all">
+            {dcInfo?.filePath || (dcInfo?.workspacePath ? `${dcInfo.workspacePath}/.devcontainer/devcontainer.json` : '—')}
+          </p>
+
+          {!dcInfo ? (
+            <p className="text-xs text-ink-dim mt-2">{dcLoading ? 'Loading…' : 'Dev container info unavailable.'}</p>
+          ) : !dcInfo.workspacePath ? (
+            <p className="text-xs text-ink-dim mt-2">
+              This agent has no custom workspace — the dev container mirror needs a workspace folder.
+            </p>
+          ) : !dcInfo.found ? (
+            <p className="text-xs text-ink-dim mt-2">
+              No devcontainer.json in the workspace yet. Generate one mirroring this pad's current settings.
+            </p>
+          ) : (
+            <div className="mt-3">
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-[11px] uppercase tracking-wider text-ink-faint font-medium">
+                  Diff — current file vs what Paddock would write now
+                </span>
+                <span className="text-[11px] text-ink-dim">red removed · green added</span>
+              </div>
+              <DiffPreview from={dcInfo.content} to={dcInfo.target} />
+            </div>
+          )}
+        </div>
+
+        <div className="mt-4 flex items-center gap-3">
+          <button
+            onClick={handleDcSync}
+            disabled={saving || dcAction !== '' || !dcInfo?.sync || !dcInfo?.found}
+            title={!dcInfo?.sync || !dcInfo?.found ? 'Nothing to sync — the pad never adopted this devcontainer' : undefined}
+            className="px-3 py-1.5 bg-raised hover:bg-raised-hover disabled:opacity-50 text-ink rounded-lg text-xs font-medium transition-colors"
+          >
+            {dcAction === 'sync' ? 'Syncing…' : 'Sync'}
+          </button>
+          <button
+            onClick={handleDcRegenerate}
+            disabled={saving || dcAction !== '' || !dcInfo?.workspacePath}
+            className="px-3 py-1.5 bg-accent hover:bg-accent-hover disabled:opacity-50 text-accent-ink rounded-lg text-xs font-medium transition-colors"
+          >
+            {dcAction === 'regenerate' ? 'Working…' : dcInfo?.found ? 'Regenerate' : 'Generate'}
+          </button>
+          {dcInfo?.state === 'project-authored' && (
+            <span className="text-xs text-ink-dim">Sync preserves your custom fields — Regenerate overwrites them.</span>
+          )}
+        </div>
+      </section>
 
       {/* 6. Danger Zone */}
       <section className="bg-danger-soft border border-danger-line/60 rounded-xl p-5">

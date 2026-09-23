@@ -105,6 +105,72 @@ function argsFromDockerfile(dockerfilePath) {
   return out;
 }
 
+// ── Plan 41: user "Build commands" block (dev-container build stage) ──────
+
+/** The anchor the custom-build block is inserted before: the ENTRYPOINT banner
+ *  that every driver template shares. Plan 43 renumbered it from 9 to 10 on the
+ *  four pad-user templates, hermes kept 9 — match any number. */
+const ENTRYPOINT_BANNER_RE = /^# ---- \d+\.\s*ENTRYPOINT\s+[- ]*.*$/m;
+
+/** Marker comments delimiting the web-managed block. The whole block (markers
+ *  + contents) is machine-managed: any user edits INSIDE it are overwritten on
+ *  the next write; edits outside it (anywhere else in the Dockerfile) survive. */
+const BUILD_BLOCK_HEAD = '# \u2500\u2500 PADDOCK CUSTOM BUILD COMMANDS (managed by the web UI) \u2500\u2500';
+const BUILD_BLOCK_TAIL = '# \u2500\u2500 END PADDOCK CUSTOM BUILD COMMANDS \u2500\u2500';
+
+/** The per-instance Dockerfile path (`instances/<name>/build/Dockerfile`). */
+function dockerfilePath(name) {
+  return path.join(buildDir(name), 'Dockerfile');
+}
+
+/** Read the current user "Build commands" text from the instance Dockerfile.
+ *  Returns the text between the markers (trimmed), or '' when the block (or the
+ *  file) is absent. */
+function readCustomBuild(name) {
+  const p = dockerfilePath(name);
+  if (!fs.existsSync(p)) return '';
+  const content = fs.readFileSync(p, 'utf8');
+  const m = content.match(/(?:^|\n)#\s*\u2500\u2500 PADDOCK CUSTOM BUILD COMMANDS[\s\S]*?\n#\s*\u2500\u2500 END PADDOCK CUSTOM BUILD COMMANDS[^\n]*\n?/);
+  if (!m) return '';
+  return m[0]
+    .replace(/^#\s*\u2500\u2500 PADDOCK CUSTOM BUILD COMMANDS.*\n/, '')
+    .replace(/\n?#\s*\u2500\u2500 END PADDOCK CUSTOM BUILD COMMANDS[^\n]*\n?$/, '')
+    .trim();
+}
+
+/** Set (or clear) the user "Build commands" block in the instance Dockerfile
+ *  (plan 41). `text` is injected between the marker comments, inserted right
+ *  before the ENTRYPOINT banner (so custom `ARG` lines are picked up by
+ *  `argsFromDockerfile` on the next compose regeneration). Empty text removes
+ *  the block entirely. Returns the final Dockerfile text (for tests). */
+function writeCustomBuild(name, text) {
+  const p = dockerfilePath(name);
+  fs.mkdirSync(buildDir(name), { recursive: true });
+  let content = fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '';
+  if (!content) throw new Error(`No Dockerfile for ${name} — seed the build dir first`);
+  const blockText = String(text || '').replace(/\s*$/, '');
+  const block = blockText
+    ? `${BUILD_BLOCK_HEAD}\n${blockText}\n${BUILD_BLOCK_TAIL}\n\n`
+    : '';
+
+  // Replace an existing managed block if present.
+  const blockRe = /^#\s*\u2500\u2500 PADDOCK CUSTOM BUILD COMMANDS[\s\S]*?\n#\s*\u2500\u2500 END PADDOCK CUSTOM BUILD COMMANDS[^\n]*\n?/m;
+  if (blockRe.test(content)) {
+    content = content.replace(blockRe, block);
+  } else {
+    const anchor = ENTRYPOINT_BANNER_RE.exec(content);
+    if (anchor) {
+      const at = anchor.index;
+      content = content.slice(0, at) + block + content.slice(at);
+    } else if (block) {
+      content = content.replace(/\s*$/, '') + '\n\n' + block;
+    }
+  }
+  fs.writeFileSync(p, content);
+  ensureOwned(p);
+  return content;
+}
+
 module.exports = {
   imageFor,
   legacySharedImage,
@@ -113,4 +179,9 @@ module.exports = {
   readBuildEnv,
   setBuildEnv,
   argsFromDockerfile,
+  dockerfilePath,
+  readCustomBuild,
+  writeCustomBuild,
+  BUILD_BLOCK_HEAD,
+  BUILD_BLOCK_TAIL,
 };

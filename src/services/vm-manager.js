@@ -3,8 +3,9 @@ const path = require('path');
 const { execFile, execFileSync } = require('child_process');
 const { runCmdStream } = require('./cmd');
 const { getDriver, drivers } = require('./drivers');
-const { imageFor, legacySharedImage, buildDir, buildEnvPath, readBuildEnv, setBuildEnv, argsFromDockerfile } = require('./instance-image');
+const { imageFor, legacySharedImage, buildDir, buildEnvPath, readBuildEnv, setBuildEnv, argsFromDockerfile, readCustomBuild, writeCustomBuild } = require('./instance-image');
 const { ensureOwned, normalizeTree, isSelfManagedAgentData, USER_UID, USER_GID } = require('./ownership');
+const devcontainer = require('./devcontainer');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const HOST_WORKSPACE = process.env.HOST_WORKSPACE_ROOT || WORKSPACE;
@@ -359,6 +360,162 @@ function seedBuildDir(name, agent, opts = {}) {
   return dir;
 }
 
+/** Path of the per-instance post-create script (`build/post-create.sh`). */
+function postCreateScriptPath(name) {
+  return path.join(buildDir(name), 'post-create.sh');
+}
+
+/** Path of the per-instance post-start script (`build/post-start.sh`). */
+function postStartScriptPath(name) {
+  return path.join(buildDir(name), 'post-start.sh');
+}
+
+/** Path of the per-instance post-attach script (`build/post-attach.sh`). */
+function postAttachScriptPath(name) {
+  return path.join(buildDir(name), 'post-attach.sh');
+}
+
+/** True when any plan-41 lifecycle script exists for the instance (post-create,
+ *  post-start or post-attach). The compose generator binds the build dir at
+ *  /build when ANY of them exist, so every script is exec-able in the running
+ *  container. */
+function hasLifecycleScripts(name) {
+  return [postCreateScriptPath(name), postStartScriptPath(name), postAttachScriptPath(name)]
+    .some((p) => fs.existsSync(p));
+}
+
+/** Read a lifecycle script body (without the shebang / `set -e`), or '' when
+ *  none. */
+function readLifecycleScript(p) {
+  if (!fs.existsSync(p)) return '';
+  let t = fs.readFileSync(p, 'utf8');
+  t = t.replace(/^#![^\n]*\n?/, '').replace(/^\s*set -e\s*\n?/, '').replace(/\s*$/, '');
+  return t;
+}
+
+/** Write (or remove) a lifecycle script (plan 41). Same shape as the post-create
+ *  script: `#!/usr/bin/env bash` + `set -e`; empty text removes the file. */
+function writeLifecycleScript(p, text) {
+  const dir = path.dirname(p);
+  fs.mkdirSync(dir, { recursive: true });
+  const body = String(text || '').replace(/\r\n/g, '\n');
+  if (!body.trim()) {
+    if (fs.existsSync(p)) fs.rmSync(p);
+    return;
+  }
+  const script = '#!/usr/bin/env bash\nset -e\n' + body.replace(/^\s*$/, '') + '\n';
+  fs.writeFileSync(p, script);
+  fs.chmodSync(p, 0o755);
+  ensureOwned(p);
+}
+
+/** Read the current post-create script body (without the shebang), or '' when
+ *  none exists. */
+function readPostCreate(name) {
+  return readLifecycleScript(postCreateScriptPath(name));
+}
+
+/** Read the current post-start script body, or '' when none exists. */
+function readPostStart(name) {
+  return readLifecycleScript(postStartScriptPath(name));
+}
+
+/** Read the current post-attach script body, or '' when none exists. */
+function readPostAttach(name) {
+  return readLifecycleScript(postAttachScriptPath(name));
+}
+
+/** Write (or remove) the per-instance post-create script (plan 41). The body
+ *  is wrapped in `set -e` + `#!/usr/bin/env bash` so the create job runs it
+ *  streamed via `docker exec`; empty text removes the file. */
+function writePostCreateScript(name, text) {
+  writeLifecycleScript(postCreateScriptPath(name), text);
+}
+
+/** Write (or remove) the per-instance post-start script (plan 41). Runs on
+ *  every container start (start.sh hook); empty text removes the file. */
+function writePostStartScript(name, text) {
+  writeLifecycleScript(postStartScriptPath(name), text);
+}
+
+/** Write (or remove) the per-instance post-attach script (plan 41). Runs when a
+ *  terminal/exec session attaches to the agent; empty text removes the file. */
+function writePostAttachScript(name, text) {
+  writeLifecycleScript(postAttachScriptPath(name), text);
+}
+
+// ─── Project image (plan 41 multi-stage) ────────────────────────────────────
+
+/** Tag of a pad's project image: `paddock-proj-<name>:latest`, built once from
+ *  the workspace devcontainer's `build`/`image` so the build-commands box can
+ *  `FROM paddock-proj-<name>:latest AS project` / `COPY --from=…`. The agent's
+ *  runtime base stays the driver's own image — the project image is only the
+ *  toolchain/stage source. */
+
+// ─── Project image (plan 41 multi-stage) ────────────────────────
+// The workspace's devcontainer `build`/`image` is NEVER the agent's base. It is
+// built once as `paddock-proj-<name>:latest` so the build-commands box can
+// `FROM paddock-proj-<name>:latest AS project` + `COPY --from=...` to pull the
+// project toolchain (code, venvs, node_modules) into the agent's own image.
+
+/** Tag of the per-pad project image (`paddock-proj-<name>:latest`). The name is
+ *  lowercased like `imageFor` (registry-safe tag segment); the pad prefix is
+ *  dropped since these images never map 1:1 to a running container. */
+function projectImageTag(name) {
+  return `paddock-proj-${name.toLowerCase()}:latest`;
+}
+
+/** Whether the workspace devcontainer declares a `build`/`image` worth building
+ *  as the project image. Never throws. */
+function workspaceHasProjectImage(wsHost) {
+  const view = containerViewOf(wsHost);
+  if (!view) return false;
+  const dc = devcontainer.readDevContainer(view);
+  return !!(dc && (dc.dockerFile || dc.image));
+}
+
+/** Build (or pull+tag) the workspace devcontainer's `build`/`image` once as
+ *  `paddock-proj-<name>:latest` (plan 41 item 10). Only runs for workspaces the
+ *  webui can see (containerViewOf != null); host-only sources are skipped with a
+ *  log — the Docker daemon could build them but the webui has no view to read
+ *  the devcontainer from. Throws on build failure (create job aborts visibly). */
+async function buildProjectImage(name, wsHost, { onLog = () => {} } = {}) {
+  const view = containerViewOf(wsHost);
+  if (!view || !fs.existsSync(view)) {
+    onLog('system', 'Skipping project image: workspace is not visible to the webui');
+    return null;
+  }
+  const dc = devcontainer.readDevContainer(view);
+  if (!dc || (!dc.dockerFile && !dc.image)) {
+    return null;
+  }
+  const tag = projectImageTag(name);
+  if (dc.dockerFile) {
+    // Build context = the devcontainer's `build.context` (defaults to the dir
+    // containing the devcontainer.json); the Dockerfile is relative to it.
+    const ctx = dc.buildContext || view;
+    if (!fs.existsSync(ctx)) {
+      onLog('system', `Skipping project image: build context not found (${ctx})`);
+      return null;
+    }
+    const dockerfile = dc.dockerFile.startsWith('/')
+      ? dc.dockerFile
+      : path.join(ctx, dc.dockerFile);
+    onLog('system', `Building project image ${tag} from ${dockerfile}…`);
+    await runCmdStream('docker', ['build', '-t', tag, '-f', dockerfile, ctx], { onLog, timeout: 900000 });
+    onLog('system', `Project image built: ${tag}`);
+    return tag;
+  }
+  if (dc.image) {
+    onLog('system', `Pulling project image ${dc.image} as ${tag}…`);
+    await runCmdStream('docker', ['pull', dc.image], { onLog, timeout: 900000 });
+    await runCmd('docker', ['tag', dc.image, tag], { timeout: 30000 });
+    onLog('system', `Project image tagged: ${tag}`);
+    return tag;
+  }
+  return null;
+}
+
 /** Compose command prefix for an instance. Every per-instance `docker compose`
  *  invocation passes its `build.env` as an env-file so compose resolves the
  *  generated `build.args:` interpolation consistently. Skips the env-file when
@@ -497,6 +654,359 @@ function readExtraVolumes(name) {
   } catch {
     return [];
   }
+}
+
+/** Read the persisted devcontainer plan (meta.env DC_PLAN JSON) or null when
+ *  absent/corrupt. Never throws. */
+function readDevContainerPlan(name) {
+  const meta = readMeta(path.join(INSTANCES_DIR, name)) || {};
+  if (!meta.DC_PLAN) return null;
+  try {
+    const plan = JSON.parse(meta.DC_PLAN);
+    return plan && typeof plan === 'object' && !Array.isArray(plan) ? plan : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Devcontainer runArgs allow-list (plan 41 item 16): only these keys map onto
+ *  compose; anything else is rejected with a clear error. */
+const DC_RUNARG_KEYS = new Set(['--cap-add', '--ulimit', '--sysctl', '--env-file']);
+/** Internal env keys a devcontainer may not override — start.sh owns them. */
+const DC_PROTECTED_ENV = new Set(['ROOT_PASSWORD', 'SSH_PORT', 'USER_MODE', 'TZ']);
+
+/** Resolve a workspace devcontainer.json into the effective per-pad plan the
+ *  compose generator consumes (plan 41 items 12–16):
+ *    workspaceFolder → effective mount target (editable drivers only, and only
+ *      when the stored WORKSPACE_DIR is still the driver default — a custom
+ *      mount target the user chose wins),
+ *    environment    → merged over the defaults (protected keys kept),
+ *    mounts         → validated binds (sources resolved against the workspace
+ *      host dir; anything under HOST_WORKSPACE but outside the workspace is
+ *      rejected so a devcontainer can't reach project internals),
+ *    runArgs        → allow-listed cap_add/ulimits/sysctls/env_file,
+ *    forwardPorts   → host-port allocation, persisted so re-generates stay
+ *      stable. Skip allocation (opts.allocatePorts=false) for the pre-create
+ *      validation pass — runArgs/mounts/ports still throw there.
+ * Returns null when the workspace has no devcontainer.json. Throws a clear
+ * error on invalid mounts/runArgs so create/settings abort early. */
+function resolveDevContainerPlan(name, agent, wsMount, opts = {}) {
+  if (!wsMount) return null;
+  // Container view of the workspace host dir: project paths map to /workspace;
+  // host-only paths (e.g. /www1/...) are one-to-one mounts, read as-is.
+  const view = containerViewOf(wsMount.host) || path.normalize(wsMount.host);
+  const dc = view ? devcontainer.readDevContainer(view) : null;
+  if (!dc) return null;
+  const driver = getDriver(agent);
+  const plan = {
+    filePath: dc.filePath,
+    hasDevContainer: true,
+    workspaceFolder: '',
+    environment: {},
+    volumes: [],
+    runArgs: { caps: [], ulimits: {}, sysctls: {}, envFiles: [] },
+    ports: [],
+    // 17 — remoteUser/containerUser: the devcontainer's declared user maps onto
+    // the pad's USER_MODE (plan 43 Phase 7). `containerUser` wins over
+    // `remoteUser` per spec; a non-root user (anything but ''/root/0) means the
+    // pad should run as the pad user (PUID/PGID) → 'user'. Explicit root → 'root'.
+    // Absent → '' (no preference). The raw strings are kept for generation +
+    // the UI; the preference only seeds the DEFAULT — an explicit pad-level
+    // Container user toggle always wins.
+    remoteUser: dc.remoteUser,
+    containerUser: dc.containerUser,
+    userMode: dc.preferredUserMode || '',
+  };
+
+  // 13 — workspaceFolder: only editable drivers, and only when the user has
+  // not pinned their own container target (stored WORKSPACE_DIR still the
+  // driver default).
+  if (dc.workspaceFolder && driver.workspaceCapability === 'editable' && wsMount.container === driver.workspaceDir) {
+    plan.workspaceFolder = dc.workspaceFolder;
+  }
+
+  // 12 — environment: coerce to strings, drop protected keys.
+  for (const [k, v] of Object.entries(dc.environment)) {
+    if (DC_PROTECTED_ENV.has(k)) continue;
+    plan.environment[k] = String(v);
+  }
+
+  // 15 — mounts: resolve relative sources against the workspace host dir and
+  // validate each bind through the extra-volume machinery (rejects system
+  // dirs, project internals, agent-data swallow, protected container paths).
+  for (const m of dc.mounts) {
+    if (!m || !m.host || !m.container) continue;
+    const hostPath = m.host.startsWith('/')
+      ? m.host
+      : path.join(wsMount.host, m.host);
+    if (hostPath === HOST_WORKSPACE || hostPath.startsWith(HOST_WORKSPACE + path.sep)) {
+      if (!(hostPath === wsMount.host || hostPath.startsWith(wsMount.host + path.sep))) {
+        throw new Error(`Devcontainer mount '${m.host}' would reach project internals — only paths inside the workspace or outside the project root are allowed`);
+      }
+    }
+    plan.volumes.push(validateExtraVolume(name, agent, hostPath, m.container, !!m.readonly, 'bind', ''));
+  }
+
+  // 16 — runArgs: parse the allow-listed keys only (`--key=value` or `--key value`).
+  const args = [...dc.runArgs];
+  for (let i = 0; i < args.length; i++) {
+    const raw = args[i];
+    const eq = raw.indexOf('=');
+    const key = eq > 0 ? raw.slice(0, eq) : raw;
+    let value = eq > 0 ? raw.slice(eq + 1) : '';
+    if (!DC_RUNARG_KEYS.has(key)) {
+      throw new Error(`Unsupported devcontainer runArg '${raw}' — only ${[...DC_RUNARG_KEYS].join(', ')} are supported`);
+    }
+    if (!value && key !== '--cap-add') {
+      value = args[++i];
+      if (value === undefined) throw new Error(`Missing value for devcontainer runArg '${key}'`);
+    }
+    if (key === '--cap-add') {
+      if (value && !plan.runArgs.caps.includes(value)) plan.runArgs.caps.push(value);
+    } else if (key === '--ulimit') {
+      const um = /^([a-z_]+)=(\d+)(?::(\d+))?$/.exec(value);
+      if (!um) throw new Error(`Invalid devcontainer --ulimit '${value}' — expected name=soft[:hard]`);
+      plan.runArgs.ulimits[um[1]] = { soft: +um[2], hard: um[3] ? +um[3] : +um[2] };
+    } else if (key === '--sysctl') {
+      const sm = /^([^=]+)=(.+)$/.exec(value);
+      if (!sm) throw new Error(`Invalid devcontainer --sysctl '${value}' — expected key=value`);
+      plan.runArgs.sysctls[sm[1]] = sm[2];
+    } else if (key === '--env-file') {
+      plan.runArgs.envFiles.push(value.startsWith('/') ? value : path.join(wsMount.host, value));
+    }
+  }
+
+  // 14 — forwardPorts: allocate a stable host port per container port (reuse
+  // the container port when free, else a fresh 43817-range port; previously
+  // persisted mappings are kept across settings applies). Validation passes
+  // skip allocation entirely.
+  const used = opts.allocatePorts !== false ? collectPublishedHostPorts(name) : null;
+  const excluded = new Set((opts.excludeHostPorts || []).filter(Boolean).map(String));
+  const prev = readDevContainerPlan(name);
+  const prevHosts = new Map((prev && prev.ports ? prev.ports : []).map((p) => [`${p.container}/${p.protocol}`, String(p.host)]));
+  for (const entry of dc.forwardPorts) {
+    const pm = /^(\d+)(?:\/(tcp|udp))?$/.exec(String(entry).trim());
+    if (!pm) continue;
+    const container = pm[1];
+    const protocol = pm[2] || 'tcp';
+    let host = container;
+    if (used) {
+      const prevHost = prevHosts.get(`${container}/${protocol}`);
+      let p = prevHost && !used.has(parseInt(prevHost, 10)) && !excluded.has(prevHost)
+        ? parseInt(prevHost, 10)
+        : parseInt(host, 10);
+      while (used.has(p) || excluded.has(String(p)) || plan.ports.some((x) => x.host === String(p))) p++;
+      host = String(p);
+      used.add(p);
+    }
+    const attr = dc.portsAttributes && dc.portsAttributes[container] ? dc.portsAttributes[container] : {};
+    plan.ports.push({
+      container,
+      host,
+      protocol,
+      label: attr.label ? String(attr.label) : '',
+    });
+  }
+
+  return plan;
+}
+
+/** Convert a resolved runArgs plan back into `--key value` strings for the
+ *  devcontainer mirror (plan 41 items 18–19). */
+function runArgsToDevContainerArgs(runArgs = {}) {
+  const out = [];
+  for (const cap of runArgs.caps || []) out.push('--cap-add', cap);
+  for (const [n, ul] of Object.entries(runArgs.ulimits || {})) {
+    out.push('--ulimit', `${n}=${ul.soft}:${ul.hard}`);
+  }
+  for (const [k, v] of Object.entries(runArgs.sysctls || {})) out.push('--sysctl', `${k}=${v}`);
+  for (const f of runArgs.envFiles || []) out.push('--env-file', f);
+  return out;
+}
+
+/** The 1:1 devcontainer mirror fields for a pad, computed from its CURRENT
+ *  effective config (meta, lifecycle scripts, persisted plan, extras). The
+ *  devcontainer is the portable mirror of the pad (plan 41 items 18–19), so
+ *  pad-level additions (extra volumes/ports, edited lifecycle commands) flow
+ *  back into it. */
+function devcontainerMirrorFields(name, agent, wsMount) {
+  if (!wsMount) return null;
+  const dcPlan = readDevContainerPlan(name) || {};
+  const extraVols = readExtraVolumes(name);
+  const extraPs = readExtraPorts(name);
+
+  const mounts = [];
+  const seen = new Set();
+  for (const v of [...(dcPlan.volumes || []), ...extraVols]) {
+    if (!v || !v.host || !v.container) continue;
+    const m = { host: String(v.host), container: String(v.container), readonly: !!v.readonly };
+    const key = `${m.host}\u0000${m.container}\u0000${m.readonly ? 'ro' : 'rw'}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    mounts.push(m);
+  }
+
+  const forwardPorts = [];
+  for (const p of [...(dcPlan.ports || []), ...extraPs]) {
+    if (p && p.container && !forwardPorts.includes(String(p.container))) forwardPorts.push(String(p.container));
+  }
+
+  const portsAttributes = {};
+  for (const p of dcPlan.ports || []) {
+    if (p && p.label) portsAttributes[p.container] = { label: String(p.label) };
+  }
+
+  const meta = readMeta(path.join(INSTANCES_DIR, name)) || {};
+  // Reverse-translate lifecycle commands to the /workspace convention: the
+  // pad's scripts use the agent's workspace path (e.g.
+  // /root/.openclaw/workspace); the mirror stores convention paths so
+  // different agent types can probe it cleanly (plan 45).
+  const padWs = wsMount.container;
+  const toConvention = (cmd) => {
+    if (!cmd || !padWs || padWs === '/workspace') return cmd;
+    const esc = padWs.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return cmd.replace(new RegExp(`(^|[^/\\w.-])${esc}(?=[/\\s"';&|)$])`, 'g'), '$1/workspace');
+  };
+  return {
+    workspaceFolder: dcPlan.workspaceFolder || wsMount.container,
+    postCreate: toConvention(readPostCreate(name)),
+    postStart: toConvention(readPostStart(name)),
+    postAttach: toConvention(readPostAttach(name)),
+    environment: dcPlan.environment || {},
+    mounts,
+    runArgs: runArgsToDevContainerArgs(dcPlan.runArgs),
+    forwardPorts,
+    portsAttributes,
+    remoteUser: meta.USER_MODE === 'user' ? 'pad' : '',
+  };
+}
+
+/** Generate a `.devcontainer/devcontainer.json` mirror for a pad's workspace at
+ *  create time (plan 41 item 18) — only when the workspace has none and
+ *  generation is enabled (default on; the create form toggle / MCP arg opts
+ *  out). Returns the written file path, or null when there's nothing to
+ *  generate (no workspace, workspace already has a devcontainer, workspace not
+ *  visible to the webui). */
+function generateWorkspaceDevContainer(name, agent, wsMount, { postCreate = '', postStart = '', postAttach = '', extraVols = [], extraPs = [], userMode = '', enabled = true } = {}) {
+  if (!enabled || !wsMount) return null;
+  if (devcontainer.hasDevContainer(containerViewOf(wsMount.host) || '')) return null;
+  const view = containerViewOf(wsMount.host) || path.normalize(wsMount.host);
+  if (!view || !fs.existsSync(view)) return null;
+  // Reverse-translate lifecycle commands to /workspace convention so the
+  // generated mirror is agent-type-agnostic (plan 45).
+  const padWs = wsMount.container;
+  const toConvention = (cmd) => {
+    if (!cmd || !padWs || padWs === '/workspace') return cmd;
+    const esc = padWs.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return cmd.replace(new RegExp(`(^|[^/\\w.-])${esc}(?=[/\\s"';&|)$])`, 'g'), '$1/workspace');
+  };
+  const target = devcontainer.writeGeneratedDevContainer(view, devcontainer.generateDevContainer({
+    workspaceFolder: wsMount.container,
+    postCreate: toConvention(String(postCreate).trim()),
+    postStart: toConvention(String(postStart).trim()),
+    postAttach: toConvention(String(postAttach).trim()),
+    mounts: (extraVols || [])
+      .filter((v) => v.type !== 'volume')
+      .map((v) => ({ host: v.host, container: v.container, readonly: v.readonly })),
+    forwardPorts: (extraPs || []).map((p) => String(p.container)),
+    remoteUser: userMode === 'user' ? 'pad' : '',
+  }));
+  ensureOwned(target);
+  return target;
+}
+
+/** Write back the pad's 1:1 mapped fields into the workspace devcontainer.json
+ *  in place (plan 41 item 19). Generated files (`x-paddock.generated`) are
+ *  regenerated wholesale; project-authored files get only the mapped fields
+ *  (runArgs/portsAttributes/remoteUser stay untouched). Skips when the pad has
+ *  no workspace or the workspace devcontainer is one the pad never adopted (no
+ *  generated marker, no persisted plan) — never clobbers an unknown file.
+ *  Returns the synced file path, or null. Never throws. */
+function syncDevContainer(name, agent, wsMount, { onLog = () => {} } = {}) {
+  if (!wsMount) return null;
+  const view = containerViewOf(wsMount.host) || path.normalize(wsMount.host);
+  const dc = view ? devcontainer.readDevContainer(view) : null;
+  if (!dc) return null;
+  const dcPlan = readDevContainerPlan(name);
+  if (!dc.generated && !dcPlan) return null;
+  const fields = devcontainerMirrorFields(name, agent, wsMount);
+  if (!fields) return null;
+  const content = dc.generated
+    ? devcontainer.syncFile(dc.filePath, fields)
+    : devcontainer.syncFile(dc.filePath, {
+        // Project-authored: only the mapped fields, and only when the pad has
+        // something meaningful to say. workspaceFolder is written only when the
+        // devcontainer declared one the pad honors (identity — never force the
+        // pad's own target into a project file). Empty collections are omitted
+        // so a devcontainer without mounts/ports/env stays uncluttered.
+        workspaceFolder: dcPlan && dcPlan.workspaceFolder ? fields.workspaceFolder : undefined,
+        postCreate: fields.postCreate,
+        postStart: fields.postStart,
+        postAttach: fields.postAttach,
+        ...(Object.keys(fields.environment || {}).length ? { environment: fields.environment } : {}),
+        ...(fields.mounts && fields.mounts.length ? { mounts: fields.mounts } : {}),
+        ...(fields.forwardPorts && fields.forwardPorts.length ? { forwardPorts: fields.forwardPorts } : {}),
+      });
+  ensureOwned(dc.filePath);
+  onLog('system', `Synced workspace devcontainer (${dc.generated ? 'generated' : 'project-authored'})`);
+  return dc.filePath;
+}
+
+/** The Settings "Dev Container" card state (plan 41 item 20): where the pad's
+ *  workspace devcontainer.json lives, its state badge (generated /
+ *  project-authored / missing), and both sides of the diff preview — the
+ *  current file content vs what Paddock would write now from the pad's
+ *  effective config. `sync`/`regenerate` tell the UI which actions apply.
+ *  Never throws. */
+function devContainerStatus(name) {
+  const meta = readMeta(path.join(INSTANCES_DIR, name));
+  if (!meta || (!meta.AGENT && !meta.ROOT_PASSWORD)) return null;
+  const agentType = meta.AGENT || 'openclaw';
+  let wsMount = null;
+  try { wsMount = readWorkspaceMount(name, agentType); } catch {}
+  if (!wsMount) {
+    return { found: false, state: 'missing', filePath: '', workspacePath: '', content: '', target: '', sync: false, regenerate: true };
+  }
+  const view = containerViewOf(wsMount.host) || path.normalize(wsMount.host);
+  const dc = view ? devcontainer.readDevContainer(view) : null;
+  const fields = devcontainerMirrorFields(name, agentType, wsMount);
+  const target = fields
+    ? devcontainer.generateDevContainer(fields)
+    : '';
+  const content = dc ? fs.readFileSync(dc.filePath, 'utf8') : '';
+  const generated = !!(dc && dc.generated);
+  return {
+    found: !!dc,
+    state: !dc ? 'missing' : generated ? 'generated' : 'project-authored',
+    filePath: dc ? dc.filePath : '',
+    workspacePath: view || '',
+    generated,
+    content,
+    target,
+    // Sync writes the mapped fields in place — meaningful only for a file the
+    // pad adopted (generated, or one with a persisted plan). Regenerate always
+    // applies (it creates the file when missing).
+    sync: !!dc && (generated || !!readDevContainerPlan(name)),
+    regenerate: true,
+  };
+}
+
+/** Rewrite (or create) the workspace devcontainer.json as the pad's full
+ *  generated mirror (plan 41 item 20 "Regenerate"). Unlike sync, this clobbers
+ *  the whole file — only a user clicking Regenerate in the card should do
+ *  that. Returns the written file path, or null. Never throws. */
+function regenerateDevContainer(name, agent) {
+  if (!agent) return null;
+  let wsMount = null;
+  try { wsMount = readWorkspaceMount(name, agent); } catch {}
+  if (!wsMount) return null;
+  const view = containerViewOf(wsMount.host) || path.normalize(wsMount.host);
+  if (!view || !fs.existsSync(view)) return null;
+  const fields = devcontainerMirrorFields(name, agent, wsMount);
+  if (!fields) return null;
+  const target = devcontainer.writeGeneratedDevContainer(view, devcontainer.generateDevContainer(fields));
+  ensureOwned(target);
+  return target;
 }
 
 /** The SSH daemon's port INSIDE the container (default 22). Stored in meta as
@@ -693,16 +1203,16 @@ function validateExtraPorts(ports, opts = {}) {
   return out;
 }
 
-/** Smallest unused SSH host port starting at 43817 (the same scan createVm
- *  uses to auto-allocate an SSH port when "Expose SSH" is on without a port).
- *  Collects every published host port across all instances — SSH (host:container
- *  where container can vary now), extra ports, and the web app — from the
- *  generated compose files. */
-function autoSshPort() {
+/** Every published host port across all instances — SSH (host:container where
+ *  container can vary), extra ports, the web app, and devcontainer forwardPorts
+ *  — collected from the generated compose files. Shared by the SSH auto-port
+ *  and the devcontainer forwardPorts allocator. */
+function collectPublishedHostPorts(name) {
   const used = new Set();
   if (fs.existsSync(INSTANCES_DIR)) {
     for (const entry of fs.readdirSync(INSTANCES_DIR, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
+      if (entry.name === name) continue;
       const composeFile = path.join(INSTANCES_DIR, entry.name, 'docker-compose.yml');
       if (fs.existsSync(composeFile)) {
         for (const m of fs.readFileSync(composeFile, 'utf8').matchAll(/"(\d+):(\d+)"/g)) {
@@ -711,6 +1221,26 @@ function autoSshPort() {
       }
     }
   }
+  // Live published ports (incl. containers from other projects): a forwardPort
+  // must not collide with what the daemon has already bound. Same net effect as
+  // hostPortInUse's docker ps scan, but synchronous for the port allocators.
+  try {
+    const r = execFileSync('docker', ['ps', '--format', '{{.Names}}\t{{.Ports}}'], { stdio: 'pipe', timeout: 15000 });
+    for (const line of (r.toString() || '').split('\n')) {
+      const [cn, ports] = line.split('\t');
+      if (!ports || cn === name) continue;
+      for (const m of (ports || '').matchAll(/(?:0\.0\.0\.0:|\[::\]:)?(\d+)->/g)) {
+        used.add(parseInt(m[1]));
+      }
+    }
+  } catch {}
+  return used;
+}
+
+/** Smallest unused SSH host port starting at 43817 (the same scan createVm
+ *  uses to auto-allocate an SSH port when "Expose SSH" is on without a port). */
+function autoSshPort() {
+  const used = collectPublishedHostPorts();
   let p = 43817;
   while (used.has(p)) p++;
   return String(p);
@@ -720,6 +1250,7 @@ function generateInstanceCompose(name, agent, password, port, opts = {}) {
   const { allowDocker = false, network = '', webService = null, webPeerNetwork = '' } = opts;
   const driver = getDriver(agent);
   const wsMount = readWorkspaceMount(name, agent);
+  const dcPlan = readDevContainerPlan(name);
   const peerMode = !!network;
   const args = argsFromDockerfile(path.join(INSTANCES_DIR, name, 'build', 'Dockerfile'));
   const buildArgs = Object.fromEntries(args.map((a) => [
@@ -728,6 +1259,13 @@ function generateInstanceCompose(name, agent, password, port, opts = {}) {
   ]));
   const volumes = [`${HOST_WORKSPACE}/instances/${name}/${agent}:${driver.dataDir}`];
   const sshCport = readSshCport(name);
+  // Plan-41 lifecycle scripts (post-create/post-start/post-attach) live in the
+  // build dir on the host — bind it at /build so the create job (and a later
+  // Re-run) can exec the script inside the running container. Only when the
+  // instance HAS one, so legacy agents' compose never gains a mount.
+  if (hasLifecycleScripts(name)) {
+    volumes.push(`${HOST_WORKSPACE}/instances/${name}/build:/build`);
+  }
   const service = {
     build: {
       // The compose CLI runs in the webui, so the build context uses its view.
@@ -741,15 +1279,27 @@ function generateInstanceCompose(name, agent, password, port, opts = {}) {
   };
 
   const ports = [];
+  const dcPorts = (dcPlan && dcPlan.ports) || [];
   if (!peerMode) {
     if (port) ports.push(`${port}:${sshCport}`);
     if (webService?.hostPort) ports.push(`${webService.hostPort}:${webService.containerPort}`);
     for (const p of readExtraPorts(name)) ports.push(`${p.host}:${p.container}`);
+    // Devcontainer forwardPorts (item 14) — persisted host mapping. The host
+    // side must be a plain numeric port; the protocol belongs on the container
+    // side only (`43817:4200/tcp`), or compose config rejects it.
+    for (const p of dcPorts) ports.push(`${p.host}:${p.container}/${p.protocol}`);
   }
   if (ports.length) service.ports = ports;
   if (wsMount) {
-    volumes.push(`${wsMount.host}:${wsMount.container}`);
-    service.working_dir = wsMount.container;
+    // Devcontainer workspaceFolder (item 13) overrides the mount target for
+    // editable drivers when the stored WORKSPACE_DIR is still the driver
+    // default — re-verified here so a stale plan can never override a custom
+    // target the user chose. The host source never changes.
+    const effTarget = dcPlan && dcPlan.workspaceFolder && driver.workspaceCapability === 'editable' && wsMount.container === driver.workspaceDir
+      ? dcPlan.workspaceFolder
+      : wsMount.container;
+    volumes.push(`${wsMount.host}:${effTarget}`);
+    service.working_dir = effTarget;
   }
   if (allowDocker) volumes.push('/var/run/docker.sock:/var/run/docker.sock');
   const namedVolumes = {};
@@ -762,6 +1312,10 @@ function generateInstanceCompose(name, agent, password, port, opts = {}) {
       const external = v.external && dockerVolumeExists(v.external) ? v.external : '';
       namedVolumes[v.host] = external ? { external: true, name: external } : {};
     }
+  }
+  // Devcontainer mounts (item 15) — validated binds, emitted like extra volumes.
+  for (const v of (dcPlan && dcPlan.volumes) || []) {
+    volumes.push(`${v.host}:${v.container}${v.readonly ? ':ro' : ''}`);
   }
   if (network) service.network_mode = `container:${network}`;
   // USER_MODE=user (plan 43 Phase 7) tells the baked start.sh to drop the
@@ -779,6 +1333,18 @@ function generateInstanceCompose(name, agent, password, port, opts = {}) {
     // ports — the host → container mapping alone can't fix that.
     ...(port ? { SSH_PORT: sshCport } : {}),
   };
+  if (dcPlan) {
+    // Devcontainer environment (item 12) merges over the defaults; protected
+    // keys were dropped at resolve time so start.sh keeps control.
+    Object.assign(service.environment, dcPlan.environment || {});
+    // runArgs (item 16): allow-listed keys map onto compose fields.
+    if (dcPlan.runArgs) {
+      if (dcPlan.runArgs.caps.length) service.cap_add = dcPlan.runArgs.caps;
+      if (Object.keys(dcPlan.runArgs.ulimits).length) service.ulimits = dcPlan.runArgs.ulimits;
+      if (Object.keys(dcPlan.runArgs.sysctls).length) service.sysctls = dcPlan.runArgs.sysctls;
+      if (dcPlan.runArgs.envFiles.length) service.env_file = dcPlan.runArgs.envFiles;
+    }
+  }
 
   const services = { [name]: service };
   let networks;
@@ -795,6 +1361,11 @@ function generateInstanceCompose(name, agent, password, port, opts = {}) {
     if (webService?.hostPort) doorPorts.push({ hostPort: String(webService.hostPort), containerPort: String(webService.containerPort) });
     if (port) doorPorts.push({ hostPort: String(port), containerPort: sshCport });
     for (const p of readExtraPorts(name)) doorPorts.push({ hostPort: String(p.host), containerPort: String(p.container) });
+    // Devcontainer forwardPorts (item 14) — TCP only; the socat door cannot
+    // forward UDP.
+    for (const p of dcPorts.filter((x) => x.protocol !== 'udp')) {
+      doorPorts.push({ hostPort: String(p.host), containerPort: String(p.container) });
+    }
     if (doorPorts.length) {
       const door = doorName(name);
       const socats = doorPorts
@@ -927,6 +1498,15 @@ async function applySettings(name, opts = {}) {
     setMetaFlag(name, 'WORKSPACE_HOST', '');
     setMetaFlag(name, 'WORKSPACE_DIR', '');
   }
+  // Devcontainer plan (plan 41 items 12–16): (re)resolve from the workspace's
+  // devcontainer.json whenever the workspace or settings change — the compose
+  // regen below reads the persisted mapping. '' clears it (no devcontainer /
+  // no workspace). Allocation reuses previously persisted host ports so a
+  // settings apply never reshuffles forwardPorts.
+  const dcPlan = wsMount
+    ? resolveDevContainerPlan(name, agent, wsMount, { allocatePorts: true, excludeHostPorts: [sshPort] })
+    : null;
+  setMetaFlag(name, 'DC_PLAN', dcPlan ? JSON.stringify(dcPlan) : '');
 
   // Extra volumes / ports (plan 28): written BEFORE the compose regen so the
   // generator (which reads them from meta) picks them up. Each is only written
@@ -1216,6 +1796,52 @@ function ensureSshStartBlock(name) {
   return true;
 }
 
+/** Post-start lifecycle hook marker (plan 41). The block is baked into the
+ *  image at build time and runs `/build/post-start.sh` on EVERY container start
+ *  (the build dir is bind-mounted at /build when the instance has lifecycle
+ *  scripts). Absent from pads created before the template change; callers must
+ *  rebuild the image when ensurePostStartBlock returns true. */
+const POST_START_MARKER = '/build/post-start.sh';
+
+const POST_START_BLOCK = `# Paddock post-start hook (plan 41): if the webui wrote a post-start.sh (bound
+# via the build-dir /build mount), run it on EVERY container start.
+if [ -f /build/post-start.sh ]; then
+    bash /build/post-start.sh || true
+fi
+`;
+
+/** Backfill the post-start hook into an instance's OWN build/start.sh (pads
+ *  created before the template change don't have it). Returns true when it was
+ *  injected (caller must rebuild the image); false when already present or
+ *  un-patchable. Idempotent. */
+function ensurePostStartBlock(name) {
+  const dir = buildDir(name);
+  const p = path.join(dir, 'start.sh');
+  if (!fs.existsSync(p)) return false;
+  let content = fs.readFileSync(p, 'utf8');
+  if (content.includes(POST_START_MARKER)) return false;
+  const re = /^(\s*\/usr\/sbin\/sshd &.*)$/m;
+  if (!re.test(content)) return false;
+  content = content.replace(re, '$1\n' + POST_START_BLOCK);
+  fs.writeFileSync(p, content, { mode: 0o755 });
+  ensureOwned(p);
+  return true;
+}
+
+/** Whether the built image (or running container) has the post-start hook baked
+ *  into its start.sh. Used by applyAgentChanges to decide whether enabling a
+ *  post-start command needs a rebuild. */
+async function imageHasPostStartHook(name, image, wasRunning) {
+  try {
+    const r = wasRunning
+      ? await runCmd('docker', ['exec', name, 'sh', '-lc', `grep -q '${POST_START_MARKER}' /usr/local/bin/start.sh`], { timeout: 15000 })
+      : await runCmd('docker', ['run', '--rm', '--entrypoint', 'sh', image, '-lc', `grep -q '${POST_START_MARKER}' /usr/local/bin/start.sh`], { timeout: 30000 });
+    return r.code === 0;
+  } catch {
+    return false;
+  }
+}
+
 // ─── User-mode (Container user) build-file support (plan 43 Phase 7) ────────
 // The `pad` user + daemon-drop block live in the build templates now, so NEW
 // pads get them at create time. Existing root-mode pads toggled to user mode
@@ -1346,7 +1972,7 @@ async function updateAgent(name, { onLog = () => {}, onStep = () => {}, buildArg
   }
   onStep('build', 'end');
 
-  onStep('recreate', 'start');
+  onStep('recreate', 'start', `docker compose -f instances/${name}/docker-compose.yml up -d --force-recreate`);
   try {
     await runCompose(name, ['up', '-d', '--no-deps', '--force-recreate', name], { stream: true, onLog, timeout: 300000 });
   } catch (e) {
@@ -1385,7 +2011,7 @@ async function recreateAgent(name, { pull = false, reset = false, onLog = () => 
   }
 
   if (reset) {
-    onStep('reset', 'start');
+    onStep('reset', 'start', `docker rm -f ${name} && rm -rf instances/${name}/${agent}/*`);
     try { await runCmd('docker', ['rm', '-f', name], { timeout: 30000 }); } catch {}
     const agentDir = path.join(instDir, agent);
     await removeInstanceDir(name, agentDir);
@@ -1400,7 +2026,7 @@ async function recreateAgent(name, { pull = false, reset = false, onLog = () => 
     onStep('reset', 'end');
   }
 
-  onStep('recreate', 'start');
+  onStep('recreate', 'start', `docker compose -f instances/${name}/docker-compose.yml up -d --force-recreate`);
   try {
     await runCompose(name, ['up', '-d', '--no-deps', '--force-recreate', name], { stream: true, onLog, timeout: 300000 });
   } catch (e) {
@@ -1423,6 +2049,16 @@ function existingServices() {
   return names;
 }
 
+/** Resolve the effective Container user for a pad (plan 43 Phase 7 + plan 41
+ *  item 17). An explicit caller value wins; when omitted, seed from the
+ *  devcontainer plan's userMode preference (non-root → 'user'). hermes is
+ *  always root-mode (its daemon already runs as its own user). */
+function effectiveUserMode(userMode, dcPlan, agent) {
+  if (userMode !== undefined) return userMode === 'user' ? 'user' : '';
+  if (agent === 'hermes') return '';
+  return dcPlan && dcPlan.userMode === 'user' ? 'user' : '';
+}
+
 async function createVm(name, options = {}) {
   const {
     agent = 'openclaw', mode = 'fresh', cloneSource = '',
@@ -1431,7 +2067,9 @@ async function createVm(name, options = {}) {
     workspaceHost = '', workspaceDir = '',
     allowDocker = false, network = '',
     extraVolumes = null, extraPorts = null,
-    userMode = '',
+    userMode,
+    buildCommands = '', postCreate = '', postStart = '', postAttach = '',
+    generateDevContainer = true,
   } = options;
 
   if (existingServices().has(name)) {
@@ -1476,6 +2114,22 @@ async function createVm(name, options = {}) {
     ? validateWorkspaceMount(name, agent, workspaceHost, workspaceDir)
     : null;
 
+  // Devcontainer plan (plan 41 items 12–16): resolve the workspace's
+  // devcontainer.json into the effective compose plan (workspaceFolder, env,
+  // mounts, runArgs, forwardPorts) and persist it — this also surfaces invalid
+  // mounts/runArgs as clear create-time errors. Persisted so a later settings
+  // apply or compose regen reads the same stable mapping (forwardPorts keep
+  // their allocated host ports).
+  const dcPlan = wsMount
+    ? resolveDevContainerPlan(name, agent, wsMount, { allocatePorts: true, excludeHostPorts: [finalPort] })
+    : null;
+
+  // Container user (plan 43 Phase 7): an explicit caller value (web form toggle
+  // or MCP arg) wins; when the caller does NOT pass one, seed the default from
+  // the devcontainer's declared user (plan 41 item 17) — a non-root
+  // remoteUser/containerUser means the pad should run as the pad user.
+  const effUserMode = effectiveUserMode(userMode, dcPlan, agent);
+
   const agentDataDir = path.join(instDir, agent);
   fs.mkdirSync(agentDataDir, { recursive: true });
   ensureOwned(instDir);
@@ -1493,6 +2147,23 @@ async function createVm(name, options = {}) {
       ensureOwned(view);
       onLog('system', `Created workspace source: ${wsMount.host}`);
     }
+  }
+
+  // Project image (plan 41 item 10): build the workspace devcontainer's
+  // `build`/`image` as `paddock-proj-<name>:latest` BEFORE the compose build so
+  // the build-commands box can `FROM paddock-proj-... AS project` +
+  // `COPY --from=...`. Best-effort: a workspace without a devcontainer build
+  // silently skips; a failed build aborts the create job visibly.
+  if (wsMount && devcontainer.hasDevContainer(containerViewOf(wsMount.host) || '')) {
+    onStep('project-image', 'start', `Build project image for ${name}`);
+    try {
+      await buildProjectImage(name, wsMount.host, { onLog });
+    } catch (e) {
+      onStep('project-image', 'error');
+      await pruneDanglingImages(onLog);
+      throw e;
+    }
+    onStep('project-image', 'end');
   }
 
   if (mode === 'clone') {
@@ -1546,6 +2217,29 @@ async function createVm(name, options = {}) {
     seedBuildDir(name, agent, { installDocker: allowDocker });
   }
 
+  // Build commands (plan 41): inject the web-managed Dockerfile block AFTER
+  // seeding so a custom `ARG` line is picked up by argsFromDockerfile on the
+  // compose regen below; write the post-create script for the running-container
+  // setup step later in this job.
+  if (String(buildCommands).trim()) writeCustomBuild(name, String(buildCommands));
+  if (String(postCreate).trim()) writePostCreateScript(name, String(postCreate));
+  if (String(postStart).trim()) writePostStartScript(name, String(postStart));
+  if (String(postAttach).trim()) writePostAttachScript(name, String(postAttach));
+
+  // Devcontainer generation (plan 41 item 18): when the workspace has no
+  // devcontainer.json, generate one mirroring the pad's effective config
+  // (workspaceFolder, lifecycle commands, mounts, forwardPorts, remoteUser),
+  // marked `x-paddock.generated` so later Settings changes write back into it.
+  // Default on; opt out via `generateDevContainer: false` (the create form
+  // toggle, plan 41 item 20).
+  const generatedDc = generateWorkspaceDevContainer(name, agent, wsMount, {
+    postCreate, postStart, postAttach,
+    extraVols, extraPs,
+    userMode: effUserMode,
+    enabled: generateDevContainer !== false,
+  });
+  if (generatedDc) onLog('system', 'Generated .devcontainer/devcontainer.json for the workspace');
+
   let metaTxt = `ROOT_PASSWORD=${pw}\nAGENT=${agent}\n`;
   if (finalPort) metaTxt += `PORT=${finalPort}\n`;
   if (finalCport !== DEFAULT_SSH_CPORT) metaTxt += `SSH_CPORT=${finalCport}\n`;
@@ -1554,10 +2248,11 @@ async function createVm(name, options = {}) {
   // Container user (plan 43 Phase 7): USER_MODE=user makes the daemon run as
   // the `pad` user (PUID:PGID) so agent-written files are user-owned by
   // construction. Written BEFORE the compose regen below (it reads the flag).
-  if (userMode === 'user') metaTxt += `USER_MODE=user\n`;
+  if (effUserMode === 'user') metaTxt += `USER_MODE=user\n`;
   // Workspace mount flags MUST be written before writeInstanceCompose — the
   // compose generator reads them from meta to emit the extra bind.
   if (wsMount) metaTxt += `WORKSPACE_HOST=${wsMount.host}\nWORKSPACE_DIR=${wsMount.container}\n`;
+  if (dcPlan) metaTxt += `DC_PLAN=${JSON.stringify(dcPlan)}\n`;
   // Extra volumes / ports (plan 28): single-line JSON, read back by the
   // compose generator (readExtraVolumes/readExtraPorts) on every regen path.
   if (extraVols.length) metaTxt += `EXTRA_VOLUMES=${JSON.stringify(extraVols)}\n`;
@@ -1603,7 +2298,7 @@ async function createVm(name, options = {}) {
   // User-mode pads run their setup steps as the pad user (PUID:PGID) so the
   // config files they write are born user-owned — a root-run setup would leave
   // root-owned files the user-level daemon then can't overwrite.
-  const userArgs = userMode === 'user' ? ['-u', `${USER_UID}:${USER_GID}`] : [];
+  const userArgs = effUserMode === 'user' ? ['-u', `${USER_UID}:${USER_GID}`] : [];
   if (setupSteps.length && !skipSetup) {
     onStep('setup', 'start');
     let allReady = true;
@@ -1627,6 +2322,34 @@ async function createVm(name, options = {}) {
       throw new Error(`Container '${name}' did not become ready for setup`);
     }
     onStep('setup', 'end');
+  }
+
+  // Post-create commands (plan 41): run the per-instance post-create.sh ONCE,
+  // streamed into the create log, right after the driver setup steps (same
+  // readiness-retry loop — the container may still be finishing boot). Runs as
+  // the pad user in user-mode pads so files it writes are born user-owned.
+  const postCreatePath = postCreateScriptPath(name);
+  if (fs.existsSync(postCreatePath)) {
+    const pcCmd = `docker exec ${userArgs.length ? userArgs.join(' ') + ' ' : ''}${name} /build/post-create.sh`;
+    onStep('post-create', 'start', pcCmd);
+    let ran = false;
+    for (let i = 0; i < 15; i++) {
+      try {
+        const script = path.join('/build', 'post-create.sh');
+        await runCmdStream('docker', ['exec', ...userArgs, name, script], { onLog, timeout: 600000 });
+        ran = true;
+        break;
+      } catch {
+        if (i === 14) break;
+        onLog('system', `Post-create: container not ready yet (attempt ${i + 1}/15), waiting…`);
+        await new Promise(r => setTimeout(r, 1000));
+      }
+    }
+    if (!ran) {
+      onStep('post-create', 'error');
+      throw new Error(`Post-create script did not run on container '${name}'`);
+    }
+    onStep('post-create', 'end');
   }
 
   if (setupSteps.length && !skipSetup) {
@@ -1660,6 +2383,21 @@ async function validateAgentCreate(name, opts = {}) {
     throw new Error('Hermes already runs its daemon as its own user (/opt/data, uid 10000) — the Container user option does not apply');
   }
 
+  // Build commands / lifecycle scripts sanity (plan 41): reject NUL bytes
+  // (would corrupt the Dockerfile/script) and cap length so a runaway payload
+  // can't bloat the per-instance build files. Runs on create AND on every
+  // settings apply via prepareAgentChanges' shared guard below.
+  for (const [label, text] of [
+    ['Build commands', opts.buildCommands],
+    ['Post-create commands', opts.postCreate],
+    ['Post-start commands', opts.postStart],
+    ['Post-attach commands', opts.postAttach],
+  ]) {
+    if (text === undefined || text === null) continue;
+    if (/\0/.test(String(text))) throw new Error(`${label} cannot contain NUL bytes`);
+    if (String(text).length > 100000) throw new Error(`${label} are too long (max 100000 characters)`);
+  }
+
   if (network) {
     if (network === name) throw new Error('Cannot route an agent through itself');
     let running = false;
@@ -1684,6 +2422,12 @@ async function validateAgentCreate(name, opts = {}) {
   const wsMount = workspaceHost || workspaceDir
     ? validateWorkspaceMount(name, agent, workspaceHost, workspaceDir)
     : null;
+  // Devcontainer plan (plan 41 items 12–16): surface invalid mounts/runArgs
+  // here (pre-202) instead of inside the create job. No port allocation — that
+  // happens once in createVm so the persisted mapping is stable.
+  if (wsMount) {
+    resolveDevContainerPlan(name, agent, wsMount, { allocatePorts: false, excludeHostPorts: [sshHostPort] });
+  }
 
   // Async cross-agent host-port availability across the whole request: the
   // optional SSH port and every extra port together, before anything is made.
@@ -1715,7 +2459,6 @@ async function createAgent(name, opts = {}) {
     workspaceDir: v.wsMount ? v.wsMount.container : '',
   });
 }
-
 /** Remove an instance directory (or an agent data dir inside it). The webui
  *  container runs as root (plan 43), so a plain `fs.rmSync` can always delete
  *  the data — the old root-helper-container wipe and EACCES/EPERM handling are
@@ -2276,6 +3019,11 @@ async function readSettings(name) {
     workspaceMount,
     extraVolumes: readExtraVolumes(name),
     extraPorts: readExtraPorts(name),
+    devcontainerPlan: readDevContainerPlan(name),
+    buildCommands: readCustomBuild(name),
+    postCreate: readPostCreate(name),
+    postStart: readPostStart(name),
+    postAttach: readPostAttach(name),
     web,
   };
 }
@@ -2471,6 +3219,10 @@ async function prepareAgentChanges(name, opts = {}) {
   const oldPorts = readExtraPorts(name);
   const oldMount = readWorkspaceMount(name, agentType);
   const oldUserMode = meta.USER_MODE === 'user' ? 'user' : '';
+  const oldBuildCommands = readCustomBuild(name);
+  const oldPostCreate = readPostCreate(name);
+  const oldPostStart = readPostStart(name);
+  const oldPostAttach = readPostAttach(name);
   // The existing secret even when NOT yet published: openclaw's token lives in
   // openclaw.json and outlives unpublishes, so a fresh publish can reuse it
   // instead of demanding the user retype it. Env-target drivers have no hook
@@ -2479,6 +3231,20 @@ async function prepareAgentChanges(name, opts = {}) {
 
   if (opts.reset && opts.confirm === false) {
     throw new Error('Refusing to reset without confirm: true (wipes the data dir).');
+  }
+
+  // Build commands / lifecycle scripts sanity (plan 41) — same guard as the
+  // create path, so the settings route can't write NUL bytes into the build
+  // files.
+  for (const [label, text] of [
+    ['Build commands', opts.buildCommands],
+    ['Post-create commands', opts.postCreate],
+    ['Post-start commands', opts.postStart],
+    ['Post-attach commands', opts.postAttach],
+  ]) {
+    if (text === undefined || text === null) continue;
+    if (/\0/.test(String(text))) throw new Error(`${label} cannot contain NUL bytes`);
+    if (String(text).length > 100000) throw new Error(`${label} are too long (max 100000 characters)`);
   }
 
   // ── container user (root | user) ──
@@ -2640,9 +3406,48 @@ async function prepareAgentChanges(name, opts = {}) {
     }
   }
 
+  // ── build commands / post-create / post-start / post-attach (plan 41) ──
+  const newBuildCommands = opts.buildCommands !== undefined
+    ? String(opts.buildCommands)
+    : oldBuildCommands;
+  const buildCommandsChanged = newBuildCommands !== oldBuildCommands;
+  const newPostCreate = opts.postCreate !== undefined
+    ? String(opts.postCreate)
+    : oldPostCreate;
+  const postCreateChanged = newPostCreate !== oldPostCreate;
+  const newPostStart = opts.postStart !== undefined
+    ? String(opts.postStart)
+    : oldPostStart;
+  const postStartChanged = newPostStart !== oldPostStart;
+  const newPostAttach = opts.postAttach !== undefined
+    ? String(opts.postAttach)
+    : oldPostAttach;
+  const postAttachChanged = newPostAttach !== oldPostAttach;
+
+  // Enabling post-start on an OLD image (baked start.sh lacks the /build hook)
+  // needs a rebuild; post-attach needs no image change (runs via docker exec).
+  // `ensurePostStartBlock` returns true only when it INJECTED the block; the
+  // instance start.sh may already carry it (newer template) while the built
+  // image is stale — that still needs a rebuild, so treat the file already
+  // having the marker as a backfill-too.
+  let needPostStartBackfill = false;
+  if (postStartChanged && newPostStart) {
+    needPostStartBackfill = ensurePostStartBlock(name);
+    if (!needPostStartBackfill) {
+      const sh = path.join(buildDir(name), 'start.sh');
+      const alreadyInStartSh = fs.existsSync(sh) && fs.readFileSync(sh, 'utf8').includes(POST_START_MARKER);
+      if (alreadyInStartSh) {
+        needPostStartBackfill = !(await imageHasPostStartHook(name, imageFor(name), wasRunning));
+      } else if (!(await imageHasPostStartHook(name, imageFor(name), wasRunning))) {
+        throw new Error('This agent image lacks the post-start hook and start.sh is not patchable — please rebuild via a build-commands change or recreate the agent');
+      }
+    }
+  }
+
   const changed = dockerChanged || networkChanged || workspaceChanged || volumesChanged
     || sshChanged || sshCportChanged || passwordChanged || portsChanged || webChanged
-    || userModeChanged;
+    || userModeChanged || buildCommandsChanged || postCreateChanged
+    || postStartChanged || postAttachChanged;
 
   const summary = [];
   if (dockerChanged) summary.push(`allowDocker=${newAllow}`);
@@ -2655,6 +3460,10 @@ async function prepareAgentChanges(name, opts = {}) {
   if (portsChanged) summary.push(newPorts.length ? `extraPorts=${newPorts.map((p) => `${p.host}→${p.container}`).join(', ')}` : 'extraPorts=none');
   if (webChanged) summary.push(newWeb ? `web=${newWeb.hostPort}→${newWeb.containerPort}` : 'web=off');
   if (userModeChanged) summary.push(`containerUser=${newUserMode || 'root'}`);
+  if (buildCommandsChanged) summary.push(newBuildCommands ? 'build commands updated' : 'build commands cleared');
+  if (postCreateChanged) summary.push(newPostCreate ? 'post-create updated' : 'post-create cleared');
+  if (postStartChanged) summary.push(newPostStart ? 'post-start updated' : 'post-start cleared');
+  if (postAttachChanged) summary.push(newPostAttach ? 'post-attach updated' : 'post-attach cleared');
 
   let reason = 'recreate';
   if (webChanged) reason = 'web';
@@ -2665,15 +3474,21 @@ async function prepareAgentChanges(name, opts = {}) {
   else if (workspaceChanged) reason = 'workspace';
   else if (volumesChanged) reason = 'volumes';
   else if (userModeChanged) reason = 'user';
+  else if (buildCommandsChanged) reason = 'build';
+  else if (postCreateChanged) reason = 'post-create';
+  else if (postStartChanged) reason = 'post-start';
+  else if (postAttachChanged) reason = 'post-attach';
 
   return {
     instDir, meta, agentType, driver, wasRunning,
     oldAllow, oldNetwork, oldSshPort, oldSshCport, oldRootPw, oldWeb, oldVols, oldPorts, oldMount,
-    oldWebPassword, oldUserMode,
+    oldWebPassword, oldUserMode, oldBuildCommands, oldPostCreate, oldPostStart, oldPostAttach,
     newAllow, newNetwork, newSshPort, newSshCport, newRootPw, wsMount, newVols, newPorts, newWeb,
-    newWebPassword, newUserMode,
+    newWebPassword, newUserMode, newBuildCommands, newPostCreate, newPostStart, newPostAttach,
     dockerChanged, networkChanged, sshChanged, sshCportChanged, passwordChanged,
     workspaceChanged, volumesChanged, portsChanged, webChanged, userModeChanged,
+    buildCommandsChanged, postCreateChanged, postStartChanged, postAttachChanged,
+    needPostStartBackfill,
     changed, summary, reason,
     effectiveWeb: webChanged ? newWeb : oldWeb,
   };
@@ -2697,8 +3512,13 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
     newAllow, newNetwork, newSshPort, newSshCport, newRootPw,
     wsMount, newVols, newPorts, newWeb, newUserMode,
     networkChanged, sshChanged, sshCportChanged, passwordChanged, webChanged,
-    userModeChanged,
+    userModeChanged, buildCommandsChanged, postCreateChanged, postStartChanged, postAttachChanged,
+    newBuildCommands, newPostCreate, newPostStart, newPostAttach,
+    needPostStartBackfill,
   } = ctx;
+  // User-mode pads run post-create as the pad user so files it writes are born
+  // user-owned (same rule as the create-time setup steps).
+  const userArgs = newUserMode === 'user' ? ['-u', `${USER_UID}:${USER_GID}`] : [];
 
   const purePull = !!opts.pull && !ctx.changed && !opts.reset;
   const keepUpThroughBuild = purePull; // pure update keeps the old container up
@@ -2749,7 +3569,7 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
         // Patch the config before the recreate (openclaw gateway reads
         // gateway.bind/auth on startup); env-target drivers need nothing here.
         applyWebAuth(name, driver, ctx.newWebPassword);
-        onStep('web-hook', 'start');
+        onStep('web-hook', 'start', `Write web start hook for ${name}`);
         await writeWebStartHook(name, agentType, buildWebHook(driver, agentType, newWeb, ctx.newWebPassword));
         onStep('web-hook', 'end');
       } else {
@@ -2762,6 +3582,12 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
 
     // ── 2. regenerate the compose (only the specified options) + validate ──
     if (ctx.changed) {
+      // Build commands (plan 41): write the Dockerfile block FIRST so the
+      // compose regen picks up any custom `ARG` lines (argsFromDockerfile).
+      if (buildCommandsChanged) writeCustomBuild(name, newBuildCommands);
+      if (postCreateChanged) writePostCreateScript(name, newPostCreate);
+      if (postStartChanged) writePostStartScript(name, newPostStart);
+      if (postAttachChanged) writePostAttachScript(name, newPostAttach);
       await applySettings(name, {
         ...(opts.allowDocker !== undefined ? { allowDocker: newAllow } : {}),
         ...(opts.network !== undefined ? { network: newNetwork } : {}),
@@ -2778,9 +3604,22 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
     }
     await validateInstanceCompose(name);
 
+    // Devcontainer write-back (plan 41 item 19): mirror pad Settings changes
+    // (workspace, volumes, ports, lifecycle commands) into the workspace's
+    // devcontainer.json in place — generated files regenerate wholesale,
+    // project-authored files keep their non-mapped fields. Only when something
+    // actually changed; a sync failure never blocks the apply itself.
+    if (ctx.changed && wsMount) {
+      try {
+        syncDevContainer(name, agentType, wsMount, { onLog });
+      } catch (e) {
+        onLog('system', `Devcontainer sync skipped: ${e.message}`);
+      }
+    }
+
     // ── 3. reset: wipe the data dir (kills the container first) ──
     if (opts.reset) {
-      onStep('reset', 'start');
+      onStep('reset', 'start', `docker rm -f ${name} && rm -rf instances/${name}/${agentType}/*`);
       try { await runCmd('docker', ['rm', '-f', name], { timeout: 30000 }); } catch {}
       const agentDir = path.join(instDir, agentType);
       await removeInstanceDir(name, agentDir);
@@ -2793,7 +3632,7 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
     // ── 4. stop if running (pure pull/reset keep the old container as-is) ──
     if (runningNow && !keepUpThroughBuild && !opts.reset) {
       touched = true;
-      onStep('stop', 'start');
+      onStep('stop', 'start', `docker stop ${name}`);
       await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 });
       onStep('stop', 'end');
     }
@@ -2829,7 +3668,16 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
         userRebuild = ensureUserModeBuildFiles(name, agentType);
       }
     }
-    const needRebuildFinal = !!opts.pull || needRebuild || sshRebuild || webRebuild || userRebuild;
+    let buildRebuild = false;
+    if (buildCommandsChanged) {
+      // Custom build commands are baked into the image (Dockerfile block) — a
+      // change is meaningless until the next build. The block was written above.
+      buildRebuild = true;
+    }
+    // Enabling post-start on an image whose baked start.sh lacks the /build
+    // hook requires a rebuild (the hook was backfilled into build/start.sh in
+    // prepare if the template was patchable; that only takes effect on build).
+    const needRebuildFinal = !!opts.pull || needRebuild || sshRebuild || webRebuild || userRebuild || buildRebuild || needPostStartBackfill;
     if (needRebuildFinal) {
       const why = opts.pull
         ? 'Updating to the latest base image'
@@ -2839,13 +3687,42 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
             ? 'start.sh must learn the custom SSH container port'
             : webRebuild
               ? 'start.sh must learn the web start hook'
-              : 'Image needs the user-mode (pad user + drop) support';
+              : userRebuild
+                ? 'Image needs the user-mode (pad user + drop) support'
+                : needPostStartBackfill
+                  ? 'Image needs the post-start hook baked into start.sh'
+                  : 'Build commands changed — rebuilding the image';
       onLog('system', `${why} — rebuilding the image, then recreating…`);
       await updateAgent(name, { pull: !!opts.pull, onLog, onStep });
     } else {
-      onStep('recreate', 'start');
+      onStep('recreate', 'start', `docker compose -f instances/${name}/docker-compose.yml up -d --force-recreate`);
       await runCompose(name, ['up', '-d', '--no-deps', '--force-recreate', name], { stream: true, onLog, timeout: 300000 });
       onStep('recreate', 'end');
+    }
+
+    // ── 6b. post-create re-run (plan 41) — the script changed or the container
+    // was just recreated; re-execute it so the container reflects the current
+    // post-create. It lives in the build dir (bind-mounted at /build), so this
+    // is a plain docker exec — no rebuild.
+    if (postCreateChanged || buildRebuild) {
+      if (fs.existsSync(postCreateScriptPath(name))) {
+        const pcCmd = `docker exec ${userArgs.length ? userArgs.join(' ') + ' ' : ''}${name} /build/post-create.sh`;
+        onStep('post-create', 'start', pcCmd);
+        let ran = false;
+        for (let i = 0; i < 15; i++) {
+          try {
+            await runCmdStream('docker', ['exec', ...userArgs, name, path.join('/build', 'post-create.sh')], { onLog, timeout: 600000 });
+            ran = true;
+            break;
+          } catch {
+            if (i === 14) break;
+            onLog('system', `Post-create: container not ready yet (attempt ${i + 1}/15), waiting…`);
+            await new Promise(r => setTimeout(r, 1000));
+          }
+        }
+        if (!ran) throw new Error(`Post-create script did not run on container '${name}'`);
+        onStep('post-create', 'end');
+      }
     }
 
     // ── 7. door reconcile (peer mode) ──
@@ -2858,7 +3735,7 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
 
     // ── 8. re-exec the start-web hook + verify a published web app ──
     if (ctx.effectiveWeb && runningNow) {
-      onStep('web-verify', 'start');
+      onStep('web-verify', 'start', `docker exec ${name} ${driver.dataDir}/start-web.sh`);
       const hookPath = `${driver.dataDir}/start-web.sh`;
       await runCmd('docker', ['exec', name, 'bash', hookPath], { timeout: 20000 }).catch(() => {});
       let up = false;
@@ -3067,11 +3944,19 @@ module.exports = {
   validateWorkspaceMount, workspaceMountInfo, readWorkspaceMount,
   validateExtraVolume, validateExtraVolumes, validateExtraPorts,
   readExtraVolumes, readExtraPorts, readSshCport, ensureSshStartBlock, autoSshPort,
+  readDevContainerPlan, resolveDevContainerPlan, collectPublishedHostPorts,
+  effectiveUserMode, syncDevContainer, generateWorkspaceDevContainer, devContainerStatus, regenerateDevContainer,
   imageHasDockerCli, imageHasSshPortSupport,
   ensureUserModeBuildFiles, imageHasPadUser,
   imageFor, seedBuildDir, buildDir, buildEnvPath,
   readBuildEnv, setBuildEnv,
   argsFromDockerfile,
+  readCustomBuild, writeCustomBuild,
+  postCreateScriptPath, readPostCreate, writePostCreateScript,
+  postStartScriptPath, readPostStart, writePostStartScript,
+  postAttachScriptPath, readPostAttach, writePostAttachScript,
+  hasLifecycleScripts, ensurePostStartBlock,
+  projectImageTag, buildProjectImage, workspaceHasProjectImage,
   composeCommand, runCompose, validateInstanceCompose, ensureInstanceBuilds,
   // plan 30 consolidated surface (shared by REST routes + MCP tools)
   readSettings, readWebState, readDrafts, containerInfo, listContainers,

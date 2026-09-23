@@ -47,7 +47,27 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use(cookieParser());
 
-app.use(express.static('public'));
+app.use(express.static('public', {
+  // Hashed assets (/assets/*) are immutable — cache forever. index.html must
+  // never be cached, otherwise a stale index.html references a deleted hash
+  // after a rebuild and every script load returns HTML → MIME error → black screen.
+  setHeaders(res, filePath) {
+    if (filePath.endsWith('index.html')) {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+    } else if (filePath.includes('/assets/')) {
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    }
+  },
+}));
+
+// Missing hashed assets must 404, never fall through to the SPA catch-all.
+// Otherwise a stale /assets/index-OLDHASH.js returns index.html (text/html)
+// and the browser throws "Failed to load module script: MIME type text/html".
+app.use('/assets', (req, res) => {
+  res.status(404).type('text/plain').send('Not found');
+});
 
 setupSession(app);
 app.use(csrfToken);
@@ -808,6 +828,42 @@ app.get('/api/paths/volumes', async (req, res) => {
   }
 });
 
+/** The workspace folder's devcontainer.json (plan 41), parsed into the spec's
+ *  field set so the Create Agent form can pre-fill the post-create box. */
+app.get('/api/paths/devcontainer', async (req, res) => {
+  try {
+    const dir = String(req.query.path || '');
+    if (!dir) return res.status(400).json({ error: 'path is required' });
+    const dc = require('./services/devcontainer');
+    const probed = pathProbe.containerPathOf(dir);
+    const parsed = dc.readDevContainer(probed);
+    if (!parsed) return res.json({ found: false, path: probed });
+    res.json({
+      found: true,
+      path: probed,
+      filePath: parsed.filePath,
+      name: parsed.name,
+      generated: parsed.generated,
+      postCreateCommand: parsed.postCreateCommand,
+      onCreateCommand: parsed.onCreateCommand,
+      updateContentCommand: parsed.updateContentCommand,
+      postStartCommand: parsed.postStartCommand,
+      postAttachCommand: parsed.postAttachCommand,
+      workspaceFolder: parsed.workspaceFolder,
+      forwardPorts: parsed.forwardPorts || [],
+      image: parsed.image,
+      hasBuild: !!(parsed.dockerFile || parsed.buildContext),
+      remoteUser: parsed.remoteUser,
+      containerUser: parsed.containerUser,
+      // item 17: the devcontainer's declared user → the pad Container user
+      // default (non-root → 'user'). The explicit toggle in the form wins.
+      userMode: parsed.preferredUserMode || '',
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 app.get('/api/agents/:name/settings', async (req, res) => {
   const name = safeVmName(req.params.name);
   if (!name) return res.status(400).json({ error: 'Invalid agent name' });
@@ -815,6 +871,57 @@ app.get('/api/agents/:name/settings', async (req, res) => {
     const meta = readMeta(name);
     if (!meta.AGENT && !meta.ROOT_PASSWORD) return res.status(404).json({ error: 'Agent not found' });
     res.json(await vm.readSettings(name));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** The Settings "Dev Container" card state (plan 41 item 20): file path,
+ *  state badge, and both sides of the diff preview (current file vs what
+ *  Paddock would write now from the pad's effective config). */
+app.get('/api/agents/:name/devcontainer', async (req, res) => {
+  const name = safeVmName(req.params.name);
+  if (!name) return res.status(400).json({ error: 'Invalid agent name' });
+  try {
+    const status = vm.devContainerStatus(name);
+    if (!status) return res.status(404).json({ error: 'Agent not found' });
+    res.json(status);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** Write back the pad's 1:1 mapped fields into the workspace devcontainer.json
+ *  in place (project-authored files keep every non-mapped field; generated
+ *  files regenerate wholesale). No container change. */
+app.post('/api/agents/:name/devcontainer/sync', async (req, res) => {
+  const name = safeVmName(req.params.name);
+  if (!name) return res.status(400).json({ error: 'Invalid agent name' });
+  try {
+    const meta = readMeta(name);
+    if (!meta.AGENT && !meta.ROOT_PASSWORD) return res.status(404).json({ error: 'Agent not found' });
+    const agentType = meta.AGENT || 'openclaw';
+    const wsMount = vm.readWorkspaceMount(name, agentType);
+    if (!wsMount) return res.status(400).json({ error: 'This agent has no custom workspace to sync' });
+    const filePath = vm.syncDevContainer(name, agentType, wsMount);
+    if (!filePath) return res.status(400).json({ error: 'Nothing to sync — the pad never adopted this devcontainer' });
+    res.json(vm.devContainerStatus(name));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** Rewrite (or create) the workspace devcontainer.json as the pad's full
+ *  generated mirror (marked `x-paddock.generated`). No container change. */
+app.post('/api/agents/:name/devcontainer/regenerate', async (req, res) => {
+  const name = safeVmName(req.params.name);
+  if (!name) return res.status(400).json({ error: 'Invalid agent name' });
+  try {
+    const meta = readMeta(name);
+    if (!meta.AGENT && !meta.ROOT_PASSWORD) return res.status(404).json({ error: 'Agent not found' });
+    const filePath = vm.regenerateDevContainer(name, meta.AGENT || 'openclaw');
+    if (!filePath) return res.status(400).json({ error: 'This agent has no custom workspace to write to' });
+    res.json(vm.devContainerStatus(name));
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -887,7 +994,7 @@ app.post('/api/agents/:name/settings', async (req, res) => {
     const jobKey = 'update:' + name;
     const job = jobLog.getOrCreateJob(jobKey);
     const log = (stream, text) => jobLog.line(job, stream, text);
-    const step = (stepName, state) => jobLog.setStep(job, stepName, state);
+    const step = (stepName, state, cmd) => jobLog.setStep(job, stepName, state, cmd);
 
     res.status(202).json({ ok: true, job: jobKey, streaming: true, reason: ctx.reason });
 
@@ -1078,7 +1185,7 @@ app.post('/api/agents/:name/web', async (req, res) => {
     const jobKey = 'update:' + name;
     const job = jobLog.getOrCreateJob(jobKey);
     const log = (stream, text) => jobLog.line(job, stream, text);
-    const step = (stepName, state) => jobLog.setStep(job, stepName, state);
+    const step = (stepName, state, cmd) => jobLog.setStep(job, stepName, state, cmd);
 
     res.status(202).json({ ok: true, job: jobKey, streaming: true, action: turningOn ? 'activate' : 'deactivate' });
 
@@ -1135,7 +1242,7 @@ app.post('/api/agents/:name/ports', async (req, res) => {
     const jobKey = 'update:' + name;
     const job = jobLog.getOrCreateJob(jobKey);
     const log = (stream, text) => jobLog.line(job, stream, text);
-    const step = (stepName, state) => jobLog.setStep(job, stepName, state);
+    const step = (stepName, state, cmd) => jobLog.setStep(job, stepName, state, cmd);
 
     res.status(202).json({ ok: true, job: jobKey, streaming: true, action: 'ports' });
 
@@ -1180,7 +1287,7 @@ app.post('/api/agents/:name/recreate', async (req, res) => {
     const jobKey = 'update:' + name;
     const job = jobLog.getOrCreateJob(jobKey);
     const log = (stream, text) => jobLog.line(job, stream, text);
-    const step = (stepName, state) => jobLog.setStep(job, stepName, state);
+    const step = (stepName, state, cmd) => jobLog.setStep(job, stepName, state, cmd);
 
     res.status(202).json({ ok: true, job: jobKey, streaming: true, reason: 'recreate' });
 
@@ -1235,7 +1342,7 @@ app.post('/api/agents/:name/update', async (req, res) => {
   const jobKey = 'update:' + name;
   const job = jobLog.getOrCreateJob(jobKey);
   const log = (stream, text) => jobLog.line(job, stream, text);
-  const step = (stepName, state) => jobLog.setStep(job, stepName, state);
+  const step = (stepName, state, cmd) => jobLog.setStep(job, stepName, state, cmd);
 
   res.status(202).json({ ok: true, job: jobKey, streaming: true });
 
@@ -1371,6 +1478,151 @@ app.get('/api/config', (req, res) => {
     host: process.env.HOST_NAME || '',
     hostProtocol: process.env.HOST_PROTO || 'http',
   });
+});
+
+// ─── Environment config management ──────────────────────────────
+
+const ENV_SECRET_KEYS = new Set(['SESSION_SECRET', 'VAULT_KEY', 'AUTH_PASSWORD']);
+const ENV_LOCKED_KEYS = new Set(['VAULT_KEY']);
+const ENV_RECREATE_KEYS = new Set([
+  'CONTAINER_PREFIX', 'HOST_NAME', 'HOST_PROTO', 'HOST_WORKSPACE_ROOT',
+]);
+const ENV_RESTART_KEYS = new Set([
+  'AUTO_LOGIN', 'SESSION_SECRET', 'AUTH_PASSWORD',
+  'PUID', 'PGID', 'DOCKER_GID',
+  'GUARD_PROJECT_ROOT', 'GUARD_INSTANCES_PARENT', 'GUARD_AGENT_DATA',
+]);
+const ENV_AGENT_KEYS = new Set([
+  'DEFAULT_MODEL_BASE_URL', 'DEFAULT_MODEL_NAME', 'DEFAULT_CONTEXT_LENGTH',
+  'DEFAULT_ALLOW_FROM',
+]);
+const ENV_READONLY_KEYS = new Set(['TZ']);
+
+function readEnvFile() {
+  if (!fs.existsSync(ENV_FILE)) return [];
+  return fs.readFileSync(ENV_FILE, 'utf8').split('\n');
+}
+
+function writeEnvFile(lines) {
+  fs.writeFileSync(ENV_FILE, lines.join('\n') + '\n', 'utf8');
+  envCache = null;
+}
+
+function envVarImpact(key) {
+  if (ENV_RECREATE_KEYS.has(key)) return 'recreate';
+  if (ENV_RESTART_KEYS.has(key)) return 'restart';
+  if (ENV_LOCKED_KEYS.has(key)) return 'locked';
+  if (ENV_READONLY_KEYS.has(key)) return 'readonly';
+  if (ENV_AGENT_KEYS.has(key)) return 'agent';
+  return 'agent';
+}
+
+app.get('/api/env', (req, res) => {
+  const lines = readEnvFile();
+  const vars = [];
+  let pendingComment = null;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) { pendingComment = null; continue; }
+    if (trimmed.startsWith('#')) {
+      const text = trimmed.replace(/^#+\s*/, '');
+      if (text && !text.includes('=') && text.length < 120) pendingComment = text;
+      else pendingComment = null;
+      continue;
+    }
+    if (!trimmed.includes('=')) continue;
+    const idx = trimmed.indexOf('=');
+    const key = trimmed.slice(0, idx).trim();
+    const rawValue = trimmed.slice(idx + 1).trim();
+    vars.push({
+      key,
+      value: ENV_SECRET_KEYS.has(key) ? '••••••••' : rawValue,
+      rawValue,
+      isSecret: ENV_SECRET_KEYS.has(key),
+      isLocked: ENV_LOCKED_KEYS.has(key),
+      isReadonly: ENV_READONLY_KEYS.has(key),
+      impact: envVarImpact(key),
+      description: pendingComment || '',
+    });
+    pendingComment = null;
+  }
+
+  res.json({ vars });
+});
+
+app.post('/api/env', (req, res) => {
+  const { vars = {} } = req.body || {};
+  const locked = Object.keys(vars).filter((k) => ENV_LOCKED_KEYS.has(k));
+  if (locked.length) {
+    return res.status(400).json({ error: `Cannot modify locked variables: ${locked.join(', ')}` });
+  }
+
+  const lines = readEnvFile();
+  const updatedKeys = new Set();
+  const result = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (!trimmed || trimmed.startsWith('#') || !trimmed.includes('=')) {
+      result.push(lines[i]);
+      continue;
+    }
+    const idx = trimmed.indexOf('=');
+    const key = trimmed.slice(0, idx).trim();
+    if (key in vars) {
+      const newValue = String(vars[key]).trim();
+      const comment = lines[i].match(/#\s*(.+)$/);
+      const suffix = comment ? `  # ${comment[1]}` : '';
+      result.push(`${key}=${newValue}${suffix}`);
+      updatedKeys.add(key);
+    } else {
+      result.push(lines[i]);
+    }
+  }
+
+  for (const [key, value] of Object.entries(vars)) {
+    if (!updatedKeys.has(key)) {
+      result.push(`${key}=${String(value).trim()}`);
+    }
+  }
+
+  writeEnvFile(result);
+
+  const impacts = new Set();
+  for (const key of Object.keys(vars)) {
+    const impact = envVarImpact(key);
+    if (impact !== 'locked' && impact !== 'readonly') impacts.add(impact);
+  }
+
+  res.json({ ok: true, updated: Object.keys(vars), impacts: [...impacts] });
+});
+
+app.post('/api/env/restart', async (req, res) => {
+  res.json({ ok: true, message: 'Webui restarting in 1s…' });
+  setTimeout(async () => {
+    try {
+      const c = await dockerClient.getContainer('paddock');
+      await c.restart({ t: 1 });
+    } catch (e) {
+      console.error('Env restart failed:', e.message);
+    }
+  }, 500);
+});
+
+app.post('/api/env/recreate', async (req, res) => {
+  res.json({ ok: true, message: 'Webui recreating in 1s…' });
+  setTimeout(async () => {
+    try {
+      await runCmd('docker', ['compose', '-f', '/workspace/docker-compose.yml', 'up', '-d', '--force-recreate', 'webui'], { timeout: 120000 });
+    } catch (e) {
+      console.error('Env recreate failed, falling back to restart:', e.message);
+      try {
+        const c = await dockerClient.getContainer('paddock');
+        await c.restart({ t: 1 });
+      } catch {}
+    }
+  }, 500);
 });
 
 // ─── Agent type registry (drivers) ─────────────────────────────
@@ -2093,7 +2345,7 @@ app.get('/api/vault/:id/decrypt', requireAdmin, (req, res) => {
 // ─── API: Create Agent ──────────────────────────────────────
 
 app.post('/api/agents/create', async (req, res) => {
-  const { name, agent, assign_to, workspace_host, workspace_dir, allowDocker, network, sshEnabled, port, sshContainerPort, password, extraVolumes, extraPorts, userMode } = req.body;
+  const { name, agent, assign_to, workspace_host, workspace_dir, allowDocker, network, sshEnabled, port, sshContainerPort, password, extraVolumes, extraPorts, userMode, buildCommands, postCreate, postStart, postAttach, generateDevContainer } = req.body;
   if (!name) return res.status(400).json({ error: 'Name is required' });
   if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
   if (registry.getAgent(name)) return res.status(409).json({ error: 'Agent already exists' });
@@ -2122,7 +2374,7 @@ app.post('/api/agents/create', async (req, res) => {
 
   const job = jobLog.getOrCreateJob(name);
   const log = (stream, text) => jobLog.line(job, stream, text);
-  const step = (stepName, state) => jobLog.setStep(job, stepName, state);
+  const step = (stepName, state, cmd) => jobLog.setStep(job, stepName, state, cmd);
 
   // Respond immediately; the create runs in the background and streams its
   // output to the SSE endpoint (GET /api/agents/:name/create-log).
@@ -2143,6 +2395,11 @@ app.post('/api/agents/create', async (req, res) => {
         extraVolumes,
         extraPorts,
         userMode: userMode === 'user' ? 'user' : '',
+        buildCommands: typeof buildCommands === 'string' ? buildCommands : '',
+        postCreate: typeof postCreate === 'string' ? postCreate : '',
+        postStart: typeof postStart === 'string' ? postStart : '',
+        postAttach: typeof postAttach === 'string' ? postAttach : '',
+        generateDevContainer: generateDevContainer !== false,
         onLog: log,
         onStep: step,
       });
@@ -2337,8 +2594,21 @@ app.use((req, res, next) => {
 // SPA catch-all — serve index.html for client-side routing
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api/') || req.path.startsWith('/ws/')) return next();
+  // File-like paths (e.g. stale /assets/*.js, .css, .map, .svg) must 404 —
+  // otherwise a deleted hashed chunk returns index.html (text/html) and the
+  // browser throws "Failed to load module script: MIME type text/html".
+  // The /assets 404 above already handles /assets/*, this is the safety net
+  // for any other dotted path.
+  if (/\.[a-zA-Z0-9]{1,8}$/.test(req.path)) {
+    return res.status(404).type('text/plain').send('Not found');
+  }
   const indexPath = path.join(__dirname, 'public', 'index.html');
-  if (fs.existsSync(indexPath)) return res.sendFile(indexPath);
+  if (fs.existsSync(indexPath)) {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    return res.sendFile(indexPath);
+  }
   res.status(200).send('<!DOCTYPE html><html><body><h1>React app not built yet. Run: cd client && npm run build</h1></body></html>');
 });
 
@@ -2516,6 +2786,20 @@ wss.on('connection', async (ws, req) => {
       if (ws.readyState === ws.OPEN) ws.send(`\r\n\x1b[31m[Terminal error: ${err.message}]\x1b[0m\r\n`);
       ws.close();
       return;
+    }
+
+    // Post-attach command (plan 41): if the webui wrote a post-attach.sh (bound
+    // via the build-dir /build mount), run it when this terminal attaches so
+    // the hook's output lands in the session. Best-effort and non-blocking — a
+    // failure must never take the terminal down.
+    try {
+      if (vm.postAttachScriptPath && fs.existsSync(vm.postAttachScriptPath(vmName))) {
+        runCmd('docker', ['exec', ...termUserArgs(vmName), vmName, 'sh', '-lc', '[ -f /build/post-attach.sh ] && bash /build/post-attach.sh || true'], { timeout: 60000 }).catch((e) => {
+          console.error(`[wss/terminal] post-attach error for ${vmName}:`, e.message);
+        });
+      }
+    } catch (e) {
+      console.error(`[wss/terminal] post-attach probe error for ${vmName}:`, e.message);
     }
 
     // Fresh connection → replay tmux's persistent scrollback into the new

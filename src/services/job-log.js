@@ -96,8 +96,10 @@ function subscribe(job, res, since = 0) {
   });
 }
 
-function setStep(job, step, state) {
-  return append(job, { type: 'step', step, state });
+function setStep(job, step, state, cmd) {
+  const ev = { type: 'step', step, state };
+  if (cmd) ev.cmd = cmd;
+  return append(job, ev);
 }
 
 function line(job, stream, text) {

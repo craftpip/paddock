@@ -91,7 +91,7 @@ async function discoverVolumes(hostPath) {
   }
   const composeFile = findComposeFile(cpath);
   if (!composeFile) {
-    return { path: norm, project: path.basename(cpath), compose: null, source: 'none', volumes: [], errors: [] };
+    return { path: norm, project: path.basename(cpath), compose: null, source: 'none', volumes: [], ports: [], errors: [] };
   }
 
   const volumes = [];
@@ -105,12 +105,21 @@ async function discoverVolumes(hostPath) {
     volumes.push(v);
   };
 
+  const ports = [];
+  const portSeen = new Set();
+  const pushPort = (p) => {
+    const key = `${p.host}:${p.container}`;
+    if (portSeen.has(key)) return;
+    portSeen.add(key);
+    ports.push(p);
+  };
+
   let config = null;
   try {
     const r = await runCmd('docker', ['compose', '--project-directory', cpath, '-f', composeFile, 'config', '--format', 'json'], { timeout: 60000 });
     config = JSON.parse(r.stdout);
   } catch (err) {
-    return { path: norm, project: path.basename(cpath), compose: hostPathOf(composeFile), source: 'compose', volumes: [], errors: [err.message] };
+    return { path: norm, project: path.basename(cpath), compose: hostPathOf(composeFile), source: 'compose', volumes: [], ports: [], errors: [err.message] };
   }
 
   for (const [service, def] of Object.entries(config.services || {})) {
@@ -131,6 +140,22 @@ async function discoverVolumes(hostPath) {
         service,
         origin: 'compose',
       });
+    }
+    for (const p of def.ports || []) {
+      if (typeof p === 'string') {
+        // Formats: "host:container", "host:container/proto", "ip:host:container"
+        const parts = p.split('/');
+        const addrParts = parts[0].split(':');
+        if (addrParts.length >= 2) {
+          const host = addrParts[addrParts.length - 2];
+          const container = addrParts[addrParts.length - 1];
+          if (host && container) pushPort({ host, container, service });
+        }
+      } else if (p && typeof p === 'object') {
+        const host = String(p.published || p.host || '');
+        const container = String(p.target || p.container || '');
+        if (host && container) pushPort({ host, container, service });
+      }
     }
   }
 
@@ -187,6 +212,7 @@ async function discoverVolumes(hostPath) {
     compose: hostPathOf(composeFile),
     source: 'compose',
     volumes,
+    ports,
     errors: [],
   };
 }
