@@ -1,6 +1,6 @@
 # Tabs Overview
 
-> Last updated: 2026-08-09
+> Last updated: 2026-08-17
 
 The agent detail page is a **terminal emulator with a GUI command picker**:
 one docked terminal that lives the whole time you're on the page, plus a few
@@ -37,7 +37,7 @@ commands, not APIs (Vault is the deliberate exception).
 
 Groups + pills come from the agent driver's `commands` field, served by
 `GET /api/agent-types/<type>/commands` (not hardcoded in the SPA). openclaw is
-the one exception — it renders extra hardcoded flows (Messaging, Models, MCP,
+the one exception — it renders extra hardcoded flows (Messaging, Models,
 Skills, Memory) on top of its driver groups.
 
 ## Workspace
@@ -64,7 +64,7 @@ create-file, folder, upload, download, move).
 
 Raw editor for the agent's config file — the driver's `configFile`
 (`openclaw.json` for openclaw, `opencode.json`, `config.json` for picoclaw,
-`config.yaml` for hermes, `config.toml` for codex).
+`config.yaml` for hermes, `config.toml` for codex, `settings.json` for claude).
 For `configFormat: 'json'` drivers the backend parses + redacts secrets and the
 frontend validates JSON before save; for `yaml`/`toml`/verbatim formats
 (hermes, codex) the file is served/written verbatim and the tab skips JSON
@@ -87,8 +87,7 @@ recreates). Published web servers retain their own `<dataDir>/web.log` and
 also stream output into the container log, so startup and runtime errors appear
 here.
 
-**Features:** tail-count selector, auto-scroll toggle, log-level filter
-(All/Info/Warn/Error), text search, timestamp toggle, streaming dot indicator.
+**Features:** tail-count selector (50/100/500/1000), auto-scroll toggle, streaming dot indicator.
 
 ## Activity
 

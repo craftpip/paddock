@@ -51,3 +51,7 @@ See **`STYLE-GUIDE.md`** — it is the rulebook. In short:
 
 The style guide covers the page skeleton, formatting rules, voice,
 terminology, the plan-to-docs lifecycle, and the review checklist.
+
+---
+
+**Last Synced Commit:** `357c9c58b8bb11dc207f86c9d61981918d79824d`

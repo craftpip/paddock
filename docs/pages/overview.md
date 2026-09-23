@@ -1,6 +1,6 @@
 # Pages
 
-> Last updated: 2026-08-09
+> Last updated: 2026-08-17
 
 All pages are React components served from `src/client/src/pages/`. The built SPA lives at `src/public/` and is served by Express at the root path.
 
@@ -41,7 +41,6 @@ File: `Dashboard.jsx`
 Fleet view showing all discovered PADs as cards. Features:
 - Agent cards with name, status badge (running/stopped/transition), avatar initial
 - Start/Stop/Restart inline buttons
-- CPU + MEM stats on running agents (hover for Network + Disk I/O)
 - Search/filter by name or display name
 - Loading skeleton, empty state
 
@@ -51,11 +50,8 @@ Implemented enhancements for user experience and functionality:
 
 ### Agent Detail Page
 
-- **Tab state persistence** — remember which tab was active per agent (localStorage) so navigating back doesn't reset to the first tab.
 - **Tab loading states** — each tab shows a proper skeleton/spinner while loading, not a blank flash.
 - **Sticky tab bar** — when scrolling down on a tab with lots of content, the tab bar stays visible at the top.
-- **Sidebar status/badge alignment** — status badge and action buttons (Stop, Restart) on the same line with compact icon buttons.
-- **Hover stats alignment** — hover panel (Net I/O, Disk I/O) uses CSS grid with short labels.
 - **Resource stats placeholder** — CPU and MEM lines show `&ndash;%` / `&ndash;` placeholders while loading.
 - **Tab order** — Commands (default), then Workspace/Config/Web & Ports/Logs/Activity, then Settings. The old Sessions tab is removed.
 
@@ -73,8 +69,6 @@ Implemented enhancements for user experience and functionality:
 
 ### Dashboard / Fleet View
 
-- **Health indicators** — show CPU/memory/uptime next to the status indicator.
-- **Sorting & grouping** — sort by Name/Status/Type, group by Status/Type.
 - **Fleet Resources bar always visible** — always rendered with `&ndash;%` / `&ndash;` placeholders.
 - **Mem total instead of Mem avg** — total memory summed from all containers in human-readable format.
 
@@ -88,9 +82,6 @@ Implemented enhancements for user experience and functionality:
 
 ### Logs Tab
 
-- **Log level filter** — filter by All/Info/Warn/Error.
-- **Search within logs** — search/filter log content by text.
-- **Timestamp toggling** — show/hide timestamps button.
 - **Auto-scroll lock** — toggle already existed.
 
 ### General
@@ -136,7 +127,7 @@ collapsed Optional settings accordion:
 ```
 
 - **Identity row** — Prefix (from `CONTAINER_PREFIX`, e.g. `pad`), PAD type
-  dropdown (openclaw/opencode/picoclaw/hermes/codex), name input (alphanumeric
+  dropdown (openclaw/opencode/picoclaw/hermes/codex/claude), name input (alphanumeric
   + hyphens). Always visible.
 - **Workspace source folder (host)** — the primary field, always visible,
   **resolved to an absolute host path by default** (e.g.
@@ -209,6 +200,17 @@ container path for a bind.
 
 The SSE stream reconnects with `Last-Event-ID` on drop; polling `/create-status` is the fallback.
 
+**Post-create gotcha (plan 45 — path doubling):** the `dcCmdForPad` helper
+translates the literal `/workspace` token into the agent-specific container path
+(e.g. `/root/.openclaw/workspace`). A whole-token guard
+(`(^|[^/.\w-])` prefix) prevents matching `/workspace` when it already sits
+inside a translated path like `/root/.openclaw/workspace/app` — earlier versions
+doubled the path on a second agent create against the same workspace. The
+workspace probe also reverse-translates lifecycle commands back to `/workspace`
+convention before writing the devcontainer mirror, so different agent types
+probing the same workspace get correct, non-polluted pre-fills. Switching agent
+types mid-form clears the cached lifecycle drafts and re-probes.
+
 **What was removed:**
 - No clone-from-backup dropdown (the generic backup system is gone)
 
@@ -216,34 +218,34 @@ The SSE stream reconnects with `Last-Event-ID` on drop; polling `/create-status`
 
 File: `AgentDetail.jsx`
 
-Layout shell with a sidebar, 7 mode tabs, and a docked terminal. See `tabs/`
+Layout shell with a top header bar, 7 mode tabs, and a docked terminal. See `tabs/`
 docs for each mode.
 
-Sidebar:
+Header:
 - Agent avatar + name + display name
 - Status badge with pulse animation for transitions
-- Live CPU/MEM stats on running agents (hover for Network/Disk I/O)
+- Live CPU/MEM stats on running agents
 - Start/Stop/Restart buttons
-- Mode navigation (7 tabs)
 
 Modes are defined in the `MODES` array in AgentDetail.jsx:
 | Mode | Component | Feature |
 |------|-----------|---------|
 | commands | CommandsPane.jsx | Command pill flow + Run TUI + Vault dropdown (default landing mode) |
 | workspace | — | File browser, editor, upload |
-| config | — | Editor for the driver's config file (openclaw.json / opencode.json / config.yaml / config.toml) |
+| config | — | Editor for the driver's config file (openclaw.json / opencode.json / config.yaml / config.toml / settings.json) |
 | web | WebTab.jsx | "Web & Ports" — publish the web app, expose SSH, map extra TCP ports |
 | logs | — | Container logs viewer (persistent log store) |
 | activity | — | Event timeline |
-| settings | SettingsTab.jsx | Update, health checkup, docker, network, workspace, volumes, delete |
+| settings | SettingsTab.jsx | Recreate, health checkup, docker, network, workspace, volumes, build commands, dev container, delete |
 
 The terminal is docked at the bottom of every mode — always mounted, one per
 agent, auto-collapsed outside Commands. See [tabs/terminal.md](../tabs/terminal.md).
 
 ## Settings Tab (per-PAD)
 
-Container-level operations on the agent detail page: image refresh (Update),
-container health checkup, docker access, network routing, and delete. Runs as
+Container-level operations on the agent detail page: recreate/update, health
+checkup, docker access, network routing, workspace, volumes, build commands,
+dev container sync, and delete. Runs as
 SSE-streamed background jobs with a Console popup. See
 [tabs/settings.md](../tabs/settings.md) for the full contract.
 

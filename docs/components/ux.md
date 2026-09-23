@@ -8,13 +8,14 @@ handling shared across every page. The providers mount once in
 
 Each is a provider + a hook that returns a promise-resolving function. All
 three auto-focus the dialog on open, resolve on Enter, cancel on Escape, and
-cancel on backdrop click. They render `role="alertdialog"` + `aria-modal`.
+cancel on backdrop click. `alert.jsx` renders `role="alertdialog"` + `aria-modal`;
+`confirm.jsx` and `prompt.jsx` use `role="dialog"`.
 
 | Hook | Purpose | Resolves with |
 |------|---------|---------------|
 | `useConfirm()` | yes/no, optional danger styling | `true` / `false` |
 | `useAlert()` | informational, single OK (optional cancel) | `true` / `false` |
-| `usePrompt()` | one or more text fields (`fields: [{ name, label, ... }]`) | values object / `null` |
+| `usePrompt()` | one or more text fields (`fields: [{ key, label, ... }]`) | values object / `null` |
 
 Shared options: `{ title, message, danger, confirmText, cancelText, okText }`.
 `message` renders with `whitespace-pre-wrap` (multi-line strings keep their

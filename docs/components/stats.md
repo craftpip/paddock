@@ -1,15 +1,13 @@
-# Stats (Sidebar)
+# Stats (Header)
 
-Live Docker resource usage visible in the sidebar of any PAD detail page. Not a separate tab.
+Live Docker resource usage visible in the top header bar of any PAD detail page. Not a separate tab.
 
-> Last updated: 2026-08-09
+> Last updated: 2026-08-17
 
 ## What's shown
 
 - **CPU** — percentage, always visible
 - **MEM** — memory usage with unit, always visible
-- **Network I/O** — hover to reveal (RX/TX)
-- **Disk I/O** — hover to reveal
 
 ## Data source
 
@@ -26,6 +24,6 @@ containers (`{ stats }`) — currently unused by the SPA.
 
 ## Component
 
-File: `src/client/src/pages/AgentDetail.jsx` — `SidebarStats` (stats state,
-3s poll, CPU/MEM lines, hover tooltip for network + disk I/O). Runs on the
-sidebar, not inside a tab.
+File: `src/client/src/pages/AgentDetail.jsx` — `AgentHeader` (stats state,
+3s poll, CPU/MEM lines). Renders in a horizontal top header bar above the mode
+tabs, not in a sidebar.

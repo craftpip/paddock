@@ -1,8 +1,8 @@
 # System Architecture
 
-> Last updated: 2026-08-09
+> Last updated: 2026-08-17
 
-PAD Friends is a Docker-based control plane that manages AI agent containers (PADs) through a web UI. The agent program is driver-based: openclaw, opencode, picoclaw, hermes, or codex.
+PAD Friends is a Docker-based control plane that manages AI agent containers (PADs) through a web UI. The agent program is driver-based: openclaw, opencode, picoclaw, hermes, codex, or claude.
 
 ## High-Level Flow
 
@@ -41,12 +41,17 @@ src/
 │   ├── agent-registry.js     PAD discovery from instances/ + Docker state
 │   ├── db.js                 SQLite metadata store (users, agents, vault, api_keys)
 │   ├── workspace.js          Safe file operations with path traversal protection
+│   ├── ownership.js          Chown-on-create discipline (ensureOwned, normalizeTree)
 │   ├── path-probe.js         Read-only host-path probes + compose volume inheritance (plan 40)
+│   ├── paddock-mcp.js        Internal Paddock MCP endpoint URL (plan 35b)
+│   ├── llm-guide.js          MCP "help" + "agent_commands" guide text (plan 35a)
 │   ├── vm-manager.js         Create/remove/reset PADs, compose generation, applySettings,
 │   │                         applyAgentChanges, readSettings, containerInfo, the socat door
-│   ├── drivers/              Per-type adapters: openclaw, opencode, picoclaw, hermes, codex
+│   ├── devcontainer.js       Dev Container spec support — parse + sync workspace devcontainer.json (plan 41)
+│   ├── drivers/              Per-type adapters: openclaw, opencode, picoclaw, hermes, codex, claude
 │   ├── instance-image.js     Per-PAD image tags + build.env + Dockerfile ARG parsing
 │   ├── container-health.js   Generic Docker-level health checkup (11 checks)
+│   ├── cmd.js                Streaming command runner (spawn-based, feeds onLog callbacks)
 │   ├── log-store.js          Persistent container log capture (instances/<name>/logs/)
 │   ├── job-log.js            In-memory SSE event store for long-running jobs
 │   ├── backup-manager.js     STUB — generic backups removed (see business-logic.md)
@@ -108,7 +113,7 @@ carries all host ports and forwards to the peer by name. See `tabs/web.md`.
 |----------|-----|
 | React SPA at root `/` | All pages migrated from EJS+HTMX |
 | Express serves built SPA from public/ | Simple prod deployment |
-| Driver framework (`services/drivers/`) | Per-type behavior (openclaw/opencode/picoclaw/hermes/codex) via one adapter |
+| Driver framework (`services/drivers/`) | Per-type behavior (openclaw/opencode/picoclaw/hermes/codex/claude) via one adapter |
 | No EJS rendering for modern pages | API-only for React |
 | Session-based auth with CSRF | Replaced Basic Auth; `AUTO_LOGIN=true` auto-logs in |
 | CSRF on all POST routes | Security |

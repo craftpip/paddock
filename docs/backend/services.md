@@ -1,6 +1,6 @@
 # Backend Services
 
-> Last updated: 2026-08-15
+> Last updated: 2026-08-17
 
 ## PAD Discovery (agent-registry.js)
 
@@ -107,6 +107,30 @@ compose file is never served — the endpoint returns the volume list only
 (compose files can contain secrets).
 
 **Returns:** `{ path, project, compose, source, volumes, errors }`.
+
+## Dev Container (devcontainer.js)
+
+Plan 41 — Development Container Specification support. A workspace's
+`.devcontainer/devcontainer.json` (per the spec's file precedence) is the
+portable, version-controllable mirror of a pad: its lifecycle commands,
+workspace folder, environment, mounts, run args, ports, and user.
+
+**Exports:**
+- `readDevContainer(containerPath)` — finds + parses the devcontainer.json
+  following spec file precedence, returns the parsed fields (name,
+  postCreateCommand, onCreateCommand, updateContentCommand, postStartCommand,
+  postAttachCommand, workspaceFolder, forwardPorts, image, hasBuild,
+  remoteUser, containerUser, preferredUserMode, filePath, generated)
+- `writeDevContainer(filePath, fields)` — writes a generated or synced
+  devcontainer.json back to the workspace
+
+The Create Agent form reads the devcontainer via `GET /api/paths/devcontainer`
+to pre-fill the post-create command box. The Settings tab's Dev Container card
+(`GET /api/agents/:name/devcontainer`) shows the file path, state badge, and
+both sides of the diff (current file vs what Paddock would write now). Sync
+and Regenerate are available from the UI — Sync writes 1:1 mapped fields in
+place (project-authored fields survive), Regenerate rewrites the whole file as
+a generated mirror (`x-paddock.generated`).
 
 ## VM Manager (vm-manager.js)
 

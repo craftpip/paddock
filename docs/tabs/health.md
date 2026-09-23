@@ -4,7 +4,7 @@ The container health checkup lives in the **Settings tab** (it replaced the old
 dedicated Health tab, which was removed in the SPA migration). It is a
 driver-agnostic Docker-level checkup, not an app-level one.
 
-> Last updated: 2026-08-09
+> Last updated: 2026-08-17
 
 ## What it does
 
@@ -14,10 +14,9 @@ against the **actual** container (`docker inspect`). It works on stopped
 containers too — while down it reports *why* (exit code, OOM-kill, stale
 network peer) instead of failing.
 
-**12 checks:** compose file · container exists/status (with OOM/exit-code
-reason) · Docker `/healthz` probe · restart policy · image · network mode +
-`container:` peer existence/running state · peer-network forwarding door
-existence/running state · volumes/bind mounts (incl.
+**11 checks:** compose file · container exists/status (with OOM/exit-code
+reason) · Docker healthcheck probe · restart policy · image · network mode +
+`container:` peer existence/running state · volumes/bind mounts (incl.
 `/workspace` host-path split-brain detection) · docker socket mount · published
 ports · env keys (secrets excluded via `/(password|token|key|secret)/i`).
 

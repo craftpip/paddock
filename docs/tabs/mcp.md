@@ -49,7 +49,7 @@ SPA.
 
 - `src/client/src/pages/agent/CommandsPane.jsx` — MCP group (Add server, Remove
   server) + server chips
-- The shared prompt modal (`src/client/src/components/prompt.jsx`) supports
+- The shared prompt modal (`src/client/src/lib/prompt.jsx`) supports
   `type: 'select'` (with `options` as strings or `{value,label}`),
   `type: 'checkbox'` (with `defaultValue`, `checkLabel`, `hint`), and
   conditional visibility via `when(values)` — used to show the URL field only

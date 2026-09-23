@@ -1,6 +1,6 @@
 # Middleware
 
-> Last updated: 2026-08-09
+> Last updated: 2026-08-17
 
 ## Auth (auth.js) — Session-Based Auth + CSRF
 

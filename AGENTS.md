@@ -121,10 +121,29 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   dangling only) runs after create/rebuild/delete to reclaim it. A dangling
   image that survives the prune is in use by a container (possibly another
   project) — don't force-remove it.
+- **Deleting an agent deletes its custom workspace source too** (plan 24): when
+  `meta.WORKSPACE_HOST` lives under the project root but OUTSIDE the agent's
+  data dir, `removeVm` `rmSync`s the whole workspace dir. Never point a real
+  agent at a shared workspace dir you care about unless that's intended; for
+  throwaway tests use a dedicated dir. Project-image test workspaces
+  (`wstest-*`) get wiped this way.
+- **BuildCommands box cannot open `FROM … AS <name>` stages** (plan 41): the
+  block is injected mid-file into the agent's main stage, so a `FROM` there
+  starts a new stage whose `COPY --from=<same>` is a BuildKit circular
+  dependency, and a trailing stage would become the final tagged image. To pull
+  the project toolchain use `COPY --from=paddock-proj-<name>:latest <src> <dst>`
+  or `RUN --mount=type=bind,from=paddock-proj-<name>:latest,source=…,target=…`.
 - **Restart the webui after editing backend code** (`app.js`, `vm-manager.js`,
   any `services/drivers/*.js`) — Node caches `require()`; a stale process
   keeps old behavior or builds the wrong image via the openclaw-driver
   fallback. `docker restart paddock`.
+- **Dev container sync/regenerate write into the workspace THROUGH the webui
+  container** (plan 41): it works only for workspaces the paddock container
+  mounts read-write (project root /www2/paddock). Workspaces mounted
+  read-only into paddock (e.g. `/www1` → craftpip) fail with
+  `EROFS: read-only file system` — the card shows the diff, but Sync/
+  Regenerate error out; only the auto-sync inside a settings apply would too.
+  That's by design (the webui can't clobber external workspaces), not a bug.
 - **JSX/CSS edits need `cd src/client && npm run build` + `docker restart
   paddock`** — the SPA serves the built bundle from `src/public/`.
 - **Docker Compose CLI lives inside the paddock container** — the host docker

@@ -1,6 +1,6 @@
 # User Management
 
-> Last updated: 2026-08-09
+> Last updated: 2026-08-17
 
 Multi-user system with owner-based scoping. Every resource in Paddock belongs to a user. Admins see everything and manage users. Regular users only see what they own.
 
@@ -236,8 +236,8 @@ orphans and has an `[Assign]` action per agent.
 
 ```
 DELETE /api/users/:id
-├── User has running agents → 409 Conflict ("Stop agents first")
-├── User has stopped agents → Orphan them (owner_id = NULL), delete user
+├── User is the only admin → 400 ("Cannot delete the only admin")
+├── User has agents → Orphan them (owner_id = NULL), delete user
 └── User has no agents → Delete user immediately
 ```
 
@@ -260,7 +260,7 @@ If the last admin is somehow deleted (e.g., direct DB manipulation), the system 
 
 - Sessions expire after 24 hours (cookie maxAge)
 - API returns 401 → client redirects to `/login`
-- Session stored in SQLite → survives server restart
+- Session stored in-memory (`MemoryStore`) → wiped on server restart (auto-login re-establishes admin)
 
 ### Concurrent Use
 

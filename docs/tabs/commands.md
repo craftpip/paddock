@@ -1,6 +1,6 @@
 # Commands Mode
 
-> Last updated: 2026-08-09
+> Last updated: 2026-08-17
 
 The Commands mode is the default landing mode of the agent detail page — a
 terminal emulator with a GUI command picker. One wrapped flow of pill buttons;
@@ -51,11 +51,11 @@ support was generalized, only the openclaw flows could prompt.
 ### The openclaw exception
 
 openclaw is the only type that renders extra **hardcoded flows** in the pane on
-top of its driver groups: `MessagingFlow`, `ModelsFlow`, `McpFlow`,
+top of its driver groups: `MessagingFlow`, `ModelsFlow`,
 `SkillsFlow`, `MemoryFlow` (`CommandsPane.jsx`). They are form-capable via
 `usePrompt()` and show data (servers, skills, backups) as compact chips. All
 other types render **only** their driver groups (`isOpenclaw` guard,
-`CommandsPane.jsx:716`, `779-783`). Every type also gets the right-aligned
+`CommandsPane.jsx:610`). Every type also gets the right-aligned
 **Vault dropdown** — a server-side secrets exception to the paste rule: clicking
 an item decrypts the value and pastes it into the terminal.
 
@@ -113,7 +113,7 @@ groups are Providers, Channels, MCP, and Skills.
 
 | Type    | Groups in the Commands tab |
 |---------|----------------------------|
-| openclaw| hardcoded flows: Messaging, Models, MCP, Skills, Memory · driver groups: Config, Security, Doctor, Diagnostics · Vault dropdown |
+| openclaw| hardcoded flows: Messaging, Models, Skills, Memory · driver groups: Config, Security, Doctor, Diagnostics · Vault dropdown |
 | opencode | Model, Session, MCP, Agent, Plugin, Other |
 | picoclaw | Status, Auth, Channels, Cron, Skills, Other |
 | hermes  | Status, Model, Auth, Gateway, Cron, Skills, MCP, Memory, Sessions, Plugins, Other |

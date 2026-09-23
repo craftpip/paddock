@@ -1,8 +1,8 @@
 # Settings Tab
 
-> Last updated: 2026-08-09
+> Last updated: 2026-08-17
 
-Container-level operations for an agent: update, health checkup, docker access, network routing, custom workspace + extra volumes, ssh/extra-port exposure, and delete. Lives at the end of the tab bar in the agent detail page.
+Container-level operations for an agent: recreate/update, health checkup, docker access, network routing, custom workspace + extra volumes, build & lifecycle commands, dev container sync, and delete. Lives at the end of the tab bar in the agent detail page.
 
 File: `src/client/src/pages/agent/SettingsTab.jsx`. Wired into `AgentDetail.jsx` as `{ id: 'settings', label: 'Settings' }` in `MODES`.
 
@@ -14,10 +14,18 @@ once per change set.
 
 ## Cards
 
+### 0. Stale network peer warning (conditional)
+
+Amber banner at the top when the compose routes through a `container:` peer
+that was recreated (docker still points at the old deleted container) or is
+stopped. Shows a **Recreate to fix** button (`POST /api/agents/:name/recreate`)
+to rebind to the current peer. Only visible when network health is `stale` or
+`peer-stopped`.
+
 ### 1. Container Info (read-only + popup)
 
 Name, agent type, runtime, status, and image (per-instance tag
-`paddock-vm-<name>:latest`). A **View full info** button opens the lazy-loaded
+`paddock-vm-<name>:latest`). An **Inspect details** button opens the lazy-loaded
 `ContainerInfoModal.jsx` — `GET /api/agents/:name/container-info` runs
 `docker inspect` on demand and shows network mode + peer, mounts table, **published**
 ports, env keys, and a collapsible raw inspect JSON with env secrets redacted.
@@ -25,26 +33,41 @@ Note: `EXPOSE`-declared ports are image metadata, NOT published — the popup
 labels them "Not published"; peer-mode agents legitimately show no ports (the
 host binding lives on their `<name>-door`).
 
-### 2. Update (image refresh)
+### 2. Recreate Container (update / recreate / full reset)
 
-Redownloads the base image (`--pull`), rebuilds the **per-instance image** from `instances/<name>/build/`, and recreates the container — the recreate restarts it automatically. Runs as a background job; output streams into a console pane (the same `Console` component used by Create Agent).
+General-purpose dialog replacing the old dedicated Update card. The **Recreate
+Container** button opens a confirm with checkboxes:
 
-- `GET /api/agents/:name/update-info` returns `{ currentVersion, availableVersion, updateAvailable }` for the confirm dialog
-- POST returns `202 { ok: true, job: "update:<name>", streaming: true }`, the job runs in `setImmediate`
-- Two steps, streamed as `step` events: **build** (`docker compose --env-file <build-dir>/build.env -f <instance-compose> build --pull <name>`, 900s timeout), then **recreate** (`docker compose ... up -d --no-deps --force-recreate <name>`, 300s timeout)
-- A `system` line "Done — container recreated" ends the run, then the tab refetches agent state
-- On failure the console keeps the error tail, the old container is left running (recreate is the last step), and a **Retry** button shows. The tab never navigates away.
+- **Pull latest image update** — pulls the base image, rebuilds the per-instance
+  image, then force-recreates (the old update flow)
+- **Reset the whole user folder** — wipes the data dir (config, sessions, data)
+  so the agent starts completely fresh; the bind-mounted workspace folder is
+  preserved
 
-### 3. Allow docker in the container (toggle)
+On confirm: 202 + background job (`recreate:<name>` or `update:<name>`) streamed
+into a Console popup. Steps vary by checkbox: pull → build → recreate for
+update; just recreate for a plain recreate; wipe + recreate for reset.
+
+### 3. Container Health Checkup
+
+Runs a generic, driver-agnostic Docker-level checkup: diffs the **declared** compose settings (`docker compose config --format json`) against the **actual** container (`docker inspect`). Works on stopped containers too — while down it reports *why* (exit code, OOM-kill, stale network peer, etc.).
+
+- **Run Health Check** button starts an SSE job (`health:<name>`) — each check streams into a live popup (`HealthCheckModal.jsx`) as a checklist row: ✓ pass / ✗ fail / ~ warn, with `expected`/`found` detail and a fix hint on failures. No auto-fix — each failing row tells you what to do (usually **Recreate**).
+- **Status pill** (next to the button) shows the last passive report: `✓ Healthy` / `~ N issues` / `✗ N problems`; click it to reopen the full report. Fetched on mount from `GET /api/agents/:name/health`.
+
+Checks (11): compose file · container exists + status (with OOM/exit-code reason) · Docker healthcheck probe · restart policy · image · network mode + peer · volumes/bind mounts (incl. `/workspace` host-path split-brain detection) · docker socket mount · published ports · env keys (secrets excluded).
+
+Driver-aware app-level checks are planned but not yet implemented — see `plans/20-health-check-driver-aware.md`.
+
+### 4. Allow docker in the container (toggle)
 
 Raw docker (docker CLI + host socket). Toggling mounts `/var/run/docker.sock:/var/run/docker.sock` in the agent's compose file and sets `DOCKER=1|0` in `meta.env`.
 
 - Applies through the shared settings flow (stop → regenerate compose → start)
 - Confirm popup warns the docker socket is **host-root equivalent** (the agent could control the entire host)
 - Guard rail: if the image has no docker CLI (`docker exec <name> sh -lc 'command -v docker'` fails while the container runs), the toggle errors with "The image has no docker CLI — rebuild the image to enable docker access". The toggle writes `INSTALL_DOCKER=1` to the instance `build.env` and rebuilds the per-instance image with that arg automatically. Most agent images don't ship the CLI by default (hermes ships it — the rebuild is a verified no-op there).
-- The "Install Paddock MCP" toggle is intentionally **not implemented** — see docs/tabs/mcp.md; the two were split by decision on 2026-08-04.
 
-### 3b. Container user (Root / Local user) (plan 43 Phase 7)
+### 4b. Container user (Root / Local user) (plan 43 Phase 7)
 
 Per-PAD choice of which user the agent **daemon and terminal** run as. Root (the
 default) is the legacy behavior; Local user drops them to the `pad` user
@@ -82,18 +105,6 @@ workspace, anywhere — is user-owned on the host by construction.
 - New pads in user mode run their setup steps as `-u 1000:1000`, so config
   files are born user-owned.
 
-### 4. Container Health Checkup
-
-Runs a generic, driver-agnostic Docker-level checkup: diffs the **declared** compose settings (`docker compose config --format json`) against the **actual** container (`docker inspect`). Works on stopped containers too — while down it reports *why* (exit code, OOM-kill, stale network peer, etc.).
-
-- **Run Health Check** button starts an SSE job (`health:<name>`) — each check streams into a live popup (`HealthCheckModal.jsx`) as a checklist row: ✓ pass / ✗ fail / ~ warn, with `expected`/`found` detail and a fix hint on failures. No auto-fix — each failing row tells you what to do (usually **Recreate**).
-- **Status pill** (next to the button) shows the last passive report: `✓ Healthy` / `~ N issues` / `✗ N problems`; click it to reopen the full report. Fetched on mount from `GET /api/agents/:name/health`.
-- **Stale network peer banner** (top of the tab): if the compose file routes through a `container:` peer that was recreated (docker still points at the old deleted container) or is stopped, an amber banner explains it and shows a **Recreate to fix** button (runs `POST /api/agents/:name/recreate`). This is the fix for the "exited container won't start" case.
-
-Checks (11): container exists + status (with OOM/exit-code reason), Docker healthcheck probe, restart policy, image, network mode + peer, volumes/bind mounts (incl. `/workspace` host-path split-brain detection), docker socket mount, published ports, environment keys (secrets excluded).
-
-Driver-aware app-level checks are planned but not yet implemented — see `plans/20-health-check-driver-aware.md`.
-
 ### 5. Network (dropdown)
 
 Routes the agent's traffic through another running container by joining its network namespace (`network_mode: container:<name>`).
@@ -105,17 +116,7 @@ Routes the agent's traffic through another running container by joining its netw
 - State stored in `meta.env` `NETWORK=<container>` (empty = default)
 - A published web app / ssh / extra ports are **carried over** on a network switch (door re-created on peer changes) — see web.md
 
-### 6. Workspace mount (toggle)
-
-Custom workspace bind: host source (`WORKSPACE_HOST`) + container path
-(`WORKSPACE_DIR`), persisted in `meta.env`. Default (off) keeps the workspace as
-the `workspace/` subfolder of the data mount. Validated by
-`vm.validateWorkspaceMount` (both-or-neither, no protected/system dirs, no
-swallowing the data mount or another agent's dir); hermes is excluded (its data
-dir IS the workspace). Changing/clearing a mount never moves or deletes files.
-A new folder starts empty; the old folder stays on disk.
-
-### 7. Extra volumes (card)
+### 5b. Additional volumes (card)
 
 Additional mounts — **bind** rows `hostPath:containerPath` or **named-volume**
 rows. Persisted in `EXTRA_VOLUMES` in meta.env as a JSON array, `[]` when
@@ -134,7 +135,45 @@ only the mount from meta + compose (agent recreates); the host source directory
 is **never deleted** — extra-volume sources are arbitrary user dirs, so
 `removeVm()` does not clean them up.
 
-### 8. Danger Zone — Delete Container
+### 5d. Custom workspace folder (toggle)
+
+Custom workspace bind: host source (`WORKSPACE_HOST`) + container path
+(`WORKSPACE_DIR`), persisted in `meta.env`. Default (off) keeps the workspace as
+the `workspace/` subfolder of the data mount. Validated by
+`vm.validateWorkspaceMount` (both-or-neither, no protected/system dirs, no
+swallowing the data mount or another agent's dir); hermes is excluded (its data
+dir IS the workspace). Changing/clearing a mount never moves or deletes files.
+A new folder starts empty; the old folder stays on disk.
+
+### 5e. Build & lifecycle commands (plan 41)
+
+Four textareas for the per-PAD Dockerfile and lifecycle hooks:
+
+- **Build commands (Dockerfile)** — lines in `instances/<name>/build/Dockerfile`.
+  A change rebuilds the image. A `FROM` line here fails the build (the current
+  container stays up).
+- **Post-create commands (bash)** — runs once in the running container after a
+  recreate (project mounted, services up).
+- **Post-start commands (bash)** — runs on every container start (baked into
+  `start.sh`). Enabling on an older image rebuilds it once.
+- **Post-attach commands (bash)** — runs on every terminal attach inside the
+  PAD. No image change needed.
+
+### 5f. Dev Container (plan 41 item 20)
+
+The workspace's `devcontainer.json` is the portable mirror of this pad. The card
+shows the file path, a state badge (generated / project-authored / not found),
+and both sides of the diff preview (current file vs what Paddock would write
+now from the pad's effective config).
+
+- **Sync** — writes the mapped fields (workspace folder, lifecycle commands,
+  env, volumes, ports) from the pad's settings into the workspace
+  `devcontainer.json` in place (project-authored fields survive). No container
+  recreate.
+- **Regenerate** — rewrites (or creates) the `devcontainer.json` as the pad's
+  full generated mirror (marked `x-paddock.generated`). No container recreate.
+
+### 6. Danger Zone — Delete Container
 
 Wires the existing `POST /api/agents/:name/delete` (stop + remove container + door + network, delete instance dir, drop from metadata store). Danger-styled confirm: "Permanently delete <name>, its container, and all files. This cannot be undone." On success the SPA navigates back to the fleet list.
 

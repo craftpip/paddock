@@ -1,6 +1,6 @@
 # Business Logic
 
-> Last updated: 2026-08-15
+> Last updated: 2026-08-17
 
 ## PAD Discovery and State
 
@@ -12,7 +12,7 @@
 4. **Agent build**: Merge filesystem metadata + Docker state into an agent object with:
    - `name`, `display_name` (capitalized name without prefix)
    - `status` (running/exited/missing)
-   - `agent_type` from `meta.env` (openclaw/picoclaw/hermes)
+   - `agent_type` from `meta.env` (openclaw/opencode/picoclaw/hermes/codex/claude)
    - `workspace_root` / `config_root` — resolved by probing the `instances/<name>/` directory
    - `default_model` / `default_provider` — parsed from the driver's `configFile` (e.g. `openclaw.json`) if it exists
 5. **SQLite sync**: Each discovered agent is upserted into the `agents` table for metadata tracking
