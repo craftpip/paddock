@@ -42,6 +42,7 @@ export default function DashboardLayout({ children, fullHeight, fullWidth }) {
               <Link to="/agents/create" className="px-3 py-1.5 rounded-lg text-sm text-ink-muted hover:text-ink hover:bg-panel transition-colors">+ Agent</Link>
               <Link to="/vault" className="px-3 py-1.5 rounded-lg text-sm text-ink-muted hover:text-ink hover:bg-panel transition-colors">Vault</Link>
               <Link to="/backups" className="px-3 py-1.5 rounded-lg text-sm text-ink-muted hover:text-ink hover:bg-panel transition-colors">Backups</Link>
+              <Link to="/configs" className="px-3 py-1.5 rounded-lg text-sm text-ink-muted hover:text-ink hover:bg-panel transition-colors">Configs</Link>
               <span className="w-px h-5 bg-raised mx-1.5" />
               <button onClick={handleToggleTheme} className="px-2.5 py-1.5 rounded-lg text-ink-faint hover:text-accent-text hover:bg-panel transition-colors" title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}>
                 {theme === 'dark' ? (
