@@ -256,6 +256,11 @@ async function checkContainerHealth(name, onCheck) {
   }
 
   // ── Published ports ────────────────────────────────────────
+  // `docker compose config` emits port objects { target, published, protocol }
+  // where `target` is the CONTAINER port and `published` is the HOST port.
+  // NetworkSettings.Ports is keyed by CONTAINER port (`target/protocol`) and
+  // each binding carries { HostPort }. We must resolve host→container, not
+  // look up the published port as if it were the key.
   const expPorts = Array.isArray(compose.ports) ? compose.ports : [];
   const actualPorts = (ctr.NetworkSettings && ctr.NetworkSettings.Ports) || {};
   if (!expPorts.length) {
@@ -263,9 +268,13 @@ async function checkContainerHealth(name, onCheck) {
   } else {
     const spec = expPorts.map((p) => (p && typeof p === 'object' ? `${p.published}:${p.target}` : String(p)));
     const missing = expPorts.filter((p) => {
-      const published = p && typeof p === 'object' ? String(p.published) : null;
-      if (!published) return false;
-      return !actualPorts[`${published}/tcp`] && !actualPorts[`${published}/udp`];
+      if (!p || typeof p !== 'object') return false;
+      const target = p.target != null ? String(p.target) : '';
+      const published = p.published != null ? String(p.published) : '';
+      const proto = p.protocol || 'tcp';
+      if (!published || !target) return false; // exposed-only ports have nothing to verify
+      const bindings = actualPorts[`${target}/${proto}`] || [];
+      return !bindings.some((b) => b && String(b.HostPort) === published);
     });
     if (missing.length) {
       add({ key: 'ports', label: 'Ports', status: 'error', expected: spec.join(', '), actual: Object.keys(actualPorts).join(', ') || '(none)', hint: `Published port(s) not bound: ${missing.map((p) => (p && typeof p === 'object' ? p.published : p)).join(', ')}. Recreate to fix.` });
