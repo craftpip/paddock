@@ -33,7 +33,7 @@ export default function Dashboard() {
     return () => clearInterval(fleetIntervalRef.current)
   }, [fetchAgents])
 
-  const avgCpu = fleetStats.length ? (fleetStats.reduce((s, c) => s + (parseFloat(c.CPUPerc) || 0), 0) / fleetStats.length).toFixed(1) : '0'
+  const totalCpu = fleetStats.reduce((s, c) => s + (parseFloat(c.CPUPerc) || 0), 0).toFixed(1)
 
   // Parse a docker MemUsage string like "1.012GiB / 15.5GiB" into bytes.
   function parseMemUsage(s) {
@@ -120,10 +120,10 @@ export default function Dashboard() {
         <span className="w-px h-4 bg-raised" />
         <span className="flex items-center gap-2">
           <span className="w-2 h-2 rounded-full bg-accent" />
-          <span className="text-xs text-ink-faint">CPU avg</span>
+          <span className="text-xs text-ink-faint">CPU total</span>
           {fleetLoading
             ? <span className="skeleton h-5 w-10 rounded" />
-            : <span className="text-sm font-mono text-ink">{avgCpu}%</span>}
+            : <span className="text-sm font-mono text-ink">{totalCpu}%</span>}
         </span>
         <span className="flex items-center gap-2">
           <span className="w-2 h-2 rounded-full bg-success" />
