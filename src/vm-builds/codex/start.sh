@@ -13,6 +13,11 @@ if [ -n "$SSH_PORT" ] && [ "$SSH_PORT" != "22" ]; then
     sed -i "s/^#\?[[:space:]]*Port .*/Port $SSH_PORT/" /etc/ssh/sshd_config
 fi
 /usr/sbin/sshd &
+# Paddock post-start hook (plan 41): if the webui wrote a post-start.sh (bound
+# via the build-dir /build mount), run it on EVERY container start.
+if [ -f /build/post-start.sh ]; then
+    bash /build/post-start.sh || true
+fi
 # codex has no gateway daemon — keep the container alive so the terminal
 # stays usable. PAD USER drop (plan 43 Phase 7): USER_MODE=user pads run the
 # keeper as the `pad` user so terminal-created files are user-owned.

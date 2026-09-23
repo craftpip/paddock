@@ -1,39 +1,81 @@
 # Dev Container Standard for Paddock (plan 41)
 
-## Status: Proposed (2026-08-12) — 0/20 items, design complete. Paddock
-## implements the Development Container Specification: `.devcontainer/
-## devcontainer.json` fields honored in the PAD's own container (commands,
-## workspace folder, env, mounts, run args, ports, users) + non-root agent
-## containers (PUID/PGID user). The project's `image` is never the agent's
-## base — only its commands and toolchain stage are used.
+## Status: In progress (2026-08-16) — items 1–11 + 32–36 done & verified, 25/25
+## items complete. Items 12–16 (workspaceFolder/environment/mounts/runArgs/
+## forwardPorts) DONE — implemented, 61/61 vm-manager tests green, live-verified
+## on pad-craftpip (Craftpip /www1 workspace, opencode driver): /workspace mount
+## + /srv/app-readonly:ro, NG_SERVE_HOST/CRAFTPIP_MODE env, SYS_PTRACE +
+## somaxconn runArgs, forwardPort 4200→4202 (gluetun holds 4200; allocator now
+## sees live docker ps). Two live bugs fixed: compose port short-syntax must put
+## protocol on the container side only (`4202:4200/tcp`), and
+## collectPublishedHostPorts excludes the pad's own ports so mappings stay
+## stable across apply cycles. Item 17 (remoteUser/containerUser → pad user)
+## DONE — parser exposes preferredUserMode, resolveDevContainerPlan persists
+## remoteUser/containerUser/userMode, createVm seeds USER_MODE=user from the
+## plan when the caller doesn't pick (MCP), the probe + create form default the
+## Container user toggle to Local user for non-root workspaces (explicit pick
+## wins), 63/63 tests green, live-verified on a throwaway /www2 workspace
+## (node → user, containerUser root wins → root, numeric uid → user). Items
+## 18–19 (devcontainer generation + write-back) DONE — 68/68 tests green;
+## generateWorkspaceDevContainer writes a `.devcontainer/devcontainer.json`
+## mirror (x-paddock.generated: workspaceFolder, lifecycle commands, mounts,
+## forwardPorts, remoteUser) at create when the workspace has none (default on,
+## opt-out via create form toggle / MCP generateDevContainer arg), and
+## syncDevContainer writes pad Settings changes back in place — generated files
+## regenerate wholesale, project-authored files get only the 1:1 mapped fields
+## (lifecycle clears propagate; runArgs/portsAttributes/remoteUser stay
+## untouched); never touches a devcontainer the pad never adopted. Live-verified
+## on a throwaway pad-dcgen: generated file correct at create, postStart edit
+## mirrored back, container healthy, agent + workspace cleaned up. Item 20 (Dev
+## Container card UI) DONE — 72/72 tests green; new `devContainerStatus` (file
+## path, state badge generated/project-authored/missing, current content + the
+## computed "what Paddock would write now" target for the diff preview, sync/
+## regenerate flags) + `regenerateDevContainer` (wholesale rewrite, creates when
+## missing), exposed as `GET /api/agents/:name/devcontainer` + `POST …/sync` +
+## `POST …/regenerate` (no container recreate); Settings gains the "Dev
+## Container" card (path, badge, LCS line-diff preview with identical-line
+## collapsing, Sync/Regenerate with confirms — Regenerate warns it clobbers a
+## project-authored file); Create Agent gains the "generate .devcontainer for
+## this workspace" checkbox (default on, sends generateDevContainer; hints
+## adapt: "Leave on…" vs "already ships a devcontainer — never overwritten").
+## Live-verified in-browser on pad-craftpip (project-authored card renders the
+## real diff; Sync correctly fails with EROFS — /www1 is mounted read-only for
+## the webui, so craftpip's mirror can't be maintained by the control plane,
+## only project-root workspaces can) and on a disposable pad-dctest instance
+## under the rw project root: Regenerate created the generated mirror from the
+## pad's config, Sync wrote a changed post-create script back in place, file
+## re-chowned node:node, instance + workspace removed. Remaining: 38 (final
+## test sweep). The project-image `FROM … AS project` alias pattern documented
+## below is IMPOSSIBLE (BuildKit circular dep + last-stage-wins); the working
+## form is direct `COPY --from=paddock-proj-<name>:latest`.
 
 Progress checklist:
 
-- [ ] Backend: `instance-image.js` — `readCustomBuild(name)` / `writeCustomBuild(name, text)` that inject/replace/clear the user block between marker comments in `instances/<name>/build/Dockerfile` (anchor: the `# ---- 9. ENTRYPOINT ----` banner all five templates share)
-- [ ] Backend: `vm-manager.js` — `writePostCreateScript(name, text)` writing `instances/<name>/build/post-create.sh` (chmod 0755); empty text removes the file
-- [ ] Backend: `vm-manager.js` — `createVm`/`createAgent` accept `buildCommands` + `postCreate`; inject the Dockerfile block after `seedBuildDir` (before compose gen so custom `ARG` lines are picked up); write `post-create.sh`; run it via `docker exec` in the create job after `up -d` (streamed, alongside `setupSteps`)
-- [ ] Backend: `vm-manager.js` — `readSettings` returns `buildCommands` + `postCreate` (read back from the Dockerfile block + `post-create.sh`)
-- [ ] Backend: `vm-manager.js` — `prepareAgentChanges`/`applyAgentChanges` accept both fields; `buildCommands` change → force rebuild, `postCreate` change → plain recreate (no rebuild needed — it is not baked in the image)
-- [ ] Backend: `app.js` `POST /api/agents/create` passes both fields through; `validateAgentCreate` sanity-checks them (length cap, NUL rejection)
-- [ ] Backend: devcontainer.json detector (new module, alongside `path-probe.js`) — parse the workspace's `.devcontainer/devcontainer.json` (precedence: `.devcontainer/devcontainer.json`, `.devcontainer.json`, `.devcontainer/<folder>/devcontainer.json`) and return the full field set: `postCreateCommand`, `onCreateCommand`, `updateContentCommand`, `postStartCommand`, `postAttachCommand`, `workspaceFolder`, `image`, `build`, `features`, `environment`, `mounts`, `runArgs`, `forwardPorts`, `portsAttributes`, `remoteUser`/`containerUser`, `name` (string/array/object forms joined)
-- [ ] Frontend: `CreateAgent.jsx` — "Build & post-create commands" section (two textareas); when a workspace is picked, pre-fill post-create from `postCreateCommand` with a "from .devcontainer/devcontainer.json" badge, editable before submit
-- [ ] Frontend: `SettingsTab.jsx` — matching "Build & post-create commands" card, pre-filled, "Save & recreate" (+ optional "Re-run setup" button — stretch)
-- [ ] Backend: project-image (multi-stage) — when the workspace's devcontainer has `build`/`image`, build it once as `paddock-proj-<name>:latest` and expose the tag so the build-commands box can `FROM ... AS project` / `COPY --from=...`; the agent's base stays the driver's own image
-- [ ] Backend: lifecycle wiring — `postStartCommand` runs on every container start (start.sh, alongside existing start hooks); `postAttachCommand` runs when a terminal/exec session attaches to the agent
-- [ ] Backend: `workspaceFolder` honored — project mounts at the devcontainer's `workspaceFolder` (fallback to our default when absent)
-- [ ] Backend: `environment` — injected into compose as env vars
-- [ ] Backend: `mounts` — honored with validation against `GUARD_*` (sources inside `instances/` / project root / agent data rejected with a clear error)
-- [ ] Backend: `runArgs` — allow-listed keys only (`--cap-add`, `--ulimit`, `--sysctl`, `--env-file`, …); anything else rejected with a clear error
-- [ ] Backend: `forwardPorts`/`portsAttributes` — ports allocated via the host-port/door system, `portsAttributes` labels applied
-- [ ] Backend: `remoteUser`/`containerUser` honored as the non-root pad user (PUID/PGID) — see Non-root section
-- [ ] Backend: devcontainer generation — when the workspace has no devcontainer at create time, generate `.devcontainer/devcontainer.json` from the pad's effective config (`workspaceFolder`, lifecycle commands, `environment`, `mounts`, `runArgs`, `forwardPorts`/`portsAttributes`, `remoteUser`), marked `"x-paddock": { "generated": true }`
-- [ ] Backend: write-back sync — on pad Settings changes (volumes, ports, env, lifecycle commands) update the workspace devcontainer.json in place; project-authored files get only 1:1 mapped fields updated, everything else preserved
-- [ ] Frontend: "Dev Container" card in Settings — file path, state badge (generated / project-authored / missing), diff preview + "Sync" / "Regenerate" actions; CreateAgent option "generate .devcontainer for this workspace" (default on)
-- [ ] Backend: agent images — add a non-root user (default name `pad`, UID/GID from `PUID`/`PGID`, default 1000:1000) in all five `vm-builds/*/Dockerfile` templates (+ project-stage `paddock-proj-*` images get the same user)
-- [ ] Backend: compose generation — agent containers run with `user: "${PUID}:${PGID}"`, `HOME` pointing at the new user's home, and `docker exec` / start.sh run as that user
-- [ ] Backend: driver `dataDir` remap — `/root/.openclaw`, `/root/.opencode`, `/root/.picoclaw`, `/opt/data` (hermes), `/root/.codex`, `/root/.claude` move to the pad user's home (e.g. `/home/pad/.opencode`) so config files stay writable by the non-root user
-- [ ] Backend: sudo wiring — non-root user gets passwordless sudo (sudoers drop-in) for runtime root needs; start.sh / post-create scripts that need root use `sudo`
-- [ ] Backend: `removeVm` — root-helper delete container becomes unnecessary once instance data is 1000-owned; simplify delete to plain `fs.rmSync` (keep the helper as fallback if a rebuild/upgrade left root-owned data behind)
+- [x] Backend: `instance-image.js` — `readCustomBuild(name)` / `writeCustomBuild(name, text)` that inject/replace/clear the user block between marker comments in `instances/<name>/build/Dockerfile` (anchor: the `# ---- 9. ENTRYPOINT ----` banner all five templates share)
+- [x] Backend: `vm-manager.js` — `writePostCreateScript(name, text)` writing `instances/<name>/build/post-create.sh` (chmod 0755); empty text removes the file
+- [x] Backend: `vm-manager.js` — `createVm`/`createAgent` accept `buildCommands` + `postCreate`; inject the Dockerfile block after `seedBuildDir` (before compose gen so custom `ARG` lines are picked up); write `post-create.sh`; run it via `docker exec` in the create job after `up -d` (streamed, alongside `setupSteps`)
+- [x] Backend: `vm-manager.js` — `readSettings` returns `buildCommands` + `postCreate` (read back from the Dockerfile block + `post-create.sh`)
+- [x] Backend: `vm-manager.js` — `prepareAgentChanges`/`applyAgentChanges` accept both fields; `buildCommands` change → force rebuild, `postCreate` change → plain recreate (no rebuild needed — it is not baked in the image)
+- [x] Backend: `app.js` `POST /api/agents/create` passes both fields through; `validateAgentCreate` sanity-checks them (length cap, NUL rejection)
+- [x] Backend: devcontainer.json detector (new module, alongside `path-probe.js`) — parse the workspace's `.devcontainer/devcontainer.json` (precedence: `.devcontainer/devcontainer.json`, `.devcontainer.json`, `.devcontainer/<folder>/devcontainer.json`) and return the full field set: `postCreateCommand`, `onCreateCommand`, `updateContentCommand`, `postStartCommand`, `postAttachCommand`, `workspaceFolder`, `image`, `build`, `features`, `environment`, `mounts`, `runArgs`, `forwardPorts`, `portsAttributes`, `remoteUser`/`containerUser`, `name` (string/array/object forms joined)
+- [x] Frontend: `CreateAgent.jsx` — "Build & post-create commands" section (two textareas); when a workspace is picked, pre-fill post-create from `postCreateCommand` with a "from .devcontainer/devcontainer.json" badge, editable before submit
+- [x] Frontend: `SettingsTab.jsx` — matching "Build & post-create commands" card, pre-filled, "Save & recreate" (+ optional "Re-run setup" button — stretch)
+- [x] Backend: project-image (multi-stage) — when the workspace's devcontainer has `build`/`image`, build it once as `paddock-proj-<name>:latest` and expose the tag so the build-commands box can `COPY --from=paddock-proj-<name>:latest ...` / `RUN --mount=type=bind,from=...`; the agent's base stays the driver's own image
+- [x] Backend: lifecycle wiring — `postStartCommand` runs on every container start (start.sh, alongside existing start hooks); `postAttachCommand` runs when a terminal/exec session attaches to the agent
+- [x] Backend: `workspaceFolder` honored — project mounts at the devcontainer's `workspaceFolder` (fallback to our default when absent)
+- [x] Backend: `environment` — injected into compose as env vars
+- [x] Backend: `mounts` — honored with validation against `GUARD_*` (sources inside `instances/` / project root / agent data rejected with a clear error)
+- [x] Backend: `runArgs` — allow-listed keys only (`--cap-add`, `--ulimit`, `--sysctl`, `--env-file`, …); anything else rejected with a clear error
+- [x] Backend: `forwardPorts`/`portsAttributes` — ports allocated via the host-port/door system, `portsAttributes` labels applied
+- [x] Backend: `remoteUser`/`containerUser` honored as the non-root pad user (PUID/PGID) — parser exposes `preferredUserMode` (`user` for non-root / `root` / `` absent); `resolveDevContainerPlan` persists `remoteUser`/`containerUser`/`userMode`; `createVm` seeds `USER_MODE=user` from the plan when the caller passes no explicit toggle (MCP path); `/api/paths/devcontainer` + CreateAgent default the Container user toggle to Local user for non-root workspaces while untouched (explicit pick wins); hermes exempt — see Non-root section
+- [x] Backend: devcontainer generation — when the workspace has no devcontainer at create time, generate `.devcontainer/devcontainer.json` from the pad's effective config (`workspaceFolder`, lifecycle commands, `environment`, `mounts`, `runArgs`, `forwardPorts`/`portsAttributes`, `remoteUser`), marked `"x-paddock": { "generated": true }`
+- [x] Backend: write-back sync — on pad Settings changes (volumes, ports, env, lifecycle commands) update the workspace devcontainer.json in place; project-authored files get only 1:1 mapped fields updated, everything else preserved
+- [x] Frontend: "Dev Container" card in Settings — file path, state badge (generated / project-authored / missing), diff preview + "Sync" / "Regenerate" actions; CreateAgent option "generate .devcontainer for this workspace" (default on)
+- [x] Backend: agent images — add a non-root user (default name `pad`, UID/GID from `PUID`/`PGID`, default 1000:1000) in all five `vm-builds/*/Dockerfile` templates (+ project-stage `paddock-proj-*` images get the same user) — done via plan 43 Phase 7
+- [x] Backend: compose generation — agent containers run with `user: "${PUID}:${PGID}"`, `HOME` pointing at the new user's home, and `docker exec` / start.sh run as that user — done via plan 43 Phase 7 (`USER_MODE=user`, setpriv, tmux user-scoping)
+- [x] Backend: driver `dataDir` remap — `/root/.openclaw`, `/root/.opencode`, `/root/.picoclaw`, `/opt/data` (hermes), `/root/.codex`, `/root/.claude` move to the pad user's home (e.g. `/home/pad/.opencode`) so config files stay writable by the non-root user — absorbed by plan 43 (data dirs stay `/root/*` + `/root` chmod 755; PUID ownership + boot sweep heal files)
+- [x] Backend: sudo wiring — non-root user gets passwordless sudo (sudoers drop-in) for runtime root needs; start.sh / post-create scripts that need root use `sudo` — done via plan 43 (`ALL ALL=(ALL) NOPASSWD:ALL`, sudo self-install guard)
+- [x] Backend: `removeVm` — root-helper delete container becomes unnecessary once instance data is 1000-owned; simplify delete to plain `fs.rmSync` (keep the helper as fallback if a rebuild/upgrade left root-owned data behind) — done via plan 43
 - [ ] Tests + live verify on `test-agents` (create with a build command + post-create commands → both run; edit post-create in Settings → recreate → rerun; edit build commands → rebuild; devcontainer.json pre-fill round-trip; create/delete a PAD and confirm workspace + data-dir files are 1000:1000 and editable from the host)
 
 ## Goal / user flow
@@ -49,8 +91,9 @@ Progress checklist:
    `postCreateCommand` auto-fills the post-create box (editable).
 3. If the workspace also has a `build.dockerfile`, Paddock builds it once as
    `paddock-proj-<name>:latest`; the user can reference it in the build box
-   with `FROM ... AS project` + `COPY --from=...` to pull the project toolchain
-   into their own image.
+   with `COPY --from=paddock-proj-<name>:latest ...` (or
+   `RUN --mount=type=bind,from=...`) to pull the project toolchain into their
+   own image.
 4. Later, the Settings tab shows the same two boxes. **Save & recreate**
    rebuilds when build commands changed, plain-recreates when only post-create
    changed. A **Re-run setup** action re-executes post-create without a
@@ -188,12 +231,21 @@ pad** (this plan calls the agent instance a *pad*).
   binaries/venvs from a Debian/Ubuntu project stage works cleanly; only a
   musl (Alpine) project stage would clash, and that case is documented.
 - Mechanics: Paddock builds the project's `build.dockerfile` (or `image`)
-  once as `paddock-proj-<name>:latest` (BuildKit), then the user writes in the
-  build box:
+  once as `paddock-proj-<name>:latest` (BuildKit), then the user references it
+  from the build box. The alias form (`FROM … AS project` + `COPY
+  --from=project`) does NOT work — the build box is injected mid-file into the
+  agent's main stage, so a `FROM` there opens a new stage whose `COPY
+  --from=project` is self-referential (BuildKit circular-dependency error), and
+  a trailing stage would become the final tagged image. Reference the tag
+  directly instead:
   ```dockerfile
-  FROM paddock-proj-myrepo:latest AS project
-  COPY --from=project /usr/bin/python3.12 /usr/local/bin/
-  COPY --from=project /opt/venv /opt/venv
+  COPY --from=paddock-proj-myrepo:latest /usr/bin/python3.12 /usr/local/bin/
+  COPY --from=paddock-proj-myrepo:latest /opt/venv /opt/venv
+  ```
+  or, for build-time mounts (no layer bloat):
+  ```dockerfile
+  RUN --mount=type=bind,from=paddock-proj-myrepo:latest,source=/opt/venv,target=/proj-venv \
+      cp -r /proj-venv /opt/venv
   ```
 - **Alpine project / Debian agent** (open question 6): the project's `image`
   is never the runtime base, so a musl image can't host the glibc agent. Only

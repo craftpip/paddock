@@ -19,6 +19,11 @@ fi
 if [ -f /root/.opencode/start-web.sh ]; then
     bash /root/.opencode/start-web.sh || true
 fi
+# Paddock post-start hook (plan 41): if the webui wrote a post-start.sh (bound
+# via the build-dir /build mount), run it on EVERY container start.
+if [ -f /build/post-start.sh ]; then
+    bash /build/post-start.sh || true
+fi
 # PAD USER drop (plan 43 Phase 7): USER_MODE=user pads run the foreground
 # keeper as the `pad` user (PUID:PGID=1000:1000) so files created in the
 # terminal are user-owned. The root boot above is unaffected. __PAD_USER_MODE__

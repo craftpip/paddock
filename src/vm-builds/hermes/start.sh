@@ -36,6 +36,11 @@ fi
 if [ -f /opt/data/start-web.sh ]; then
     bash /opt/data/start-web.sh || true
 fi
+# Paddock post-start hook (plan 41): if the webui wrote a post-start.sh (bound
+# via the build-dir /build mount), run it on EVERY container start.
+if [ -f /build/post-start.sh ]; then
+    bash /build/post-start.sh || true
+fi
 # Run the hermes messaging gateway (keeps cron + platforms alive). If it exits
 # for any reason, stay up so the terminal stays usable.
 hermes gateway run || tail -f /dev/null

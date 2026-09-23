@@ -20,6 +20,12 @@ fi
 if [ -f /root/.openclaw/start-web.sh ]; then
     bash /root/.openclaw/start-web.sh || true
 fi
+# Paddock post-start hook (plan 41): if the webui wrote a post-start.sh (bound
+# via the build-dir /build mount), run it on EVERY container start. It is
+# re-runnable and must never terminate this script.
+if [ -f /build/post-start.sh ]; then
+    bash /build/post-start.sh || true
+fi
 # PAD USER drop (plan 43 Phase 7): USER_MODE=user pads run the foreground
 # daemon as the `pad` user (PUID:PGID=1000:1000) so every file the agent
 # writes is user-owned. The root boot above is unaffected; only the daemon
