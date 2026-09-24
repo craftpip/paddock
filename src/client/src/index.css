@@ -111,6 +111,49 @@ html {
   100% { background-position: -200% 0; }
 }
 
+/* ────────────────────────────── Tab marquee ──────────────────────────────── */
+
+/* Terminal-tab title: clipped at rest, scrolls (marquee) on tab hover.
+   The track holds the text twice, so translating -50% loops seamlessly; when
+   the text fits the tab the loop is invisible, when it overflows it scrolls. */
+.tab-marquee {
+  overflow: hidden;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.tab-marquee-track {
+  display: inline-flex;
+  align-items: center;
+  will-change: transform;
+}
+
+.tab-marquee .tab-marquee-text {
+  display: inline-block;
+  white-space: nowrap;
+}
+
+.tab-marquee .tab-marquee-sep {
+  display: inline-block;
+  white-space: nowrap;
+  padding: 0 0.5rem;
+  opacity: 0.4;
+}
+
+.group:hover .tab-marquee-track {
+  animation: tab-marquee-scroll 8s linear infinite;
+}
+
+@keyframes tab-marquee-scroll {
+  to { transform: translateX(-50%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .group:hover .tab-marquee-track {
+    animation: none;
+  }
+}
+
 /* ────────────────────────────── Tooltip ─────────────────────────────── */
 
 .tt {

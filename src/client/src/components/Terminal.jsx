@@ -81,14 +81,14 @@ import { useConfirm } from '../lib/confirm'
  *    by xterm. No `\r` → `\n` conversion — the PTY line discipline handles CR/LF.
  *
  * ─────────────────────────────────────────────────────────────────────────────
- *  Sessions (header dropdown next to the connection status)
- * ─────────────────────────────────────────────────────────────────────────────
- *  - The dropdown lists the PAD's active tmux sessions (GET
- *    /api/agents/:name/terminal-sessions) and lets you switch, create
- *    ("+ New session" → next free `term-N`), or close (DELETE) a session.
- *  - The selected session is persisted in localStorage
- *    (`pad-term-session-<name>`), so a page reload returns to the same session.
- *  - Closing the current session falls back to `main` (auto-created on demand).
+  *  Sessions (header tab strip next to the connection dot)
+  * ─────────────────────────────────────────────────────────────────────────────
+  *  - The tab strip lists the PAD's active tmux sessions (GET
+  *    /api/agents/:name/terminal-sessions) and lets you switch (click a tab),
+  *    create (`+` → next free `term-N`), or close (`×` on hover, DELETE) a session.
+  *  - The selected session is persisted in localStorage
+  *    (`pad-term-session-<name>`), so a page reload returns to the same session.
+  *  - Closing the current session falls back to `main` (auto-created on demand).
  *
  * ─────────────────────────────────────────────────────────────────────────────
  *  Tracked/locked mode: how "command is done" is detected
@@ -203,8 +203,7 @@ const Terminal = forwardRef(function Terminal(
   const [sessions, setSessions] = useState([])
   const [sessionsLoading, setSessionsLoading] = useState(false)
   const [sessionsLoaded, setSessionsLoaded] = useState(false)
-  const [showSessions, setShowSessions] = useState(false)
-  const sessionMenuRef = useRef(null)
+  const tabListRef = useRef(null)
 
   /** Set state only while the component is mounted. */
   function setStateSafe(setter, value) {
@@ -374,32 +373,83 @@ const Terminal = forwardRef(function Terminal(
     }
 
     let TerminalCtor, FitAddonCtor
-    try {
-      ;({ Terminal: TerminalCtor } = await import('@xterm/xterm'))
-      ;({ FitAddon: FitAddonCtor } = await import('@xterm/addon-fit'))
-      await import('@xterm/xterm/css/xterm.css')
-    } catch (err) {
-      if (isCurrent()) setStateSafe(setInitError, `Failed to load xterm: ${err.message}`)
-      initInFlightRef.current = false
-      return
-    }
-    if (!isCurrent()) {
-      initInFlightRef.current = false
-      return
-    }
+    // The xterm instance is created once per terminal host; session switches
+    // reuse it and only swap the WebSocket below, so changing tabs never
+    // blanks the terminal (no black-flash between sessions).
+    let term = termRef.current
+    if (!term) {
+      try {
+        ;({ Terminal: TerminalCtor } = await import('@xterm/xterm'))
+        ;({ FitAddon: FitAddonCtor } = await import('@xterm/addon-fit'))
+        await import('@xterm/xterm/css/xterm.css')
+      } catch (err) {
+        if (isCurrent()) setStateSafe(setInitError, `Failed to load xterm: ${err.message}`)
+        initInFlightRef.current = false
+        return
+      }
+      if (!isCurrent()) {
+        initInFlightRef.current = false
+        return
+      }
 
-    const fitAddon = new FitAddonCtor()
-    const term = new TerminalCtor({
-      cursorBlink: true,
-      fontSize,
-      fontFamily: '"Cascadia Code", "Fira Code", monospace',
-      scrollback: 10000,
-    })
-    term.loadAddon(fitAddon)
-    term.open(containerRef.current)
-    fitAddon.fit()
-    termRef.current = term
-    fitAddonRef.current = fitAddon
+      const fitAddon = new FitAddonCtor()
+      term = new TerminalCtor({
+        cursorBlink: true,
+        fontSize,
+        fontFamily: '"Cascadia Code", "Fira Code", monospace',
+        scrollback: 10000,
+      })
+      term.loadAddon(fitAddon)
+      term.open(containerRef.current)
+      fitAddon.fit()
+      termRef.current = term
+      fitAddonRef.current = fitAddon
+
+      term.onData((data) => {
+        // Locked mode: drop keystrokes unless an injected command is running.
+        if (isInputLocked()) return
+        const live = wsRef.current
+        if (live && live.readyState === WebSocket.OPEN) live.send(data)
+      })
+
+      const ro = new ResizeObserver(() => {
+        try {
+          // Never fit a hidden/zero-size container. FitAddon clamps to a 2x1
+          // minimum instead of bailing, so collapsing the terminal (display:none
+          // -> 0x0) would otherwise shred the buffer to a couple of columns and
+          // resize the container PTY to match. The observer re-fires with a real
+          // size once the terminal becomes visible again. Resize targets the
+          // live WS (not a captured session), so it follows tab switches.
+          const el = containerRef.current
+          if (collapsedRef.current || !el || !el.clientWidth || !el.clientHeight) return
+          fitAddon.fit()
+          const live = wsRef.current
+          if (live && live.readyState === WebSocket.OPEN) pushResize(term.cols, term.rows)
+        } catch {}
+      })
+      ro.observe(containerRef.current)
+      roRef.current = ro
+
+      term.attachCustomKeyEventHandler((e) => {
+        // Allow Ctrl/Cmd+C to copy when text is selected (default copy action).
+        if ((e.ctrlKey || e.metaKey) && e.key === 'c' && term.hasSelection()) return true
+        return true
+      })
+
+      term.attachCustomWheelEventHandler((e) => {
+        // Wheel policy (review #4): the wheel never becomes arrow-key input inside
+        // a full-screen TUI. In alternate-screen mode xterm's alternate-scroll
+        // default turns the wheel into ^[[A/^[[B — swallow the event instead. In
+        // normal mode let xterm scroll the scrollback natively. Apps with mouse
+        // reporting never reach this handler (real wheel events scroll them).
+        if (term.buffer.active.type === 'alternate') {
+          e.preventDefault()
+          e.stopPropagation()
+          return false
+        }
+        return true
+      })
+    }
     setStateSafe(setInitError, '')
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -422,12 +472,6 @@ const Terminal = forwardRef(function Terminal(
       setStateSafe(setConnState, 'disconnected')
       return
     }
-
-    term.onData((data) => {
-      // Locked mode: drop keystrokes unless an injected command is running.
-      if (isInputLocked()) return
-      if (ws.readyState === WebSocket.OPEN) ws.send(data)
-    })
 
     ws.onopen = () => {
       if (gen !== genRef.current) return // superseded session
@@ -527,48 +571,6 @@ const Terminal = forwardRef(function Terminal(
       initInFlightRef.current = false
       setStateSafe(setConnState, 'disconnected')
     }
-
-    const ro = new ResizeObserver(() => {
-      try {
-        // Never fit a hidden/zero-size container. FitAddon clamps to a 2x1
-        // minimum instead of bailing, so collapsing the terminal (display:none
-        // -> 0x0) would otherwise shred the buffer to a couple of columns and
-        // resize the container PTY to match. The wrapped prompt then looks like
-        // a busy shell forever. The observer re-fires with a real size once the
-        // terminal becomes visible again.
-        const el = containerRef.current
-        if (collapsedRef.current || !el || !el.clientWidth || !el.clientHeight) return
-        fitAddon.fit()
-        if (gen === genRef.current) pushResize(term.cols, term.rows)
-      } catch {}
-    })
-    ro.observe(containerRef.current)
-    roRef.current = ro
-
-    term.attachCustomKeyEventHandler((e) => {
-      // Allow Ctrl/Cmd+C to copy when text is selected (default copy action).
-      if ((e.ctrlKey || e.metaKey) && e.key === 'c' && term.hasSelection()) return true
-      return true
-    })
-
-    term.attachCustomWheelEventHandler((e) => {
-      // Wheel policy (review #4): the wheel never becomes arrow-key input inside
-      // a full-screen TUI. xterm's alternate-scroll default turns the wheel into
-      // ^[[A/^[[B for apps without mouse reporting (opencode, htop, top), which
-      // moves their cursor/selection instead of scrolling. In alternate-screen
-      // mode there is no xterm scrollback to scroll, so swallow the event
-      // (return false = xterm emits no arrow sequence) and cancel it so the page
-      // doesn't scroll instead. In normal mode return true — xterm's viewport
-      // scrolls the scrollback natively. Apps that enable mouse reporting never
-      // reach this handler: xterm feeds them real wheel events and they scroll
-      // themselves.
-      if (term.buffer.active.type === 'alternate') {
-        e.preventDefault()
-        e.stopPropagation()
-        return false
-      }
-      return true
-    })
   }
 
   /** Tear down the current session. Idempotent and safe mid-init. */
@@ -752,16 +754,6 @@ const Terminal = forwardRef(function Terminal(
     return () => window.removeEventListener('keydown', onKey)
   }, [fullscreen])
 
-  // Close the sessions dropdown when clicking outside it.
-  useEffect(() => {
-    if (!showSessions) return
-    function onDocClick(e) {
-      if (sessionMenuRef.current && !sessionMenuRef.current.contains(e.target)) setShowSessions(false)
-    }
-    document.addEventListener('mousedown', onDocClick)
-    return () => document.removeEventListener('mousedown', onDocClick)
-  }, [showSessions])
-
   /** Load the PAD's active tmux sessions. */
   const refreshSessions = useCallback(async () => {
     if (!name) return []
@@ -780,11 +772,18 @@ const Terminal = forwardRef(function Terminal(
     return list
   }, [name])
 
-  function toggleSessions() {
-    const next = !showSessions
-    setShowSessions(next)
-    if (next) refreshSessions()
-  }
+  // The tab strip owns the session list now (no dropdown): load on mount /
+  // PAD change so tabs render without waiting for a click.
+  useEffect(() => {
+    refreshSessions()
+  }, [refreshSessions])
+
+  // Keep the active tab visible when the strip overflows horizontally.
+  useEffect(() => {
+    try {
+      tabListRef.current?.querySelector('[data-active="true"]')?.scrollIntoView({ inline: 'nearest', block: 'nearest' })
+    } catch {}
+  }, [sessionId, sessions])
 
   /** Switch to a session: persist choice, tear down, reconnect (backend
    *  auto-creates the tmux session on attach if it does not exist yet). Like
@@ -796,7 +795,16 @@ const Terminal = forwardRef(function Terminal(
       sessionIdRef.current = id
       setSessionId(id)
       try { localStorage.setItem(`pad-term-session-${name}`, id) } catch {}
-      teardown()
+      // Soft swap: reuse the live xterm instance and only reconnect the
+      // WebSocket to the new session, so switching tabs never blanks the
+      // terminal. Bumping the gen invalidates the old WS's handlers — its late
+      // close can't reschedule a reconnect. (teardown() stays for real
+      // teardowns: PAD stop, name change, unmount, explicit reconnect.)
+      genRef.current++
+      initInFlightRef.current = false
+      if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null }
+      if (wsRef.current) { try { wsRef.current.close() } catch {} ; wsRef.current = null }
+      setStateSafe(setConnState, 'connecting')
       initTerminal().catch(() => {})
     },
     [name]
@@ -947,100 +955,73 @@ const Terminal = forwardRef(function Terminal(
 
   return (
     <div className={`flex flex-col border border-line-faint overflow-hidden bg-sunken ${fullscreen ? 'fixed inset-0 z-[100] rounded-none' : 'relative rounded-xl'} ${className}`}>
-      <div className="flex items-center justify-between px-4 py-2 border-b border-line-faint bg-sunken/80 select-none">
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2">
-            <span className={`w-2 h-2 rounded-full ${connState === 'connected' ? 'bg-success' : connState === 'connecting' ? 'bg-warning' : 'bg-line'}`} />
-            <span className="text-xs text-ink-faint font-medium min-w-[8rem] whitespace-nowrap shrink-0">
-              {connState === 'connected' ? 'Terminal Connected' : connState === 'connecting' ? 'Terminal Connecting' : 'Terminal Disconnected'}
-            </span>
-          </div>
+      <div className="flex items-center gap-3 px-4 py-2 border-b border-line-faint bg-sunken/80 select-none">
+        <div className="flex items-center gap-2 shrink-0">
+          <span
+            title={connState === 'connected' ? 'Terminal Connected' : connState === 'connecting' ? 'Terminal Connecting' : 'Terminal Disconnected'}
+            className={`w-2 h-2 rounded-full ${connState === 'connected' ? 'bg-success' : connState === 'connecting' ? 'bg-warning' : 'bg-line'}`}
+          />
           {uiLocked && !cmdRunning && (
-            <span className="flex items-center gap-1.5 text-xs text-warning font-medium">
+            <span title="Locked — only injected commands run" className="flex items-center text-warning">
               <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
                 <path d="M7 11V7a5 5 0 0 1 10 0v4" />
               </svg>
-              Locked
             </span>
           )}
-          <span className="w-px h-4 bg-raised" />
-          <span className="text-xs text-ink-muted font-mono">{dynTitle || title || name}</span>
+        </div>
+        <div ref={tabListRef} role="tablist" aria-label="Terminal sessions" className="flex flex-1 min-w-0 items-center gap-1 overflow-x-auto">
+          {(sessions.some((s) => s.name === sessionId) ? sessions : [...sessions, { name: sessionId }]).map((s) => {
+            const isCur = s.name === sessionId
+            return (
+              <div
+                key={s.name}
+                role="tab"
+                aria-selected={isCur}
+                tabIndex={0}
+                data-active={isCur ? 'true' : 'false'}
+                onClick={() => switchSession(s.name)}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); switchSession(s.name) } }}
+                title={isCur && dynTitle ? `${s.name} — ${dynTitle}` : `Session ${s.name}${s.title ? ' — ' + s.title : ''}`}
+                className={`group flex max-w-40 shrink-0 cursor-pointer items-center gap-1 rounded-md px-2.5 py-1 text-xs font-mono transition-colors ${isCur ? 'bg-panel text-ink' : 'text-ink-muted hover:bg-panel/60 hover:text-ink'}`}
+              >
+                <span className={`tab-marquee min-w-0 flex-1 ${sessionsLoading && !sessionsLoaded ? 'animate-pulse' : ''}`}>
+                  <span className="tab-marquee-track">
+                    <span className="tab-marquee-text">{isCur ? dynTitle || s.title || title || name : s.title || title || name}</span>
+                    <span className="tab-marquee-sep" aria-hidden="true">·</span>
+                    <span className="tab-marquee-text">{isCur ? dynTitle || s.title || title || name : s.title || title || name}</span>
+                  </span>
+                </span>
+                <button
+                  onClick={(e) => { e.stopPropagation(); closeSession(s.name) }}
+                  title={`Close session ${s.name}`}
+                  aria-label={`Close session ${s.name}`}
+                  className="shrink-0 px-0.5 text-ink-dim hover:text-danger opacity-0 group-hover:opacity-100 focus:opacity-100 focus-visible:opacity-100 transition-opacity text-xs leading-none"
+                >
+                  ×
+                </button>
+              </div>
+            )
+          })}
+          <button
+            onClick={newSession}
+            title="New terminal tab"
+            aria-label="New terminal tab"
+            className="shrink-0 px-2 py-1 text-sm leading-none text-ink-dim hover:text-accent-text hover:bg-panel/60 rounded transition-colors"
+          >
+            +
+          </button>
           {shellBusy && !collapsed && (
             <button
               onClick={() => ref.current?.close()}
               title="Send Ctrl+C to interrupt the running command"
-              className="px-2 py-1 text-xs text-danger hover:text-ink hover:bg-danger-soft rounded transition-colors"
+              className="shrink-0 px-2 py-1 text-xs text-danger hover:text-ink hover:bg-danger-soft rounded transition-colors"
             >
               Stop Command
             </button>
           )}
         </div>
-        <div className="relative flex items-center gap-1.5">
-          <div ref={sessionMenuRef} className="relative">
-            <button
-              onClick={toggleSessions}
-              title="Terminal sessions"
-              className="flex items-center gap-1 px-2 py-0.5 text-xs font-mono text-ink-muted bg-panel/60 border border-line rounded hover:border-accent-line hover:text-accent-text transition-colors"
-            >
-              <span className="max-w-[8rem] truncate">{sessionId}</span>
-              <svg className="w-3 h-3 text-ink-dim" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M6 9l6 6 6-6" />
-              </svg>
-            </button>
-            {showSessions && (
-              <div className="absolute right-0 top-full mt-1 w-64 max-h-72 overflow-y-auto rounded-lg border border-line bg-sunken shadow-xl z-50">
-                <div className="flex items-center justify-between px-3 py-2 border-b border-line-faint">
-                  <span className="text-xs font-medium text-ink-muted">Terminal sessions</span>
-                  <button
-                    onClick={refreshSessions}
-                    title="Refresh session list"
-                    className="text-ink-dim hover:text-ink text-xs px-1"
-                  >
-                    ↻
-                  </button>
-                </div>
-                <div className="py-1">
-                  {(sessionsLoading || !sessionsLoaded) && sessions.length === 0 && (
-                    <div className="px-3 py-2 text-xs text-ink-dim">Loading…</div>
-                  )}
-                  {!sessionsLoading && sessionsLoaded && sessions.length === 0 && (
-                    <div className="px-3 py-2 text-xs text-ink-dim">No sessions yet.</div>
-                  )}
-                  {sessions.map((s) => {
-                      const isCur = s.name === sessionId
-                      return (
-                        <div key={s.name} className="flex items-center group">
-                          <button
-                            onClick={() => switchSession(s.name)}
-                            className="flex-1 text-left px-3 py-1.5 text-xs font-mono text-ink-muted hover:bg-panel hover:text-accent-text transition-colors truncate"
-                            title={`Switch to session ${s.name}`}
-                          >
-                            {s.name}
-                            {isCur && <span className="ml-2 text-[10px] text-accent-text">current</span>}
-                          </button>
-                          <button
-                            onClick={() => closeSession(s.name)}
-                            className="px-2 py-1.5 text-ink-dim hover:text-danger opacity-0 group-hover:opacity-100 transition-opacity text-xs"
-                            title={`Close session ${s.name}`}
-                          >
-                            ×
-                          </button>
-                        </div>
-                      )
-                    })}
-                </div>
-                <div className="border-t border-line-faint p-1">
-                  <button
-                    onClick={newSession}
-                    className="w-full text-left px-3 py-1.5 text-xs text-accent-text hover:bg-panel hover:text-accent-text rounded transition-colors"
-                  >
-                    + New session
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
+        <div className="relative flex shrink-0 items-center gap-1.5">
           <span className="w-px h-4 bg-raised" />
           <button onClick={() => setFontSize((s) => Math.max(10, s - 1))} className="px-2 py-1 text-xs text-ink-faint hover:text-ink hover:bg-raised rounded transition-colors">A-</button>
           <span className="text-xs text-ink-dim w-6 text-center">{fontSize}</span>

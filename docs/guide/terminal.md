@@ -10,7 +10,7 @@ Every agent page has a terminal docked at the bottom. It is a real shell inside 
 
 - Click the terminal and type. `Enter` runs, `Up arrow` recalls the last command.
 - Drag the handle above the terminal to make it taller. The fullscreen button gives you the whole screen.
-- If the text is stuck, the session menu lets you switch to a fresh shell or kill a frozen one.
+- The tabs above the terminal are separate shells in the same box. `+` opens a fresh one, `×` kills one. If the text is stuck, switch tabs or kill the frozen shell.
 - Closing the page never kills your shell. Only stopping the PAD does.
 
 ## See Also

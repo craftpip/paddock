@@ -23,7 +23,7 @@ prompt.
 
 | Piece | File | What it does |
 |-------|------|--------------|
-| Frontend component | `src/client/src/components/Terminal.jsx` | The one-and-only shell component (xterm.js + WebSocket + sessions dropdown). |
+| Frontend component | `src/client/src/components/Terminal.jsx` | The one-and-only shell component (xterm.js + WebSocket + session tab strip). |
 | Backend WS handler | `src/app.js` — "Terminal WebSocket" block (`wsType === 'terminal'`) | tmux session setup, scrollback replay, real PTY attach. |
 | Sessions API | `src/app.js` — `GET/DELETE /api/agents/:name/terminal-sessions[/:id]` | List, switch, create, kill tmux sessions. |
 | Command log | `src/app.js` — `POST /api/agents/:name/command-log` | Records run commands for the Activity tab. |
@@ -47,9 +47,8 @@ Browser (Terminal.jsx)  ──ws://host/ws/terminal/&lt;name&gt;?session=&lt;id&
 ```
 
 ### Backend — persistent tmux sessions via Docker Engine API
-
 Each terminal session is a **tmux session** inside the PAD container (default
-`main`, more via the dropdown: `term-1`, `term-2`, ...). The WS handler only
+`main`, more via the `+` tab: `term-1`, `term-2`, ...). The WS handler only
 **attaches**; closing the WebSocket detaches the client and leaves the session
 running. The next connection reattaches and replays the pane history.
 
@@ -186,11 +185,17 @@ to its header bar (session stays alive); Commands mode takes the full remaining
 height. A drag handle resizes the dock outside Commands, and the header has a
 fullscreen overlay toggle.
 
-### Session dropdown
+### Session tabs
 
-The header dropdown lists the PAD's active tmux sessions (`GET
-/api/agents/:name/terminal-sessions`) and lets you switch, create
-("+ New session" → next free `term-N`), or close (DELETE) a session. The
+The header tab strip (plan 53) lists the PAD's active tmux sessions (`GET
+/api/agents/:name/terminal-sessions`, loaded on mount) and lets you switch
+(click a tab), create (`+` → next free `term-N`), or close (`×` on hover,
+DELETE) a session. Each session carries a `title` from the server, shown on
+every tab from the first load: for opencode agents it is the TUI session name
+(`OC | …`, same source the WS live-polls); other types send none and the tab
+falls back to the agent display name. The active tab keeps live-updating its
+title via the WS control frame. The connection dot sits left of the strip
+(status via tooltip); the old status text and session dropdown are gone. The
 selected session is persisted in `localStorage` (`pad-term-session-&lt;name&gt;`), so
 a page reload returns to the same session. Closing the current session falls
 back to `main`. Session names are validated against

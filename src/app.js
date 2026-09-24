@@ -417,7 +417,7 @@ async function ensureTmuxSession(vmName, session, cols, rows) {
   );
 }
 
-async function listTmuxSessions(vmName) {
+async function listTmuxSessions(vmName, agentType = '') {
   await ensureTmux(vmName);
   // tmux 3.3a converts `\t` inside `-F` formats into `_`, so use a `|`
   // delimiter (session names are restricted to [a-zA-Z0-9._-], never `|`).
@@ -427,6 +427,18 @@ async function listTmuxSessions(vmName) {
     const [name, attached, created] = line.split('|');
     if (!name) continue;
     sessions.push({ name, attached: attached === '1', created: parseInt(created, 10) || 0 });
+  }
+  if (sessions.length && agentType === 'opencode') {
+    // Attach the opencode TUI session title to EVERY tab (prefixed with the
+    // same `OC | ` the live WS sends), so the tab strip shows real titles for
+    // all sessions on first load — not just the one WS polled (the WS only
+    // polls the attached session). Cheap single read of the latest session.
+    let t = '';
+    try { t = await opencodeSessionTitle(vmName); } catch {}
+    if (t) {
+      t = 'OC | ' + t;
+      for (const s of sessions) s.title = t;
+    }
   }
   return sessions;
 }
@@ -2285,7 +2297,13 @@ app.get('/api/agents/:name/terminal-sessions', async (req, res) => {
     return res.json({ sessions: [] });
   }
   try {
-    res.json({ sessions: await listTmuxSessions(name) });
+    let agentType = '';
+    try { agentType = (registry.getAgent(name) || {}).agent_type || ''; } catch {}
+    if (agentType === 'opencode') {
+      // Make sqlite3 available for the title query (no-op on modern images).
+      try { await ensureSqlite3(name); } catch {}
+    }
+    res.json({ sessions: await listTmuxSessions(name, agentType) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
