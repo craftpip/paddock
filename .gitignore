@@ -27,3 +27,8 @@ backups/
 
 # Docker build contexts
 src/vm-builds/*/scripts/
+
+# VitePress docs site
+docs/.vitepress/dist
+docs/.vitepress/cache
+src/public/website

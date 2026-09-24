@@ -33,6 +33,12 @@ change), \`health\` (declared-vs-live checkup, works on stopped containers),
 for agent-config commands (models, MCP servers, skills, ...). Optional \`stdin\` is written
 verbatim to the process stdin; use it for secrets, never put secrets in the command text.
 
+**Task queue:** \`task_submit\` (push: run \`opencode run\` in a PAD now; pull: file to the
+shared pool, optionally addressed with \`enqueue:true\`), \`task_status\` / \`task_result\` /
+\`task_list\` (read), \`task_get_next\` / \`task_complete\` / \`task_priority\` / \`task_cancel\`
+(exec bucket). Push runs the task for you; pull lets a worker PAD claim work itself with
+\`task_get_next\`, do it, and report with \`task_complete\` until the queue is empty.
+
 ## Caller rules — read this before mutating anything
 
 - **Read-tool discipline:** run \`settings_get\` first. It returns everything (settings, ssh,
@@ -71,6 +77,19 @@ verbatim to the process stdin; use it for secrets, never put secrets in the comm
    command (default \`--no-probe\`), then verify with \`openclaw mcp list\` / \`mcp probe\`.
 10. **Run one-off commands / config changes:** \`exec\`.
 11. **Delete a PAD:** \`delete_agent\` (\`confirm: true\`, no undo).
+12. **Dispatch a task (push):** \`task_submit {name, prompt}\` → \`task_status\` to poll,
+    \`task_result\` for the answer, \`task_cancel {confirm: true}\` to stop it.
+13. **Work a queue (pull):** \`task_get_next {name}\` → do the work yourself → \`task_complete\`
+    → repeat until \`queueEmpty\`. Rank the backlog with \`task_priority\`.
+
+## Headless opencode rules — read before submitting any task
+
+- The task runs as \`opencode run --format json --dir <workspace>\` — the PAD's own
+  workspace, never the container root.
+- Agent selection is \`--agent <name>\` only. **Never \`@mention\` an agent in the
+  prompt** — headless runs silently fall through to the primary agent's model.
+- Tasks auto-approve permissions not explicitly denied (\`--auto\`). Pass
+  \`autoApprove: false\` only if you can answer the approval yourself.
 
 ## The command catalog
 

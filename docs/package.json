@@ -1,0 +1,15 @@
+{
+  "name": "paddock-docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "docs:dev": "vitepress dev --base /website/",
+    "docs:build": "vitepress build",
+    "docs:build:publish": "vitepress build && node -e \"const fs=require('fs'); const path=require('path'); const src='.vitepress/dist'; const dst='../src/public/website'; fs.rmSync(dst,{recursive:true,force:true}); fs.mkdirSync(dst,{recursive:true}); fs.cpSync(src,dst,{recursive:true}); console.log('Published to src/public/website')\"",
+    "docs:preview": "vitepress preview"
+  },
+  "devDependencies": {
+    "vitepress": "^1.6.3",
+    "vue": "^3.5.0"
+  }
+}

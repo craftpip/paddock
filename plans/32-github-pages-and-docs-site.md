@@ -1,7 +1,6 @@
-# Goal 32 — GitHub Pages: modern deploy workflow + docs website from `docs/`
+# Goal 32 — User-facing website + docs split (technical → reference)
 
-## Status: Proposed (not started, 2026-08-09) — 0% implemented: no Actions
-workflow, no VitePress scaffold, no `.github/` yet.
+## Status: In progress (2026-09-24) — user-facing site live at `/website` (guide + reference split done, landing frozen at hero + features); only the Pages workflow remains.
 
 > User request: "create the modern workflow,
 > keep it" for GitHub Pages, plus a documentation website built directly from the
@@ -148,14 +147,27 @@ Build order in CI: SPA → `dist/` (staging), VitePress → `dist/docs`, then co
       limitation"), `/docs/` loads the docs site, deep links + sidebar + assets
       all resolve, `404.html` works on refresh of a nested app route.
 
-## Known limitation — the app shell is static on Pages
+## Pivot (2026-09-24) — user-facing website first
 
-This is a Docker-management dashboard; `/api/*` and `/ws/*` need the Express
-backend, which doesn't exist on GitHub Pages. The deployed app is a **static UI
-demo only** (login screen, layout, routes render; data calls fail). The docs
-site is the real content and works fully. Note this on the docs landing page /
-Dashboard so visitors aren't surprised. The live tool keeps being served from
-`10.69.1.164:6789` as before.
+`/website` is a **user-facing website**, not a mirror of the technical docs.
+
+- [x] Phase 1 done: VitePress scaffold, horse-brown theme, landing page, served at `/website` from Express (dev-visible). Links fixed to `craftpip/vm-friends`. Landing is static/professional (no emoji icons, no animations, even padding, white-on-gold CTA).
+- [x] **User docs in simple words** (`docs/guide/`: getting-started, agents, terminal, web-publish, vault — no internals).
+- [x] Technical `docs/` content moved to **`docs/reference/`** as a separate collapsed sidebar category (relative links preserved, build passed first try).
+- [x] Every user doc links back to its API/reference detail. No internal notes on the landing (LAN IP + Live-vs-Pages callout removed).
+- [x] Landing frozen per user (2026-09-24): hero name solid panel `accent-text` (no gradient), body stripped to **hero + 6 features only** (Why-Paddock band, Explore table, badge removed; dead CSS removed).
+- [ ] Later: GitHub Pages workflow (`.github/workflows/pages.yml`) builds the same VitePress site with `DOCS_BASE=/<repo>/website/`.
+
+## Progress checklist
+
+- [x] VitePress build from `docs/` + landing + `/website` hosting
+- [x] Theme cleanup (white-on-gold CTA, no icons, static, even padding, 3-col grid)
+- [x] Links to `craftpip/vm-friends`
+- [x] User docs (simple words) — `docs/guide/` (5 pages)
+- [x] Technical docs moved to `docs/reference/` + sidebar split (User Guide open, Technical Reference collapsed)
+- [x] User → API backlinks on every user page
+- [x] Landing frozen: solid hero name, hero + features only
+- [ ] Pages workflow
 
 ## Files touched
 
@@ -163,24 +175,23 @@ Dashboard so visitors aren't surprised. The live tool keeps being served from
 |------|--------|
 | `docs/package.json` | new — vitepress dep + scripts |
 | `docs/package-lock.json` | new — generated |
-| `docs/.vitepress/config.mjs` | new — site config, base, nav, sidebar |
-| `.gitignore` | add `docs/.vitepress/dist`, `.cache` |
-| `src/client/src/App.jsx` | one line — `BrowserRouter basename` |
-| `.github/workflows/pages.yml` | new — build + deploy |
-| `plans/32-github-pages-and-docs-site.md` | delete after absorption |
+| `docs/.vitepress/config.mjs` | User Guide + Technical Reference sidebar, base `/website/`, nav, footer |
+| `docs/.vitepress/theme/style.css` | horse-brown, static, no icons, solid hero name, 1152px alignment |
+| `docs/index.md` | landing — hero + 6 features only (guide-linked) |
+| `docs/guide/` | 5 user pages in plain words, each with reference backlink |
+| `docs/reference/` | moved technical tree (overview/backend/pages/tabs/components/operations/STYLE-GUIDE) |
+| `docs/README.md` | rewritten hub (guide table + reference map) |
+| `.gitignore` | add `docs/.vitepress/dist`, `.cache`, `src/public/website` |
+| `src/app.js` | mount `/website` (static + cleanUrls + public), skip SPA catch-all |
+| `src/public/website` | build output copy (gitignored) |
+| `plans/32-github-pages-and-docs-site.md` | updated to user-facing pivot (this file) |
 
 ## Open questions
 
-1. **App shell on Pages** — deploy the (static, API-less) SPA demo, or skip the
-   app and deploy **docs only** at the root? Default: include both (user said
-   "keep" the app workflow). Docs URL is `/docs/` either way.
-2. **VitePress version** — pin `vitepress@^1` (stable) vs `latest`.
-3. **Nav link to the live tool** — add "Live dashboard → 10.69.1.164:6789" link
-   in the docs nav for anyone who wants the real thing?
+1. ~~**Reference folder name**~~ — decided: `docs/reference/` (done 2026-09-24).
+2. ~~**User docs scope**~~ — decided: getting-started, agents, terminal, web-publish, vault (done 2026-09-24).
+3. **Pages layout** — docs-only site at root, or keep `/website/` subpath on Pages too?
 
 ## Process note
 
-When absorbed: delete this plan file, record learnings in AGENTS.md (the
-VitePress setup, the subpath-base trick, the `404.html` requirement, the
-"GitHub Actions" source click), and add a `docs/operations/overview.md` note or
-new `docs/operations/publishing.md` runbook per the plan→docs lifecycle rule.
+When absorbed: delete this plan file, record learnings in AGENTS.md (VitePress setup, the subpath-base trick, the flex-gap 2-col bug, the 1152-vs-1280 container alignment, the `extensions:['html']` cleanUrls fix), and add a `docs/operations/publishing.md` runbook per the plan→docs lifecycle rule.

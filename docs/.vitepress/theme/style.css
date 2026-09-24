@@ -1,0 +1,282 @@
+/* ──────────────────────────────────────────────────────────
+   Paddock docs — Horse-brown theme (Sunlit / Espresso Barn)
+   Clean, professional — built from the paddock palette, not copied.
+   Twist: warm paper grain, soft herd-glow on hero, tidy rhythm.
+   ────────────────────────────────────────────────────────── */
+
+@import url('https://fonts.googleapis.com/css2?family=Bitter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+
+/* ── palette tokens ── */
+:root {
+  --t-canvas:        #f6eeda;
+  --t-panel:         #fffdf6;
+  --t-sunken:        #efe4c8;
+  --t-raised:        #e8dbb9;
+  --t-raised-hover:  #dccb9f;
+  --t-line:          #d5c196;
+  --t-line-faint:    #e6d9b8;
+  --t-ink:           #2a1d0e;
+  --t-ink-muted:     #5c4426;
+  --t-ink-faint:     #7c613e;
+  --t-ink-dim:       #97794f;
+  --t-accent:        #a86a12;
+  --t-accent-hover:  #94590d;
+  --t-accent-deep:   #7d4c0d;
+  --t-accent-soft:   #f2d493;
+  --t-accent-line:   #c07d1d;
+  --t-accent-text:   #94590d;
+  --t-accent-ink:    #ffffff;
+  --t-success:       #059669;
+  --t-warning:       #b45309;
+  --t-danger:        #dc2626;
+  --t-info:          #2563eb;
+  --t-brand:         #6d28d9;
+}
+
+html.dark {
+  --t-canvas:        #19120a;
+  --t-panel:         #211710;
+  --t-sunken:        #100b05;
+  --t-raised:        #332416;
+  --t-raised-hover:  #453221;
+  --t-line:          #45301f;
+  --t-line-faint:    #2b1d11;
+  --t-ink:           #f1e7cf;
+  --t-ink-muted:     #d9c49a;
+  --t-ink-faint:     #b0946c;
+  --t-ink-dim:       #8d7350;
+  --t-accent:        #c98a1c;
+  --t-accent-hover:  #dd9f2a;
+  --t-accent-deep:   #8a5a12;
+  --t-accent-soft:   #4a2f12;
+  --t-accent-line:   #d99e33;
+  --t-accent-text:   #e2a832;
+  --t-accent-ink:    #ffffff;
+  --t-success:       #34d399;
+  --t-warning:       #fbbf24;
+  --t-danger:        #f87171;
+  --t-info:          #60a5fa;
+  --t-brand:         #c4b5fd;
+}
+
+/* ── VitePress brand mapping ── */
+:root {
+  --vp-font-family-base: "Bitter", ui-serif, Georgia, serif;
+  --vp-font-family-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  --vp-c-brand-1: var(--t-accent);
+  --vp-c-brand-2: var(--t-accent-hover);
+  --vp-c-brand-3: var(--t-accent-deep);
+  --vp-c-brand-soft: var(--t-accent-soft);
+
+  --vp-c-bg: var(--t-canvas);
+  --vp-c-bg-alt: var(--t-panel);
+  --vp-c-bg-elv: var(--t-panel);
+  --vp-c-bg-soft: var(--t-sunken);
+
+  --vp-c-border: var(--t-line-faint);
+  --vp-c-divider: var(--t-line-faint);
+  --vp-c-gutter: var(--t-line-faint);
+
+  --vp-c-text-1: var(--t-ink);
+  --vp-c-text-2: var(--t-ink-muted);
+  --vp-c-text-3: var(--t-ink-faint);
+
+  --vp-button-brand-bg: var(--t-accent);
+  --vp-button-brand-hover-bg: var(--t-accent-hover);
+  --vp-button-brand-active-bg: var(--t-accent-deep);
+  --vp-button-brand-text: #ffffff;
+
+  --vp-code-block-bg: var(--t-sunken);
+  --vp-code-line-highlight-color: var(--t-raised);
+
+  --vp-sidebar-bg-color: var(--t-panel);
+  --vp-nav-bg-color: color-mix(in srgb, var(--t-canvas) 88%, transparent);
+  --vp-nav-height: 64px;
+}
+
+html.dark {
+  --vp-c-bg: var(--t-canvas);
+  --vp-c-bg-alt: var(--t-panel);
+  --vp-c-bg-elv: var(--t-panel);
+  --vp-c-bg-soft: var(--t-sunken);
+  --vp-c-border: var(--t-line);
+  --vp-c-divider: var(--t-line-faint);
+  --vp-code-block-bg: #0f0a04;
+  --vp-button-brand-text: #ffffff;
+}
+
+/* ── base ── */
+html, body {
+  font-family: var(--vp-font-family-base);
+  -webkit-font-smoothing: antialiased;
+}
+
+.VPNavBarTitle .title {
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.VPNavBar {
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--t-line-faint);
+}
+
+/* ── HERO — static, professional. No padding override: VitePress default
+   padding already accounts for nav height (calc(var(--vp-nav-height)+48px)).
+   Overriding it broke the offset and caused the weird top gap. ── */
+/* Hero name is solid panel color (text-accent-text), never gradient. */
+:root {
+  --vp-home-hero-name-color: var(--t-accent-text);
+  --vp-home-hero-name-background: none;
+  --vp-home-hero-image-background-image: linear-gradient(135deg, var(--t-accent) 18%, var(--t-accent-soft) 82%);
+  --vp-home-hero-image-filter: blur(64px);
+}
+
+html.dark {
+  --vp-home-hero-name-color: var(--t-accent-text);
+  --vp-home-hero-name-background: none;
+}
+
+.VPHero .name {
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
+
+.VPHero .text {
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  margin-top: 12px;
+}
+
+.VPHero .tagline {
+  color: var(--t-ink-muted);
+  font-weight: 500;
+  max-width: 560px;
+  line-height: 1.6;
+  margin-top: 16px;
+  font-size: 15px;
+}
+
+.VPHero .VPImage {
+  filter: drop-shadow(0 8px 20px rgba(42, 29, 14, 0.1));
+}
+
+html.dark .VPHero .VPImage {
+  filter: drop-shadow(0 8px 20px rgba(0, 0, 0, 0.4));
+}
+
+/* ── buttons — Get Started must be white on gold, both modes ── */
+.VPButton.brand {
+  background: linear-gradient(135deg, var(--t-accent) 0%, var(--t-accent-deep) 100%);
+  border: 1px solid var(--t-accent-line);
+  color: #ffffff !important;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  box-shadow: 0 2px 10px rgba(168, 106, 18, 0.22);
+}
+
+.VPButton.brand:hover {
+  background: var(--t-accent-hover);
+  color: #ffffff !important;
+  border-color: var(--t-accent-hover);
+}
+
+.VPButton.alt {
+  border-color: var(--t-line);
+  color: var(--t-ink) !important;
+  background: var(--t-panel);
+  font-weight: 600;
+}
+
+.VPButton.alt:hover {
+  background: var(--t-raised);
+  border-color: var(--t-line);
+  color: var(--t-ink) !important;
+}
+
+/* ── features — static, even padding ──
+   NOTE: .items stays VitePress default (flex + margin:-8px / padding:8px).
+   Do NOT add gap here — flex widths are calc(100%/3) and any gap pushes
+   the 3rd card onto a new row (2-col bug). Gutter comes from .item padding. */
+.VPFeatures {
+  padding-top: 24px;
+  padding-bottom: 24px;
+}
+
+/* no icons on landing — hide the box entirely if one slips through */
+.VPFeatures .VPFeature .icon {
+  display: none;
+}
+
+.VPFeatures .VPFeature {
+  background: var(--t-panel);
+  border: 1px solid var(--t-line-faint);
+  border-radius: 12px;
+  padding: 24px;
+  transition: border-color 0.15s ease;
+}
+
+.VPFeatures .VPFeature:hover {
+  border-color: var(--t-line);
+}
+
+.VPFeatures .VPFeature .title {
+  font-weight: 700;
+  font-size: 15px;
+  line-height: 1.35;
+  margin: 0;
+}
+
+.VPFeatures .VPFeature .details {
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--t-ink-muted);
+  margin: 8px 0 0;
+}
+
+/* ── home content aligns with hero/features (both 1152px). ── */
+.VPHome .vp-doc.container {
+  max-width: 1152px;
+  padding-top: 8px;
+}
+
+/* ── doc surface ── */
+.vp-doc div[class*='language-'] {
+  border: 1px solid var(--t-line-faint);
+}
+
+.vp-doc table {
+  border-collapse: collapse;
+}
+
+.vp-doc th {
+  background: var(--t-sunken);
+}
+
+/* ── scrollbar ── */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--t-raised) transparent;
+}
+
+/* ── footer ── */
+.VPFooter {
+  border-top: 1px solid var(--t-line-faint) !important;
+  background: var(--t-panel) !important;
+  margin-top: 32px !important;
+}
+
+.VPDoc .content-container {
+  max-width: 820px;
+}
+
+.VPDocAsideOutline .outline-marker {
+  background: var(--t-accent);
+}
+
+.VPLocalSearchBox {
+  --vp-c-bg-soft: var(--t-sunken);
+}

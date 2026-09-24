@@ -118,6 +118,38 @@ describe('MCP Server - Handshake', () => {
     const get = result.tools.find((t) => t.name === 'get_agent');
     assert.ok(get.inputSchema.properties.logs, 'get_agent has logs param');
   });
+
+  it('registers the task queue tools', async () => {
+    const result = await client.listTools();
+    const names = result.tools.map((t) => t.name);
+    for (const tool of ['task_submit', 'task_get_next', 'task_complete', 'task_priority', 'task_status', 'task_result', 'task_list', 'task_cancel']) {
+      assert.ok(names.includes(tool), `has ${tool}`);
+    }
+  });
+
+  it('task_submit carries the push and pool inputs', async () => {
+    const result = await client.listTools();
+    const submit = result.tools.find((t) => t.name === 'task_submit');
+    const props = submit.inputSchema.properties;
+    assert.ok(props.prompt, 'task_submit has prompt');
+    assert.ok(props.name, 'task_submit has name (optional = pool)');
+    for (const key of ['model', 'agent', 'enqueue', 'priority', 'timeout', 'autoApprove']) {
+      assert.ok(props[key], `task_submit has ${key}`);
+    }
+  });
+
+  it('pull and cancel tools carry their required inputs', async () => {
+    const result = await client.listTools();
+    const props = (n) => result.tools.find((t) => t.name === n).inputSchema.properties;
+    assert.ok(props('task_get_next').name, 'task_get_next has name');
+    const complete = props('task_complete');
+    assert.ok(complete.task_id, 'task_complete has task_id');
+    assert.ok(complete.status, 'task_complete has status');
+    assert.ok(props('task_priority').rank, 'task_priority has rank');
+    assert.ok(props('task_status').task_id, 'task_status has task_id');
+    assert.ok(props('task_result').task_id, 'task_result has task_id');
+    assert.ok(props('task_cancel').confirm, 'task_cancel has confirm');
+  });
 });
 
 describe('MCP Server - Auth', () => {
@@ -212,5 +244,54 @@ describe('MCP Server - API key grants (plan 35b)', () => {
     const adminTarget = { userId: 'u1', role: 'admin', scopes: ['target:agent:pad-x'] };
     assert.throws(() => requireTool(adminTarget, 'get_agent', 'pad-other'), /target grant/);
     assert.strictEqual(toolAllowed(adminTarget, 'get_agent', 'pad-x'), true);
+  });
+});
+
+describe('MCP Server - task queue grants (plan 47)', () => {
+  const user = (scopes) => ({ userId: 'u1', role: 'user', scopes });
+  const READ = ['task_status', 'task_result', 'task_list'];
+  const EXEC = ['task_submit', 'task_get_next', 'task_complete', 'task_priority', 'task_cancel'];
+
+  it('read scope sees task results but cannot mutate the queue', () => {
+    const read = user(['read', 'target:agent:pad-x']);
+    for (const t of READ) assert.strictEqual(toolAllowed(read, t, 'pad-x'), true, `read ${t}`);
+    for (const t of EXEC) assert.strictEqual(toolAllowed(read, t, 'pad-x'), false, `read blocks ${t}`);
+  });
+
+  it('base fine-grained keys may self-serve work through the exec bucket', () => {
+    const base = user(['target:agent:pad-x']);
+    for (const t of EXEC) assert.strictEqual(toolAllowed(base, t, 'pad-x'), true, `base ${t}`);
+    for (const t of READ) assert.strictEqual(toolAllowed(base, t, 'pad-x'), true, `base ${t}`);
+  });
+
+  it('task_get_next is not a read tool — claiming mutates state', () => {
+    const read = user(['read', 'target:owned']);
+    assert.strictEqual(toolAllowed(read, 'task_get_next', 'pad-x'), false);
+  });
+
+  it('task tools share the exec grant bucket', () => {
+    const lifecycle = user(['tools:lifecycle']);
+    assert.strictEqual(toolAllowed(lifecycle, 'exec', 'pad-x'), true);
+    assert.strictEqual(toolAllowed(lifecycle, 'task_submit', 'pad-x'), true, 'same bucket as exec');
+  });
+
+  it('default and control keys get the whole task surface', () => {
+    for (const s of ['default', 'control']) {
+      for (const t of [...READ, ...EXEC]) {
+        assert.strictEqual(toolAllowed(user([s]), t, 'pad-x'), true, `${s} ${t}`);
+      }
+    }
+  });
+
+  it('target grants still confine task tools to their PAD', () => {
+    const scoped = user(['target:agent:pad-x']);
+    assert.strictEqual(toolAllowed(scoped, 'task_status', 'pad-y'), false);
+    const admin = { userId: 'u1', role: 'admin', scopes: ['target:agent:pad-x'] };
+    assert.throws(() => requireTool(admin, 'task_status', 'pad-y'), /target grant/);
+  });
+
+  it('requireTool rejects a read-scoped admin from mutating the queue', () => {
+    const admin = { userId: 'u1', role: 'admin', scopes: ['read'] };
+    assert.throws(() => requireTool(admin, 'task_submit', 'pad-x'), /tool grant/);
   });
 });

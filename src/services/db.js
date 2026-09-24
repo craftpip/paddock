@@ -113,6 +113,29 @@ function migrate(db) {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS tasks (
+      id TEXT PRIMARY KEY,
+      agent_name TEXT,
+      prompt TEXT NOT NULL,
+      model TEXT,
+      agent_type TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      priority INTEGER NOT NULL DEFAULT 0,
+      pid INTEGER,
+      claimed_by TEXT,
+      exit_code INTEGER,
+      stdout TEXT DEFAULT '',
+      stderr TEXT DEFAULT '',
+      result_summary TEXT DEFAULT '',
+      created_by TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      started_at TEXT,
+      finished_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_tasks_agent ON tasks(agent_name);
+    CREATE INDEX IF NOT EXISTS idx_tasks_queue ON tasks(status, priority, created_at);
+
     CREATE INDEX IF NOT EXISTS idx_activity_agent ON activity_events(agent_id);
     CREATE INDEX IF NOT EXISTS idx_activity_ts ON activity_events(timestamp);
     CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id);

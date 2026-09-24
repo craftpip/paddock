@@ -14,6 +14,7 @@ const logStore = require('./services/log-store');
 const containerHealth = require('./services/container-health');
 const { getGuide, getCommandCatalog, listCatalogTypes } = require('./services/llm-guide');
 const { getDb } = require('./services/db');
+const taskRunner = require('./services/task-runner');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const PREFIX = process.env.CONTAINER_PREFIX || 'vm';
@@ -110,6 +111,7 @@ function requireAccess(user, agentName) {
 const READ_TOOLS = new Set([
   'list_agents', 'get_agent', 'agent_logs', 'config_get', 'settings_get',
   'health', 'workspace_list', 'workspace_read', 'help', 'agent_commands',
+  'task_status', 'task_result', 'task_list',
 ]);
 
 const TOOL_GRANT_FOR = {
@@ -121,6 +123,13 @@ const TOOL_GRANT_FOR = {
   update: 'recreate',
   recreate: 'recreate',
   reset: 'reset', // recreate with reset:true only
+  // Task tools ride the `exec` bucket: they run or steer real work inside a PAD,
+  // so they share `exec`'s base grant rather than inventing a new scope.
+  task_submit: 'exec',
+  task_get_next: 'exec',
+  task_complete: 'exec',
+  task_priority: 'exec',
+  task_cancel: 'exec',
 };
 
 function keyGrants(user) {
@@ -149,7 +158,8 @@ function toolAllowed(user, tool, agentName) {
   const g = keyGrants(user);
   if (g.full) return targetAllowed(user, agentName);
   if (g.readOnly) return READ_TOOLS.has(tool) && targetAllowed(user, agentName);
-  if (READ_TOOLS.has(tool) || tool === 'exec' || tool === 'workspace_write') {
+  if (READ_TOOLS.has(tool) || tool === 'exec' || tool === 'workspace_write'
+      || TOOL_GRANT_FOR[tool] === 'exec') {
     return targetAllowed(user, agentName);
   }
   const grant = TOOL_GRANT_FOR[tool];
@@ -175,6 +185,32 @@ function requireAgent(agentName) {
   const agent = registry.getAgent(agentName);
   if (!agent) throw new McpError(ErrorCode.InvalidRequest, `Agent not found: ${agentName}`);
   return agent;
+}
+
+/** Task-tool gate (plan 47). A task that names a PAD — assigned at submit, or
+ *  claimed by a worker — resolves that PAD and goes through the normal
+ *  owner + grant flow. An unclaimed pool task has no owning PAD, and
+ *  `requireAccess('')` would reject it, so the shared pool is grant-scoped. */
+function requireTaskGrant(user, tool, task) {
+  if (!task) throw new McpError(ErrorCode.InvalidRequest, 'Task not found');
+  const pad = task.claimed_by || task.agent_name || '';
+  if (pad) {
+    requireTool(user, tool, pad);
+    return;
+  }
+  if (user && !toolAllowed(user, tool, '')) {
+    throw new McpError(ErrorCode.InvalidRequest, `Not permitted by API key tool grant: ${tool}`);
+  }
+}
+
+/** Runner errors are plain Errors; surface them as clean tool errors so the
+ *  calling LLM reads the message instead of an internal-error envelope. */
+function taskError(fn) {
+  try {
+    return fn();
+  } catch (e) {
+    throw new McpError(ErrorCode.InvalidRequest, e.message);
+  }
 }
 
 function textResult(obj) {
@@ -622,6 +658,215 @@ function registerTools(server) {
       }
       const r = await dockerExec(agent.runtime_ref, command, timeout || 30000, stdin);
       return textResult({ name, stdout: r.stdout, stderr: r.stderr });
+    }
+  );
+
+  // ─── Task queue (plan 47) ───────────────────────────────────────────────
+  // Push mode runs `opencode run` inside a PAD. Pull mode is the TaskPeace
+  // loop: a worker claims from the ranked pool, works it itself, reports back.
+
+  server.registerTool(
+    'task_submit',
+    {
+      title: 'Submit a task to an opencode PAD (or the shared pool)',
+      description: 'Push: runs `opencode run` inside the named opencode PAD in the background and returns a task_id immediately — poll with task_status, fetch with task_result, stop with task_cancel. The task runs in that PAD\'s own workspace and auto-approves permissions that are not explicitly denied (pass autoApprove:false to refuse that). Pull: omit `name` to file the task in the shared pool at `priority`; combine `name` with enqueue:true to address a task to one PAD without starting it yet. A worker PAD then claims it with task_get_next. Never pick an agent with an @mention in the prompt — headless runs silently fall through to the primary agent; use `agent` instead.',
+      inputSchema: {
+        name: z.string().optional().describe('PAD to run the task on (opencode only). Omit to add it to the unassigned pool.'),
+        prompt: z.string().describe('Task instructions for the agent'),
+        model: z.string().optional().describe('provider/model override, e.g. anthropic/claude-sonnet-4-5'),
+        agent: z.string().optional().describe('OpenCode agent to run as (--agent). Use this, never an @mention.'),
+        enqueue: z.boolean().optional().describe('File addressed to `name` without starting it — it stays pending for task_get_next'),
+        priority: z.number().int().optional().describe('Queue rank for pool tasks — lower numbers are served first (default 0)'),
+        timeout: z.number().int().min(1000).max(3600000).optional().describe('Kill the task after this many ms (default 600000)'),
+        autoApprove: z.boolean().optional().describe('Auto-approve permissions not explicitly denied (default true) — same trust level as exec'),
+      },
+    },
+    async (args) => {
+      const user = currentUser();
+      const pad = args.name || '';
+      if (pad) {
+        requireTool(user, 'task_submit', pad);
+        requireAgent(pad);
+      } else if (user && !toolAllowed(user, 'task_submit', '')) {
+        throw new McpError(ErrorCode.InvalidRequest, 'Not permitted by API key tool grant: task_submit');
+      }
+      const id = taskError(() => taskRunner.submitTask({
+        name: pad || undefined,
+        prompt: args.prompt,
+        model: args.model,
+        agent: args.agent,
+        enqueue: args.enqueue === true,
+        priority: args.priority,
+        timeout: args.timeout,
+        autoApprove: args.autoApprove !== false,
+        user,
+      }));
+      return textResult({ ok: true, task_id: id, mode: pad ? 'push' : 'pool', task: taskRunner.getTask(id) });
+    }
+  );
+
+  server.registerTool(
+    'task_get_next',
+    {
+      title: 'Claim the next queued task for a PAD',
+      description: 'Pull: atomically claim the highest-priority pending task for this PAD — either addressed to it or sitting in the shared pool — and return it. The worker then does the work itself and reports with task_complete. Returns { task: null, queueEmpty: true } when there is nothing to do. This mutates state (the task becomes `running`), so read-only keys cannot use it.',
+      inputSchema: {
+        name: z.string().describe('PAD claiming the work'),
+      },
+    },
+    async ({ name }) => {
+      requireTool(currentUser(), 'task_get_next', name);
+      requireAgent(name);
+      const task = taskError(() => taskRunner.claimNextTask(name));
+      return textResult(task ? { task } : { task: null, queueEmpty: true });
+    }
+  );
+
+  server.registerTool(
+    'task_complete',
+    {
+      title: 'Report a claimed task finished',
+      description: 'Pull: close out a task this worker claimed. `done` stores your summary as the task result; `failed` records the failure. Only a `pending` or `running` task can be completed.',
+      inputSchema: {
+        task_id: z.string().describe('Task id from task_get_next or task_submit'),
+        status: z.enum(['done', 'failed']).optional().describe('done (default) or failed'),
+        summary: z.string().optional().describe('What was done, or why it failed'),
+      },
+    },
+    async ({ task_id, status, summary }) => {
+      const task = taskRunner.getTask(task_id);
+      requireTaskGrant(currentUser(), 'task_complete', task);
+      const done = taskError(() => taskRunner.completeTask(task_id, { status: status || 'done', summary: summary || '' }));
+      return textResult({ task: done });
+    }
+  );
+
+  server.registerTool(
+    'task_priority',
+    {
+      title: 'Re-rank a queued task',
+      description: 'Re-order the queue: task_get_next serves lower numbers first. Only a `pending` task can be re-ranked.',
+      inputSchema: {
+        task_id: z.string().describe('Task id'),
+        rank: z.number().int().describe('New priority — lower is earlier in the queue'),
+      },
+    },
+    async ({ task_id, rank }) => {
+      const task = taskRunner.getTask(task_id);
+      requireTaskGrant(currentUser(), 'task_priority', task);
+      return textResult({ task: taskError(() => taskRunner.setPriority(task_id, rank)) });
+    }
+  );
+
+  server.registerTool(
+    'task_status',
+    {
+      title: 'Task status',
+      description: 'Read a task\'s state: pending | running | done | error | cancelled, with exit code, claimer, priority, timing, and an optional tail of its output.',
+      inputSchema: {
+        task_id: z.string().describe('Task id'),
+        tail: z.number().int().min(1).max(20000).optional().describe('Return the last N characters of captured stdout'),
+      },
+    },
+    async ({ task_id, tail }) => {
+      const task = taskRunner.getTask(task_id);
+      requireTaskGrant(currentUser(), 'task_status', task);
+      const out = {
+        id: task.id,
+        status: task.status,
+        agent_name: task.agent_name,
+        claimed_by: task.claimed_by,
+        priority: task.priority,
+        model: task.model,
+        agent: task.agent_type,
+        exit_code: task.exit_code,
+        result_summary: task.result_summary,
+        created_at: task.created_at,
+        started_at: task.started_at,
+        finished_at: task.finished_at,
+      };
+      if (tail) out.stdout_tail = String(task.stdout || '').slice(-tail);
+      return textResult(out);
+    }
+  );
+
+  server.registerTool(
+    'task_result',
+    {
+      title: 'Task result',
+      description: 'Full result of a task: the extracted assistant text, exit code, and the raw captured stdout/stderr (byte-capped).',
+      inputSchema: {
+        task_id: z.string().describe('Task id'),
+      },
+    },
+    async ({ task_id }) => {
+      const task = taskRunner.getTask(task_id);
+      requireTaskGrant(currentUser(), 'task_result', task);
+      return textResult({
+        id: task.id,
+        status: task.status,
+        exit_code: task.exit_code,
+        result: task.result_summary,
+        stdout: task.stdout,
+        stderr: task.stderr,
+        finished_at: task.finished_at,
+      });
+    }
+  );
+
+  server.registerTool(
+    'task_list',
+    {
+      title: 'List tasks',
+      description: 'List recent tasks, newest first — optionally only those addressed to or claimed by one PAD. Rows are scoped to what your key may see; unclaimed pool tasks are shared.',
+      inputSchema: {
+        name: z.string().optional().describe('Only tasks for this PAD (addressed to or claimed by it)'),
+        limit: z.number().int().min(1).max(200).optional().describe('How many to return (default 50)'),
+      },
+    },
+    async ({ name, limit }) => {
+      const user = currentUser();
+      if (name) requireTool(user, 'task_list', name);
+      const rows = taskRunner.listTasks({ pad: name, limit });
+      const visible = name
+        ? rows
+        : rows.filter((t) => {
+          const pad = t.claimed_by || t.agent_name || '';
+          return !pad || (canAccess(user, pad) && targetAllowed(user, pad));
+        });
+      return textResult({
+        tasks: visible.map((t) => ({
+          id: t.id,
+          status: t.status,
+          agent_name: t.agent_name,
+          claimed_by: t.claimed_by,
+          priority: t.priority,
+          prompt: String(t.prompt || '').slice(0, 200),
+          exit_code: t.exit_code,
+          created_at: t.created_at,
+          finished_at: t.finished_at,
+        })),
+      });
+    }
+  );
+
+  server.registerTool(
+    'task_cancel',
+    {
+      title: 'Cancel a task',
+      description: 'Stop a pending or running task: signals the process (SIGTERM, then SIGKILL after a grace period) and marks the task `cancelled`. Requires confirm: true.',
+      inputSchema: {
+        task_id: z.string().describe('Task id'),
+        confirm: z.boolean().describe('Must be true to cancel'),
+      },
+    },
+    async ({ task_id, confirm }) => {
+      const task = taskRunner.getTask(task_id);
+      requireTaskGrant(currentUser(), 'task_cancel', task);
+      if (confirm !== true) {
+        throw new McpError(ErrorCode.InvalidRequest, 'Refusing to cancel without confirm: true.');
+      }
+      return textResult({ task: taskError(() => taskRunner.cancelTask(task_id)) });
     }
   );
 }

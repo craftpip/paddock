@@ -1,53 +1,57 @@
 # Docs
 
-Documentation for the PAD Friends Web UI.
+Documentation for the Paddock web UI and website. Two halves: a **User Guide** in plain words, and a **Technical Reference** for readers who want depth.
 
-## Layout
+## Start here
+
+- New to Paddock? Begin at [Getting started](guide/getting-started.md).
+- Building or debugging? Jump to the [reference map](#technical-reference-map) below.
+
+## User guide
+
+Simple words, no internals. Every page ends with a link back to its technical detail.
+
+| Page | What it covers |
+|---|---|
+| [Getting started](guide/getting-started.md) | First PAD in 3 steps |
+| [Your PADs](guide/agents.md) | Open, start, stop, delete, tabs |
+| [The terminal](guide/terminal.md) | The docked shell and the paste rule |
+| [Sharing on the web](guide/web-publish.md) | Publish a web page, SSH, extra ports |
+| [Keeping secrets](guide/vault.md) | Vault PIN and everyday use |
+
+## Technical Reference map
 
 ```
 docs/
-├── README.md                         ← this file (index + map)
-├── STYLE-GUIDE.md                    ← how to write docs: format, voice, skeleton, terminology
-├── overview/                         ← whole-system docs
-│   ├── architecture.md               ← system architecture, containers, data flow
-│   ├── business-logic.md             ← detailed workflows: discovery, workspace, lifecycle, backup, auth, terminal, MCP, skills, OAuth, config
-│   └── react-migration.md            ← React migration details, stack, routes
-├── backend/                          ← server-side modules
-│   ├── services.md                   ← all services with functions, schemas, business logic
-│   ├── drivers.md                    ← per-driver reference: fields, commands, gotchas for each agent type
-│   ├── middleware.md                  ← auth + CSRF + rate limiter internals
-│   └── user-management.md            ← multi-user system, owner-based scoping, data access rules
-├── pages/                            ← top-level page docs
-│   └── overview.md                   ← pages: dashboard, create, agent detail, vault, backups, onboard
-├── tabs/                             ← Agent Detail page tabs (modes)
-│   ├── overview.md                   ← all tabs/modes described
-│   ├── commands.md                   ← Commands mode: pill buttons, driver command API, per-type matrix
-│   ├── terminal.md                   ← the docked interactive shell (tmux + xterm)
-│   ├── web.md                        ← Web & Ports tab: web app publish, SSH expose, extra ports, the socat door
-│   ├── web-consoles.md               ← per-agent web consoles: ports, auth requirements, where + how to set the password
-│   ├── health.md                     ← container health checkup (lives in Settings)
-│   ├── mcp.md                        ← MCP server management (Commands pane, paste-commands flow)
-│   ├── skills.md                     ← skill listing (Commands pane, paste-commands flow)
-│   └── settings.md                   ← container settings: update, health checkup, docker, network, workspace+volumes, ssh/ports, delete
-├── components/                       ← shared/reusable UI pieces
-│   ├── stats.md                      ← sidebar Docker stats
-│   ├── theme.md                      ← design guidelines: horse-brown palette, tokens, light/dark
-│   └── ux.md                         ← shared UX utilities: dialogs, toasts, shortcuts, connection-lost
-└── operations/                       ← operational workflows
-    ├── overview.md                   ← agent lifecycle, dev workflow, git workflow
-    └── openclaw.md                   ← OpenClaw: cron, provider keys, updates, memory
+├── README.md                         ← this file (hub)
+├── index.md                          ← website landing page
+├── guide/                            ← user guide, plain words
+│   ├── getting-started.md
+│   ├── agents.md
+│   ├── terminal.md
+│   ├── web-publish.md
+│   └── vault.md
+└── reference/                        ← technical reference
+    ├── STYLE-GUIDE.md                ← how to write docs
+    ├── overview/                     ← architecture, business logic, react migration
+    ├── backend/                      ← services, drivers, middleware, user management
+    ├── pages/                        ← top-level page docs
+    ├── tabs/                         ← one file per Agent Detail tab
+    ├── components/                   ← stats, theme, ux
+    └── operations/                   ← runbooks: lifecycle, openclaw
 ```
 
 ## Adding new docs
 
-See **`STYLE-GUIDE.md`** — it is the rulebook. In short:
+See **[STYLE-GUIDE.md](reference/STYLE-GUIDE.md)** — it is the rulebook. In short:
 
-- **overview/** — whole-system *explanation*: architecture, business logic, migration notes
-- **backend/** — *reference* for server modules: services, middleware, auth
-- **pages/** — one doc per top-level page, or an overview if pages are simple
-- **tabs/** — one file per Agent Detail tab. Covers frontend component, backend API routes
-- **components/** — reusable UI pieces that aren't full pages or tabs
-- **operations/** — *how-to* runbooks: deployment, dev workflow, git
+- **guide/** — user-facing *how-to* in plain words; every page links back to its reference detail
+- **reference/overview/** — whole-system *explanation*: architecture, business logic, migration notes
+- **reference/backend/** — *reference* for server modules: services, middleware, auth
+- **reference/pages/** — one doc per top-level page, or an overview if pages are simple
+- **reference/tabs/** — one file per Agent Detail tab. Covers frontend component, backend API routes
+- **reference/components/** — reusable UI pieces that aren't full pages or tabs
+- **reference/operations/** — *how-to* runbooks: deployment, dev workflow, git
 
 The style guide covers the page skeleton, formatting rules, voice,
 terminology, the plan-to-docs lifecycle, and the review checklist.

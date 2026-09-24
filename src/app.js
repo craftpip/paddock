@@ -62,6 +62,31 @@ app.use(express.static('public', {
   },
 }));
 
+// Docs website at /website — VitePress build (base /website/). Served from
+// src/public/website (copied from docs/.vitepress/dist) and also from the
+// workspace dist as fallback so a host-only build is visible without a copy.
+// cleanUrls: /website/foo → /website/foo.html, so extensions html.
+app.use('/website', express.static(path.join(WORKSPACE, 'docs/.vitepress/dist'), {
+  extensions: ['html'],
+  setHeaders(res, filePath) {
+    if (filePath.endsWith('.html')) {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    } else if (filePath.includes('/assets/')) {
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    }
+  },
+}));
+app.use('/website', express.static(path.join(__dirname, 'public/website'), {
+  extensions: ['html'],
+  setHeaders(res, filePath) {
+    if (filePath.endsWith('.html')) {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    } else if (filePath.includes('/assets/')) {
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    }
+  },
+}));
+
 // Missing hashed assets must 404, never fall through to the SPA catch-all.
 // Otherwise a stale /assets/index-OLDHASH.js returns index.html (text/html)
 // and the browser throws "Failed to load module script: MIME type text/html".
@@ -103,7 +128,8 @@ app.use(checkNeedsSetup);
 
 app.use((req, res, next) => {
   if (AUTO_LOGIN) return next();
-  // Public paths — no auth needed
+  // Public paths — no auth needed (docs site is public)
+  if (req.path === '/website' || req.path.startsWith('/website/')) return next();
   const publicPaths = ['/api/setup', '/api/login', '/api/session', '/login', '/setup', '/mcp'];
   if (publicPaths.includes(req.path)) return next();
   if (req.path.startsWith('/api/') || req.path.startsWith('/ws/')) {
@@ -2593,7 +2619,7 @@ app.use((req, res, next) => {
 
 // SPA catch-all — serve index.html for client-side routing
 app.get('*', (req, res, next) => {
-  if (req.path.startsWith('/api/') || req.path.startsWith('/ws/')) return next();
+  if (req.path.startsWith('/api/') || req.path.startsWith('/ws/') || req.path === '/website' || req.path.startsWith('/website/')) return next();
   // File-like paths (e.g. stale /assets/*.js, .css, .map, .svg) must 404 —
   // otherwise a deleted hashed chunk returns index.html (text/html) and the
   // browser throws "Failed to load module script: MIME type text/html".

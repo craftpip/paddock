@@ -155,6 +155,47 @@ const CODEX = {
     { label: 'Marketplaces', cmd: 'codex plugin marketplace', desc: 'Interactive marketplace management.' },
   ],
 
+  /** Headless task capability (plan 48). `codex exec --json` streams JSONL
+   *  thread events to stdout; the final answer arrives as an
+   *  `item.completed` event whose item is an agent message. `--skip-git-repo-check`
+   *  is required: the default workspace is not a git repo and codex exec
+   *  refuses to run there. `--sandbox danger-full-access` matches the runner's
+   *  `autoApprove` contract (same trust level as the exec tool); drop it for a
+   *  constrained read-only run. */
+  task: {
+    supported: true,
+    buildCommand(prompt, { workspaceDir, model, autoApprove }) {
+      const parts = ['codex exec', '--json', '--skip-git-repo-check'];
+      if (workspaceDir) parts.push('-C', sq(workspaceDir));
+      if (model && String(model).trim()) parts.push('-m', sq(String(model).trim()));
+      if (autoApprove) parts.push('--sandbox', 'danger-full-access');
+      parts.push('--', sq(prompt));
+      return parts.join(' ');
+    },
+    /** JSONL event shape (live-captured 2026-09-24 on pad-test-codex):
+     *  `{"type":"item.completed","item":{"id":"…","type":"agent_message",
+     *  "text":"…"}}`. Older builds spelled the discriminator `item_type` with
+     *  `assistant_message`. Accept both spellings; take the LAST agent message
+     *  (earlier ones are interim status lines). Non-JSON output is kept whole. */
+    extractSummary(raw) {
+      const texts = [];
+      for (const line of String(raw || '').split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        let ev;
+        try { ev = JSON.parse(trimmed); } catch { continue; }
+        if (!ev || typeof ev !== 'object' || ev.type !== 'item.completed') continue;
+        const item = ev.item;
+        if (!item || typeof item !== 'object') continue;
+        const kind = item.type || item.item_type;
+        if (kind !== 'agent_message' && kind !== 'assistant_message') continue;
+        if (typeof item.text === 'string' && item.text.trim()) texts.push(item.text);
+      }
+      if (texts.length) return texts[texts.length - 1];
+      return String(raw || '').trim();
+    },
+  },
+
   /** Paddock MCP server operations (plan 35b). `codex mcp add` has NO inline
    *  header flag and NO non-interactive flag in this build (live-verified:
    *  `codex mcp add <name> --url <url> [--bearer-token-env-var <ENV>]`).

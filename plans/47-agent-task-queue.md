@@ -1,8 +1,11 @@
 # Plan 47 — Agent Task Queue over Paddock MCP
 
-## Status: In progress (2026-09-24) — 0/5 phases done; design complete and
-validated against current OpenCode docs + the live code (see § Validation
-findings). 7 must-fix defects folded in, nothing built yet.
+## Status: [SUPERSEDED by plan 52 — do not build from this file; remaining work tracked ONLY in plan 52]  In progress (2026-09-24) — 4/5 phases done. Phases 1–4 built,
+unit-tested (`tasks` 38/38, `mcp` 27/27) **and live-verified end-to-end on a
+real opencode PAD**, including a cancel-orphan bug found and fixed live.
+Remaining: Phase 5 docs absorb — **gated on explicit user confirmation.**
+Build deltas: explicit `enqueue` mode, `rowid` FIFO ordering, synchronous test
+fakes, pidfile + env-tagged in-container kill, `part.text` extraction.
 
 > Manager-agent assigns work to `opencode` PADs through Paddock's own `/mcp`
 > server — **push and pull**:
@@ -162,7 +165,7 @@ Live-verified in Phase 4.
 
 | Tool | Input | Grant bucket |
 |---|---|---|
-| `task_submit` | `{ name?, prompt, model?, agent?, priority?, timeout?, autoApprove? }` | exec |
+| `task_submit` | `{ name?, prompt, model?, agent?, enqueue?, priority?, timeout?, autoApprove? }` | exec |
 | `task_get_next` | `{ name }` | exec (it **mutates** — claims) |
 | `task_complete` | `{ task_id, status: done\|failed, summary? }` | exec |
 | `task_priority` | `{ task_id, rank }` | exec |
@@ -253,26 +256,47 @@ registry has six types — so a `claude` PAD cannot be created over MCP.
 
 ## Phases
 
-- [ ] Phase 1 — persistence + engine: `tasks` migration (no FK, SQL timestamps),
+- [x] Phase 1 — persistence + engine: `tasks` migration (no FK, SQL timestamps),
       boot reconciliation, `task-runner.js` (build command with `--dir`/`--auto`,
       spawn, stream, cap, kill) + `_setForTests` seam. Tests: schema, pre-checks,
       push happy path, non-zero exit, 512KB cap, cancel, timeout, boot sweep.
-- [ ] Phase 2 — push MCP surface: 5 tools, `READ_TOOLS`/`TOOL_GRANT_FOR`
+      Built 2026-09-24: `enqueue` flag added (address a task without starting it —
+      required for pull of pre-assigned tasks); ordering uses monotonic `rowid`,
+      not `created_at` (second resolution breaks FIFO ties).
+- [x] Phase 2 — push MCP surface: 5 tools, `READ_TOOLS`/`TOOL_GRANT_FOR`
       updates, the `toolAllowed` exec-bucket clause, `requireTaskGrant`,
       `opencode run` in the driver's `llmCommands`. Tests: tool list, schemas,
       the grant matrix (read / base / lifecycle-only), pool-task grant path.
-- [ ] Phase 3 — pull loop: `task_get_next` (atomic claim via
+      Built 2026-09-24 (`tasks` 37/37 ×6 clean, `mcp` 27/27; paddock restarted,
+      live `tasks` table verified).
+- [x] Phase 3 — pull loop: `task_get_next` (atomic claim via
       `UPDATE … RETURNING`), `task_complete`, `task_priority`. Tests: two workers
       never claim the same task, priority ordering, pre-assigned isolation,
-      complete/transition rules.
-- [ ] Phase 4 — live verify on a `test-agents` opencode PAD (after
-      `docker restart paddock`): push writes a file **in the workspace** (proves
-      `--dir`), a permission-touching task does not hang (proves `--auto`), poll
-      to `done`, `task_result` shows extracted text, real `task_cancel` kills the
-      container-side process, restart leaves no `running` rows, then the pull
-      loop end-to-end with a PAD-scoped key.
+      complete/transition rules. Test fakes emit `exit` synchronously —
+      `setImmediate` in the fake flaked ~50% under the test runner.
+- [x] Phase 4 — live verified 2026-09-24 on `pad-opencode-jake-man` (root-mode
+      opencode PAD, real model via env credentials):
+      push `task_submit` → `running` → `done` exit 0, real `opencode run` wrote
+      `hello-phase4.txt` **into the workspace** while the container CWD is
+      `/jake` (proves `--dir`); `task_result` returned the extracted `"Done."`
+      (proves the `part.text` event shape); a write-tool task completed headless
+      with no hang (consistent with `--auto`; no-missing-approval control not
+      run by design). Full MCP path proven with a minted `default` key:
+      initialize → 27 tools incl. all 8 task tools → `task_submit` → `running`
+      → `task_result` `done` + file `mango-phase4.txt` containing `mango`;
+      key revoked after (401 confirmed). **Cancel bug found + fixed live:**
+      first cancel left the container-side `opencode run` (PID 5976, 81% CPU)
+      alive — SIGTERM only reached the `docker exec` CLI. Fix: pidfile +
+      `PADDOCK_TASK_ID` env tag in the spawn, verified-by-environ in-container
+      sweep (TERM now, KILL after grace) on every cancel/timeout; re-tested
+      live with zero orphan processes. Pull loop live: pool submit → claim →
+      `done`. Boot sweep live: planted `running` row flipped to `error` /
+      `orphaned by webui restart` across a `docker restart paddock`.
+      Cleanup done: 4 test files + 4 opencode sessions + test key + all task
+      rows removed; live PAD left untouched.
 - [ ] Phase 5 — absorb into `docs/` (`docs/overview/business-logic.md` MCP
       section + `docs/backend/services.md` task-runner) and delete this file.
+      **Gate: do not absorb until the user explicitly confirms.**
 
 ## Verification
 

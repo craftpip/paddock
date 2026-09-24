@@ -244,3 +244,14 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
 - **When the user says "show me my plans" (or similar)**: summarize with a
   status column per file (from each file's `## Status:` header) and what's
   complete vs. not — don't just dump filenames.
+- **"chat test" mode — test from the MCP, as a real LLM.** When the user says
+  **chat test**, act as a generic LLM consuming *this project's* MCP surface
+  over `/mcp` — i.e. use the paddock MCP tools from my own opencode config, and
+  drive the request purely through those tool calls, the same way any agent
+  would. Do **not** drop to bash/curl/node/backend tricks to get around the
+  tools; work with exactly what the MCP returns. Purpose: experience
+  first-hand how an LLM reacts to the request and the tool responses — what's
+  obvious, what's jargon-y, what's missing/terse/over-verbose — so we can make
+  the software easy for any LLM to understand. Report friction (e.g. "the
+  response never said X, I had to guess Y") rather than silently working
+  around it.

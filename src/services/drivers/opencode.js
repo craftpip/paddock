@@ -119,6 +119,12 @@ const OPENCODE = {
    *  without a TTY through the MCP `exec` tool. */
   llmCommands: [
     {
+      title: 'Run', commands: [
+        { label: 'Run a task headlessly', cmd: 'opencode run --format json --dir <workspace> -- "<prompt>"', desc: 'Non-interactive run for scripting and task execution.' },
+        { label: 'Run with model and agent', cmd: 'opencode run --format json --model <provider/model> --agent <name> -- "<prompt>"', desc: 'Pin the model and agent. Never select an agent with an @mention — headless runs silently fall through to the primary agent.', caveats: 'Add --auto to approve permissions not explicitly denied, or the run can hang waiting for approval with no TTY.' },
+      ],
+    },
+    {
       title: 'Model', commands: [
         { label: 'List providers', cmd: 'opencode providers list', desc: 'Providers + saved credentials.' },
         { label: 'Logout provider', cmd: 'opencode providers logout', desc: 'Log out a configured provider.' },
@@ -168,6 +174,42 @@ const OPENCODE = {
     { label: 'MCP OAuth login', cmd: 'opencode mcp auth', desc: 'Interactive OAuth flow.' },
     { label: 'Create agent', cmd: 'opencode agent create', desc: 'Interactive agent creation.' },
   ],
+
+  /** Headless task capability (plan 48). Presence = the type can run queued
+   *  tasks through the MCP task tools. The runner builds the machine wrapper
+   *  (pidfile + PADDOCK_TASK_ID + `exec`), the driver supplies the inner CLI. */
+  task: {
+    supported: true,
+    buildCommand(prompt, { workspaceDir, model, agent, autoApprove }) {
+      const parts = ['opencode run', '--format json'];
+      if (workspaceDir) parts.push('--dir', sq(workspaceDir));
+      if (model && String(model).trim()) parts.push('--model', sq(String(model).trim()));
+      if (agent && String(agent).trim()) parts.push('--agent', sq(String(agent).trim()));
+      if (autoApprove) parts.push('--auto');
+      parts.push('--', sq(prompt));
+      return parts.join(' ');
+    },
+    /** `--format json` emits one raw event per line. Live shape (plan 47):
+     *  `{"type":"text",…,"part":{"type":"text","text":"Done."}}` — the answer
+     *  sits at `part.text`. Top-level `text` is kept as a fallback. Non-JSON
+     *  output is kept whole. */
+    extractSummary(raw) {
+      const texts = [];
+      for (const line of String(raw || '').split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        let ev;
+        try { ev = JSON.parse(trimmed); } catch { continue; }
+        if (!ev || typeof ev !== 'object') continue;
+        if (typeof ev.text === 'string') texts.push(ev.text);
+        else if (ev.part && typeof ev.part === 'object' && typeof ev.part.text === 'string') {
+          texts.push(ev.part.text);
+        }
+      }
+      if (texts.length) return texts[texts.length - 1];
+      return String(raw || '').trim();
+    },
+  },
 
   /** Paddock MCP server operations (plan 35b). opencode has no `mcp remove` in
    *  the installed build, so disconnect edits the global jsonc config
