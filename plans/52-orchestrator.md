@@ -62,80 +62,71 @@ this plan. Concretely:
   orchestration UI anywhere in Phases A–G. If a task seems to need a new
   screen, redesign the task, not the frontend.
 
-## Phase A — homes backend [49§§0–1,4b] (FIRST)
+## Phase A — Direct tool surface: un-break + complete (FIRST)
 
-- [ ] A1. Read-only verification of [49§6] checklist (meta keys, compose
-      emission point, per-PAD build pipeline COPY feasibility, settings
-      flow, devcontainer-vs-non-bind, deletion path). Record findings in
-      [49§6]. No code changes.
-- [ ] A2. `WORKSPACE_MODE` meta (`bind|worktree|copy|volume`, absent = today)
-      + per-mode compose emission as NEW functions in `vm-manager.js` (old
-      bind lines untouched) + worktree create/remove helpers + nested-docker
-      registry fields (port block, compose `-p` name, volume prefix).
-- [ ] A3. Unit tests: compose output per mode + rebuild semantics. Gate:
-      green + `docker restart paddock` + throwaway-PAD live verify.
+v1 = my LLM drives everything over MCP. Nothing here needs a new screen,
+a new agent type, or a persistent component.
 
-## Phase B — un-break + observe [48 Phases 1–3]
+- [ ] A1. Un-break: `task-runner.js` exports fix, `taskCapability` cap-object
+      fix, `killTask` timer leak, `db.js` `last_output_at` migration, tests
+      to the real API. (The crash dies here — nothing downstream works until
+      the module loads.)
+- [ ] A2. Complete: `task_watch` (read bucket) in `mcp.js`; NEW
+      memory/journal tools (notes read/write, run journal append/read.
+      User's framing, locked 2026-09-24: with no separate orchestrator
+      component, my LLM IS the orchestrator — so this memory IS its context:
+      task rows = working memory (live state), journal/notes = long-term
+      context (history, decisions, learnings). Any LLM instance rehydrates
+      from both and continues. Armada-Recorder pattern. Storage (locked
+      2026-09-24): same `app.db` as agents/tasks/keys — control-plane data,
+      owner-scoped, independent of any PAD lifecycle (survives agent
+      delete/rebuild), one backup covers all. Append-mostly growth is the
+      design; retention/pruning + Recorder distillation per R11 is the
+      maintenance); VERIFY lifecycle
+      tools (create/start/stop) + workspace tools (list/read/write) present
+      and correctly granted. Unit tests per tool.
+- [ ] Gate: full tool surface callable over live MCP + all test files green
+      individually + `docker restart paddock` clean (no boot throw).
 
-- [ ] B1. `task-runner.js`: `taskCapability` accepts cap objects; fix
-      `module.exports` (drop phantom `buildCommand`/`extractSummary`, export
-      `buildExecCommand`+`taskCapability`); `killTask` clears flush timer.
-- [ ] B2. `db.js`: `last_output_at` column + ALTER guard (owner_id pattern).
-- [ ] B3. `src/test/tasks.test.js` → plan-48 API (schema + driver-cap command
-      tests + codex-accepted/openclaw-rejected + heartbeat + extractors).
-      Gate: `tasks.test.js` + `mcp.test.js` green individually.
-- [ ] B4. `src/mcp.js`: `task_watch` + read bucket + `task_submit`
-      description (multi-driver). Tests for watch/terminal/wait + scoping.
-- [ ] B5. Live verify on real PADs + **H.3 resume research**: opencode/codex
-      session-continue round-trips, exact flags recorded in [48§H.3]. Its
-      outcome fixes Phase C's architecture — no dead flags either way.
+## Phase B — Playbook: the LLM's operating manual
 
-## Phase C — hands [48 Phase 4, primary feature]
+- [ ] B1. `llm-guide.js` becomes the direct-mode manual: decompose work;
+      push vs pool; poll loop (submit → watch/status → result); MANUAL steer
+      (cancel + resubmit with amended prompt carrying tail + new direction —
+      wasteful but functional v1 steering, token cost stated honestly);
+      lifecycle rules (start-auto, create-confirmed, sleep-wake, human-only
+      delete); memory discipline (read journal on arrival, write on decide).
+- [ ] B2. My-LLM onboarding artifact (system-prompt snippet/skill — [51§4]
+      item, pulled forward). No backend.
 
-- [ ] C1. `db.js` migration: `steering/steered_from/session_id/turn_count/
-      approval` columns.
-- [ ] C2. `task_steer` (note/stop/redirect; push resume-steer via
-      `detachChild` + same-row re-attach, resubmit fallback with
-      `steered_from` link; pull redirect flag) + `task_approve`
-      (+`needs_approval` submit flag; reject auto-appends redirect).
-      [48§H.2–H.3]
-- [ ] C3. Driver resume trio (`supportsResume/resumeCommand/sessionId`) ONLY
-      for drivers B5 proves; others ship without and take the fallback.
-- [ ] C4. Worker re-read contract in `llm-guide.js` + steer loop playbook.
-      Gate: [48§H.4] test list green + live steer demo (note → redirect →
-      resumed tail) on a real PAD.
+## Phase C — Prove it: my LLM drives a real run
 
-## Phase D — home UI [49 Phases 2–4 + plan 44 merged here, once]
+- [ ] C1. End-to-end over MCP on a real project: inspect → setup → dispatch
+      → poll → manual steer → collect → journal. Narrated step by step.
+- [ ] C2. Every gap found becomes a task; nothing advances until C1 is
+      green twice (two projects, ideally two different LLMs — the
+      model-independence proof from [51§2b], pulled forward).
 
-- [ ] D1. Create form: mode selector + per-mode fields/validation.
-- [ ] D2. Settings: show mode, guarded switches, copy-rebuild warnings,
-      orchestrator-assigned registry fields (read-only).
-- [ ] D3. Volume lifecycle: list/show/delete + orphan accounting.
-      Gate: browser-verify create + settings pages live.
+## Phase D — LATER: homes modes (old 49 + plan 44)
 
-## Phase E — runbook [50 Phases 1–2]
+Worktree/copy/volume backend + create/settings UI + volume lifecycle +
+nested-docker registry. Direct mode works on today's bind-create until then.
+[49§§0–8] holds the full design; [49§6] verification runs first inside this
+phase, not before Phase A.
 
-- [ ] E1. Bootstrap checklist in `llm-guide.js` (inspect → inventory →
-      devcontainer → start-or-propose → dispatch) with lifecycle laws as
-      checklist gates (never prose advice). Uses Blocks A–D only.
-- [ ] E2. Only the backend gaps E1 proves missing (scout path, inventory
-      filter, idempotency guard). Gate: live manager walkthrough on a
-      throwaway folder, narrated end to end (setup → dispatch → steer →
-      accept).
+## Phase E — LATER: machine steering + guardrails (old 48 Phases 4–5)
 
-## Phase F — guardrails [48 Phase 5]
+`task_steer`/`task_approve`/resume trio (turns manual resubmit-steer into
+one-call resume-steer — needs B5-style resume proof first), hooks/fences.
+[48§H–I] holds the design.
 
-- [ ] F1. `PADDOCK_TASK_PRE_SUBMIT` (fail-closed) + `PADDOCK_TASK_POST_COMPLETE`
-      (fire-and-forget) + pull-path claimed_by/agent_name mismatch warning.
-      Gate: refuse path, f&f logging, mismatch tests green.
+## Phase F — LATER: capstone (old 51)
 
-## Phase G — capstone [51]
-
-- [ ] G1. Conferral: fleet-MCP wiring with orchestrator grant on an ordinary
+- [ ] F1. Conferral: fleet-MCP wiring with orchestrator grant on an ordinary
       PAD + folder-assignment config ([51§1b]). No new agent type. UI: the
       "Make orchestrator" button on agent detail does this in one click
       (wires fleet MCP in + creates the config); "Remove" reverses it.
-- [ ] G2. THE TWO SURFACES (user-derived, 2026-09-24 — this is the setup):
+- [ ] F2. THE TWO SURFACES (user-derived, 2026-09-24 — this is the setup):
       (a) Fleet MCP (exists today: task_submit/watch/steer/approve/cancel…)
       gets wired INTO the orchestrator PAD so it can drive workers;
       (b) Orchestrator MCP (NEW: start_project/project_status/steer/approve/
@@ -144,16 +135,16 @@ this plan. Concretely:
       key. Namespace/grant split enforced server-side: a client key can
       never reach a worker tool. UI for (b): client keys listed where keys
       live today + per-key revoke; no new screen.
-- [ ] G3. My-LLM onboarding artifact ([51§4]) + omni-client bridges (thin,
+- [ ] F3. My-LLM onboarding artifact ([51§4]) + omni-client bridges (thin,
       stateless).
-- [ ] G4. Adversarial proving: law-breaking requests ("delete everything",
+- [ ] F4. Adversarial proving: law-breaking requests ("delete everything",
       "skip the gates") fail closed; continuation test with a DIFFERENT
       model than the starter. Gate: all fail-closed proofs pass.
 
-## Phase H — closings (each gated on explicit user confirmation)
+## Phase G — closings (each gated on explicit user confirmation)
 
-- [ ] H1. Plan 47 Phase 5 docs absorb (4/5 done; only docs remain).
-- [ ] H2. Plans 48/49/50/51 docs absorb into `docs/` per each plan's closing
+- [ ] G1. Plan 47 Phase 5 docs absorb (4/5 done; only docs remain).
+- [ ] G2. Plans 48/49/50/51 docs absorb into `docs/` per each plan's closing
       phase, then delete source files. Order: 48 → 49 → 50 → 51.
 
 ## Risk register (filed 2026-09-24 — full disclosure, user-ordered into decisions below)

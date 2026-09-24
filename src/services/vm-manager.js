@@ -1980,7 +1980,9 @@ async function updateAgent(name, { onLog = () => {}, onStep = () => {}, buildArg
     throw e;
   }
   onStep('recreate', 'end');
+  onStep('cleanup', 'start', 'docker image prune -f');
   await pruneDanglingImages(onLog);
+  onStep('cleanup', 'end');
 }
 
 /** Recreate a container with optional extras (the Settings "Recreate Container"
@@ -2034,7 +2036,9 @@ async function recreateAgent(name, { pull = false, reset = false, onLog = () => 
     throw e;
   }
   onStep('recreate', 'end');
+  onStep('cleanup', 'start', 'docker image prune -f');
   await pruneDanglingImages(onLog);
+  onStep('cleanup', 'end');
 }
 
 function existingServices() {
@@ -3700,29 +3704,26 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
       onStep('recreate', 'end');
     }
 
-    // ── 6b. post-create re-run (plan 41) — the script changed or the container
-    // was just recreated; re-execute it so the container reflects the current
-    // post-create. It lives in the build dir (bind-mounted at /build), so this
-    // is a plain docker exec — no rebuild.
-    if (postCreateChanged || buildRebuild) {
-      if (fs.existsSync(postCreateScriptPath(name))) {
-        const pcCmd = `docker exec ${userArgs.length ? userArgs.join(' ') + ' ' : ''}${name} /build/post-create.sh`;
-        onStep('post-create', 'start', pcCmd);
-        let ran = false;
-        for (let i = 0; i < 15; i++) {
-          try {
-            await runCmdStream('docker', ['exec', ...userArgs, name, path.join('/build', 'post-create.sh')], { onLog, timeout: 600000 });
-            ran = true;
-            break;
-          } catch {
-            if (i === 14) break;
-            onLog('system', `Post-create: container not ready yet (attempt ${i + 1}/15), waiting…`);
-            await new Promise(r => setTimeout(r, 1000));
-          }
+    // ── 6b. post-create re-run (plan 41) — every mutation above recreates the
+    // container, so run the persisted hook after every recreation. It lives in
+    // the build dir (bind-mounted at /build), so this is a plain docker exec.
+    if (fs.existsSync(postCreateScriptPath(name))) {
+      const pcCmd = `docker exec ${userArgs.length ? userArgs.join(' ') + ' ' : ''}${name} /build/post-create.sh`;
+      onStep('post-create', 'start', pcCmd);
+      let ran = false;
+      for (let i = 0; i < 15; i++) {
+        try {
+          await runCmdStream('docker', ['exec', ...userArgs, name, path.join('/build', 'post-create.sh')], { onLog, timeout: 600000 });
+          ran = true;
+          break;
+        } catch {
+          if (i === 14) break;
+          onLog('system', `Post-create: container not ready yet (attempt ${i + 1}/15), waiting…`);
+          await new Promise(r => setTimeout(r, 1000));
         }
-        if (!ran) throw new Error(`Post-create script did not run on container '${name}'`);
-        onStep('post-create', 'end');
       }
+      if (!ran) throw new Error(`Post-create script did not run on container '${name}'`);
+      onStep('post-create', 'end');
     }
 
     // ── 7. door reconcile (peer mode) ──

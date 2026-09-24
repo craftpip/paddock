@@ -60,8 +60,9 @@ Setup is idempotent and runs on every connect (`ensureTmuxSession`):
 2. **Shell choice** — `tmux new-session` runs `bash` when the image has it,
    falling back to the default shell otherwise (busybox-ash emits a doubled
    blank line on Ctrl+C; bash does not).
-3. **Colored PS1** — appended to `/root/.bashrc` (idempotent) because
-   tmux-created shells inherit the tmux server env, not the attach exec env.
+3. **Colored PS1** — appended to `/root/.bashrc` with portable `printf`
+   (idempotent) because tmux-created shells inherit the tmux server env, not
+   the attach exec env. The setup also repairs the older dash `echo -e` entry.
 4. **`/root/.tmux.conf`** — `set -ga terminal-overrides ',xterm-256color:smcup@:rmcup@'`
    strips the alternate-screen enter/exit from the attach terminal, so output
    lands on the normal screen and accumulates in the scrollback instead of
@@ -99,15 +100,17 @@ const hist = await runCmd('docker', [
   'exec', vmName, 'sh', '-lc',
   `tmux capture-pane -t ${session} -p -e -S -${TMUX_HISTORY}`,
 ]);
-ws.send(hist.stdout.replace(/\r?\n/g, '\r\n'));   // LF → CRLF, lines land at col 0
+const replay = hist.stdout.replace(/(?:\r?\n)+$/, '');
+if (replay) ws.send(replay.replace(/\r?\n/g, '\r\n')); // LF → CRLF, lines land at col 0
 ```
 
-`capture-pane -S` grabs the whole history + current screen; the attach repaint
-that follows redraws the same visible screen over it. If the pane is mid-TUI
-(alternate screen) there is no history to replay and the capture is just the
-current screen, which is still correct. The LF→CRLF conversion matters: xterm
-treats a bare LF as "move down, keep column", which renders replayed lines
-diagonally ("waterfall") instead of at column 0.
+Paddock checks tmux's `history_size` first. With no scrollback it skips capture
+entirely and lets the attach repaint draw the current screen; this avoids
+turning unused rows below the cursor into extra terminal lines. Otherwise,
+`capture-pane -S` grabs the history + current screen and Paddock drops trailing
+blank rows before replaying it. The LF→CRLF conversion matters: xterm treats a
+bare LF as "move down, keep column", which renders replayed lines diagonally
+("waterfall") instead of at column 0.
 
 ### Single-client policy
 

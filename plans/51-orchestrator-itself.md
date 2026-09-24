@@ -4,7 +4,7 @@
 started. Inputs: plan 48 (task mechanics + steering), plan 49 (agent homes),
 plan 50 (bootstrap runbook + lifecycle laws). Nothing here is verified
 against code yet.
-Build order: Block 6 (capstone, last). Master sequence: plan 48 “Build order”.
+Build order: plan 52 Phase F (LATER). Master sequence: plan 52.
 
 ## 1. The user's architecture (verbatim intent — this is the capstone)
 

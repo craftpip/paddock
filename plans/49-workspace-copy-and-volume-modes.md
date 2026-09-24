@@ -6,7 +6,7 @@ in this file is verified against code yet — every design claim carries a
 "verify" marker. Related: plan 44 (workspace card, Proposed), plan 27
 (persist toggle, Blocked/dropped — Docker cannot overlay `/`), plan 41
 (custom build commands), plan 24 (custom workspace).
-Build order: Block 0 (backend) + Block 3 (UI, merged with plan 44). Master sequence: plan 48 “Build order”.
+Build order: plan 52 Phase D (LATER). Master sequence: plan 52.
 
 ## 1. The user's mental model (confirmed back — this is correct)
 

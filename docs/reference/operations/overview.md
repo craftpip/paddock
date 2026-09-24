@@ -52,8 +52,9 @@ POST `/api/agents/:name/update` is async + streaming like create: returns `202 {
 
 Steps:
 1. **build** — `docker compose -f &lt;instance-compose&gt; build --pull &lt;name&gt;` (900s timeout). `--pull` redownloads the base image first, so a `:latest` tag gets a fresh copy, then rebuilds.
-2. **recreate** — `docker compose -f &lt;instance-compose&gt; up -d --no-deps --force-recreate &lt;name&gt;` (300s). This is the last step and restarts the container automatically; if it fails the old container is left running.
-3. **done** — "Done — container recreated" `system` line, registry re-discovered, `lifecycle/update` activity recorded.
+2. **recreate** — `docker compose -f &lt;instance-compose&gt; up -d --no-deps --force-recreate &lt;name&gt;` (300s). The container restarts automatically; if it fails the old container is left running.
+3. **post-create** — Runs the PAD's persisted post-create script, when configured. This runs after every recreation, including an image update.
+4. **done** — "Done — container recreated" `system` line, registry re-discovered, `lifecycle/update` activity recorded.
 
 ### Settings (docker access, network, workspace, volumes, ssh, ports)
 

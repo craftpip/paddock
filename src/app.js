@@ -373,7 +373,10 @@ async function ensureTmuxSession(vmName, session, cols, rows) {
   await runCmd(
     'docker',
     ['exec', vmName, 'sh', '-lc',
-      `grep -q '__PAD_PS1__' /root/.bashrc 2>/dev/null || echo -e "export PS1='\\[\\e[1;36m\\]\\u@\\h\\[\\e[0m\\]:\\w\\$ '\\n[ -w \"\${HOME}/.bash_history\" ] || HISTFILE=/tmp/pad_history  # __PAD_PS1__" >> /root/.bashrc`],
+      // Debian's dash does not support echo -e and wrote a literal `-e` into
+      // older .bashrc files. Remove that broken managed line before adding the
+      // portable printf form, leaving every user-owned line untouched.
+      `grep -v '^[-]e export PS1=' /root/.bashrc 2>/dev/null > /tmp/pad-bashrc && mv /tmp/pad-bashrc /root/.bashrc; grep -q '__PAD_PROMPT_V2__' /root/.bashrc 2>/dev/null || printf '%s\\n' "export PS1='\\[\\e[1;36m\\]\\u@\\h\\[\\e[0m\\]:\\w\\$ '  # __PAD_PROMPT_V2__" >> /root/.bashrc; grep -q '__PAD_PS1__' /root/.bashrc 2>/dev/null || printf '%s\\n' '[ -w "\${HOME}/.bash_history" ] || HISTFILE=/tmp/pad_history  # __PAD_PS1__' >> /root/.bashrc`],
     { timeout: 15000, check: false }
   );
   // tmux attach switches the client to the alternate screen, which has no
@@ -2831,20 +2834,32 @@ wss.on('connection', async (ws, req) => {
     // Fresh connection → replay tmux's persistent scrollback into the new
     // xterm first, so the terminal behaves like a real one: output from before
     // this connection (reload, PAD switch, reconnect) is still scrollable.
-    // capture-pane -S grabs the whole history + current screen; the attach
-    // repaint that follows redraws the same visible screen over it. If the
-    // pane is mid-TUI (alternate screen) there is no history to replay and the
-    // capture is just the current screen, which is still correct.
+    // With no scrollback, capture-pane contains only the current screen plus
+    // unused rows below the cursor. The tmux attach repaint already provides
+    // that screen, so replaying it would make a refresh look like blank lines
+    // were entered after the prompt.
     try {
-      const hist = await runCmd(
+      const history = await runCmd(
         'docker',
-        ['exec', ...termUserArgs(vmName), vmName, 'sh', '-lc', `tmux capture-pane -t ${session} -p -e -S -${TMUX_HISTORY} 2>/dev/null`],
-        { timeout: 20000, check: false }
+        ['exec', ...termUserArgs(vmName), vmName, 'tmux', 'display-message', '-p', '-t', session, '#{history_size}'],
+        { timeout: 15000, check: false }
       );
-      if (hist.code === 0 && hist.stdout && ws.readyState === ws.OPEN) {
-        // capture-pane emits LF-only lines. xterm needs CRLF to return to
-        // column zero; otherwise each restored line starts after the last.
-        ws.send(hist.stdout.replace(/\r?\n/g, '\r\n'));
+      const historySize = Math.max(0, parseInt(history.stdout, 10) || 0);
+      if (historySize > 0) {
+        const hist = await runCmd(
+          'docker',
+          ['exec', ...termUserArgs(vmName), vmName, 'sh', '-lc', `tmux capture-pane -t ${session} -p -e -S -${TMUX_HISTORY} 2>/dev/null`],
+          { timeout: 20000, check: false }
+        );
+        if (hist.code === 0 && hist.stdout && ws.readyState === ws.OPEN) {
+          // capture-pane emits LF-only lines. xterm needs CRLF to return to
+          // column zero; otherwise each restored line starts after the last.
+          // It also includes every unused row below the cursor. Replaying those
+          // viewport blanks as history makes reconnects look like random Enter
+          // presses after the prompt, so preserve content but drop that padding.
+          const replay = hist.stdout.replace(/(?:\r?\n)+$/, '');
+          if (replay) ws.send(replay.replace(/\r?\n/g, '\r\n'));
+        }
       }
     } catch (err) {
       console.error('[wss/terminal] scrollback replay error:', err.message);

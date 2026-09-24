@@ -22,6 +22,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const srcFile = join(root, 'node_modules/@xterm/xterm/src/common/InputHandler.ts')
 const mjsFile = join(root, 'node_modules/@xterm/xterm/lib/xterm.mjs')
 const umdFile = join(root, 'node_modules/@xterm/xterm/lib/xterm.js')
+const cssFile = join(root, 'node_modules/@xterm/xterm/css/xterm.css')
 
 const MARKER = 'PAD PATCH: when the scroll region starts at the top of the screen'
 const START = '  public scrollUp(params: IParams): boolean {'
@@ -55,6 +56,9 @@ const libTargets = [
   { file: mjsFile, from: compiledOriginal('i'), to: compiledPatched('i') },
   { file: umdFile, from: compiledOriginal('t'), to: compiledPatched('t') },
 ]
+
+const screenRule = '.xterm .xterm-screen {\n    position: relative;\n}'
+const paddedScreenRule = '.xterm .xterm-screen {\n    position: relative;\n    padding: 9px;\n}'
 
 let failures = 0
 
@@ -135,6 +139,23 @@ if (src) {
 
 // --- Compiled lib bundles (what Vite actually builds) ----------------------
 for (const target of libTargets) patchCompiled(target)
+
+// --- Terminal screen padding ------------------------------------------------
+try {
+  const css = readFileSync(cssFile, 'utf8')
+  if (css.includes(paddedScreenRule)) {
+    console.log(`[patch-xterm] ${cssFile}: screen padding already patched, nothing to do.`)
+  } else if (!css.includes(screenRule)) {
+    console.error(`[patch-xterm] ${cssFile}: screen rule not found in expected shape; aborting without changes.`)
+    failures++
+  } else {
+    writeFileSync(cssFile, css.replace(screenRule, paddedScreenRule), 'utf8')
+    console.log(`[patch-xterm] ${cssFile}: added 9px terminal screen padding.`)
+  }
+} catch (err) {
+  console.error(`[patch-xterm] cannot read ${cssFile}: ${err.message}`)
+  failures++
+}
 
 if (failures > 0) {
   console.error(`[patch-xterm] ${failures} target(s) failed.`)

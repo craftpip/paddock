@@ -6,7 +6,7 @@ setup, plan 48 (task queue + steering) for dispatch, plan 41 (devcontainer
 generate) for devcontainer handling. Nothing here is verified against the
 current MCP/lifecycle surface yet — every tool name below carries a verify
 marker.
-Build order: Block 4 (runbook), needs Blocks 0–3. Master sequence: plan 48 “Build order”.
+Build order: lifecycle laws live in plan 52 governing laws; runbook reference for plan 52 Phases B–C. Master sequence: plan 52.
 
 ## 1. The user's requirement (kept intact)
 
