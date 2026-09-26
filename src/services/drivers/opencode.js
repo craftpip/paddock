@@ -29,6 +29,21 @@ const OPENCODE = {
   configFile: 'opencode.json',
   tuiCommand: 'opencode',
 
+  /** Mission (plan 53): this is a coding model, so it gets Mission projects and
+   *  sessions. The personal agents (openclaw, picoclaw, hermes) have no `mission`
+   *  key and are rejected by the service, not just hidden in the UI. */
+  mission: { supported: true },
+
+  /** How the Mission page launches a TUI inside a session's tmux pane. `fresh`
+   *  reuses tuiCommand so the two can never drift. The session's tmux pane is
+   *  created with `-c <project folder>`, so every command already runs there —
+   *  no path flag is needed (and `opencode` has no `--cwd` to invent one with). */
+  tuiLaunch: {
+    fresh: () => OPENCODE.tuiCommand,
+    resume: ({ sessionId }) => `${OPENCODE.tuiCommand} -s ${sessionId}`,
+    continueLatest: () => `${OPENCODE.tuiCommand} -c`,
+  },
+
   /** No gateway/onboard flow — opencode config is created on first run. */
   setupSteps: [],
 

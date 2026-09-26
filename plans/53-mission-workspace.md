@@ -1,12 +1,22 @@
 # Plan 53 — Mission page: 3-column project → session → agent TUI workspace (the orchestration UI)
 
-## Status: Proposed (2026-09-27) — design + live session/resume audit done, **0/9 phases
-built** (Phase 0–8). Nothing implemented yet; every code claim below was read out of
-the tree (or verified live in a real PAD — see §8). **Scope widened 2026-09-27**: the
+## Status: In progress (2026-09-27) — design + live session/resume audit done, **1/9
+phases built** (Phase 0–8). **Phase 0 (store + validation) is DONE and verified
+live** (2026-09-27): `mission_projects` / `mission_sessions` tables, the
+`src/services/mission.js` store, the `mission.supported` driver flag on the three
+coding drivers, and the `/api/mission/*` CRUD routes — 19/19 store tests green
+(`src/test/mission.test.js`) plus a live curl round-trip (create project on
+opencode/codex/claude, `mission_unsupported_agent` on picoclaw/hermes/openclaw,
+404 on a ghost agent, CSRF enforced, agent-origin session, solo lock, delete
+cascade). **Next: Phase 1** (tmux cwd + `tuiLaunch` actually launching the TUI, so
+a session goes live). Scope widened 2026-09-27: the
 user identified this page as the user-facing UI for the MCP agent orchestration
 (plan 52) and as **the shared workplace for the human and the agent** — see §1b
 (agent-visible surface = Phase 7) and §1a (the same flow for both sides,
 projects = agent + folder many-per-agent, only the three coding models).
+**"Do task one after the other" settled 2026-09-27 (option A):** no server-side
+runner — the LLM appends the items to a per-project checklist and works them one at
+a time in a visible session (Phase 8).
 **Headless work retired 2026-09-27** ("remove task submit"): a session is the only
 unit of work, and **plan 52 was rewritten around `mission_*` sessions** the same day
 — 52 owns keys/grants/conferral/playbook/proof, this file owns the surface.
@@ -441,11 +451,16 @@ src/client/src/stores/mission.js                  zustand store (mirror stores/a
 
 Each phase is independently shippable and ends verified in the browser.
 
-- [ ] **Phase 0 — tables + service skeleton.** `mission_projects` /
+- [x] **Phase 0 — tables + service skeleton.** `mission_projects` /
       `mission_sessions` in `db.js:migrate`, `src/services/mission.js` with
       CRUD + ownership helpers, routes wired, no UI. Verify: `curl` the CRUD
       round-trip; `docker restart paddock`; `node --test test/mission.test.js`
       (new file, run individually per the house rule).
+      **Done 2026-09-27** — 19/19 tests green; live curl round-trip proven
+      (coding agents accepted, personal agents rejected, 404/CSRF/cascade
+      checked). Deliverable split: the `tuiLaunch` object and the
+      `mission.supported` flag landed here too (they are the eligibility gate
+      `mission.js` needs), so Phase 1 is only the tmux half.
 - [ ] **Phase 1 — `ensureTmuxSession` cwd + `tuiLaunch` + the `mission` flag.**
       `-c <cwd>` on `new-session`, `send-keys` launch, unit test for the argv
       shape; `tuiLaunch` on the three coding drivers only, `mission: {supported}`
@@ -499,15 +514,24 @@ Each phase is independently shippable and ends verified in the browser.
       (h) `mission_send` on a **solo-locked** session returns
       `session is solo-locked by <user> — unlock it on the Mission page` and types
       nothing.
-- [ ] **Phase 8 — project + session memory/journal (plan 52's context, rekeyed).**
-      With the headless task path retired, the LLM still needs somewhere to keep
-      what it learned — so 52's memory/journal tools get rekeyed from `task_id` to
-      `project_id` (+ optional `session_id`): notes read/write, run-journal
-      append/read, both in `app.db` beside the mission tables, scoped by the same
-      PAD ownership rule. Verify: from a real agent, write a note against a
-      project, restart the agent, and have it read the note back before working
-      (the "rehydrate and continue" loop from 52, now anchored on the project
-      instead of a task row).
+- [ ] **Phase 8 — project memory + the ordered checklist (how the LLM works
+      "one after the other").** Two small tables beside the mission ones:
+      `mission_notes (id, project_id, text, created_by, created_at)` and
+      `mission_checklist (id, project_id, seq, text, status pending|done,
+      done_at, created_at)`. Four tools, deliberately: `mission_notes(project_id?)`
+      (read — notes **and** checklist in one call), `mission_note_add`,
+      `mission_todo_add(project_id, text)`, `mission_todo_done(todo_id)`. The
+      first two are `read`, the writers `exec`.
+      **The flow this buys (user, 2026-09-27 — option A):** you say "do A, then
+      B, then C"; the LLM appends A/B/C to the checklist, then works them **one
+      at a time in one visible session**, ticking each off as it goes. The
+      checklist is what survives a closed chat ("what's left"), not a runner.
+      No separate "run journal" table: the session *is* the transcript (tmux
+      scrollback + the CLI's own store), so a parallel journal would duplicate
+      it. Nothing here runs in the background. Verify: from a real agent, add
+      three items, work the first, and prove (a) the other two are still listed,
+      (b) ticking one off is reflected in the page, (c) a fresh LLM instance
+      reads the checklist first and continues with the next item.
 Phases 7–8 are additive to a working page — the page ships and is useful
 without them. Nothing in Phases 0–6 depends on plan 52 any more: the headless
 task path was retired and 52 was rewritten around sessions (2026-09-27). The one

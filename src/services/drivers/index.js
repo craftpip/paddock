@@ -17,8 +17,10 @@ function getDriver(type) {
 }
 
 /** All known drivers as [{ type, label, setupSteps, workspaceCapability,
- *  workspaceDir }] — feeds the CreateAgent select, the commands endpoint, and
- *  the create-form Workspace card (plan 24). */
+ *  workspaceDir, mission }] — feeds the CreateAgent select, the commands
+ *  endpoint, and the create-form Workspace card (plan 24). `mission.supported`
+ *  is the Mission page's agent filter (plan 53): true only for the coding
+ *  models, so the picker never has to hardcode a list. */
 function listDrivers() {
   return Object.values(drivers).map((d) => ({
     type: d.type,
@@ -27,6 +29,7 @@ function listDrivers() {
     workspaceCapability: d.workspaceCapability || 'fixed',
     workspaceDir: d.workspaceDir || '',
     dataDir: d.dataDir || '',
+    mission: { supported: !!(d.mission && d.mission.supported) },
   }));
 }
 

@@ -39,8 +39,11 @@ tools that let it manage machines remain `pad_*`.
   `pad_stop_agent` / `pad_restart_agent` / `pad_update` / `pad_recreate` /
   `pad_delete_agent` / `pad_health` / `pad_settings_get` / `pad_exec` /
   `pad_config_get` / `pad_workspace_*`.
-- **Context (53 Phase 8):** notes + run-journal read/write, keyed to
-  `project_id` (+ optional `session_id`).
+- **Context (53 Phase 8):** per-project notes + an **ordered checklist** — the
+  LLM appends "do A, then B, then C" as items and works them one at a time in a
+  visible session, ticking each off. No server-side runner: the checklist is
+  "what's left" across a closed chat, not a background worker (option A, user
+  2026-09-27).
 - **Not used by the agent:** the whole `task_*` family. Retired — see §3.
 
 Grant buckets are unchanged: `read` (the two list/read tools), `create`
@@ -137,10 +140,13 @@ The gate for everything: the agent can only do what its key says.
 ## Phase B — Playbook: the LLM's operating manual
 
 - [ ] B1. `llm-guide.js` becomes the session manual: the four-step flow (agent →
-      project → session → work); use an existing session when one fits, else open
+      project → session → work); **work the checklist in order, one item at a
+      time, in a visible session, ticking each off** (53 Phase 8) — that is how
+      "do A then B then C" is executed, and the checklist (not a runner) is what
+      survives a closed chat; use an existing session when one fits, else open
       one; read `mission_sessions` before typing into anything you didn't start;
-      respect solo locks; memory discipline (read notes/journal on arrival, write
-      on decide); never start work the user can't see.
+      respect solo locks; memory discipline (read notes + checklist on arrival,
+      write on decide); never start work the user can't see.
 - [ ] B2. Onboarding artifact (system-prompt snippet / skill, [51§4]) rewritten
       for the session model. No backend.
 

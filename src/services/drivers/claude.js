@@ -29,6 +29,18 @@ const CLAUDE = {
   configFile: 'settings.json',
   tuiCommand: 'claude',
 
+  /** Mission (plan 53): coding model — gets projects and sessions. */
+  mission: { supported: true },
+
+  /** TUI launch for a Mission session. Note claude's `-c` is directory-scoped:
+   *  a project at a new folder legitimately has no "last conversation", so
+   *  `continueLatest` is only meaningful for a folder claude has worked in. */
+  tuiLaunch: {
+    fresh: () => CLAUDE.tuiCommand,
+    resume: ({ sessionId }) => `${CLAUDE.tuiCommand} -r ${sessionId}`,
+    continueLatest: () => `${CLAUDE.tuiCommand} -c`,
+  },
+
   /** No gateway/onboard flow — claude config is created on first run. */
   setupSteps: [],
 

@@ -30,6 +30,19 @@ const CODEX = {
   configFormat: 'toml',
   tuiCommand: 'codex',
 
+  /** Mission (plan 53): coding model — gets projects and sessions. */
+  mission: { supported: true },
+
+  /** TUI launch for a Mission session. The session's tmux pane is created with
+   *  `-c <project folder>`, so resume/continue already run in the right place;
+   *  `fresh` passes -C explicitly because that is codex's own documented way to
+   *  set the working dir. */
+  tuiLaunch: {
+    fresh: ({ cwd } = {}) => (cwd ? `${CODEX.tuiCommand} -C ${cwd}` : CODEX.tuiCommand),
+    resume: ({ sessionId }) => `${CODEX.tuiCommand} resume ${sessionId}`,
+    continueLatest: () => `${CODEX.tuiCommand} resume --last`,
+  },
+
   /** No gateway/onboard flow — codex config is created on first run. */
   setupSteps: [],
 

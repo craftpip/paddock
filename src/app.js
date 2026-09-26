@@ -21,6 +21,7 @@ const jobLog = require('./services/job-log');
 const apiKeys = require('./services/api-keys');
 const containerHealth = require('./services/container-health');
 const logStore = require('./services/log-store');
+const mission = require('./services/mission');
 const ownership = require('./services/ownership');
 const { USER_UID, USER_GID } = ownership;
 const { getDb } = require('./services/db');
@@ -2351,6 +2352,175 @@ app.delete('/api/agents/:name/terminal-sessions/:id', async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── API: Mission (plan 53) ─────────────────────────────────────────────────
+// A project is an (agent, folder) pair; a session is the only unit of work —
+// one live tmux session per row running the agent's TUI in the project's folder,
+// typed into by the human and the agent alike. Phase 0: the store + validation.
+// The tmux half (launch TUI / send keys / capture) lands in Phase 1, so the CRUD
+// surface is testable on its own.
+
+/** PAD names the caller may touch. Admins get null (= no filter). */
+function missionAllowedAgents(req) {
+  if (req.session.role === 'admin') return null;
+  return getDb().prepare('SELECT name FROM agents WHERE owner_id = ?').all(req.session.userId).map((r) => r.name);
+}
+
+/** Load a project the caller is allowed to see, or answer 403/404 for them. */
+function missionProject(req, res) {
+  let project;
+  try {
+    project = mission.getProject(req.params.id);
+  } catch (e) {
+    res.status(e.status || 400).json({ error: e.message, code: e.code });
+    return null;
+  }
+  if (!canTouchAgent(req, project.agent_name)) {
+    res.status(403).json({ error: 'Access denied' });
+    return null;
+  }
+  return project;
+}
+
+/** A session plus its project, access-checked. Returns { session, project }. */
+function missionSession(req, res) {
+  let session;
+  try {
+    session = mission.getSession(req.params.id);
+  } catch (e) {
+    res.status(e.status || 400).json({ error: e.message, code: e.code });
+    return null;
+  }
+  let project;
+  try {
+    project = mission.getProject(session.project_id);
+  } catch (e) {
+    res.status(e.status || 400).json({ error: e.message, code: e.code });
+    return null;
+  }
+  if (!canTouchAgent(req, project.agent_name)) {
+    res.status(403).json({ error: 'Access denied' });
+    return null;
+  }
+  return { session, project };
+}
+
+function canTouchAgent(req, agentName) {
+  if (req.session.role === 'admin') return true;
+  const row = getDb().prepare('SELECT owner_id FROM agents WHERE name = ?').get(agentName);
+  return !!row && row.owner_id === req.session.userId;
+}
+
+/** Errors from the service carry a machine code the UI and the LLM both branch
+ *  on (mission_unsupported_agent, mission_session_locked, …). */
+function missionFail(res, e) {
+  const status = e.status || 400;
+  res.status(status).json({ error: e.message, code: e.code || 'mission_error' });
+}
+
+app.get('/api/mission/projects', (req, res) => {
+  try {
+    res.json({ projects: mission.listProjects({ agent: req.query.agent || '', agents: missionAllowedAgents(req) }) });
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+app.post('/api/mission/projects', csrfCheck, (req, res) => {
+  try {
+    const project = mission.createProject({
+      name: req.body.name,
+      agent: req.body.agent,
+      folder: req.body.folder,
+      createdBy: req.session.userId || null,
+    });
+    if (!canTouchAgent(req, project.agent_name)) {
+      mission.deleteProject(project.id);
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    res.json({ project });
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+app.get('/api/mission/projects/:id', (req, res) => {
+  const project = missionProject(req, res);
+  if (!project) return;
+  try {
+    res.json({ project, sessions: mission.listSessions({ projectId: project.id }) });
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+app.patch('/api/mission/projects/:id', csrfCheck, (req, res) => {
+  const project = missionProject(req, res);
+  if (!project) return;
+  try {
+    res.json({ project: mission.updateProject(project.id, { name: req.body.name, folder: req.body.folder }) });
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+app.delete('/api/mission/projects/:id', csrfCheck, (req, res) => {
+  const project = missionProject(req, res);
+  if (!project) return;
+  try {
+    // Phase 1 kills the project's tmux sessions here, before the rows go, so a
+    // delete can never leave an orphan TUI running in a PAD.
+    mission.deleteProject(project.id);
+    res.json({ ok: true });
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+app.get('/api/mission/projects/:id/sessions', (req, res) => {
+  const project = missionProject(req, res);
+  if (!project) return;
+  try {
+    res.json({ sessions: mission.listSessions({ projectId: project.id }) });
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+app.post('/api/mission/projects/:id/sessions', csrfCheck, (req, res) => {
+  const project = missionProject(req, res);
+  if (!project) return;
+  try {
+    // Phase 0 stores the row; Phase 1 creates the tmux session and launches the
+    // TUI here, and a `live` flag joins the response.
+    const session = mission.createSession(project.id, { label: req.body.label, origin: req.body.origin });
+    res.json({ session });
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+app.patch('/api/mission/sessions/:id', csrfCheck, (req, res) => {
+  const found = missionSession(req, res);
+  if (!found) return;
+  try {
+    res.json({ session: mission.updateSession(found.session.id, { label: req.body.label, locked: req.body.locked }) });
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+app.delete('/api/mission/sessions/:id', csrfCheck, (req, res) => {
+  const found = missionSession(req, res);
+  if (!found) return;
+  try {
+    // Phase 1 kills the tmux session before the row goes.
+    mission.deleteSession(found.session.id);
+    res.json({ ok: true });
+  } catch (e) {
+    missionFail(res, e);
   }
 });
 
