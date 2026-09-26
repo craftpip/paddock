@@ -1,15 +1,19 @@
 # Plan 53 — Mission page: 3-column project → session → agent TUI workspace (the orchestration UI)
 
-## Status: In progress (2026-09-27) — design + live session/resume audit done, **1/9
-phases built** (Phase 0–8). **Phase 0 (store + validation) is DONE and verified
-live** (2026-09-27): `mission_projects` / `mission_sessions` tables, the
-`src/services/mission.js` store, the `mission.supported` driver flag on the three
-coding drivers, and the `/api/mission/*` CRUD routes — 19/19 store tests green
-(`src/test/mission.test.js`) plus a live curl round-trip (create project on
-opencode/codex/claude, `mission_unsupported_agent` on picoclaw/hermes/openclaw,
-404 on a ghost agent, CSRF enforced, agent-origin session, solo lock, delete
-cascade). **Next: Phase 1** (tmux cwd + `tuiLaunch` actually launching the TUI, so
-a session goes live). Scope widened 2026-09-27: the
+## Status: In progress (2026-09-27) — design + live session/resume audit done, **2/9
+phases built** (Phase 0–8). **Phase 0 (store + validation) and Phase 1 (live
+sessions) are DONE and verified live** (2026-09-27): `mission_projects` /
+`mission_sessions` tables, the `src/services/mission.js` store, the
+`mission.supported` driver flag on the three coding drivers, the
+`/api/mission/*` routes, and — Phase 1 — `src/services/pad-tmux.js` (the shared
+tmux layer app.js now delegates to) with `startSession` / `relaunchTui` /
+`sendText` / `screen` / `state` / `closeSession`. 38 tests green
+(`src/test/mission.test.js` 19, `src/test/pad-tmux.test.js` 19) plus live
+curl rounds: a real opencode TUI opened in a project folder, a prompt typed
+through `send-keys` got answered, solo lock refused writes but not reads, close
+killed the tmux session, and the refactored terminal path was regression-checked
+in a browser. **Next: Phase 2** (the 3-column page skeleton). Scope widened
+2026-09-27: the
 user identified this page as the user-facing UI for the MCP agent orchestration
 (plan 52) and as **the shared workplace for the human and the agent** — see §1b
 (agent-visible surface = Phase 7) and §1a (the same flow for both sides,
@@ -461,12 +465,31 @@ Each phase is independently shippable and ends verified in the browser.
       checked). Deliverable split: the `tuiLaunch` object and the
       `mission.supported` flag landed here too (they are the eligibility gate
       `mission.js` needs), so Phase 1 is only the tmux half.
-- [ ] **Phase 1 — `ensureTmuxSession` cwd + `tuiLaunch` + the `mission` flag.**
+- [x] **Phase 1 — `ensureTmuxSession` cwd + `tuiLaunch` + the `mission` flag.**
       `-c <cwd>` on `new-session`, `send-keys` launch, unit test for the argv
       shape; `tuiLaunch` on the three coding drivers only, `mission: {supported}`
       on all six (false for openclaw/picoclaw/hermes). Verify live: `pad_exec` a
       manual `tmux new-session -d -s probe -c /tmp && tmux send-keys …`
       round-trip, then the API.
+      **Done 2026-09-27.** The tmux primitives moved into
+      `src/services/pad-tmux.js` (app.js delegates; `mcp.js` must not require
+      app.js), and `mission.js` grew the live half: `startSession`,
+      `relaunchTui`, `sendText`, `screen`, `state`, `withLive` (one tmux call
+      per PAD, not two per session), `closeSession`. `src/test/pad-tmux.test.js`
+      pins the argv AND the exec options (19 tests) — the options check exists
+      because a bare-number timeout vs an options object only breaks against
+      real docker. Live-proven on `pad-opencode-proj`: a session opened a real
+      opencode TUI in `/www2/paddock`, a prompt typed through `send-keys -l`
+      got answered, `relaunch` refused while the TUI ran and worked after
+      `/exit`, the solo lock refused `mission_send` but not reads, close killed
+      the tmux session and dropped the row, and the refactored **terminal path
+      was regression-checked in the browser** (attach, typed `e`, got
+      `command not found`, scrollback replays on reload).
+      **Found + fixed live:** `tmux new-session -c <missing>` does NOT fail — it
+      silently starts the pane in the PARENT, so the agent ran in `/www1` when
+      asked for `/www1/craftpip`. `padTmux.folderExists` (`test -d`, quoted)
+      now gates every start; a missing folder is refused with
+      `mission_folder_missing` before any row or tmux session exists.
 - [ ] **Phase 2 — the page skeleton: 3 columns, empty states, resizable.**
       `Splitter.jsx`, nav link, route, no data. Verify in the browser: empty
       copy renders, both splitters drag, widths survive a reload.

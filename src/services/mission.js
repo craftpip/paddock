@@ -3,6 +3,7 @@ const path = require('path');
 
 const { getDb } = require('./db');
 const drivers = require('./drivers');
+const padTmux = require('./pad-tmux');
 
 // Mission (plan 53): projects are (agent, folder) pairs, and a session is the
 // only unit of work — one live tmux session per row, running the agent's TUI in
@@ -253,6 +254,167 @@ function touchSession(id) {
   getDb().prepare("UPDATE mission_sessions SET last_seen_at = ? WHERE id = ?").run(new Date().toISOString(), String(id));
 }
 
+// ─── Live sessions (the tmux half) ──────────────────────────────────────────
+
+/** A stopped PAD cannot host a session. The agents row is a cheap pre-check for
+ *  a message the user can act on; the exec below is the real authority (the
+ *  row can be stale). */
+function assertPadRunning(agentName) {
+  const row = agentRow(agentName);
+  if (row.status !== 'running') {
+    throw new MissionError('mission_agent_stopped', `${agentName} is not running — start it before opening a session`, 409);
+  }
+  return row;
+}
+
+function sessionTarget(sessionId) {
+  const session = getSession(sessionId);
+  const project = getProject(session.project_id);
+  const driver = assertMissionAgent(project.agent_type);
+  return { session, project, driver, vmName: project.agent_name };
+}
+
+/** Open a session and launch the agent's TUI into it.
+ *
+ *  Order matters: the tmux session is created rooted at the project's folder and
+ *  only then is the TUI typed in, so the agent starts in the folder the user
+ *  picked. A row whose PAD or folder turns out to be unusable is rolled back —
+ *  never leave a session row that can only ever be dead.
+ *
+ *  There is no headless variant: the TUI is launched because the whole point is
+ *  that the work is visible. */
+async function startSession(projectId, { label = '', origin = 'human', cols = 0, rows = 0 } = {}) {
+  const project = getProject(projectId);
+  const driver = assertMissionAgent(project.agent_type);
+  assertPadRunning(project.agent_name);
+  if (!project.folder) {
+    throw new MissionError('mission_bad_folder', 'This project has no folder to open a session in');
+  }
+  // The folder must exist INSIDE the PAD, checked before anything is created:
+  // tmux does not fail on a missing `-c` directory, it quietly starts the pane
+  // in the parent instead — so without this the agent would work in a folder
+  // the user never chose, and never find out.
+  if (!(await padTmux.folderExists(project.agent_name, project.folder))) {
+    throw new MissionError(
+      'mission_folder_missing',
+      `${project.folder} does not exist inside ${project.agent_name} — pick a folder the agent can see`,
+      409
+    );
+  }
+  const session = createSession(project.id, { label, origin });
+  try {
+    await padTmux.createSession(project.agent_name, session.tmux_id, { cwd: project.folder, cols, rows });
+    await padTmux.sendCommand(project.agent_name, session.tmux_id, driver.tuiLaunch.fresh({ cwd: project.folder }));
+  } catch (e) {
+    // A launch that never happened must not leave a row behind.
+    try { await padTmux.killSession(project.agent_name, session.tmux_id); } catch {}
+    deleteSession(session.id);
+    throw e instanceof MissionError ? e : new MissionError('mission_session_start_failed', e.message, 500);
+  }
+  const state = await padTmux.paneState(project.agent_name, session.tmux_id);
+  return { session: getSession(session.id), state };
+}
+
+/** Re-launch the TUI in a session whose TUI exited (the pane dropped back to
+ *  the shell). Refuses when a TUI is already running — retyping the command
+ *  would start a second conversation in the same pane. */
+async function relaunchTui(sessionId) {
+  const { session, project, driver, vmName } = sessionTarget(sessionId);
+  const state = await padTmux.paneState(vmName, session.tmux_id);
+  if (!state.live) {
+    throw new MissionError('mission_session_dead', 'This session is gone — restart it to get a fresh TUI', 409);
+  }
+  if (state.tuiAlive) {
+    throw new MissionError('mission_tui_already_running', 'That session is already running its agent', 409);
+  }
+  await padTmux.sendCommand(vmName, session.tmux_id, driver.tuiLaunch.fresh({ cwd: project.folder }));
+  return { session: getSession(session.id), state: await padTmux.paneState(vmName, session.tmux_id) };
+}
+
+/** Type into a live session. The one writer path for the agent (mission_send)
+ *  AND the API, so the solo lock is honoured in exactly one place. */
+async function sendText(sessionId, text) {
+  const { session, vmName } = sessionTarget(sessionId);
+  assertNotLocked(session);
+  const body = String(text || '');
+  if (!body.trim()) throw new MissionError('mission_empty_message', 'Nothing to send');
+  if (!(await padTmux.hasSession(vmName, session.tmux_id))) {
+    throw new MissionError('mission_session_dead', 'This session is gone — restart it to get a fresh TUI', 409);
+  }
+  const sent = await padTmux.sendText(vmName, session.tmux_id, body);
+  touchSession(session.id);
+  return { session: getSession(session.id), sent };
+}
+
+/** The pane's visible text — what the LLM reads to see what happened. */
+async function screen(sessionId, lines = 40) {
+  const { session, vmName } = sessionTarget(sessionId);
+  const captured = await padTmux.captureScreen(vmName, session.tmux_id, lines);
+  const state = await padTmux.paneState(vmName, session.tmux_id);
+  return { session, state, screen: captured.text, live: captured.live };
+}
+
+/** live / tuiAlive / command / cwd for one session, for the page's badges and
+ *  its Relaunch-TUI vs Restart decision. */
+async function state(sessionId) {
+  const { session, vmName } = sessionTarget(sessionId);
+  return { session, state: await padTmux.paneState(vmName, session.tmux_id) };
+}
+
+/** liveness for a list of sessions on one PAD, batched into a single tmux
+ *  call by the route (see listProjects' isLive seam). */
+async function statesFor(vmsAndSessions) {
+  const out = [];
+  for (const { vmName, session } of vmsAndSessions) {
+    out.push({ session, state: await padTmux.paneState(vmName, session.tmux_id) });
+  }
+  return out;
+}
+
+/** Stamp `live` on every session of every project, at one tmux call per PAD
+ *  (`list-sessions`) rather than two per session (`paneState`). A list page
+ *  with 20 sessions across 4 PADs is 4 execs, not 40. Deliberately only `live`:
+ *  whether a TUI is running inside a live session is one call per session and
+ *  the page asks for it when it opens that session. */
+async function withLive(projects) {
+  const byPad = new Map();
+  for (const p of projects) {
+    if (!byPad.has(p.agent_name)) byPad.set(p.agent_name, new Set());
+  }
+  for (const [vmName] of byPad) {
+    try {
+      const rows = await padTmux.listSessions(vmName);
+      byPad.set(vmName, new Set(rows.map((r) => r.name)));
+    } catch {
+      byPad.set(vmName, new Set());
+    }
+  }
+  for (const p of projects) {
+    const names = byPad.get(p.agent_name) || new Set();
+    p.sessions = (p.sessions || []).map((s) => ({ ...s, live: names.has(s.tmux_id) }));
+    p.liveCount = p.sessions.filter((s) => s.live).length;
+  }
+  return projects;
+}
+
+/** Stamp `live` on a plain session list (same one-call-per-PAD trick). */
+async function withLiveSessions(sessions, agentName) {
+  if (!sessions.length) return sessions;
+  let names = new Set();
+  try {
+    names = new Set((await padTmux.listSessions(agentName)).map((r) => r.name));
+  } catch {}
+  return sessions.map((s) => ({ ...s, live: names.has(s.tmux_id) }));
+}
+
+/** Stop a session for good: kill the tmux session first, then drop the row, so
+ *  a delete never leaves a TUI running in a PAD. */
+async function closeSession(sessionId) {
+  const { session, vmName } = sessionTarget(sessionId);
+  await padTmux.killSession(vmName, session.tmux_id);
+  return deleteSession(session.id);
+}
+
 module.exports = {
   MissionError,
   supportedTypes,
@@ -271,4 +433,13 @@ module.exports = {
   assertNotLocked,
   deleteSession,
   touchSession,
+  startSession,
+  relaunchTui,
+  sendText,
+  screen,
+  state,
+  statesFor,
+  withLive,
+  withLiveSessions,
+  closeSession,
 };

@@ -117,6 +117,27 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   self-install matters because toggled pads build from their ORIGINAL Dockerfile
   copy (pre-sudo package list) — without it the sudoers drop-in silently does
   nothing. Debian images also still list `sudo` explicitly in the package list.
+- **`tmux new-session -c <dir>` does NOT fail on a missing directory — it
+  silently starts the pane in the PARENT.** Verified live on `pad-opencode-proj`:
+  asked for `/www1/craftpip` (gone), got a working session whose
+  `pane_current_path` was `/www1`, with the agent happily working in a folder
+  the user never chose. **Always `test -d` the folder inside the PAD first**
+  (`padTmux.folderExists`, single-quote-escaped) and refuse with a clear
+  message; never trust tmux to tell you the folder was bad. Same class of
+  trap: check `pane_current_path`/`pane_current_command` when you need to know
+  what a pane is really doing.
+- **tmux primitives live in `src/services/pad-tmux.js`, not app.js.** app.js's
+  `ensureTmuxSession`/`ensureTmux`/`killTmuxSession`/`listTmuxSessions` are thin
+  delegates. Reason: the Mission page and the MCP tools need the same primitives
+  and `mcp.js` must never `require('./app')` (it would drag in Express). If you
+  need a tmux capability, add it to pad-tmux and delegate — do not re-inline a
+  second `docker exec … tmux` call in app.js. **`pad-tmux`'s `tmuxExec`/`padExec`
+  take an OPTIONS OBJECT `{timeout, check}`**, not a bare number: passing a
+  number-shaped object makes `execFile` throw
+  `The value of "timeout" is out of range` at runtime. The unit tests validate
+  that (`src/test/pad-tmux.test.js` asserts on the recorded argv AND the
+  options) because a fake `runCmd` that ignores options will happily pass a
+  call that only breaks against real docker.
 - **Per-PAD image builds orphan disk.** Every create/rebuild retags
   `paddock-vm-<name>:latest` and orphans the old build as a dangling image;
   delete removes the tag and `pruneDanglingImages` (`docker image prune -f`,

@@ -22,6 +22,7 @@ const apiKeys = require('./services/api-keys');
 const containerHealth = require('./services/container-health');
 const logStore = require('./services/log-store');
 const mission = require('./services/mission');
+const padTmux = require('./services/pad-tmux');
 const ownership = require('./services/ownership');
 const { USER_UID, USER_GID } = ownership;
 const { getDb } = require('./services/db');
@@ -317,8 +318,7 @@ async function sweepStaleAttaches(vmName, session) {
 }
 
 async function containerHasTmux(vmName) {
-  const r = await runCmd('docker', ['exec', ...termUserArgs(vmName), vmName, 'sh', '-lc', 'command -v tmux'], { timeout: 15000, check: false });
-  return r.code === 0;
+  return padTmux.hasTmux(vmName);
 }
 
 const sqliteReady = new Set(); // PAD names where sqlite3 is confirmed present
@@ -348,87 +348,25 @@ async function ensureSqlite3(vmName) {
 
 /** Lazy-install tmux once per PAD (images that predate the Dockerfile change). */
 async function ensureTmux(vmName) {
-  if (tmuxReady.has(vmName)) return;
-  if (await containerHasTmux(vmName)) {
-    tmuxReady.add(vmName);
-    return;
-  }
-  const inst = await runCmd(
-    'docker',
-    ['exec', vmName, 'sh', '-lc', 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y --no-install-recommends tmux'],
-    { timeout: 240000, check: false }
-  );
-  if (inst.code !== 0) throw new Error(`tmux install failed: ${String(inst.stderr || inst.stdout || '').trim()}`);
-  if (!(await containerHasTmux(vmName))) throw new Error('tmux still missing after install');
-  tmuxReady.add(vmName);
+  return padTmux.ensureTmux(vmName);
 }
 
-/** Make sure a tmux session exists (create it if missing). Colored prompt is
- *  hooked into /root/.bashrc because tmux-created shells inherit the tmux
- *  server env, not the attach exec env, so the old PS1-on-exec trick is moot. */
-async function ensureTmuxSession(vmName, session, cols, rows) {
-  await ensureTmux(vmName);
-  // The hooks write ROOT-owned config files (/root/.bashrc, /root/.tmux.conf)
-  // so they run as the container root even for user-mode pads; the pad-user
-  // shells read them (HOME=/root, /root is chmod 755 in user-mode images).
-  await runCmd(
-    'docker',
-    ['exec', vmName, 'sh', '-lc',
-      // Debian's dash does not support echo -e and wrote a literal `-e` into
-      // older .bashrc files. Remove that broken managed line before adding the
-      // portable printf form, leaving every user-owned line untouched.
-      `grep -v '^[-]e export PS1=' /root/.bashrc 2>/dev/null > /tmp/pad-bashrc && mv /tmp/pad-bashrc /root/.bashrc; grep -q '__PAD_PROMPT_V2__' /root/.bashrc 2>/dev/null || printf '%s\\n' "export PS1='\\[\\e[1;36m\\]\\u@\\h\\[\\e[0m\\]:\\w\\$ '  # __PAD_PROMPT_V2__" >> /root/.bashrc; grep -q '__PAD_PS1__' /root/.bashrc 2>/dev/null || printf '%s\\n' '[ -w "\${HOME}/.bash_history" ] || HISTFILE=/tmp/pad_history  # __PAD_PS1__' >> /root/.bashrc`],
-    { timeout: 15000, check: false }
-  );
-  // tmux attach switches the client to the alternate screen, which has no
-  // scrollback — xterm.js then maps the mouse wheel to up/down arrow keys (the
-  // shell recalls history instead of scrolling). Strip smcup/rmcup from the
-  // attach terminal so tmux stays on the normal screen: output lands in the
-  // terminal's real scrollback and the wheel scrolls it natively.
-  await runCmd(
-    'docker',
-    ['exec', vmName, 'sh', '-lc',
-      `grep -q '__PAD_TMUX_V2__' /root/.tmux.conf 2>/dev/null || echo "set -ga terminal-overrides ',xterm-256color:smcup@:rmcup@'  # __PAD_TMUX_V2__" >> /root/.tmux.conf`],
-    { timeout: 15000, check: false }
-  );
-  const has = await runCmd('docker', ['exec', ...termUserArgs(vmName), vmName, 'tmux', 'has-session', '-t', session], { timeout: 15000, check: false });
-  if (has.code !== 0) {
-    const c = Math.max(40, Math.min(400, parseInt(cols, 10) || 120));
-    const r = Math.max(12, Math.min(120, parseInt(rows, 10) || 32));
-    // Prefer bash over the image's default shell: busybox ash (Alpine images,
-    // e.g. picoclaw) echoes `^C` with an extra newline on Ctrl+C, leaving a
-    // blank line before the next prompt. bash emits a clean single newline.
-    const bash = await runCmd('docker', ['exec', ...termUserArgs(vmName), vmName, 'sh', '-lc', 'command -v bash'], { timeout: 15000, check: false });
-    const shellCmd = bash.code === 0 && bash.stdout.trim() ? bash.stdout.trim() : null;
-    const args = ['tmux', 'new-session', '-d', '-s', session, '-x', String(c), '-y', String(r)];
-    if (shellCmd) args.push(shellCmd);
-    await runCmd('docker', ['exec', ...termUserArgs(vmName), vmName, ...args], { timeout: 20000, check: false });
-  }
-  // Keep enough history that a fresh attach has something real to replay.
-  await runCmd('docker', ['exec', ...termUserArgs(vmName), vmName, 'sh', '-lc', `tmux set-option -g history-limit ${TMUX_HISTORY} 2>/dev/null || true`], { timeout: 15000, check: false });
-  // The webui draws its own session chrome — a tmux status bar in the pane
-  // would only duplicate it (the green `[main] 0:bash` line). Kill it globally
-  // so the pane shows pure app output. Idempotent: no-op on later connects.
-  await runCmd('docker', ['exec', ...termUserArgs(vmName), vmName, 'sh', '-lc', 'tmux set-option -g status off 2>/dev/null || true'], { timeout: 15000, check: false });
-  await runCmd(
-    'docker',
-    ['exec', ...termUserArgs(vmName), vmName, 'sh', '-lc',
-      `tmux show-options -gqv terminal-overrides | grep -Fq 'xterm-256color:smcup@:rmcup@' || tmux set-option -ga terminal-overrides ',xterm-256color:smcup@:rmcup@'`],
-    { timeout: 15000, check: false }
-  );
+/** Make sure a tmux session exists (create it if missing, rooted at `cwd`).
+ *  Colored prompt is hooked into /root/.bashrc because tmux-created shells
+ *  inherit the tmux server env, not the attach exec env, so the old
+ *  PS1-on-exec trick is moot.
+ *
+ *  The primitives live in services/pad-tmux.js so the Mission page and the MCP
+ *  tools can do the same thing without requiring this file (mcp.js must not pull
+ *  in Express). `cwd` is optional — the terminal's own sessions pass none. */
+async function ensureTmuxSession(vmName, session, cols, rows, cwd = '') {
+  await padTmux.createSession(vmName, session, { cwd, cols, rows });
 }
 
 async function listTmuxSessions(vmName, agentType = '') {
-  await ensureTmux(vmName);
-  // tmux 3.3a converts `\t` inside `-F` formats into `_`, so use a `|`
-  // delimiter (session names are restricted to [a-zA-Z0-9._-], never `|`).
-  const r = await runCmd('docker', ['exec', ...termUserArgs(vmName), vmName, 'tmux', 'list-sessions', '-F', '#{session_name}|#{session_attached}|#{session_created}'], { timeout: 15000, check: false });
-  const sessions = [];
-  for (const line of (r.stdout || '').split('\n')) {
-    const [name, attached, created] = line.split('|');
-    if (!name) continue;
-    sessions.push({ name, attached: attached === '1', created: parseInt(created, 10) || 0 });
-  }
+  // The tmux call itself is pad-tmux's (one implementation, tested); only the
+  // opencode title-stamping below is terminal-specific.
+  const sessions = await padTmux.listSessions(vmName);
   // Only sessions actually running the opencode TUI carry the `OC | …` title.
   // opencode_web creates sessions too, so the "latest session" title must
   // never be stamped onto a pane that isn't running the TUI (see opencodePanes).
@@ -478,11 +416,7 @@ async function opencodePanes(vmName) {
 }
 
 async function killTmuxSession(vmName, session) {
-  await ensureTmux(vmName);
-  const r = await runCmd('docker', ['exec', ...termUserArgs(vmName), vmName, 'tmux', 'kill-session', '-t', session], { timeout: 15000, check: false });
-  if (r.code !== 0 && !/can't find|no such|no server/i.test(String(r.stderr))) {
-    throw new Error(String(r.stderr || 'tmux kill-session failed').trim());
-  }
+  return padTmux.killSession(vmName, session);
 }
 
 /** Title of the opencode session the TUI is showing, e.g. `Casual greeting`.
@@ -2422,7 +2356,11 @@ function missionFail(res, e) {
 
 app.get('/api/mission/projects', (req, res) => {
   try {
-    res.json({ projects: mission.listProjects({ agent: req.query.agent || '', agents: missionAllowedAgents(req) }) });
+    const projects = mission.listProjects({ agent: req.query.agent || '', agents: missionAllowedAgents(req) });
+    mission.withLive(projects).then(
+      (live) => res.json({ projects: live }),
+      () => res.json({ projects }) // liveness is decoration; never fail the list on it
+    );
   } catch (e) {
     missionFail(res, e);
   }
@@ -2450,7 +2388,10 @@ app.get('/api/mission/projects/:id', (req, res) => {
   const project = missionProject(req, res);
   if (!project) return;
   try {
-    res.json({ project, sessions: mission.listSessions({ projectId: project.id }) });
+    mission.withLiveSessions(mission.listSessions({ projectId: project.id }), project.agent_name).then(
+      (sessions) => res.json({ project, sessions }),
+      () => res.json({ project, sessions: mission.listSessions({ projectId: project.id }) })
+    );
   } catch (e) {
     missionFail(res, e);
   }
@@ -2470,10 +2411,17 @@ app.delete('/api/mission/projects/:id', csrfCheck, (req, res) => {
   const project = missionProject(req, res);
   if (!project) return;
   try {
-    // Phase 1 kills the project's tmux sessions here, before the rows go, so a
-    // delete can never leave an orphan TUI running in a PAD.
-    mission.deleteProject(project.id);
-    res.json({ ok: true });
+    // Kill the project's tmux sessions before the rows go, so deleting a
+    // project can never leave an orphan TUI running in the PAD. A PAD that is
+    // already gone makes killSession a no-op by design.
+    Promise.all(
+      mission.listSessions({ projectId: project.id }).map((s) =>
+        mission.closeSession(s.id).catch(() => {})
+      )
+    ).then(() => {
+      mission.deleteProject(project.id);
+      res.json({ ok: true });
+    }, (e) => missionFail(res, e));
   } catch (e) {
     missionFail(res, e);
   }
@@ -2483,23 +2431,55 @@ app.get('/api/mission/projects/:id/sessions', (req, res) => {
   const project = missionProject(req, res);
   if (!project) return;
   try {
-    res.json({ sessions: mission.listSessions({ projectId: project.id }) });
+    mission.withLiveSessions(mission.listSessions({ projectId: project.id }), project.agent_name).then(
+      (sessions) => res.json({ sessions }),
+      () => res.json({ sessions: mission.listSessions({ projectId: project.id }) })
+    );
   } catch (e) {
     missionFail(res, e);
   }
 });
 
+/** Open a session: create the tmux session rooted at the project's folder and
+ *  launch the agent's TUI into it. No headless variant by design — the work
+ *  must be visible. */
 app.post('/api/mission/projects/:id/sessions', csrfCheck, (req, res) => {
   const project = missionProject(req, res);
   if (!project) return;
-  try {
-    // Phase 0 stores the row; Phase 1 creates the tmux session and launches the
-    // TUI here, and a `live` flag joins the response.
-    const session = mission.createSession(project.id, { label: req.body.label, origin: req.body.origin });
-    res.json({ session });
-  } catch (e) {
-    missionFail(res, e);
-  }
+  mission
+    .startSession(project.id, { label: req.body.label, origin: req.body.origin })
+    .then(({ session, state }) => res.json({ session, state }), (e) => missionFail(res, e));
+});
+
+/** One session in full: metadata + the pane's live/tuiAlive/cwd state + the
+ *  last lines of its screen. This is the shape both the page and
+ *  `mission_sessions(session_id)` want. */
+app.get('/api/mission/sessions/:id', (req, res) => {
+  const found = missionSession(req, res);
+  if (!found) return;
+  mission
+    .screen(found.session.id, parseInt(req.query.lines, 10) || 40)
+    .then((r) => res.json(r), (e) => missionFail(res, e));
+});
+
+/** Type into a live session. The human mostly types in the attached terminal
+ *  instead; this is the API the MCP `mission_send` tool calls, kept here so both
+ *  go through the same solo-lock check. */
+app.post('/api/mission/sessions/:id/send', csrfCheck, (req, res) => {
+  const found = missionSession(req, res);
+  if (!found) return;
+  mission.sendText(found.session.id, req.body.text).then(
+    (r) => res.json({ ok: true, sent: r.sent, session: r.session }),
+    (e) => missionFail(res, e)
+  );
+});
+
+/** Re-launch the TUI in a session whose agent exited (the pane is back at a
+ *  shell). Refuses when one is already running. */
+app.post('/api/mission/sessions/:id/relaunch', csrfCheck, (req, res) => {
+  const found = missionSession(req, res);
+  if (!found) return;
+  mission.relaunchTui(found.session.id).then((r) => res.json(r), (e) => missionFail(res, e));
 });
 
 app.patch('/api/mission/sessions/:id', csrfCheck, (req, res) => {
@@ -2515,13 +2495,10 @@ app.patch('/api/mission/sessions/:id', csrfCheck, (req, res) => {
 app.delete('/api/mission/sessions/:id', csrfCheck, (req, res) => {
   const found = missionSession(req, res);
   if (!found) return;
-  try {
-    // Phase 1 kills the tmux session before the row goes.
-    mission.deleteSession(found.session.id);
-    res.json({ ok: true });
-  } catch (e) {
-    missionFail(res, e);
-  }
+  mission.closeSession(found.session.id).then(
+    () => res.json({ ok: true }),
+    (e) => missionFail(res, e)
+  );
 });
 
 // ─── API: Vault (encrypted key-value store) ────────────────
