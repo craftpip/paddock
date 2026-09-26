@@ -1,18 +1,22 @@
 # Plan 53 — Mission page: 3-column project → session → agent TUI workspace (the orchestration UI)
 
-## Status: In progress (2026-09-27) — design + live session/resume audit done, **2/9
-phases built** (Phase 0–8). **Phase 0 (store + validation) and Phase 1 (live
-sessions) are DONE and verified live** (2026-09-27): `mission_projects` /
+## Status: In progress (2026-09-27) — design + live session/resume audit done, **3/9
+phases built** (Phase 0–8). **Phase 0 (store + validation), Phase 1 (live
+sessions) and Phase 2 (the 3-column page skeleton) are DONE and verified
+live** (2026-09-27): `mission_projects` /
 `mission_sessions` tables, the `src/services/mission.js` store, the
 `mission.supported` driver flag on the three coding drivers, the
-`/api/mission/*` routes, and — Phase 1 — `src/services/pad-tmux.js` (the shared
+`/api/mission/*` routes, — Phase 1 — `src/services/pad-tmux.js` (the shared
 tmux layer app.js now delegates to) with `startSession` / `relaunchTui` /
-`sendText` / `screen` / `state` / `closeSession`. 38 tests green
+`sendText` / `screen` / `state` / `closeSession`, and — Phase 2 —
+`/mission` with the three columns, empty states and two persisted splitters.
+38 tests green
 (`src/test/mission.test.js` 19, `src/test/pad-tmux.test.js` 19) plus live
 curl rounds: a real opencode TUI opened in a project folder, a prompt typed
 through `send-keys` got answered, solo lock refused writes but not reads, close
 killed the tmux session, and the refactored terminal path was regression-checked
-in a browser. **Next: Phase 2** (the 3-column page skeleton). Scope widened
+in a browser. **Next: Phase 3** (projects end-to-end: the create/edit/delete
+dialog and col 1). Scope widened
 2026-09-27: the
 user identified this page as the user-facing UI for the MCP agent orchestration
 (plan 52) and as **the shared workplace for the human and the agent** — see §1b
@@ -490,9 +494,24 @@ Each phase is independently shippable and ends verified in the browser.
       asked for `/www1/craftpip`. `padTmux.folderExists` (`test -d`, quoted)
       now gates every start; a missing folder is refused with
       `mission_folder_missing` before any row or tmux session exists.
-- [ ] **Phase 2 — the page skeleton: 3 columns, empty states, resizable.**
+- [x] **Phase 2 — the page skeleton: 3 columns, empty states, resizable.**
       `Splitter.jsx`, nav link, route, no data. Verify in the browser: empty
       copy renders, both splitters drag, widths survive a reload.
+      **Done + verified in a browser 2026-09-27:** `Splitter.jsx`,
+      `pages/Mission.jsx`, the `/mission` route and the nav link (between
+      Agents and + Agent). Measured in the live DOM: Projects x=0 w=260,
+      Sessions x=266, Agent x=452, all y=101 h=699; empty states centered.
+      Both splitters drag and persist (`pad-mission-col1` / `-col2` in
+      localStorage): +90px → 350, `min` clamp at 180, `max` clamp at exactly
+      45% of the row (648/1440), widths restored after a reload, `ArrowLeft`
+      −16 and `Shift+ArrowLeft` −64, double-click back to the default, console
+      clean. Three real bugs found and fixed while verifying: (1) the column
+      wrapper needed `h-full` or columns 1–2 sized to content (220/181px)
+      instead of filling the row; (2) `onMouseDown`+`onTouchStart` calling
+      `setPointerCapture(e.pointerId)` — those events have no `pointerId`, so
+      it is one `onPointerDown`; (3) the drag flag was React state, so
+      pointermove arriving before the re-render committed was dropped and a
+      fast drag lost its first pixels — it is a ref now (state only styles).
 - [ ] **Phase 3 — projects end-to-end.** Dialog (coding-model agent select only
       + "create an agent first" link, folder field + suggestions chips +
       validation + duplicate warning), create/edit/delete, col 1 live. Verify:

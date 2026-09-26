@@ -39,6 +39,7 @@ export default function DashboardLayout({ children, fullHeight, fullWidth }) {
             </Link>
             <div className="flex items-center gap-0.5">
               <Link to="/agents" className="px-3 py-1.5 rounded-lg text-sm text-ink-muted hover:text-ink hover:bg-panel transition-colors">Agents</Link>
+              <Link to="/mission" className="px-3 py-1.5 rounded-lg text-sm text-ink-muted hover:text-ink hover:bg-panel transition-colors">Mission</Link>
               <Link to="/agents/create" className="px-3 py-1.5 rounded-lg text-sm text-ink-muted hover:text-ink hover:bg-panel transition-colors">+ Agent</Link>
               <Link to="/vault" className="px-3 py-1.5 rounded-lg text-sm text-ink-muted hover:text-ink hover:bg-panel transition-colors">Vault</Link>
               <Link to="/backups" className="px-3 py-1.5 rounded-lg text-sm text-ink-muted hover:text-ink hover:bg-panel transition-colors">Backups</Link>
