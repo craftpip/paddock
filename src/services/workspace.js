@@ -86,6 +86,12 @@ try{
       .sort((a,b)=>a.type!==b.type?(a.type==='directory'?-1:1):a.name.localeCompare(b.name));};
   switch(q.op){
     case 'list':out={path:p,entries:lst(p)};break;
+    case 'folders':{const stat=st(p);
+      if(!stat){out={path:p,exists:false,isDir:false,entries:[]};break;}
+      if(!stat.isDirectory()){out={path:p,exists:true,isDir:false,entries:[]};break;}
+      out={path:p,exists:true,isDir:true,entries:fs.readdirSync(p,{withFileTypes:true})
+        .filter(e=>e.isDirectory()&&!e.name.startsWith('.'))
+        .map(e=>e.name).sort((a,b)=>a.localeCompare(b)).slice(0,200)};break;}
     case 'read':{const stat=st(p);if(!stat)throw new Error('File not found');if(stat.isDirectory())throw new Error('Cannot read directory');
       out={content:fs.readFileSync(p,'utf8'),size:stat.size,size_hr:hr(stat.size),modified:new Date(stat.mtime).toISOString(),name:path.basename(p)};break;}
     case 'save':{fs.writeFileSync(p,q.content||'','utf8');const stat=fs.statSync(p);
@@ -172,6 +178,17 @@ async function listDir(agentId, relativePath, scope) {
   }
   requireHostBrowsable(agent);
   return fsList(resolveHostPath(agent.workspace_root, relativePath || ''));
+}
+
+// Mission folder picker (plan 53). Unlike `listDir` this NEVER throws for a
+// missing path — the dialog needs to say "Not found inside the PAD" and still
+// offer the sibling folders, which is a normal state while typing. Returns
+// {path, exists, isDir, entries} with dir names only, hidden entries dropped
+// and the list capped at 200 inside the container helper.
+async function listFolders(agentName, absPath) {
+  const result = await containerExec(agentName, { op: 'folders', path: absPath || '/' });
+  if (result && result.error) throw new Error(result.error);
+  return result;
 }
 
 async function readFile(agentId, relativePath, scope) {
@@ -471,6 +488,7 @@ function downloadParentFile(agentId, relativePath) {
 
 module.exports = {
   listDir,
+  listFolders,
   readFile,
   writeFile,
   readFileB64,

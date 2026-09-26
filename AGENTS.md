@@ -169,6 +169,16 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   That's by design (the webui can't clobber external workspaces), not a bug.
 - **JSX/CSS edits need `cd src/client && npm run build` + `docker restart
   paddock`** — the SPA serves the built bundle from `src/public/`.
+- **`api(path, { body })` wants a plain object, not `JSON.stringify`ed** —
+  `src/client/src/lib/api.js` does the `JSON.stringify` itself, so passing a
+  pre-stringified body sends a quoted string and the backend sees the wrong
+  shape. Same for `Content-Type` (it sets JSON only when `body` is present).
+  Errors come back as a **thrown plain object**, not an `Error`: `{ status, error,
+  code? }` — so `err?.message` is usually undefined and `errText` must read
+  `error`. The client agent list exposes the effective workspace as
+  `workspace_dir` (custom mount when set, else the driver default); there is no
+  `mission` block on the row, so filter coding agents on `agent_type` and read
+  `workspace_dir` (see `pages/agent/SettingsTab.jsx` for the same value).
 - **Docker Compose CLI lives inside the paddock container** — the host docker
   CLI has no compose plugin. Invoke `docker compose` from the container.
 - **Instance compose uses absolute host paths** (`HOST_WORKSPACE_ROOT` from

@@ -4,6 +4,7 @@ const path = require('path');
 const { getDb } = require('./db');
 const drivers = require('./drivers');
 const padTmux = require('./pad-tmux');
+const workspace = require('./workspace');
 
 // Mission (plan 53): projects are (agent, folder) pairs, and a session is the
 // only unit of work — one live tmux session per row, running the agent's TUI in
@@ -274,6 +275,27 @@ function sessionTarget(sessionId) {
   return { session, project, driver, vmName: project.agent_name };
 }
 
+/** What the create/edit dialog needs to know about a folder INSIDE the PAD.
+ *
+ *  This is the honest answer for a host path that simply is not mounted in the
+ *  agent's container: the path can look perfectly valid from the webui and
+ *  still be unusable, so the dialog probes the container itself (via the
+ *  workspace service's container helper — one `docker exec`, no new one) and
+ *  returns the sibling folders so the user can pick something that works. */
+async function projectFolders(agentName, folderPath) {
+  const row = agentRow(agentName); // throws mission_agent_not_found (404)
+  assertMissionAgent(row.agent_type);
+  assertPadRunning(agentName);
+  const folder = normalizeFolder(folderPath || ''); // throws mission_bad_folder
+  const listing = await workspace.listFolders(agentName, folder);
+  return {
+    path: folder,
+    exists: !!listing.exists,
+    isDir: !!listing.isDir,
+    entries: Array.isArray(listing.entries) ? listing.entries : [],
+  };
+}
+
 /** Open a session and launch the agent's TUI into it.
  *
  *  Order matters: the tmux session is created rooted at the project's folder and
@@ -434,6 +456,7 @@ module.exports = {
   deleteSession,
   touchSession,
   startSession,
+  projectFolders,
   relaunchTui,
   sendText,
   screen,

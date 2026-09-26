@@ -2354,6 +2354,19 @@ function missionFail(res, e) {
   res.status(status).json({ error: e.message, code: e.code || 'mission_error' });
 }
 
+app.get('/api/agents/:name/mission-folders', async (req, res) => {
+  // Folder picker for the project dialog. Read-only (a GET), but still
+  // owner-checked: it runs a container command on a named agent.
+  if (!canTouchAgent(req, req.params.name)) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+  try {
+    res.json(await mission.projectFolders(req.params.name, req.query.path || ''));
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
 app.get('/api/mission/projects', (req, res) => {
   try {
     const projects = mission.listProjects({ agent: req.query.agent || '', agents: missionAllowedAgents(req) });

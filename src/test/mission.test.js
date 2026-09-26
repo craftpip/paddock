@@ -188,3 +188,70 @@ describe('Mission - sessions', () => {
     assert.equal(mission.listSessions({ projectId: p.id }).length, 5);
   });
 });
+
+describe('Mission - project folder probe', () => {
+  const workspace = require('../services/workspace');
+  const real = workspace.listFolders;
+  let calls = [];
+
+  beforeEach(() => {
+    calls = [];
+    workspace.listFolders = async (agentName, path) => {
+      calls.push({ agentName, path });
+      return { path, exists: true, isDir: true, entries: ['craftpip.com', 'paddock'] };
+    };
+  });
+
+  afterEach(() => {
+    workspace.listFolders = real;
+  });
+
+  it('reports what the PAD can actually see, with sibling folders', async () => {
+    const out = await mission.projectFolders('pad-msn-oc', '/www1');
+    assert.equal(out.exists, true);
+    assert.equal(out.isDir, true);
+    assert.deepEqual(out.entries, ['craftpip.com', 'paddock']);
+    assert.deepEqual(calls, [{ agentName: 'pad-msn-oc', path: '/www1' }]);
+  });
+
+  it('normalizes a trailing slash before probing', async () => {
+    const out = await mission.projectFolders('pad-msn-oc', '/www1/');
+    assert.equal(out.path, '/www1');
+    assert.equal(calls[0].path, '/www1');
+  });
+
+  it('passes a missing folder through as exists:false instead of throwing', async () => {
+    workspace.listFolders = async (agentName, path) => ({ path, exists: false, isDir: false, entries: [] });
+    const out = await mission.projectFolders('pad-msn-oc', '/nope');
+    assert.equal(out.exists, false);
+    assert.deepEqual(out.entries, []);
+  });
+
+  it('refuses a personal agent — Mission is coding models only', async () => {
+    await assert.rejects(
+      () => mission.projectFolders('pad-msn-pc', '/www1'),
+      (e) => e.code === 'mission_unsupported_agent'
+    );
+    assert.equal(calls.length, 0, 'never probes a pad the dialog would not offer');
+  });
+
+  it('refuses a stopped agent and a missing one', async () => {
+    getDb().prepare("UPDATE agents SET status='stopped' WHERE name='pad-msn-oc'").run();
+    await assert.rejects(
+      () => mission.projectFolders('pad-msn-oc', '/www1'),
+      (e) => e.code === 'mission_agent_stopped'
+    );
+    getDb().prepare('UPDATE agents SET status=? WHERE name=?').run('running', 'pad-msn-oc');
+    await assert.rejects(
+      () => mission.projectFolders('pad-ghost', '/www1'),
+      (e) => e.code === 'mission_agent_not_found' && e.status === 404
+    );
+  });
+
+  it('needs a folder to probe', async () => {
+    await assert.rejects(
+      () => mission.projectFolders('pad-msn-oc', ''),
+      (e) => e.code === 'mission_bad_folder'
+    );
+  });
+});

@@ -1,22 +1,28 @@
 # Plan 53 — Mission page: 3-column project → session → agent TUI workspace (the orchestration UI)
 
-## Status: In progress (2026-09-27) — design + live session/resume audit done, **3/9
+## Status: In progress (2026-09-27) — design + live session/resume audit done, **4/9
 phases built** (Phase 0–8). **Phase 0 (store + validation), Phase 1 (live
-sessions) and Phase 2 (the 3-column page skeleton) are DONE and verified
+sessions), Phase 2 (the 3-column page skeleton) and Phase 3 (projects
+end-to-end) are DONE and verified
 live** (2026-09-27): `mission_projects` /
 `mission_sessions` tables, the `src/services/mission.js` store, the
 `mission.supported` driver flag on the three coding drivers, the
 `/api/mission/*` routes, — Phase 1 — `src/services/pad-tmux.js` (the shared
 tmux layer app.js now delegates to) with `startSession` / `relaunchTui` /
 `sendText` / `screen` / `state` / `closeSession`, and — Phase 2 —
-`/mission` with the three columns, empty states and two persisted splitters.
-38 tests green
-(`src/test/mission.test.js` 19, `src/test/pad-tmux.test.js` 19) plus live
+`/mission` with the three columns, empty states and two persisted splitters,
+and — Phase 3 — col 1 with live projects plus the create/edit dialog
+(`stores/mission.js`, `components/ProjectDialog.jsx`, the
+`GET /api/agents/:name/mission-folders` PAD-side folder probe).
+44 tests green
+(`src/test/mission.test.js` 25, `src/test/pad-tmux.test.js` 19) plus live
 curl rounds: a real opencode TUI opened in a project folder, a prompt typed
 through `send-keys` got answered, solo lock refused writes but not reads, close
-killed the tmux session, and the refactored terminal path was regression-checked
-in a browser. **Next: Phase 3** (projects end-to-end: the create/edit/delete
-dialog and col 1). Scope widened
+killed the tmux session, the refactored terminal path was regression-checked
+in a browser, and the project CRUD was driven through a real browser against
+`pad-opencode-proj` (two folders on one PAD, duplicate warning, refused
+invalid folder, edit, delete, reload). **Next: Phase 4** (sessions end-to-end:
+`+ New session` → row + live TUI in col 3). Scope widened
 2026-09-27: the
 user identified this page as the user-facing UI for the MCP agent orchestration
 (plan 52) and as **the shared workplace for the human and the agent** — see §1b
@@ -411,10 +417,16 @@ Two things per driver, next to the existing `tuiCommand` / `startCommand`:
 src/client/src/pages/Mission.jsx                  page shell, 3 cols, empty states
 src/client/src/pages/mission/ProjectList.jsx      col 1
 src/client/src/pages/mission/SessionList.jsx      col 2
-src/client/src/pages/mission/ProjectDialog.jsx    the "+ New project" modal
+src/client/src/components/ProjectDialog.jsx        the "+ New project" modal
 src/client/src/components/Splitter.jsx            reusable mouse-resizable divider
 src/client/src/stores/mission.js                  zustand store (mirror stores/agents.js)
 ```
+
+Phase 3 as built (2026-09-27): col 1's rows and the dialog live in
+`pages/Mission.jsx` + `components/ProjectDialog.jsx` rather than the
+`pages/mission/*` split above — col 1 is a flat list and splitting it out buys
+nothing yet. `pages/mission/SessionList.jsx` (col 2) still has to be created in
+Phase 4.
 
 - Route: `/mission` in `App.jsx`, wrapped `<AuthPage fullHeight>`; nav link in
   `DashboardLayout` between "Agents" and "+ Agent".
@@ -512,13 +524,25 @@ Each phase is independently shippable and ends verified in the browser.
       it is one `onPointerDown`; (3) the drag flag was React state, so
       pointermove arriving before the re-render committed was dropped and a
       fast drag lost its first pixels — it is a ref now (state only styles).
-- [ ] **Phase 3 — projects end-to-end.** Dialog (coding-model agent select only
+- [x] **Phase 3 — projects end-to-end.** Dialog (coding-model agent select only
       + "create an agent first" link, folder field + suggestions chips +
       validation + duplicate warning), create/edit/delete, col 1 live. Verify:
       create a project against a real `opencode` PAD; create a **second project
       on the same PAD with a different folder** (from the suggestions chips) and
       see both in col 1; confirm an `openclaw` PAD is not offered; change the
-      folder; delete one.
+      folder; delete one. **DONE + verified live 2026-09-27**: `stores/mission.js`
+      (projects CRUD, selection, debounced folder probe) + `components/ProjectDialog.jsx`
+      (coding-agent chips only, `workspace_dir` prefill, PAD-side probe with
+      `..`/child chips, mount chips, duplicate warning, agent immutable on edit) +
+      col 1 rows with inline delete confirm. Backend: `workspace.listFolders` +
+      `mission.projectFolders` + `GET /api/agents/:name/mission-folders`
+      (25/25 `mission.test.js`). Live on `pad-opencode-proj`: created
+      `/www1/craftpip.com`, a second project on the same PAD at
+      `/www1/esphome`, a duplicate attempt warned but stayed enabled, an
+      invalid folder (`/www2/agent-work/esphome-mirror`) was refused with the
+      "mount it" message, edit moved the folder to `/www2` and renamed, both
+      test projects deleted, list survives reload, no `openclaw`/personal PAD
+      offered, console clean. Test rows cleaned up (0 projects / 0 sessions).
 - [ ] **Phase 4 — sessions end-to-end.** `+ New session` → row + live TUI in
       col 3, restart/delete, dead-session repair, the **solo lock** toggle
       (row flag + col 3 padlock), `msn-*` **visible** in the agent-detail
