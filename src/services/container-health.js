@@ -79,6 +79,46 @@ async function resolvePeer(peer) {
   }
 }
 
+/** The published-ports check, as a pure function of the compose services and
+ *  the live inspect results, so it is testable without a docker daemon.
+ *
+ *  A peer-mode agent publishes NOTHING itself — every declared port rides on its
+ *  `-door` sidecar, which is the only container that actually binds them. Reading
+ *  the agent service/ctr there reports "(none)" for a fully working pad, so the
+ *  door is the port-bearing unit whenever it exists. */
+function checkPublishedPorts(compose, ctr, door, doorCtr) {
+  const portUnit = door ? { compose: door, ctr: doorCtr, label: 'Ports (via door)' } : { compose, ctr, label: 'Ports' };
+  const expPorts = Array.isArray(portUnit.compose && portUnit.compose.ports) ? portUnit.compose.ports : [];
+  const actualPorts = (portUnit.ctr && portUnit.ctr.NetworkSettings && portUnit.ctr.NetworkSettings.Ports) || {};
+  if (!expPorts.length) {
+    if (door && !doorCtr) {
+      // The door is gone, so its declared ports cannot be verified at all.
+      // Saying "(none)" here would read as healthy; say what is actually true.
+      return { key: 'ports', label: portUnit.label, status: 'warn', expected: 'see compose', actual: 'not verifiable (door missing)', hint: 'The forwarding door is gone, so these published ports cannot be checked. Recreate to restore it.' };
+    }
+    return { key: 'ports', label: portUnit.label, status: 'ok', expected: '(none)', actual: '(none)' };
+  }
+  const spec = expPorts.map((p) => (p && typeof p === 'object' ? `${p.published}:${p.target}` : String(p)));
+  const missing = expPorts.filter((p) => {
+    if (!p || typeof p !== 'object') return false;
+    const target = p.target != null ? String(p.target) : '';
+    const published = p.published != null ? String(p.published) : '';
+    const proto = p.protocol || 'tcp';
+    if (!published || !target) return false; // exposed-only ports have nothing to verify
+    const bindings = actualPorts[`${target}/${proto}`] || [];
+    return !bindings.some((b) => b && String(b.HostPort) === published);
+  });
+  if (missing.length) {
+    // `Object.keys(...).join(', ')` is empty when nothing at all is bound, which
+    // rendered as "(none)" and read like "this pad publishes nothing" — the
+    // opposite of the truth when ports ARE declared.
+    const bound = Object.keys(actualPorts).filter((k) => (actualPorts[k] || []).length).join(', ');
+    const actual = bound || 'none bound';
+    return { key: 'ports', label: portUnit.label, status: 'error', expected: spec.join(', '), actual, hint: `Published port(s) not bound: ${missing.map((p) => (p && typeof p === 'object' ? p.published : p)).join(', ')}. Recreate to fix.` };
+  }
+  return { key: 'ports', label: portUnit.label, status: 'ok', expected: spec.join(', '), actual: spec.join(', ') };
+}
+
 async function checkContainerHealth(name, onCheck) {
   const checks = [];
   const add = (check) => {
@@ -188,20 +228,19 @@ async function checkContainerHealth(name, onCheck) {
 
   // ── Peer-network forwarding door ───────────────────────────
   const door = services && services[`${name}-door`];
+  const doorContainer = door ? (door.container_name || `${name}-door`) : null;
+  const doorCtr = doorContainer ? await inspectContainer(doorContainer) : null;
   if (door) {
-    const doorContainer = door.container_name || `${name}-door`;
-    const doorCtr = await inspectContainer(doorContainer);
-    const doorState = doorCtr && doorCtr.State;
     if (!doorCtr) {
       add({
         key: 'door', label: 'Forwarding door', status: 'error',
         expected: `${doorContainer} (running)`, actual: 'not found',
         hint: 'The forwarding door is missing, so published web and SSH ports cannot reach this agent. Recreate to restore it.',
       });
-    } else if (!doorState.Running) {
+    } else if (!(doorCtr.State || {}).Running) {
       add({
         key: 'door', label: 'Forwarding door', status: 'error',
-        expected: `${doorContainer} (running)`, actual: `${doorContainer} (${doorState.Status || 'stopped'})`,
+        expected: `${doorContainer} (running)`, actual: `${doorContainer} (${(doorCtr.State || {}).Status || 'stopped'})`,
         hint: 'The forwarding door is stopped, so published web and SSH ports cannot reach this agent. Recreate to restore it.',
       });
     } else {
@@ -261,27 +300,13 @@ async function checkContainerHealth(name, onCheck) {
   // NetworkSettings.Ports is keyed by CONTAINER port (`target/protocol`) and
   // each binding carries { HostPort }. We must resolve host→container, not
   // look up the published port as if it were the key.
-  const expPorts = Array.isArray(compose.ports) ? compose.ports : [];
-  const actualPorts = (ctr.NetworkSettings && ctr.NetworkSettings.Ports) || {};
-  if (!expPorts.length) {
-    add({ key: 'ports', label: 'Ports', status: 'ok', expected: '(none)', actual: '(none)' });
-  } else {
-    const spec = expPorts.map((p) => (p && typeof p === 'object' ? `${p.published}:${p.target}` : String(p)));
-    const missing = expPorts.filter((p) => {
-      if (!p || typeof p !== 'object') return false;
-      const target = p.target != null ? String(p.target) : '';
-      const published = p.published != null ? String(p.published) : '';
-      const proto = p.protocol || 'tcp';
-      if (!published || !target) return false; // exposed-only ports have nothing to verify
-      const bindings = actualPorts[`${target}/${proto}`] || [];
-      return !bindings.some((b) => b && String(b.HostPort) === published);
-    });
-    if (missing.length) {
-      add({ key: 'ports', label: 'Ports', status: 'error', expected: spec.join(', '), actual: Object.keys(actualPorts).join(', ') || '(none)', hint: `Published port(s) not bound: ${missing.map((p) => (p && typeof p === 'object' ? p.published : p)).join(', ')}. Recreate to fix.` });
-    } else {
-      add({ key: 'ports', label: 'Ports', status: 'ok', expected: spec.join(', '), actual: spec.join(', ') });
-    }
-  }
+  //
+  // A peer-mode agent publishes NOTHING itself — every declared port rides on
+  // its `-door` sidecar, which is the only container that actually binds them.
+  // Reading the agent service/ctr there reports "(none)" for a fully working
+  // pad, so pick the door as the port-bearing unit whenever it exists.
+  const portCheck = checkPublishedPorts(compose, ctr, door, doorCtr);
+  add(portCheck);
 
   // ── Environment (keys only, secrets excluded) ─────────────
   const expEnv = compose.environment || {};
@@ -313,4 +338,4 @@ function summarize(name, checks) {
   return { name, status, checks, counts };
 }
 
-module.exports = { checkContainerHealth, summarize };
+module.exports = { checkContainerHealth, checkPublishedPorts, summarize };

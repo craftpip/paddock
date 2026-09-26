@@ -52,10 +52,21 @@ const running = new Map();
 /** Task capability for an agent type (plan 48). The driver's `task` block
  *  exists only for types that can run queued tasks headlessly. Returns null
  *  for unsupported types. */
+/** Resolve a driver's task capability from whatever the caller has: a type
+ *  string, a driver object, a pad-like `{agent_type}`, or an already-resolved
+ *  capability. Each of these reaches this function on a live path, so each one
+ *  has to resolve — a capability object is what the submit path has in hand by
+ *  the time it builds the exec script, and looking that up as a driver type
+ *  always misses. */
 function taskCapability(type) {
-  const d = typeof type === 'object' && type !== null ? type : getDriver(type);
-  const cap = d && d.task;
-  return cap && cap.supported ? cap : null;
+  if (!type) return null;
+  const fromCap = (c) => (c && c.supported ? c : null);
+  if (typeof type.buildCommand === 'function') return fromCap(type); // resolved capability
+  if (typeof type === 'object') {
+    if (type.task) return fromCap(type.task);                       // driver object
+    return fromCap((getDriver(type.agent_type) || {}).task);        // pad-like
+  }
+  return fromCap((getDriver(type) || {}).task);                      // type string
 }
 
 function shq(s) {
@@ -142,12 +153,20 @@ function attachProcess(id, child, timeoutMs, runtimeRef, cap) {
     // arrived since the previous flush, so a silent-but-alive agent (stuck,
     // spinning) reads as a stale heartbeat, exactly the signal an orchestrator
     // wants.
+    //
+    // This runs from a setInterval: an exception here is an uncaught exception
+    // in a timer callback, which kills the whole webui — a heartbeat must never
+    // be able to take the control plane down over a DB hiccup.
     const dirty = state.sinceFlush;
     state.sinceFlush = false;
-    getDb().prepare(
-      `UPDATE tasks SET stdout = ?, stderr = ?, result_summary = ?${dirty ? ", last_output_at = datetime('now')" : ''}
-       WHERE id = ? AND status IN ('pending','running')`
-    ).run(capOutput(state.out), capOutput(state.err), extract(state.out), id);
+    try {
+      getDb().prepare(
+        `UPDATE tasks SET stdout = ?, stderr = ?, result_summary = ?${dirty ? ", last_output_at = datetime('now')" : ''}
+         WHERE id = ? AND status IN ('pending','running')`
+      ).run(capOutput(state.out), capOutput(state.err), extract(state.out), id);
+    } catch (err) {
+      console.error(`[tasks] live flush failed for ${id}: ${err.message}`);
+    }
   };
 
   child.on('error', (err) => {

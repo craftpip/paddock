@@ -190,16 +190,21 @@ fullscreen overlay toggle.
 The header tab strip (plan 53) lists the PAD's active tmux sessions (`GET
 /api/agents/:name/terminal-sessions`, loaded on mount) and lets you switch
 (click a tab), create (`+` → next free `term-N`), or close (`×` on hover,
-DELETE) a session. Each session carries a `title` from the server, shown on
-every tab from the first load: for opencode agents it is the TUI session name
-(`OC | …`, same source the WS live-polls); other types send none and the tab
-falls back to the agent display name. The active tab keeps live-updating its
-title via the WS control frame. The connection dot sits left of the strip
-(status via tooltip); the old status text and session dropdown are gone. The
-selected session is persisted in `localStorage` (`pad-term-session-&lt;name&gt;`), so
-a page reload returns to the same session. Closing the current session falls
-back to `main`. Session names are validated against
-`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$` (`safeSessionName`).
+DELETE) a session. Each tab shows its **session name** (`main`, `term-N`), and the
+**active tab additionally shows the terminal title**: for opencode agents that
+is the TUI session name (`OC | …`)
+— delivered on first paint via the sessions fetch (stamped onto the attached
+session only) and kept live by the WebSocket control frame as you type/act;
+other types send none and the tab keeps the session name. No title is stamped
+on the other tabs on purpose — opencode's `session` table has no tty column, so
+a tab cannot be mapped to a specific session; a shared "latest title" on every
+tab was tried and removed because it made all tabs show one sticky title. The
+connection dot sits left of the strip (status via tooltip); the old status text
+and session dropdown are gone. The selected session is persisted in
+`localStorage` (`pad-term-session-&lt;name&gt;`), so a page reload returns to the
+same session. Closing the current session falls back to `main`. Session names
+are validated against `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`
+(`safeSessionName`).
 
 ## WebSocket protocol
 

@@ -29,6 +29,12 @@ change), \`health\` (declared-vs-live checkup, works on stopped containers),
 **Control:** \`create_agent\`, \`start_agent\` / \`stop_agent\` / \`restart_agent\`, \`recreate\`
 (the single mutation gun), \`update\` (alias for \`recreate {pull:true}\`), \`delete_agent\`.
 
+**Job progress:** \`job_status\` / \`job_log\` (read) — the progress + build log of a
+\`create_agent\` / \`recreate\` / \`update\`. A timed-out call does NOT cancel the work: the
+image build keeps going in the background, so after a timeout poll \`job_status\` (or
+\`job_log\`) with the pad name instead of retrying the mutation. Jobs are in-memory and
+expire 5 minutes after they finish.
+
 **Exec:** \`exec\` runs any shell command inside a PAD (\`docker exec -i sh -lc\`) — the vehicle
 for agent-config commands (models, MCP servers, skills, ...). Optional \`stdin\` is written
 verbatim to the process stdin; use it for secrets, never put secrets in the command text.
@@ -43,9 +49,19 @@ shared pool, optionally addressed with \`enqueue:true\`), \`task_status\` / \`ta
 
 - **Read-tool discipline:** run \`settings_get\` first. It returns everything (settings, ssh,
   workspace mount, volumes/ports, image/version, networkHealth, web publish state,
-  availableNetworks). Reconstruct the picture before changing anything.
+  availableNetworks). Reconstruct the picture before changing anything. Its
+  \`availableNetworks\` is filtered to running peer candidates and capped at 10 — read
+  \`availableNetworksTotal\` / \`availableNetworksTruncated\` to know if that is all of them.
+  \`workspaceDevcontainer\` describes the workspace's own .devcontainer (shared with the
+  pads in \`sharedWith\`), NOT this pad's config.
 - **Change only what you specify:** \`recreate\` leaves every unspecified option untouched.
   \`undefined\` = keep; \`[]\` / \`''\` / \`false\` = explicit clear. Never default an option.
+- **Naming:** \`create_agent\` takes the FINAL pad name with the container prefix left off;
+  Paddock prepends \`CONTAINER_PREFIX\` (\`pad-\`) and never weaves in the agent type.
+  \`name: "tester"\` → \`pad-tester\`, NOT \`pad-opencode-tester\`. Use the returned
+  \`resolvedName\` in every later call.
+- **Never retry a timed-out mutation:** the work continues in the background. Read
+  \`job_status\` / \`job_log\` — a second \`create_agent\` would race the first build.
 - **confirm-gated tools:** \`create_agent\` and \`delete_agent\` require \`confirm: true\`, and
   \`recreate\` requires it when \`reset: true\`. Only pass it after checking with the user.
 - **No TTY in \`exec\`:** commands that demand a TTY (\`openclaw onboard\`,
@@ -65,7 +81,8 @@ shared pool, optionally addressed with \`enqueue:true\`), \`task_status\` / \`ta
 1. **Survey the fleet:** \`list_agents\` → \`get_agent\` (or \`agent_logs\`) for detail/logs.
 2. **Inspect before changing anything:** \`settings_get\` → (optional) \`config_get\`, \`health\`.
 3. **Create a PAD:** \`create_agent\` (bare name, agent type, \`confirm: true\`, optional
-   allowDocker/network/workspace/ssh/ports). Verify with \`get_agent\` + \`settings_get\`.
+   allowDocker/network/workspace/ssh/ports/hooks/web). Verify with \`get_agent\` +
+   \`settings_get\`. If the call times out, poll \`job_status\` — do NOT re-create.
 4. **Update to latest:** \`update\` (or \`recreate {pull:true}\`). Config/data survive.
 5. **Change a setting / web / ssh / ports:** one \`recreate\` with only the options that change.
 6. **Health check / explain why down:** \`health\` (works on stopped containers).

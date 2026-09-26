@@ -17,11 +17,14 @@ function rateLimit(req, res, next) {
   next();
 }
 
-setInterval(() => {
+const sweep = setInterval(() => {
   const now = Date.now();
   for (const [ip, entry] of hits) {
     if (now - entry.start > WINDOW_MS * 2) hits.delete(ip);
   }
 }, WINDOW_MS * 2);
+// The sweep is housekeeping, not work: it must never be the reason a process
+// (a test runner, a CLI) stays alive after its work is done.
+if (typeof sweep.unref === 'function') sweep.unref();
 
 module.exports = { rateLimit };

@@ -33,6 +33,8 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
 - **`instances/<pad>/`** — per-PAD dir: `<agent>/` bind-mounted data dir,
   `docker-compose.yml`, **`meta.env`** (critical state), `logs/`.
 - **`backups/`**, **`plans/`** — archives and idea files.
+- **`friction/`** — chat-test findings log: what LLM callers of the MCP
+  surface couldn't understand or do (`friction/README.md` has the shape).
 
 ## Golden Rules
 
@@ -255,3 +257,10 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   the software easy for any LLM to understand. Report friction (e.g. "the
   response never said X, I had to guess Y") rather than silently working
   around it.
+- **Chat-test friction goes in `friction/`.** When the user says to note
+  friction down (or it should be noted by default at the end of a chat-test
+  run), write `friction/YYYY-MM-DD-<slug>.md` — one file per session, one H3
+  per finding, shape + severities per `friction/README.md`. Never put friction
+  findings in `docs/` (that folder is the reference for how things *do* work);
+  a fixed finding stays in the log with a **Resolution** line instead of being
+  deleted.

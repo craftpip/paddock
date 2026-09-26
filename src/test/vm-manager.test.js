@@ -1,4 +1,4 @@
-const { describe, it } = require('node:test');
+const { describe, it, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert');
 const path = require('path');
 const fs = require('fs');
@@ -257,14 +257,41 @@ describe('vm-manager - applySettings keeps a published web app alive', () => {
 
 describe('vm-manager - per-instance build files (plan 25)', () => {
   const TMP = '/tmp/insttest-' + Date.now();
-  process.env.WORKSPACE_ROOT = TMP;
-  process.env.HOST_WORKSPACE_ROOT = TMP;
-  delete require.cache[require.resolve('../services/instance-image')];
-  delete require.cache[require.resolve('../services/vm-manager')];
-  const vm = require('../services/vm-manager');
-
   const instDir = path.join(TMP, 'instances', 'pad-t1');
   const buildDir = path.join(instDir, 'build');
+  let vm;
+  let previousWorkspace;
+  let previousHostWorkspace;
+
+  // `instance-image` resolves its paths from process.env.WORKSPACE_ROOT at CALL
+  // time, so the isolation has to wrap the test body — setting the env once at
+  // describe-collection time is undone by every other block that swaps it.
+  beforeEach(() => {
+    previousWorkspace = process.env.WORKSPACE_ROOT;
+    previousHostWorkspace = process.env.HOST_WORKSPACE_ROOT;
+    process.env.WORKSPACE_ROOT = TMP;
+    process.env.HOST_WORKSPACE_ROOT = TMP;
+    delete require.cache[require.resolve('../services/instance-image')];
+    delete require.cache[require.resolve('../services/vm-manager')];
+    vm = require('../services/vm-manager');
+    fs.mkdirSync(buildDir, { recursive: true });
+    // Fixture: the compose test reads its ARGs out of this Dockerfile, so it must
+    // not depend on argsFromDockerfile having run first.
+    fs.writeFileSync(path.join(buildDir, 'Dockerfile'),
+      'FROM base:latest\n' +
+      'ARG INSTALL_DOCKER=0\n' +
+      '# ARG INSTALL_TMUX=1\n' +
+      'ARG INSTALL_TMUX=1\n' +
+      'ARG NO_DEFAULT\n');
+  });
+
+  afterEach(() => {
+    process.env.WORKSPACE_ROOT = previousWorkspace;
+    process.env.HOST_WORKSPACE_ROOT = previousHostWorkspace;
+    delete require.cache[require.resolve('../services/instance-image')];
+    delete require.cache[require.resolve('../services/vm-manager')];
+    fs.rmSync(TMP, { recursive: true, force: true });
+  });
 
   it('imageFor derives a stable per-instance tag', () => {
     assert.strictEqual(vm.imageFor('pad-t1'), 'paddock-vm-pad-t1:latest');
@@ -272,13 +299,6 @@ describe('vm-manager - per-instance build files (plan 25)', () => {
   });
 
   it('argsFromDockerfile extracts ARG lines (defaults + commented skip)', () => {
-    fs.mkdirSync(buildDir, { recursive: true });
-    fs.writeFileSync(path.join(buildDir, 'Dockerfile'),
-      'FROM base:latest\n' +
-      'ARG INSTALL_DOCKER=0\n' +
-      '# ARG INSTALL_TMUX=1\n' +
-      'ARG INSTALL_TMUX=1\n' +
-      'ARG NO_DEFAULT\n');
     const args = vm.argsFromDockerfile(path.join(buildDir, 'Dockerfile'));
     assert.deepStrictEqual(args, [
       { name: 'INSTALL_DOCKER', default: '0' },
@@ -334,13 +354,19 @@ describe('vm-manager - per-instance build files (plan 25)', () => {
   });
 
   it('composeCommand prefixes --env-file with the instance build.env', () => {
+    // --env-file is only added once the instance HAS a build.env, so create one
+    // rather than depending on the setBuildEnv test above having run.
+    vm.setBuildEnv('pad-t1', { INSTALL_DOCKER: '0' });
     const args = vm.composeCommand('pad-t1', 'build');
     assert.deepStrictEqual(args[0], 'compose');
     assert.deepStrictEqual(args[1], '--env-file');
     assert.strictEqual(args[2], path.join(buildDir, 'build.env'));
     assert.strictEqual(args[3], '-f');
     assert.ok(args.includes('build'));
-    fs.rmSync(TMP, { recursive: true, force: true });
+  });
+
+  it('composeCommand omits --env-file when the instance has no build.env', () => {
+    assert.ok(!vm.composeCommand('pad-t1', 'build').includes('--env-file'), 'no env-file without a build.env');
   });
 });
 
@@ -1444,5 +1470,181 @@ describe('vm-manager - devcontainer plan (plan 41 items 12-16)', () => {
       assert.ok(door, 'door present in peer mode');
       assert.ok(door.entrypoint.join(' ').includes('TCP-LISTEN:4200'), 'forwardPort forwarded through the door');
     });
+  });
+});
+
+describe('vm-manager - capability image probes', () => {
+  process.env.WORKSPACE_ROOT = '/workspace';
+  process.env.HOST_WORKSPACE_ROOT = '/workspace';
+  const vm = require('../services/vm-manager');
+
+  // The bug these guards exist for: a stale `wasRunning=true` (a status that was
+  // cached before the pad was stopped) used to make every probe `docker exec`
+  // into a container that no longer existed, so every probe threw → "needs
+  // rebuild" → every settings toggle rebuilt the image. The probe must verify
+  // the container is genuinely up first, and fall back to `docker run --rm`.
+  const PROBES = [
+    ['imageHasDockerCli', 'imageHasDockerCli'],
+    ['imageHasSshPortSupport', 'imageHasSshPortSupport'],
+    ['imageHasWebStartSupport', 'imageHasWebStartSupport'],
+    ['imageHasPostStartHook', 'imageHasPostStartHook'],
+    ['imageHasPadUser', 'imageHasPadUser'],
+  ];
+
+  it('exports every capability probe', () => {
+    for (const [name] of PROBES) assert.strictEqual(typeof vm[name], 'function', `${name} is exported`);
+  });
+
+  it('a stale wasRunning=true does not make a missing image report "supported"', async () => {
+    // No such image, no such container: every probe must resolve false rather
+    // than throwing or (worse) reporting a rebuild need it cannot justify.
+    for (const [name] of PROBES) {
+      const got = await vm[name]('pad-no-such-pad', 'paddock-vm-does-not-exist:latest', false);
+      assert.strictEqual(got, false, `${name} → false for a missing image`);
+    }
+  });
+
+  it('a stale wasRunning=true against a stopped container still resolves (no throw)', async () => {
+    // wasRunning is what the caller cached; the probe re-checks liveness itself.
+    for (const [name] of PROBES) {
+      const got = await vm[name]('pad-definitely-not-running', 'paddock-vm-does-not-exist:latest', true);
+      assert.strictEqual(got, false, `${name} → false, not an exception`);
+    }
+  });
+});
+
+describe('vm-manager - network peers for settings_get', () => {
+  process.env.WORKSPACE_ROOT = '/workspace';
+  process.env.HOST_WORKSPACE_ROOT = '/workspace';
+  const vm = require('../services/vm-manager');
+  const c = (name, extra = {}) => ({ Names: name, Image: 'img', State: 'running', Ports: '', ...extra });
+
+  it('drops the webui and every socat door', () => {
+    const res = vm.selectNetworkPeers(
+      [
+        c('paddock', { Image: 'paddock-webui:latest' }),
+        c('pad-a-door', { Ports: '80:80' }),
+        c('pad-a-web', { Ports: '80:80' }),
+        c('pad-a', { Ports: '80:80' }),
+        c('gluetun-global'),
+      ],
+      { limit: 50, webuiContainer: 'paddock', isFleetPad: (n) => n.startsWith('pad-') }
+    );
+    const names = res.peers.map((p) => p.name);
+    assert.ok(!names.includes('paddock'), 'webui is not a peer');
+    assert.ok(!names.includes('pad-a-door'), 'a door is not a peer');
+    assert.ok(!names.includes('pad-a-web'), 'a legacy -web is not a peer');
+    assert.ok(names.includes('pad-a'), 'the PAD itself is a peer');
+    assert.ok(names.includes('gluetun-global'), 'a real peer survives');
+  });
+
+  it('a fleet PAD with nothing published is not a peer; a foreign container always is', () => {
+    const res = vm.selectNetworkPeers(
+      [c('pad-bare'), c('pad-published', { Ports: '43818:43818' }), c('someones-thing')],
+      { limit: 50, isFleetPad: (n) => n.startsWith('pad-') }
+    );
+    const names = res.peers.map((p) => p.name);
+    assert.ok(!names.includes('pad-bare'), 'a bare PAD is not a network anyone routes through');
+    assert.ok(names.includes('pad-published'), 'a publishing PAD is a peer');
+    assert.ok(names.includes('someones-thing'), 'a non-PAD container is a candidate');
+  });
+
+  it('caps the page but still reports the true total and truncated flag', () => {
+    const many = Array.from({ length: 46 }, (_, i) => c(`peer-${i}`));
+    const res = vm.selectNetworkPeers(many, { limit: 10 });
+    assert.strictEqual(res.peers.length, 10, 'page is capped');
+    assert.strictEqual(res.total, 46, 'total is the unfiltered count');
+    assert.strictEqual(res.truncated, true, 'truncated warns the caller more exist');
+  });
+
+  it('marks only the currently selected peer', () => {
+    const res = vm.selectNetworkPeers([c('a'), c('b'), c('c')], { limit: 10, currentPeer: 'b' });
+    assert.deepStrictEqual(res.peers.filter((p) => p.isCurrent).map((p) => p.name), ['b']);
+  });
+
+  it('tolerates junk lines and normalizes the docker name field', () => {
+    const res = vm.selectNetworkPeers([null, c('/gluetun'), { Names: '' }, c('x')], { limit: 10 });
+    assert.deepStrictEqual(res.peers.map((p) => p.name), ['gluetun', 'x']);
+  });
+
+  it('the live lister returns the same shape', async () => {
+    const res = await vm.listNetworkPeers({ limit: 10 });
+    assert.ok(Array.isArray(res.peers), 'peers is an array');
+    assert.strictEqual(typeof res.total, 'number', 'total is reported');
+    assert.strictEqual(res.truncated, res.total > res.peers.length, 'truncated matches total vs page size');
+    assert.ok(res.peers.length <= 10, 'the page is capped at 10');
+    for (const p of res.peers) assert.ok(!vm.isManagedDoorName(p.name), `no door in the live list: ${p.name}`);
+  });
+});
+
+describe('vm-manager - workspace devcontainer is labeled as shared', () => {
+  process.env.WORKSPACE_ROOT = '/workspace';
+  process.env.HOST_WORKSPACE_ROOT = '/workspace';
+  const vm = require('../services/vm-manager');
+
+  it('returns null when the workspace has no devcontainer', () => {
+    assert.strictEqual(vm.readWorkspaceDevContainer('pad-nope', '/workspace/instances/pad-nope'), null);
+  });
+
+  it('padsOnSameWorkspace needs a workspace and never counts the pad itself', () => {
+    assert.deepStrictEqual(vm.padsOnSameWorkspace('pad-x', ''), [], 'no workspace → no siblings');
+    assert.deepStrictEqual(vm.padsOnSameWorkspace('pad-x', undefined), [], 'undefined → no siblings');
+  });
+});
+
+describe('vm-manager - create-time web request', () => {
+  process.env.WORKSPACE_ROOT = '/workspace';
+  process.env.HOST_WORKSPACE_ROOT = '/workspace';
+  const vm = require('../services/vm-manager');
+
+  it('no web option → nothing to publish', async () => {
+    assert.strictEqual(await vm.resolveWebRequest('pad-a', 'openclaw', undefined), null);
+    assert.strictEqual(await vm.resolveWebRequest('pad-a', 'openclaw', null), null);
+  });
+
+  it('web.active=false → nothing to publish (and no port validation)', async () => {
+    assert.strictEqual(await vm.resolveWebRequest('pad-a', 'openclaw', { active: false }), null);
+  });
+
+  it('rejects a non-numeric or out-of-range host port before anything is written', async () => {
+    for (const hostPort of ['abc', '0', '70000', '', '80.5']) {
+      await assert.rejects(
+        () => vm.resolveWebRequest('pad-a', 'picoclaw', { active: true, hostPort }),
+        /Host port must be a number between 1 and 65535/,
+        `hostPort=${JSON.stringify(hostPort)} is rejected`
+      );
+    }
+  });
+
+  it('rejects a host port that collides with the SSH port or an extra port', async () => {
+    await assert.rejects(
+      () => vm.resolveWebRequest('pad-a', 'picoclaw', { active: true, hostPort: '2222' }, { sshHostPort: '2222' }),
+      /already the SSH port/
+    );
+    await assert.rejects(
+      () => vm.resolveWebRequest('pad-a', 'picoclaw', { active: true, hostPort: '2223' }, { extraPorts: [{ host: 2223, container: 80 }] }),
+      /already listed in extraPorts/
+    );
+  });
+
+  it('openclaw refuses to publish without a gateway token (it binds non-loopback)', async () => {
+    await assert.rejects(
+      () => vm.resolveWebRequest('pad-a', 'openclaw', { active: true, hostPort: '45999' }),
+      /gateway token is required/
+    );
+  });
+
+  it('openclaw ignores a caller container port and uses its fixed gateway port', async () => {
+    const req = await vm.resolveWebRequest('pad-a', 'openclaw', {
+      active: true, hostPort: '45998', containerPort: 9999, password: 'secret-token',
+    });
+    assert.notStrictEqual(req.containerPort, 9999, 'fixed-port driver ignores the caller port');
+    assert.strictEqual(req.authToken, 'secret-token', 'the token doubles as the auth token');
+  });
+
+  it('a token-less driver keeps authToken empty', async () => {
+    const req = await vm.resolveWebRequest('pad-a', 'picoclaw', { active: true, hostPort: '8123' });
+    assert.strictEqual(req.authToken, '', 'no token for a driver without url-token auth');
+    assert.strictEqual(req.hostPort, '8123');
   });
 });

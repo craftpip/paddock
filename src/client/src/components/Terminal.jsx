@@ -1,4 +1,4 @@
-import { useEffect, useRef, useImperativeHandle, forwardRef, useState, useCallback } from 'react'
+import { useEffect, useLayoutEffect, useRef, useImperativeHandle, forwardRef, useState, useCallback } from 'react'
 import { useConfirm } from '../lib/confirm'
 
 /**
@@ -203,6 +203,27 @@ const Terminal = forwardRef(function Terminal(
   const [sessions, setSessions] = useState([])
   const [sessionsLoading, setSessionsLoading] = useState(false)
   const [sessionsLoaded, setSessionsLoaded] = useState(false)
+  // Per-tab marquee: only engage the scrolling (duplicated-title) track when the
+  // label actually overflows the tab; otherwise a plain single title is shown.
+  // Re-measured after every render (cheap: a handful of tabs).
+  const [marqueeTabs, setMarqueeTabs] = useState({})
+  const marqueeRefs = useRef({})
+  useLayoutEffect(() => {
+    const changed = {}
+    let any = false
+    for (const key of Object.keys(marqueeRefs.current)) {
+      const m = marqueeRefs.current[key]
+      if (!m?.measure || !m?.wrap) continue
+      const overflow = m.measure.scrollWidth > m.wrap.clientWidth + 1
+      if (marqueeTabs[key] !== overflow) { changed[key] = overflow; any = true }
+    }
+    if (any) setMarqueeTabs((p) => ({ ...p, ...changed }))
+  })
+  useEffect(() => {
+    const onResize = () => setMarqueeTabs({})
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
   const tabListRef = useRef(null)
 
   /** Set state only while the component is mounted. */
@@ -494,7 +515,7 @@ const Terminal = forwardRef(function Terminal(
       if (data.charCodeAt(0) === 0 && data.charCodeAt(1) === 0) {
         try {
           const parsed = JSON.parse(data.slice(2))
-          if (parsed.type === 'title' && parsed.title) setStateSafe(setDynTitle, parsed.title)
+          if (parsed.type === 'title') setStateSafe(setDynTitle, parsed.title || '')
         } catch {}
         return
       }
@@ -982,15 +1003,30 @@ const Terminal = forwardRef(function Terminal(
                 data-active={isCur ? 'true' : 'false'}
                 onClick={() => switchSession(s.name)}
                 onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); switchSession(s.name) } }}
-                title={isCur && dynTitle ? `${s.name} — ${dynTitle}` : `Session ${s.name}${s.title ? ' — ' + s.title : ''}`}
+                title={isCur && (dynTitle || s.title) ? `${s.name} — ${dynTitle || s.title}` : `Session ${s.name}`}
                 className={`group flex max-w-40 shrink-0 cursor-pointer items-center gap-1 rounded-md px-2.5 py-1 text-xs font-mono transition-colors ${isCur ? 'bg-panel text-ink' : 'text-ink-muted hover:bg-panel/60 hover:text-ink'}`}
               >
-                <span className={`tab-marquee min-w-0 flex-1 ${sessionsLoading && !sessionsLoaded ? 'animate-pulse' : ''}`}>
-                  <span className="tab-marquee-track">
-                    <span className="tab-marquee-text">{isCur ? dynTitle || s.title || title || name : s.title || title || name}</span>
-                    <span className="tab-marquee-sep" aria-hidden="true">·</span>
-                    <span className="tab-marquee-text">{isCur ? dynTitle || s.title || title || name : s.title || title || name}</span>
-                  </span>
+                <span className={`tab-marquee relative min-w-0 flex-1 ${sessionsLoading && !sessionsLoaded ? 'animate-pulse' : ''}`}>
+                  {(() => {
+                    const label = isCur ? (dynTitle || s.title || s.name) : s.name
+                    const marquee = !!marqueeTabs[s.name]
+                    return (
+                      <>
+                        {marquee && (
+                          <span className="tab-marquee-track" aria-hidden="true">
+                            <span className="tab-marquee-text">{label}</span>
+                            <span className="tab-marquee-sep">·</span>
+                            <span className="tab-marquee-text">{label}</span>
+                          </span>
+                        )}
+                        <span
+                          key="measure"
+                          ref={(el) => { const m = marqueeRefs.current[s.name] || (marqueeRefs.current[s.name] = {}); m.measure = el; m.wrap = m.wrap || (el && el.parentElement) }}
+                          className={`tab-marquee-text ${marquee ? 'absolute left-0 top-0 invisible' : 'truncate'}`}
+                        >{label}</span>
+                      </>
+                    )
+                  })()}
                 </span>
                 <button
                   onClick={(e) => { e.stopPropagation(); closeSession(s.name) }}

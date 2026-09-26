@@ -1,6 +1,6 @@
 # Backend Services
 
-> Last updated: 2026-08-17
+> Last updated: 2026-09-27
 
 ## PAD Discovery (agent-registry.js)
 
@@ -178,6 +178,7 @@ and its own image tag (`paddock-vm-&lt;name&gt;:latest`). See
 - `setMetaFlag(name, key, value)` — writes/clears a `KEY=VALUE` line in `meta.env` preserving other lines (empty value **removes** the line)
 - `seedBuildDir(name, agent, { installDocker })` — idempotently copies `src/vm-builds/&lt;type&gt;/` → `instances/&lt;name&gt;/build/`, seeds `extras/.gitkeep` + `build.env`; never overwrites existing build files
 - `ensureUserModeBuildFiles(name, agent)` / `imageHasPadUser(name, image, wasRunning)` — the existing-pad user-mode upgrade (plan 43 Phase 7). `imageHasPadUser` runs `docker run --rm --entrypoint &lt;sh&gt; &lt;image&gt; -c 'id -u pad'` (via `id -u pad` inside the image) to tell whether the pad-user build files are baked in. When they are not, `ensureUserModeBuildFiles` (a) regenerates the instance `build/start.sh` **from the shared template** when the `__PAD_USER_MODE__` marker is missing (start.sh is machine-managed, so it is safe to overwrite) and (b) injects the universal pad-user block (`PAD_USER_DOCKERFILE_BLOCK` — `groupadd`/`useradd` + `chmod 755 /root` + a **`sudo` self-install guard** (`apt-get install sudo` / `apk add sudo` when missing) + `ALL ALL=(ALL) NOPASSWD:ALL` sudoers, covering both apt and apk images) into the instance Dockerfile before the `COPY start.sh`/`ENTRYPOINT` line. The block is machine-managed: a **stale pre-existing block is replaced with the canonical one** (so rule/installer upgrades propagate), never the whole file clobbered — the rest of the Dockerfile stays the user's editable surface (plan 41). The `ALL ALL=` (username-independent) form matters because base images ship their own uid-1000 account (`node` in node:20-slim) that wins `sudo`'s uid→name lookup; the self-install matters because toggled pads build from their ORIGINAL (pre-sudo) package list. Callers must rebuild the image after.
+- `imageProbe(name, image, wasRunning, script)` — the shared capability probe behind `imageHasDockerCli`, `imageHasSshPortSupport`, `imageHasWebStartSupport`, `imageHasPostStartHook` and `imageHasPadUser`. It answers "does the current image already have this?" by running `script` in a **throwaway container** (`docker run --rm --entrypoint sh <image> -lc <script>`), and only `docker exec`s into the live PAD when `wasRunning` **and** `isContainerRunning(name)` both hold. That liveness re-check is load-bearing: `wasRunning` is a cached status that can be stale, and an `exec` into a container that has since stopped throws — which read as "the image lacks this", made every pad look like it needed a rebuild, and turned unrelated settings toggles into multi-minute image builds. A probe reports capability by exit status, never by a `code` field, and returns `false` (never throws) when neither path can answer. `imageHasWebStartSupport`/`imageHasPostStartHook` are why a web-publish toggle no longer rebuilds: every `src/vm-builds/*/start.sh` bakes in the web start hook, so the answer is already yes.
 - `composeCommand(name, ...args)` — `docker compose --env-file &lt;instance&gt;/build/build.env -f &lt;compose&gt; ...` prefix used by every per-instance compose invocation (skips the env-file when the build dir is missing)
 - `validateInstanceCompose(name)` — pre-flight gate: runs `docker compose ... config --quiet` (parse + schema + interpolation, no side effects) and throws with the parser output on failure. Call **before** stopping/recreating a PAD so a malformed document aborts with the container still running.
 - `runCompose(name, args, opts)` — validates via `validateInstanceCompose` then runs the compose `build`/`up` command. Every per-instance compose action goes through it (or an explicit early `validateInstanceCompose` in the settings/ports/web/recreate routes), so a bad document never reaches `docker compose up`.
@@ -291,7 +292,9 @@ In-memory event store for long-running operations (create agent, …). Holds an 
 
 Events: `{ n, ts, type: 'step'|'line'|'check'|'done'|'error', step?, state?, stream?, text?, message?, ok?, name?, key?, label?, status?, expected?, actual?, hint? }`.
 
-**Functions:** `createJob`, `getJob`, `getOrCreateJob`, `append`, `setStep(job, step, state)`, `line(job, stream, text)`, `check(job, item)` (streams a health-check result item — shape matches container-health checks), `finish(job, ok, extra)` (accepts `extra` like `{ status, counts }` for the health job), `fail(job, message)`, `subscribe(job, res, since)` (SSE fan-out + keep-alive), `getStatus(name)` (polling fallback).
+**Functions:** `createJob`, `getJob`, `getOrCreateJob`, `clearJob`, `append`, `setStep(job, step, state)`, `line(job, stream, text)`, `check(job, item)` (streams a health-check result item — shape matches container-health checks), `finish(job, ok, extra)` (accepts `extra` like `{ status, counts }` for the health job), `fail(job, message)`, `subscribe(job, res, since)` (SSE fan-out + keep-alive), `getStatus(name)` (polling fallback), `listJobs(prefix)` (every live job, newest first), `logLines(name, { tail, since })` (rendered `[stream] text` lines).
+
+The store is also readable over MCP — see [Jobs](#jobs-job-logjs) under MCP Tools for the key convention and the polling contract. `clearJob` cancels the pending cleanup timer, and the timer is `unref`'d, so a job waiting to expire never holds a process open.
 
 In-memory is fine for a single-user panel: a create in flight during a server restart is lost (frontend shows "connection lost" and returns to the form).
 
@@ -366,6 +369,34 @@ CREATE TABLE sessions (
 );
 ```
 
+`migrate(db)` runs the `CREATE TABLE IF NOT EXISTS` block, then patches older
+databases with idempotent `ALTER TABLE` guards — `agents.owner_id`, and
+`tasks.last_output_at` (the task runner's liveness heartbeat; without it the
+runner's flush threw `SQLITE_ERROR` from a timer callback and restarted the
+webui mid-task). Any code that writes a column must add it to both the
+`CREATE TABLE` and one of these guards, or an existing `app.db` breaks.
+
+## Task Runner (services/task-runner.js)
+
+The opencode task queue behind the eight `task_*` MCP tools: push a prompt at a
+PAD (`docker exec … opencode run --format json`), stream its output into the
+`tasks` row, and extract the assistant text into `result_summary`. A row left in
+`running` by a restart is swept to `error` / `orphaned by webui restart` at
+module load.
+
+`taskCapability(type)` resolves a driver's `task` capability and accepts **four**
+shapes, because all four reach it on live paths: a type string, a driver object,
+a pad-like `{ agent_type }`, and an already-resolved capability. The submit path
+resolves the capability first and then hands it to `buildExecCommand`, so
+looking that value up as a driver type must not be the only option — when it
+was, every non-enqueue `task_submit` threw `Task submission is not supported by
+[object Object] agents` and no task ever ran.
+
+While a task runs, `flushLive` persists capped output plus the `last_output_at`
+heartbeat on a 1s interval. The flush is wrapped in a try/catch on purpose: it
+runs from a timer, and an exception in a timer callback is an uncaught exception
+that kills the webui.
+
 ## API Keys (api-keys.js)
 
 Per-user bearer keys for the paddock MCP server (`/mcp`). Replaces the
@@ -405,7 +436,7 @@ the same owner-scoping as the REST API: admin → all agents, user → owned age
 ## MCP Tools (mcp.js)
 
 `src/mcp.js` mounts the paddock's own MCP server at `/mcp` (Streamable HTTP). It
-exposes 19 tools. Every tool is a thin adapter over the same `src/services/`
+exposes 29 tools. Every tool is a thin adapter over the same `src/services/`
 functions the REST API uses — behavior lives in the services, never in the tool
 handlers (no duplication between REST and MCP).
 
@@ -415,12 +446,12 @@ handlers (no duplication between REST and MCP).
 | `get_agent` | Details + optional `logs` tail (≤500) | `registry` + `logStore` |
 | `agent_logs` | Container logs tail (≤5000) | `logStore.capture/readLogs` |
 | `config_get` | Driver config file (JSON redacted; yaml/toml verbatim) | `vm.readAgentConfig(agent)` |
-| `settings_get` | Full read picture before a `recreate` | `vm.readSettings(name)` + `vm.listContainers()` |
+| `settings_get` | Full read picture before a `recreate` | `vm.readSettings(name)` + `vm.listNetworkPeers()` |
 | `health` | Docker-level health checkup (same as the Settings tab) | `containerHealth.checkContainerHealth(name)` |
 | `workspace_list` | List a workspace dir | `workspace.listDir` |
 | `workspace_read` | Read a text file (≤256KB) | `workspace.statFile/readFile` |
 | `workspace_write` | Write a file | `workspace.writeFile` |
-| `create_agent` | Create a PAD (full create flow); needs `confirm: true`; accepts `userMode: 'root'|'user'` (plan 43 Phase 7, hermes always root) | `vm.validateAgentCreate` + `vm.createAgent` |
+| `create_agent` | Create a PAD (full create flow); needs `confirm: true`; accepts the lifecycle hooks, `web`, and `userMode: 'root'\|'user'` | `vm.validateAgentCreate` + `vm.createAgent` |
 | `start_agent` | Start container + socat door | `vm.startAgent(name)` |
 | `stop_agent` | Stop container + door | `vm.stopAgent(name)` |
 | `restart_agent` | Restart container + door | `vm.restartAgent(name)` |
@@ -428,19 +459,34 @@ handlers (no duplication between REST and MCP).
 | `update` | Alias for `recreate {pull: true}` | `vm.updateAgent(name, { pull: true })` |
 | `delete_agent` | Delete PAD; needs `confirm: true` | `vm.removeVm` + `registry.removeAgentFromDb` |
 | `exec` | Run a shell command in the PAD (optional `stdin`) | `docker exec` |
+| `job_status` | Poll a long-running job (see Jobs below) | `jobLog.getStatus` + `jobLog.listJobs` |
+| `job_log` | Read a job's streamed log lines | `jobLog.logLines` |
 | `help` | The "how to use Paddock through MCP" guide (§§1–4, plan 35a) | `llm-guide.js` |
 | `agent_commands` | Set B — non-interactive command catalog for an agent type | `llm-guide.js` → `drivers` `llmCommands` |
+| `task_submit` … `task_priority` (8 tools) | The opencode task queue: push/pull/result/cancel | `services/task-runner.js` |
 
 Rules:
 
 - Tool names carry no `paddock_` prefix — the consuming MCP client namespaces
   the server's tools itself.
-- `create_agent` is the only tool that takes a *bare* agent name (`createNameFor`
-  adds the container prefix); every other tool takes the full name. It needs
+- `create_agent` is the only tool that takes a *bare* agent name; every other
+  tool takes the full name. `name` is the **final** container name:
+  `createNameFor` prepends `CONTAINER_PREFIX` + `-` only when the caller left it
+  off, and never inserts the agent type — `blog-bot` becomes `pad-blog-bot`, and
+  `opencode-tester` becomes `pad-opencode-tester`. The result echoes
+  `resolvedName` so a caller never has to guess which rule applied. It needs
   `confirm: true` (image build + new fleet member) and the creating API-key user
   becomes the owner (`registry.assignOwner`). It shares `validateAgentCreate` +
   `createAgent` with `POST /api/agents/create` — the REST route kept only the
   409 exists-check and the admin `assign_to` owner override.
+- `create_agent` also carries the four lifecycle fields — `buildCommands`,
+  `postCreate`, `postStart`, `postAttach` — and the same `web` block as
+  `recreate`, so a PAD can be reproduced in full from the tool surface without a
+  second heavy pass. Web is validated before anything is written
+  (`resolveWebRequest`), persisted with the instance, and applied during the
+  initial bring-up; `createVm` applies the auth and re-verifies after the
+  driver's setup steps. `openclaw` still refuses to publish without a gateway
+  token — that is the driver refusing a non-loopback bind, not a Paddock limit.
 - Mutations go through one gun: `recreate` accepts every Settings/Web option
   (`allowDocker`, `network`, `extraVolumes` — binds or named-volume entries,
   `workspaceHost`/`workspaceDir`,
@@ -451,7 +497,18 @@ Rules:
   summary, webService, log }`.
 - `settings_get` is the paired read: one call returns allowDocker, network
   peer, SSH, workspace mount, volumes/ports, image/version, networkHealth, the
-  available peer containers, AND the published-web state.
+  available peer containers, AND the published-web state. Two of those fields
+  carry a deliberate contract:
+  - `availableNetworks` is the filtered peer list from `listNetworkPeers` (the
+    UI's raw `listContainers` is untouched): the webui and every socat door are
+    dropped, a PAD appears only when it publishes something, the page is capped
+    at 10, and `availableNetworksTotal` + `availableNetworksTruncated` make
+    truncation explicit. The selected peer carries `isCurrent`.
+  - `workspaceDevcontainer` describes the **workspace's** `.devcontainer`, not
+    the PAD's own, so it states `scope: "workspace"`, `shared`, `sharedWith`
+    (the other PADs on that workspace) and a `note`. Its `ports` are a plan; the
+    PAD's live bindings are the `actualPorts` in the web state. It inherits the
+    PAD's `userMode`/`containerUser` rather than reporting blanks.
 - Destructive tools require a guard: `delete_agent` needs `confirm: true`
   (and `create_agent` too — it adds fleet members).
 - Secrets are write-only in the tools (`sshPassword`, `web.password`): empty
@@ -460,6 +517,35 @@ Rules:
   `x-api-key`) and returns 406 unless the client sends
   `Accept: application/json, text/event-stream`. Responses are SSE
   (`event: message` + `data:` JSON lines).
+
+### Jobs (`job-log.js`)
+
+`services/job-log.js` is the in-memory store behind the create/recreate/update
+SSE streams. The same store is readable over MCP through `job_status` and
+`job_log`, which is what makes a **timed-out** `create_agent` recoverable: the
+build keeps running server-side, and the caller polls it by name instead of
+re-firing a create on top of a live build.
+
+Job keys are shared with the REST routes so one name identifies one job:
+
+| Key | Operation |
+|-----|-----------|
+| `<name>` | `create_agent` |
+| `update:<name>` | `recreate` and `update` |
+| `health:<name>` | the REST health route |
+
+Both tools take the bare PAD name plus an optional `kind`; omitting `kind`
+resolves to the newest job for that PAD whichever operation it came from, so the
+common case is `job_status { name }`. `job_status` returns
+`{ state, step, done, failed, error, lineCount, expiresIn }` and an optional
+`tail`; `job_log` returns rendered `[stream] text` / `[step] …` lines with `tail`
+and `since`. A name with no job answers `{ found: false, hint, liveJobs }` so a
+caller can see what does exist instead of a bare miss.
+
+Jobs are dropped 5 minutes after they finish, and only when no SSE subscriber is
+still attached; a webui restart clears them all (the UI shows the same
+"orphaned by webui restart" caveat for tasks). The cleanup timer is `unref`'d and
+cancelled by `clearJob`, so a pending expiry never holds a process open.
 
 ### LLM guidance surface (plan 35a)
 

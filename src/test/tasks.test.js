@@ -11,9 +11,10 @@ const AGENTS = {
   'pad-task-b': { name: 'pad-task-b', agent_type: 'opencode', runtime_ref: 'pad-task-b', status: 'running' },
   'pad-task-off': { name: 'pad-task-off', agent_type: 'opencode', runtime_ref: 'pad-task-off', status: 'exited' },
   'pad-task-codex': { name: 'pad-task-codex', agent_type: 'codex', runtime_ref: 'pad-task-codex', status: 'running' },
+  'pad-task-openclaw': { name: 'pad-task-openclaw', agent_type: 'openclaw', runtime_ref: 'pad-task-openclaw', status: 'running' },
 };
 
-const RUNNING = { 'pad-task-a': true, 'pad-task-b': true, 'pad-task-codex': true };
+const RUNNING = { 'pad-task-a': true, 'pad-task-b': true, 'pad-task-codex': true, 'pad-task-openclaw': true };
 
 function makeChild(pid = 4242) {
   const child = new EventEmitter();
@@ -93,30 +94,30 @@ describe('Task queue - schema', () => {
 
 describe('Task queue - command construction', () => {
   it('always passes --format json and the driver workspace dir', () => {
-    const cmd = tasks.buildCommand('do the thing', { workspaceDir: '/root/.opencode/workspace' });
+    const cmd = tasks.buildCommand('opencode', 'do the thing', { workspaceDir: '/root/.opencode/workspace' });
     assert.ok(cmd.includes('--format json'), 'json format');
     assert.ok(cmd.includes("--dir '/root/.opencode/workspace'"), 'workspace dir');
     assert.ok(cmd.includes('opencode run'), 'opencode run');
   });
 
   it('adds --model, --agent and --auto only when asked', () => {
-    const bare = tasks.buildCommand('x', { workspaceDir: '/ws' });
+    const bare = tasks.buildCommand('opencode', 'x', { workspaceDir: '/ws' });
     assert.ok(!bare.includes('--model'), 'no model');
     assert.ok(!bare.includes('--agent'), 'no agent');
     assert.ok(!bare.includes('--auto'), 'no auto');
-    const full = tasks.buildCommand('x', { workspaceDir: '/ws', model: 'anthropic/claude', agent: 'build', autoApprove: true });
+    const full = tasks.buildCommand('opencode', 'x', { workspaceDir: '/ws', model: 'anthropic/claude', agent: 'build', autoApprove: true });
     assert.ok(full.includes("--model 'anthropic/claude'"), 'model');
     assert.ok(full.includes("--agent 'build'"), 'agent');
     assert.ok(full.includes('--auto'), 'auto');
   });
 
   it('shell-quotes single quotes in the prompt', () => {
-    const cmd = tasks.buildCommand("don't break it", { workspaceDir: '/ws' });
+    const cmd = tasks.buildCommand('opencode', "don't break it", { workspaceDir: '/ws' });
     assert.ok(cmd.includes(`'don'\\''t break it'`), `escaped single quote in: ${cmd}`);
   });
 
   it('keeps a dash-leading prompt after the -- separator', () => {
-    const cmd = tasks.buildCommand('-rf /', { workspaceDir: '/ws' });
+    const cmd = tasks.buildCommand('opencode', '-rf /', { workspaceDir: '/ws' });
     assert.ok(cmd.includes("-- '-rf /'"), `separator in: ${cmd}`);
   });
 });
@@ -130,8 +131,13 @@ describe('Task queue - submit pre-checks', () => {
     assert.throws(() => tasks.submitTask({ name: 'pad-task-off', prompt: 'x' }), /not running/);
   });
 
-  it('rejects a non-opencode PAD', () => {
-    assert.throws(() => tasks.submitTask({ name: 'pad-task-codex', prompt: 'x' }), /opencode/);
+  it('rejects a PAD whose type has no task capability', () => {
+    // Task submission is an opencode/codex capability; openclaw cannot run one.
+    assert.throws(() => tasks.submitTask({ name: 'pad-task-openclaw', prompt: 'x' }), /openclaw/);
+  });
+
+  it('accepts codex, which gained task support', () => {
+    assert.doesNotThrow(() => tasks.submitTask({ name: 'pad-task-codex', prompt: 'x', enqueue: true }), 'codex is a task-capable type');
   });
 
   it('rejects an empty prompt and inserts nothing', () => {

@@ -15,6 +15,7 @@ const containerHealth = require('./services/container-health');
 const { getGuide, getCommandCatalog, listCatalogTypes } = require('./services/llm-guide');
 const { getDb } = require('./services/db');
 const taskRunner = require('./services/task-runner');
+const jobLog = require('./services/job-log');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const PREFIX = process.env.CONTAINER_PREFIX || 'vm';
@@ -112,6 +113,9 @@ const READ_TOOLS = new Set([
   'list_agents', 'get_agent', 'agent_logs', 'config_get', 'settings_get',
   'health', 'workspace_list', 'workspace_read', 'help', 'agent_commands',
   'task_status', 'task_result', 'task_list',
+  // Job readers are pure reads on the in-memory job store, so a read-only key
+  // may poll the progress of a create/recreate it is not allowed to start.
+  'job_status', 'job_log',
 ]);
 
 const TOOL_GRANT_FOR = {
@@ -298,17 +302,22 @@ function registerTools(server) {
     'settings_get',
     {
       title: 'Get PAD settings + published-web state',
-      description: 'The single read tool for a PAD — the full picture before a `recreate`. Returns allowDocker, network peer, SSH (host + container port), custom workspace mount, extra volumes/ports, image/version, networkHealth, the available network-peer containers, AND the published-web state (active, webService, networkMode, passwordConfigured, startCommand, actualPorts).',
+      description: 'The single read tool for a PAD — the full picture before a `recreate`. Returns allowDocker, network peer, SSH (host + container port), custom workspace mount, extra volumes/ports, image/version, networkHealth, the available network-peer containers, AND the published-web state (active, webService, networkMode, passwordConfigured, startCommand, actualPorts). `availableNetworks` is FILTERED to running containers that make sense as a peer (the whole host\'s container list is not useful here) and capped at 10 — read `availableNetworksTotal` / `availableNetworksTruncated` to know if you are seeing all of them. `workspaceDevcontainer` describes the .devcontainer in the WORKSPACE (shared by every pad on that workspace, NOT this pad\'s own config) — `sharedWith` lists the other pads using it.',
       inputSchema: { name: z.string().describe('PAD name') },
     },
     async ({ name }) => {
       requireTool(currentUser(), 'settings_get', name);
       requireAgent(name);
-      const [settings, availableNetworks] = await Promise.all([
-        vm.readSettings(name),
-        vm.listContainers(),
-      ]);
-      return textResult({ name, ...settings, availableNetworks });
+      const settings = await vm.readSettings(name);
+      const currentPeer = (settings && settings.network) || '';
+      const nets = await vm.listNetworkPeers({ currentPeer });
+      return textResult({
+        name,
+        ...settings,
+        availableNetworks: nets.peers,
+        availableNetworksTotal: nets.total,
+        availableNetworksTruncated: nets.truncated,
+      });
     }
   );
 
@@ -442,9 +451,9 @@ function registerTools(server) {
     'create_agent',
     {
       title: 'Create a PAD agent',
-      description: 'Create a new PAD: validate, seed the per-instance build, write meta + compose, build the per-instance image, start the container, and run the driver\'s setup steps — the full create flow from the web UI. The `name` is the bare agent name (the container prefix is added for you, e.g. `blog-bot` → `pad-blog-bot`). Agent type defaults to openclaw. Requires `confirm: true` — it is heavy (image build) and adds a new agent to the fleet. The API key user becomes the agent owner. Returns the created agent + a log of what happened.',
+      description: 'Create a new PAD: validate, seed the per-instance build, write meta + compose, build the per-instance image, start the container, and run the driver\'s setup steps — the full create flow from the web UI. NAMING: `name` is the FINAL container name — Paddock prepends CONTAINER_PREFIX (`pad-` by default) ONLY if you left it off, and never inserts the agent type. So `name: "blog-bot"` becomes the pad `pad-blog-bot`, and `name: "opencode-tester"` becomes `pad-opencode-tester` (NOT `pad-opencode-opencode-tester`). The resolved name is returned as `resolvedName` — use it for every later call. Agent type defaults to openclaw. Requires `confirm: true` — it is heavy (image build) and adds a new agent to the fleet. The API key user becomes the agent owner. Returns the created agent + a log of what happened. LONG-RUNNING: an image build can outlive an MCP call timeout — the create keeps going in the background, so after a timeout call `job_status` with the resolved name (or `job_log`) to watch it instead of retrying the create.',
       inputSchema: {
-        name: z.string().describe('Agent name without the container prefix (e.g. "blog-bot" → pad-blog-bot)'),
+        name: z.string().describe('The pad name WITHOUT the container prefix (e.g. "blog-bot" → pad-blog-bot). The agent type is NOT woven in — pass "tester" for pad-tester, or "opencode-tester" for pad-opencode-tester.'),
         agent: z.enum(['openclaw', 'opencode', 'picoclaw', 'hermes', 'codex']).optional().describe('Agent type (default openclaw)'),
         confirm: z.boolean().describe('Must be true to create — heavy and adds a new agent to the fleet'),
         userMode: z.enum(['root', 'user']).optional().describe('Container user: "root" (default) or "user" — user runs the agent daemon + terminal as the pad user (PUID:PGID) so agent-written files are user-owned. Not applicable to hermes (it already runs as its own user).'),
@@ -457,6 +466,16 @@ function registerTools(server) {
         sshPassword: z.string().optional().describe('Root/SSH password (defaults to the name)'),
         workspaceHost: z.string().optional().describe('Custom workspace host source — both-or-neither with workspaceDir'),
         workspaceDir: z.string().optional().describe('Custom workspace container path — both-or-neither with workspaceHost'),
+        buildCommands: z.string().optional().describe('Dockerfile build commands baked into the image (injected into the pad\'s build/Dockerfile — cannot open a FROM stage)'),
+        postCreate: z.string().optional().describe('Shell script run after every container create/recreate (/build/post-create.sh)'),
+        postStart: z.string().optional().describe('Shell script run on every container start (/build/post-start.sh)'),
+        postAttach: z.string().optional().describe('Shell script run when the terminal attaches (/build/post-attach.sh)'),
+        web: z.object({
+          active: z.boolean().describe('Publish (true) or unpublish (false) the web app'),
+          hostPort: z.number().int().min(1).max(65535).optional().describe('Host port'),
+          containerPort: z.number().int().min(1).max(65535).optional().describe('Container port the app listens on (unique per agent when peers share a network namespace)'),
+          password: z.string().optional().describe('Web app password (write-only; empty = keep current)'),
+        }).optional().describe('Publish the web app as part of the create (no second recreate needed)'),
         extraVolumes: z.array(z.object({
           type: z.enum(['bind', 'volume']).optional().describe('bind = host source path, volume = named Docker volume'),
           host: z.string().describe('Host source path (or the volume name when type is volume)'),
@@ -480,7 +499,17 @@ function registerTools(server) {
         throw new McpError(ErrorCode.InvalidRequest, `Invalid agent name: ${args.name}`);
       }
       requireTool(user, 'create_agent', fullName);
+      // Register the job up front so a create that outlives the MCP call
+      // timeout is still observable via job_status / job_log. The key matches
+      // the REST create route's, so both surfaces read the same job.
+      const job = jobLog.getOrCreateJob(fullName);
       const log = [];
+      const onLog = (type, msg) => {
+        const entry = `[${type}] ${msg}`;
+        log.push(entry);
+        jobLog.line(job, type, msg);
+      };
+      const onStep = (step, state, cmd) => jobLog.setStep(job, step, state, cmd);
       try {
         await vm.createAgent(fullName, {
           agent: args.agent || 'openclaw',
@@ -496,12 +525,18 @@ function registerTools(server) {
           extraPorts: args.extraPorts,
           userMode: args.userMode,
           generateDevContainer: args.generateDevContainer !== false,
-          onLog: (type, msg) => log.push(`[${type}] ${msg}`),
-          onStep: () => {},
+          buildCommands: args.buildCommands,
+          postCreate: args.postCreate,
+          postStart: args.postStart,
+          postAttach: args.postAttach,
+          web: args.web,
+          onLog,
+          onStep,
         });
       } catch (e) {
         registry.dockerPsList(true);
         registry.discoverAgents();
+        jobLog.fail(job, e.message);
         throw new McpError(ErrorCode.InvalidRequest, `Create failed: ${e.message}`);
       }
       registry.dockerPsList(true);
@@ -510,7 +545,8 @@ function registerTools(server) {
       registry.assignOwner(fullName, ownerId);
       registry.recordActivity(fullName, 'lifecycle', 'create', 'ok', `Agent created via MCP (type=${args.agent || 'openclaw'})`);
       const agent = registry.getAgent(fullName);
-      return textResult({ ok: true, name: fullName, status: agent ? agent.status : 'created', ownerId, log });
+      jobLog.finish(job, true, { name: fullName });
+      return textResult({ ok: true, name: fullName, resolvedName: fullName, status: agent ? agent.status : 'created', ownerId, log });
     }
   );
 
@@ -584,13 +620,25 @@ function registerTools(server) {
       if (args.reset) {
         requireTool(currentUser(), 'reset', name);
       }
+      // Same job key the REST apply route uses, so a recreate that outlives the
+      // MCP call timeout stays observable via job_status / job_log.
+      const job = jobLog.getOrCreateJob(`update:${name}`);
       const log = [];
-      const result = await vm.applyAgentChanges(name, { ...args, force: true }, {
-        onLog: (type, msg) => log.push(`[${type}] ${msg}`),
-        onStep: () => {},
-      });
+      const onLog = (type, msg) => {
+        log.push(`[${type}] ${msg}`);
+        jobLog.line(job, type, msg);
+      };
+      const onStep = (step, state, cmd) => jobLog.setStep(job, step, state, cmd);
+      let result;
+      try {
+        result = await vm.applyAgentChanges(name, { ...args, force: true }, { onLog, onStep });
+      } catch (e) {
+        jobLog.fail(job, e.message);
+        throw new McpError(ErrorCode.InvalidRequest, `Recreate failed: ${e.message}`);
+      }
       registry.dockerPsList(true);
       registry.discoverAgents();
+      jobLog.finish(job, true, { name });
       return textResult({ ...result, log });
     }
   );
@@ -599,16 +647,101 @@ function registerTools(server) {
     'update',
     {
       title: 'Update PAD to latest image',
-      description: 'Convenience alias for `recreate {pull: true}` — pull the base image, rebuild and force-recreate the container (same as the Settings tab "Update" flow). Config/data live in bind mounts, so they survive. The old container stays up through the build and is only swapped at recreate.',
+      description: 'Convenience alias for `recreate {pull: true}` — pull the base image, rebuild and force-recreate the container (same as the Settings tab "Update" flow). Config/data live in bind mounts, so they survive. The old container stays up through the build and is only swapped at recreate. LONG-RUNNING: the build can outlive an MCP call timeout and keeps going — poll `job_status` with the pad name after a timeout.',
       inputSchema: { name: z.string().describe('PAD name') },
     },
     async ({ name }) => {
       requireTool(currentUser(), 'update', name);
       requireAgent(name);
-      await vm.updateAgent(name, { pull: true });
+      const job = jobLog.getOrCreateJob(`update:${name}`);
+      const onLog = (type, msg) => jobLog.line(job, type, msg);
+      const onStep = (step, state, cmd) => jobLog.setStep(job, step, state, cmd);
+      try {
+        await vm.updateAgent(name, { pull: true, onLog, onStep });
+      } catch (e) {
+        jobLog.fail(job, e.message);
+        throw new McpError(ErrorCode.InvalidRequest, `Update failed: ${e.message}`);
+      }
       registry.dockerPsList(true);
       registry.discoverAgents();
+      jobLog.finish(job, true, { name });
       return textResult({ ok: true, name, action: 'updated' });
+    }
+  );
+
+  // ─── Job readers (the answer to a timed-out create/recreate) ────────────
+  // A create or a rebuild holds the MCP connection open for minutes, and the
+  // client's timeout is not ours to raise. The work does NOT stop on a client
+  // timeout — so the way out is never "retry the create" (that races a second
+  // build against the first) but "read the job it left behind".
+
+  /** The job key for a PAD. `kind` narrows it: 'create' → `<name>`,
+   *  'recreate'/'update' → `update:<name>`, 'health' → `health:<name>`.
+   *  Omitted → the most recently started job of any kind for this pad. */
+  function resolveJobName(name, kind) {
+    if (kind) {
+      if (kind === 'create') return name;
+      if (kind === 'health') return `health:${name}`;
+      return `update:${name}`;
+    }
+    const jobs = jobLog.listJobs().filter((j) => j.name === name || j.name.endsWith(`:${name}`));
+    return jobs.length ? jobs[0].name : name;
+  }
+
+  server.registerTool(
+    'job_status',
+    {
+      title: 'Progress of a create / recreate / update',
+      description: 'Read the progress of a long-running Paddock operation: the current step, whether it is still running, and the log line count. USE THIS INSTEAD OF RETRYING after a `create_agent` / `recreate` / `update` call times out — a timed-out call does NOT cancel the work, it keeps building in the background, and a second create would race it. Pass the pad name; omit `kind` to get the most recent job of any kind. Job state: running → done | failed. Jobs are held in memory and expire 5 minutes after they finish (a webui restart clears them all).',
+      inputSchema: {
+        name: z.string().describe('PAD name'),
+        kind: z.enum(['create', 'recreate', 'update', 'health']).optional().describe('Which job to read (default: the most recent one for this pad)'),
+        tail: z.number().int().min(1).max(200).optional().describe('Also return the last N log lines (default 0 = status only)'),
+      },
+    },
+    async ({ name, kind, tail }) => {
+      requireTool(currentUser(), 'job_status', name);
+      const jobName = resolveJobName(name, kind);
+      const status = jobLog.getStatus(jobName);
+      if (!status) {
+        const known = jobLog.listJobs().map((j) => j.name);
+        return textResult({
+          found: false,
+          job: jobName,
+          hint: 'No job in memory for this operation. Either it finished more than 5 minutes ago, the webui restarted, or the operation never started. Check the pad itself with get_agent / list_agents.',
+          liveJobs: known,
+        });
+      }
+      const out = { found: true, ...status, expiresIn: status.state === 'running' ? null : 'within 5 minutes of finishing' };
+      if (tail) out.log = jobLog.logLines(jobName, { tail }) || [];
+      return textResult(out);
+    }
+  );
+
+  server.registerTool(
+    'job_log',
+    {
+      title: 'Log of a create / recreate / update',
+      description: 'The build/recreate log of a long-running Paddock operation — the same lines those tools return on success, readable afterwards. This is how you see WHY a create failed or how far a timed-out build got, without restarting anything. Pass the pad name; omit `kind` for the most recent job. Jobs expire 5 minutes after finishing, and a webui restart clears them.',
+      inputSchema: {
+        name: z.string().describe('PAD name'),
+        kind: z.enum(['create', 'recreate', 'update', 'health']).optional().describe('Which job to read (default: the most recent one for this pad)'),
+        tail: z.number().int().min(1).max(2000).optional().describe('Return the last N lines (default 100)'),
+      },
+    },
+    async ({ name, kind, tail }) => {
+      requireTool(currentUser(), 'job_log', name);
+      const jobName = resolveJobName(name, kind);
+      const status = jobLog.getStatus(jobName);
+      const lines = jobLog.logLines(jobName, { tail: tail || 100 });
+      if (!status) {
+        return textResult({
+          found: false, job: jobName,
+          hint: 'No job in memory for this operation (expired after 5 min, or the webui restarted).',
+          liveJobs: jobLog.listJobs().map((j) => j.name),
+        });
+      }
+      return textResult({ found: true, job: jobName, state: status.state, step: status.step, error: status.error, lineCount: status.lineCount, log: lines || [] });
     }
   );
 

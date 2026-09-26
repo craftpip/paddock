@@ -13,6 +13,9 @@ const INSTANCES_DIR = path.join(WORKSPACE, 'instances');
 const PREFIX = process.env.CONTAINER_PREFIX || 'vm';
 const PREFIX_RE = new RegExp('^' + PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-');
 const VM_NAME_RE = new RegExp('^' + PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-[a-zA-Z0-9][a-zA-Z0-9_-]*$');
+// The control-plane container itself (docker-compose.yml `container_name`) —
+// never a network peer for a pad.
+const WEBUI_CONTAINER = process.env.WEBUI_CONTAINER_NAME || 'paddock';
 
 // Shared build-template root (`src/vm-builds/<type>/`). Read-only template
 // source: copied into `instances/<name>/build/` at create/clone/migrate time.
@@ -667,6 +670,53 @@ function readDevContainerPlan(name) {
   } catch {
     return null;
   }
+}
+
+/** Other pads mounted on the same workspace host. A shared workspace means
+ *  ONE `.devcontainer/devcontainer.json` for N pads — knowing the others is
+ *  what tells a reader the file is not this pad's alone. */
+function padsOnSameWorkspace(name, workspaceHost) {
+  if (!workspaceHost) return [];
+  const target = path.normalize(String(workspaceHost));
+  const out = [];
+  let entries = [];
+  try { entries = fs.readdirSync(INSTANCES_DIR, { withFileTypes: true }); } catch { return out; }
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const other = e.name;
+    if (other === name || other.endsWith('-door') || other.endsWith('-web')) continue;
+    const meta = readMeta(path.join(INSTANCES_DIR, other)) || {};
+    if (!meta.WORKSPACE_HOST) continue;
+    let norm = null;
+    try { norm = path.normalize(String(meta.WORKSPACE_HOST)); } catch { continue; }
+    if (norm === target) out.push(other);
+  }
+  return out;
+}
+
+/** The workspace's .devcontainer as a workspace-scoped, explicitly labelled
+ *  block. It is NOT the pad's own devcontainer: it lives in the workspace, is
+ *  shared by every pad mounted there, and its port plan is a plan — the live
+ *  bindings are the pad's `actualPorts` (in the published-web state). Blank
+ *  `userMode`/`containerUser` inherit the pad's effective values rather than
+ *  reporting an empty string next to a `userMode: 'user'` pad. */
+function readWorkspaceDevContainer(name, workspaceMount) {
+  const plan = readDevContainerPlan(name);
+  if (!plan) return null;
+  const meta = readMeta(path.join(INSTANCES_DIR, name)) || {};
+  const padUserMode = meta.USER_MODE === 'user' ? 'user' : 'root';
+  const sharedWith = padsOnSameWorkspace(name, workspaceMount && workspaceMount.host);
+  const out = { ...plan };
+  // Inherit the pad's user model instead of echoing back a blank plan field.
+  if (!out.userMode) out.userMode = padUserMode;
+  if (!out.containerUser) out.containerUser = padUserMode === 'user' ? 'pad (PUID:PGID)' : 'root';
+  out.scope = 'workspace';
+  out.shared = sharedWith.length > 0;
+  if (sharedWith.length) out.sharedWith = sharedWith;
+  out.note = sharedWith.length
+    ? `This .devcontainer lives in the WORKSPACE at ${plan.filePath || 'the workspace root'} and is shared with ${sharedWith.join(', ')} — it is not ${name}'s own config, and editing it affects every pad listed. Its ports are a PLAN; this pad's live bindings are the actualPorts in the web state above.`
+    : `This .devcontainer lives in the WORKSPACE at ${plan.filePath || 'the workspace root'}, not in ${name}'s instance directory. Its ports are a PLAN; this pad's live bindings are the actualPorts in the web state above.`;
+  return out;
 }
 
 /** Devcontainer runArgs allow-list (plan 41 item 16): only these keys map onto
@@ -1828,18 +1878,11 @@ function ensurePostStartBlock(name) {
   return true;
 }
 
-/** Whether the built image (or running container) has the post-start hook baked
- *  into its start.sh. Used by applyAgentChanges to decide whether enabling a
+/** Whether the baked image's start.sh has the post-start hook baked
+ *  into it. Used by applyAgentChanges to decide whether enabling a
  *  post-start command needs a rebuild. */
 async function imageHasPostStartHook(name, image, wasRunning) {
-  try {
-    const r = wasRunning
-      ? await runCmd('docker', ['exec', name, 'sh', '-lc', `grep -q '${POST_START_MARKER}' /usr/local/bin/start.sh`], { timeout: 15000 })
-      : await runCmd('docker', ['run', '--rm', '--entrypoint', 'sh', image, '-lc', `grep -q '${POST_START_MARKER}' /usr/local/bin/start.sh`], { timeout: 30000 });
-    return r.code === 0;
-  } catch {
-    return false;
-  }
+  return imageProbe(name, image, wasRunning, `grep -q '${POST_START_MARKER}' /usr/local/bin/start.sh`);
 }
 
 // ─── User-mode (Container user) build-file support (plan 43 Phase 7) ────────
@@ -1937,14 +1980,7 @@ function ensureUserModeBuildFiles(name, agent) {
  *  (i.e. it can run a user-mode pad). Used by `applyAgentChanges` to decide
  *  whether toggling Container user needs a rebuild. */
 async function imageHasPadUser(name, image, wasRunning) {
-  try {
-    const r = wasRunning
-      ? await runCmd('docker', ['exec', name, 'sh', '-lc', 'id -u pad'], { timeout: 15000 })
-      : await runCmd('docker', ['run', '--rm', '--entrypoint', 'sh', image, '-lc', 'id -u pad'], { timeout: 30000 });
-    return !!r.stdout && /^\d+$/.test((r.stdout || '').trim());
-  } catch {
-    return false;
-  }
+  return imageProbe(name, image, wasRunning, 'id -u pad');
 }
 
 /** Rebuild the image (--pull to redownload the base) and recreate the
@@ -2063,6 +2099,59 @@ function effectiveUserMode(userMode, dcPlan, agent) {
   return dcPlan && dcPlan.userMode === 'user' ? 'user' : '';
 }
 
+/** Normalize + validate a `web` publish request for the CREATE path (shared by
+ *  `validateAgentCreate` and `createVm`, which re-checks as its second line of
+ *  defense). Returns the `webService` shape `writeInstanceCompose` wants, or
+ *  null when no web app is being published. Throws a user-facing error.
+ *
+ *  Publishing at create time needs no image rebuild: the start-web hook lives in
+ *  the agent's BIND-MOUNTED data dir and every image template already runs it
+ *  when present, so the hook is just a file we write. `applyWebAuth`'s config
+ *  patch is applied AFTER the driver setup steps (the config may not exist yet
+ *  at this point), then the hook is exec'd — same order `applyAgentChanges`
+ *  uses on a publish. */
+async function resolveWebRequest(name, agent, web, { sshHostPort = '', extraPorts = null } = {}) {
+  if (web === undefined || web === null) return null;
+  const driver = getDriver(agent);
+  if (!driver.webApp) throw new Error('This agent type has no web app to publish');
+  if (!web.active) return null;
+  const hPort = String(web.hostPort !== undefined && web.hostPort !== null ? web.hostPort : '').trim();
+  if (!/^\d+$/.test(hPort) || +hPort < 1 || +hPort > 65535) {
+    throw new Error('Host port must be a number between 1 and 65535');
+  }
+  // Fixed-port drivers (openclaw gateway 18789) always publish the driver's
+  // declared container port.
+  const cPort = web.containerPort !== undefined && web.containerPort !== null && driver.webApp.containerPortEditable !== false
+    ? Number(web.containerPort)
+    : (driver.webApp.containerPort || 8080);
+  if (!Number.isInteger(cPort) || cPort < 1 || cPort > 65535) {
+    throw new Error('Container port must be a number between 1 and 65535');
+  }
+  if (sshHostPort && String(sshHostPort) === hPort) {
+    throw new Error(`Host port ${hPort} is already the SSH port of this agent`);
+  }
+  for (const p of (extraPorts || [])) {
+    if (p && String(p.host) === hPort) {
+      throw new Error(`Host port ${hPort} is already listed in extraPorts`);
+    }
+  }
+  if (await hostPortInUse(hPort, name)) {
+    throw new Error(`Host port ${hPort} is already in use by another agent`);
+  }
+  const password = web.password === undefined || web.password === null ? '' : String(web.password);
+  // Required-auth drivers (openclaw — fails closed on non-loopback binds) have
+  // no token to fall back on at create time, so publishing needs one.
+  if (driver.webApp.auth && driver.webApp.auth.required && !password) {
+    throw new Error('A gateway token is required to publish this web app (openclaw refuses to listen outside loopback without auth)');
+  }
+  return {
+    containerPort: cPort,
+    hostPort: hPort,
+    password,
+    authToken: driver.webApp.auth && driver.webApp.auth.urlToken ? password : '',
+  };
+}
+
 async function createVm(name, options = {}) {
   const {
     agent = 'openclaw', mode = 'fresh', cloneSource = '',
@@ -2074,6 +2163,7 @@ async function createVm(name, options = {}) {
     userMode,
     buildCommands = '', postCreate = '', postStart = '', postAttach = '',
     generateDevContainer = true,
+    web = null,
   } = options;
 
   if (existingServices().has(name)) {
@@ -2110,6 +2200,13 @@ async function createVm(name, options = {}) {
   }
   const extraVols = validateExtraVolumes(name, agent, extraVolumes);
   const extraPs = validateExtraPorts(extraPorts, { sshPort: finalPort });
+
+  // Web publish at create time (no second recreate, no rebuild): validated up
+  // front so a bad request aborts before anything is written to disk.
+  const webService = await resolveWebRequest(name, agent, web, {
+    sshHostPort: finalPort,
+    extraPorts: extraPs,
+  });
 
   // Custom workspace bind (plan 24): validate BEFORE writing meta/compose so a
   // bad request aborts with a clear error and leaves nothing behind. `wsMount`
@@ -2272,7 +2369,24 @@ async function createVm(name, options = {}) {
     webPeerNetwork = await getPeerNetworkName(network);
   }
 
-  writeInstanceCompose(name, agent, pw, finalPort, { allowDocker, network, webPeerNetwork });
+  // Web publish (part of the create): persist the binding + write the start-web
+  // hook BEFORE the compose regen so the published port (and the peer-mode door
+  // that carries it) is part of the very first `up`. The hook sits in the
+  // bind-mounted agent data dir, so no image rebuild is involved.
+  if (webService) {
+    const wp = webServicePath(name);
+    fs.writeFileSync(wp, JSON.stringify({
+      containerPort: webService.containerPort,
+      hostPort: webService.hostPort,
+      authToken: webService.authToken || '',
+    }, null, 2));
+    ensureOwned(wp);
+    const wDriver = getDriver(agent);
+    await writeWebStartHook(name, agent, buildWebHook(wDriver, agent, webService, webService.password));
+    onLog('system', `Web app will be published on host port ${webService.hostPort} (no extra recreate needed)`);
+  }
+
+  writeInstanceCompose(name, agent, pw, finalPort, { allowDocker, network, webService, webPeerNetwork });
 
   const composePath = instanceComposePath(name);
 
@@ -2360,6 +2474,28 @@ async function createVm(name, options = {}) {
     await runCmdStream('docker', ['restart', name], { onLog, timeout: 30000 });
   }
 
+  // Web publish, finalized (create path): the driver's config now exists, so the
+  // gateway auth patch can land, then re-exec the start-web hook and confirm the
+  // app is actually serving. Same order as `applyAgentChanges`' publish: patch
+  // config → exec hook → verify.
+  if (webService) {
+    const wDriver = getDriver(agent);
+    await applyWebAuth(name, wDriver, webService.password);
+    onStep('web-verify', 'start', `docker exec ${name} ${wDriver.dataDir}/start-web.sh`);
+    await runCmd('docker', ['exec', name, 'bash', `${wDriver.dataDir}/start-web.sh`], { timeout: 20000 }).catch(() => {});
+    let up = false;
+    for (let i = 0; i < 20 && !up; i++) {
+      if (await webPortReachable(name, webService.containerPort)) up = true;
+      else await new Promise((r) => setTimeout(r, 1000));
+    }
+    onStep('web-verify', 'end');
+    if (up) {
+      onLog('system', `Web app is live at http://${process.env.HOST_NAME || 'localhost'}:${webService.hostPort}`);
+    } else {
+      throw new Error(`Web server did not come up on port ${webService.containerPort} (see container web.log)`);
+    }
+  }
+
   return name;
 }
 
@@ -2434,14 +2570,22 @@ async function validateAgentCreate(name, opts = {}) {
   }
 
   // Async cross-agent host-port availability across the whole request: the
-  // optional SSH port and every extra port together, before anything is made.
+  // optional SSH port, every extra port and the optional web port together,
+  // before anything is made.
   for (const hp of [...extraPs.map((p) => p.host), sshHostPort].filter(Boolean)) {
     if (await hostPortInUse(hp, name)) {
       throw new Error(`Host port ${hp} is already in use by another agent`);
     }
   }
 
-  return { sshHostPort, sshCport: sshCportValid ? sshCportRaw : '', wsMount };
+  // Web publish on create — same validator createVm uses, so both abort with an
+  // identical message before any 202/job is emitted.
+  const webService = await resolveWebRequest(name, agent, opts.web, {
+    sshHostPort,
+    extraPorts: extraPs,
+  });
+
+  return { sshHostPort, sshCport: sshCportValid ? sshCportRaw : '', wsMount, webService };
 }
 
 /** Create a PAD — validate, then `createVm` (seed build dir → write meta +
@@ -2840,50 +2984,48 @@ async function removeWebAuth(name, driver) {
   }
 }
 
-/** Whether the baked image's start.sh ships the docker CLI (settings toggle:
- *  enabling docker on an image without it triggers a rebuild). Checks the
- *  running container when up, else spins a throwaway container. Shared by the
- *  app.js settings route and `applyAgentChanges`. */
-async function imageHasDockerCli(name, image, wasRunning) {
+/** Run a probe script inside the agent's image and report whether it exits 0.
+ *  Uses `docker exec` when the container is genuinely UP, else spins a
+ *  throwaway container from `image`.
+ *
+ *  The live-state check is a correctness fix, not an optimization:
+ *  `applyAgentChanges` STOPPES the container (step 4) BEFORE it probes (step 6)
+ *  while the caller's `wasRunning` flag still reads true — so a flag-driven
+ *  `docker exec` would target a stopped container, always fail, and make every
+ *  toggle look like "the image needs a rebuild". `runCmd` rejects on a non-zero
+ *  exit, so success is the resolve, never `r.code`. */
+async function imageProbe(name, image, wasRunning, script) {
   try {
-    const r = wasRunning
-      ? await runCmd('docker', ['exec', name, 'sh', '-lc', 'command -v docker'], { timeout: 15000 })
-      : await runCmd('docker', ['run', '--rm', '--entrypoint', 'sh', image, '-lc', 'command -v docker'], { timeout: 30000 });
-    return !!(r.stdout || '').trim();
+    const up = !!wasRunning && await isContainerRunning(name);
+    await (up
+      ? runCmd('docker', ['exec', name, 'sh', '-lc', script], { timeout: 15000 })
+      : runCmd('docker', ['run', '--rm', '--entrypoint', 'sh', image, '-lc', script], { timeout: 60000 }));
+    return true;
   } catch {
     return false;
   }
+}
+
+/** Whether the baked image's start.sh ships the docker CLI (settings toggle:
+ *  enabling docker on an image without it triggers a rebuild). Shared by the
+ *  app.js settings route and `applyAgentChanges`. */
+async function imageHasDockerCli(name, image, wasRunning) {
+  return imageProbe(name, image, wasRunning, 'command -v docker');
 }
 
 /** Whether the baked /usr/local/bin/start.sh knows to honor the SSH_PORT env
  *  (i.e. the image was built from a start.sh containing the SSH_PORT block).
- *  Checks the running container when up, else spins a throwaway container.
  *  Shared by the app.js settings route and `applyAgentChanges`. */
 async function imageHasSshPortSupport(name, image, wasRunning) {
-  try {
-    await (wasRunning
-      ? runCmd('docker', ['exec', name, 'sh', '-lc', 'grep -q SSH_PORT /usr/local/bin/start.sh'], { timeout: 15000 })
-      : runCmd('docker', ['run', '--rm', '--entrypoint', 'sh', image, '-lc', 'grep -q SSH_PORT /usr/local/bin/start.sh'], { timeout: 30000 }));
-    return true;
-  } catch {
-    return false;
-  }
+  return imageProbe(name, image, wasRunning, 'grep -q SSH_PORT /usr/local/bin/start.sh');
 }
 
 /** Whether the baked /usr/local/bin/start.sh runs the web start-hook (i.e. the
- *  image was built from a start.sh containing the web start block). Checks the
- *  running container when up, else spins a throwaway container. Used by
+ *  image was built from a start.sh containing the web start block). Used by
  *  `applyAgentChanges` to decide whether publishing web on a pre-hook PAD needs
  *  a rebuild (backfilled via ensureWebStartBlock). */
 async function imageHasWebStartSupport(name, image, wasRunning) {
-  try {
-    await (wasRunning
-      ? runCmd('docker', ['exec', name, 'sh', '-lc', 'grep -q start-web.sh /usr/local/bin/start.sh'], { timeout: 15000 })
-      : runCmd('docker', ['run', '--rm', '--entrypoint', 'sh', image, '-lc', 'grep -q start-web.sh /usr/local/bin/start.sh'], { timeout: 30000 }));
-    return true;
-  } catch {
-    return false;
-  }
+  return imageProbe(name, image, wasRunning, 'grep -q start-web.sh /usr/local/bin/start.sh');
 }
 
 /** Can the container reach its own published web port? Used to verify the web
@@ -2989,6 +3131,56 @@ async function listContainers() {
   return out;
 }
 
+/** The containers that make sense as a NETWORK PEER for a pad, filtered and
+ *  capped for the MCP `settings_get` tool.
+ *
+ *  `listContainers` returns the whole host's container list (the Settings-tab
+ *  dropdown wants that), which is pure noise to an LLM choosing a peer: a pad
+ *  joins another container's network namespace (`network_mode: container:<peer>`),
+ *  so a peer must be a RUNNING container, and the paddock fleet itself is not
+ *  something you route a pad through. We keep non-fleet containers, keep fleet
+ *  containers that publish a port (a deliberately shared service), drop doors
+ *  and the webui, and cap the list — an honest `truncated` + `total` beats
+ *  silently showing 30 rows with no count. */
+/** Pure peer selection, split out of `listNetworkPeers` so the filter is
+ *  testable without a live `docker ps` and without depending on where the real
+ *  instance dirs happen to live. `isFleetPad(name)` says "a PAD this project
+ *  manages"; doors and the webui are always dropped. */
+function selectNetworkPeers(containers, { limit = 10, currentPeer = '', isFleetPad = () => false, webuiContainer = WEBUI_CONTAINER } = {}) {
+  const peers = [];
+  for (const c of containers) {
+    if (!c) continue;
+    const name = Array.isArray(c.Names) ? String(c.Names[0] || '') : String(c.Names || c.ID || '');
+    const clean = name.replace(/^\//, '');
+    if (!clean) continue;
+    // A socat door (or legacy -web) is never a peer — it is part of a PAD.
+    if (isManagedDoorName(clean)) continue;
+    if (clean === webuiContainer || /paddock-webui/.test(c.Image || '')) continue;
+    // A fleet pad is only a sensible peer if it publishes something; a bare
+    // pad container is not a network anyone routes through.
+    if (isFleetPad(clean) && !String(c.Ports || '').trim()) continue;
+    peers.push({ name: clean, image: c.Image || '', state: (c.State || '').toLowerCase(), isCurrent: clean === currentPeer });
+  }
+  return { peers: peers.slice(0, limit), total: peers.length, truncated: peers.length > limit };
+}
+
+/** `<pad>-door` / `<pad>-web` belong to a PAD, not to the peer list. */
+function isManagedDoorName(name) {
+  return /-(door|web)$/.test(name);
+}
+
+async function listNetworkPeers({ limit = 10, currentPeer = '' } = {}) {
+  const r = await runCmd('docker', ['ps', '--format', '{{json .}}'], { timeout: 15000 });
+  const containers = (r.stdout || '').trim().split('\n').filter(Boolean).map((line) => {
+    try { return JSON.parse(line); } catch { return null; }
+  });
+  return selectNetworkPeers(containers, {
+    limit,
+    currentPeer,
+    isFleetPad: (n) => fs.existsSync(path.join(INSTANCES_DIR, n, 'meta.env')),
+  });
+}
+
 /** Current settings + published-web state, shared by `GET
  *  /api/agents/:name/settings` and the MCP `settings_get` tool. The web
  *  binding rides along so a single read reconstructs the whole picture before
@@ -3023,7 +3215,7 @@ async function readSettings(name) {
     workspaceMount,
     extraVolumes: readExtraVolumes(name),
     extraPorts: readExtraPorts(name),
-    devcontainerPlan: readDevContainerPlan(name),
+    workspaceDevcontainer: readWorkspaceDevContainer(name, workspaceMount),
     buildCommands: readCustomBuild(name),
     postCreate: readPostCreate(name),
     postStart: readPostStart(name),
@@ -3946,8 +4138,10 @@ module.exports = {
   validateExtraVolume, validateExtraVolumes, validateExtraPorts,
   readExtraVolumes, readExtraPorts, readSshCport, ensureSshStartBlock, autoSshPort,
   readDevContainerPlan, resolveDevContainerPlan, collectPublishedHostPorts,
+  readWorkspaceDevContainer, padsOnSameWorkspace,
   effectiveUserMode, syncDevContainer, generateWorkspaceDevContainer, devContainerStatus, regenerateDevContainer,
-  imageHasDockerCli, imageHasSshPortSupport,
+  imageHasDockerCli, imageHasSshPortSupport, imageHasWebStartSupport,
+  imageHasPostStartHook,
   ensureUserModeBuildFiles, imageHasPadUser,
   imageFor, seedBuildDir, buildDir, buildEnvPath,
   readBuildEnv, setBuildEnv,
@@ -3961,8 +4155,9 @@ module.exports = {
   composeCommand, runCompose, validateInstanceCompose, ensureInstanceBuilds,
   // plan 30 consolidated surface (shared by REST routes + MCP tools)
   readSettings, readWebState, readDrafts, containerInfo, listContainers,
+  listNetworkPeers, selectNetworkPeers, isManagedDoorName,
   prepareAgentChanges, applyAgentChanges,
-  validateAgentCreate, createAgent, hostPortInUse,
+  validateAgentCreate, createAgent, hostPortInUse, resolveWebRequest,
   INSTANCES_DIR, PREFIX, PREFIX_RE, VM_NAME_RE,
   HOST_WORKSPACE, WORKSPACE,
   findWebCollision,

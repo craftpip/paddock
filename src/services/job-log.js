@@ -17,11 +17,15 @@ const jobs = new Map();
 
 const CLEANUP_MS = 5 * 60 * 1000;
 
-function scheduleCleanup(name) {
-  setTimeout(() => {
-    const job = jobs.get(name);
-    if (job && job.subs.size === 0) jobs.delete(name);
+function scheduleCleanup(job) {
+  // unref'd + tracked on the job: a pending cleanup must never hold the process
+  // open (it would delay shutdown by up to 5 min), and clearJob cancels it.
+  if (job.cleanupTimer) clearTimeout(job.cleanupTimer);
+  job.cleanupTimer = setTimeout(() => {
+    const live = jobs.get(job.name);
+    if (live && live.subs.size === 0) jobs.delete(job.name);
   }, CLEANUP_MS);
+  if (typeof job.cleanupTimer.unref === 'function') job.cleanupTimer.unref();
 }
 
 function createJob(name) {
@@ -35,6 +39,7 @@ function createJob(name) {
     failed: false,
     error: '',
     ts: Date.now(),
+    cleanupTimer: null,
   };
   jobs.set(name, job);
   return job;
@@ -51,6 +56,8 @@ function getOrCreateJob(name) {
 }
 
 function clearJob(name) {
+  const job = jobs.get(name);
+  if (job && job.cleanupTimer) clearTimeout(job.cleanupTimer);
   jobs.delete(name);
 }
 
@@ -114,13 +121,13 @@ function check(job, item) {
 
 function finish(job, ok = true, extra = {}) {
   const n = append(job, { type: 'done', ok, name: job.name, ...extra });
-  scheduleCleanup(job.name);
+  scheduleCleanup(job);
   return n;
 }
 
 function fail(job, message) {
   const n = append(job, { type: 'error', message });
-  scheduleCleanup(job.name);
+  scheduleCleanup(job);
   return n;
 }
 
@@ -139,6 +146,32 @@ function getStatus(name) {
   };
 }
 
+/** Every live job, newest first. `prefix` filters by job-key prefix; used to
+ *  resolve "which jobs belong to this PAD" (`<name>` = create, `update:<name>`
+ *  = recreate/update, `health:<name>` = health check). */
+function listJobs(prefix = '') {
+  return [...jobs.values()]
+    .filter((j) => j.name.startsWith(prefix))
+    .sort((a, b) => b.ts - a.ts)
+    .map((j) => ({ ...getStatus(j.name), ts: j.ts }));
+}
+
+/** The rendered log lines of a job: `{stream, text}` events become
+ *  `[stream] text` strings, matching what the create/recreate tools return in
+ *  their `log` array. `tail` limits to the last N (default 50, max 2000). */
+function logLines(name, { tail = 50, since = 0 } = {}) {
+  const job = getJob(name);
+  if (!job) return null;
+  const out = [];
+  for (const ev of job.events) {
+    if (ev.n < since) continue;
+    if (ev.type === 'line') out.push(`[${ev.stream || 'line'}] ${ev.text || ''}`);
+    else if (ev.type === 'step') out.push(`[step] ${ev.step} ${ev.state}${ev.cmd ? ` — ${ev.cmd}` : ''}`);
+  }
+  const n = Math.max(1, Math.min(Number(tail) || 50, 2000));
+  return out.slice(-n);
+}
+
 module.exports = {
   createJob,
   getJob,
@@ -152,4 +185,6 @@ module.exports = {
   fail,
   subscribe,
   getStatus,
+  listJobs,
+  logLines,
 };

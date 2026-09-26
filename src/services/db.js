@@ -130,11 +130,45 @@ function migrate(db) {
       created_by TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       started_at TEXT,
-      finished_at TEXT
+      finished_at TEXT,
+      last_output_at TEXT
     );
 
     CREATE INDEX IF NOT EXISTS idx_tasks_agent ON tasks(agent_name);
     CREATE INDEX IF NOT EXISTS idx_tasks_queue ON tasks(status, priority, created_at);
+
+    -- Mission (plan 53): a project IS an (agent, folder) pair -- many projects
+    -- per agent is the normal case, so no UNIQUE on that pair. A session is the
+    -- only unit of work: one row per live tmux session (msn-*) running the
+    -- agent's TUI in the project's folder, typed into by the human and the
+    -- agent alike.
+    CREATE TABLE IF NOT EXISTS mission_projects (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      agent_name TEXT NOT NULL,
+      agent_type TEXT NOT NULL,
+      folder TEXT NOT NULL,
+      created_by TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (agent_name) REFERENCES agents(name) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS mission_sessions (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      tmux_id TEXT NOT NULL,
+      label TEXT NOT NULL DEFAULT '',
+      origin TEXT NOT NULL DEFAULT 'human',
+      locked INTEGER NOT NULL DEFAULT 0,
+      agent_session_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_seen_at TEXT,
+      FOREIGN KEY (project_id) REFERENCES mission_projects(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_mission_projects_agent ON mission_projects(agent_name);
+    CREATE INDEX IF NOT EXISTS idx_mission_sessions_project ON mission_sessions(project_id);
 
     CREATE INDEX IF NOT EXISTS idx_activity_agent ON activity_events(agent_id);
     CREATE INDEX IF NOT EXISTS idx_activity_ts ON activity_events(timestamp);
@@ -149,6 +183,16 @@ function migrate(db) {
   const cols = db.prepare("PRAGMA table_info(agents)").all().map(c => c.name);
   if (!cols.includes('owner_id')) {
     db.exec("ALTER TABLE agents ADD COLUMN owner_id TEXT");
+  }
+
+  // The task runner stamps last_output_at as a liveness heartbeat so a stale
+  // "running" row can be told from a live one. Older databases predate the
+  // column, and the runner's UPDATE then threw SQLITE_ERROR from a timer
+  // callback — which took the whole webui down. Fresh DBs get it from the
+  // CREATE above; these need the ALTER.
+  const taskCols = db.prepare("PRAGMA table_info(tasks)").all().map(c => c.name);
+  if (!taskCols.includes('last_output_at')) {
+    db.exec("ALTER TABLE tasks ADD COLUMN last_output_at TEXT");
   }
 }
 

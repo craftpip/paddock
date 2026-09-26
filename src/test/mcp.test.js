@@ -295,3 +295,85 @@ describe('MCP Server - task queue grants (plan 47)', () => {
     assert.throws(() => requireTool(admin, 'task_submit', 'pad-x'), /tool grant/);
   });
 });
+
+describe('MCP Server - job readers (timed-out create/recreate)', () => {
+  const jobLog = require('../services/job-log');
+
+  it('the tool surface exposes job_status and job_log', async () => {
+    const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION }, { capabilities: { tools: {} } });
+    registerTools(server);
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await server.connect(st);
+    const client = new Client({ name: 'test-client', version: '0' });
+    await client.connect(ct);
+    try {
+      const names = (await client.listTools()).tools.map((t) => t.name);
+      assert.ok(names.includes('job_status'), 'has job_status');
+      assert.ok(names.includes('job_log'), 'has job_log');
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('job readers are read-only tools (a read key may poll a create it cannot start)', () => {
+    const reader = { userId: 'u1', role: 'user', scopes: ['read'] };
+    assert.strictEqual(toolAllowed(reader, 'job_status', 'pad-x'), true);
+    assert.strictEqual(toolAllowed(reader, 'job_log', 'pad-x'), true);
+    assert.strictEqual(toolAllowed(reader, 'create_agent', 'pad-x'), false, 'still cannot create');
+  });
+
+  it('listJobs finds a create by the bare name and a recreate by the update: prefix', () => {
+    jobLog.clearJob('pad-j1');
+    jobLog.clearJob('update:pad-j1');
+    const a = jobLog.getOrCreateJob('pad-j1');
+    const b = jobLog.getOrCreateJob('update:pad-j1');
+    jobLog.line(a, 'system', 'building');
+    jobLog.setStep(b, 'recreate', 'start');
+    try {
+      const all = jobLog.listJobs();
+      assert.ok(all.some((j) => j.name === 'pad-j1'), 'create job listed');
+      assert.ok(all.some((j) => j.name === 'update:pad-j1'), 'recreate job listed');
+      // No kind given → the newest job for that pad, whatever its kind.
+      const forPad = all.filter((j) => j.name === 'pad-j1' || j.name.endsWith(':pad-j1'));
+      assert.strictEqual(forPad.length, 2, 'both jobs resolve to the same pad name');
+    } finally {
+      jobLog.clearJob('pad-j1');
+      jobLog.clearJob('update:pad-j1');
+    }
+  });
+
+  it('a finished job reports done/failed state, its last step and its error', () => {
+    jobLog.clearJob('pad-j2');
+    const job = jobLog.getOrCreateJob('pad-j2');
+    jobLog.setStep(job, 'build', 'start', 'docker compose build');
+    jobLog.line(job, 'stdout', 'step 1/10');
+    jobLog.fail(job, 'build exploded');
+    try {
+      const st = jobLog.getStatus('pad-j2');
+      assert.strictEqual(st.state, 'failed');
+      assert.strictEqual(st.failed, true);
+      assert.strictEqual(st.error, 'build exploded');
+      assert.strictEqual(st.step, 'build');
+      const lines = jobLog.logLines('pad-j2', { tail: 10 });
+      assert.ok(lines.some((l) => l.includes('step 1/10')), 'streamed line is readable');
+      assert.ok(lines.some((l) => l.includes('[step] build start')), 'step marker is readable');
+    } finally {
+      jobLog.clearJob('pad-j2');
+    }
+  });
+
+  it('logLines tails, and returns null for a job that is not in memory', () => {
+    jobLog.clearJob('pad-j3');
+    const job = jobLog.getOrCreateJob('pad-j3');
+    for (let i = 1; i <= 200; i++) jobLog.line(job, 'stdout', `line ${i}`);
+    try {
+      const tail = jobLog.logLines('pad-j3', { tail: 5 });
+      assert.strictEqual(tail.length, 5);
+      assert.ok(tail[4].includes('line 200'), 'tail ends at the newest line');
+      assert.strictEqual(jobLog.logLines('pad-does-not-exist', {}), null, 'unknown job → null');
+    } finally {
+      jobLog.clearJob('pad-j3');
+    }
+  });
+});

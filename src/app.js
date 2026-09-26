@@ -428,19 +428,52 @@ async function listTmuxSessions(vmName, agentType = '') {
     if (!name) continue;
     sessions.push({ name, attached: attached === '1', created: parseInt(created, 10) || 0 });
   }
-  if (sessions.length && agentType === 'opencode') {
-    // Attach the opencode TUI session title to EVERY tab (prefixed with the
-    // same `OC | ` the live WS sends), so the tab strip shows real titles for
-    // all sessions on first load — not just the one WS polled (the WS only
-    // polls the attached session). Cheap single read of the latest session.
-    let t = '';
-    try { t = await opencodeSessionTitle(vmName); } catch {}
-    if (t) {
-      t = 'OC | ' + t;
-      for (const s of sessions) s.title = t;
-    }
+  // Only sessions actually running the opencode TUI carry the `OC | …` title.
+  // opencode_web creates sessions too, so the "latest session" title must
+  // never be stamped onto a pane that isn't running the TUI (see opencodePanes).
+  if (agentType === 'opencode') {
+    try {
+      const openPanes = await opencodePanes(vmName);
+      let t = '';
+      if (openPanes.size) t = await opencodeSessionTitle(vmName) || '';
+      if (t) t = 'OC | ' + t;
+      for (const s of sessions) if (openPanes.has(s.name)) s.title = t;
+    } catch {}
   }
   return sessions;
+}
+
+// Sessions whose pane is currently running an opencode process (the TUI).
+// `pane_pid` is the shell inside the pane; launching `opencode` makes it a
+// descendant, so a flat process dump lets us match pane→TUI with no tty
+// bookkeeping (opencode's DB has no tty column). `opencode web` sits on pid 1
+// and is never a pane descendant, so it can't leak its session title into tabs.
+async function opencodePanes(vmName) {
+  const panes = await runCmd('docker', ['exec', ...termUserArgs(vmName), vmName, 'tmux', 'list-panes', '-a', '-F', '#{session_name}|#{pane_pid}'], { timeout: 15000, check: false });
+  const procs = await runCmd('docker', ['exec', vmName, 'ps', '-eo', 'pid=,ppid=,args='], { timeout: 15000, check: false });
+  const ppidOf = new Map();
+  const openPids = [];
+  for (const line of (procs.stdout || '').split('\n')) {
+    const m = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/);
+    if (!m) continue;
+    ppidOf.set(+m[1], +m[2]);
+    if (m[3].includes('opencode')) openPids.push(+m[1]);
+  }
+  if (!openPids.length || ppidOf.size === 0) return new Set();
+  const ancestorsOf = (pid, seen = []) => {
+    let cur = pid, guard = 0;
+    while (cur && !seen.includes(cur) && guard++ < 32) { seen.push(cur); cur = ppidOf.get(cur) || 0; }
+    return seen;
+  };
+  const res = new Set();
+  for (const line of (panes.stdout || '').split('\n')) {
+    const [sname, panePid] = line.split('|');
+    if (!sname) continue;
+    const pp = +panePid;
+    const hasTui = openPids.some((o) => ancestorsOf(o).includes(pp));
+    if (hasTui) res.add(sname);
+  }
+  return res;
 }
 
 async function killTmuxSession(vmName, session) {
@@ -2783,7 +2816,7 @@ wss.on('connection', async (ws, req) => {
     let dockerStream = null;
     let closed = false;
     let titleIv = null; // polls the tmux window title for the terminal header
-    let lastTitle = ''; // last title frame sent to this client
+    let lastTitle = null; // last title frame sent to this client (null = unsent, force first frame)
     const connId = Math.random().toString(36).slice(2, 6);
 
     const cleanup = (reason) => {
@@ -2960,12 +2993,21 @@ wss.on('connection', async (ws, req) => {
       if (closed || ws.readyState !== ws.OPEN) return;
       let t = '';
       if (agentType === 'opencode') {
-        try { t = await opencodeSessionTitle(vmName); } catch {}
+        // Only the tab whose pane actually runs the opencode TUI gets the
+        // title. `opencode web` sessions would otherwise leak into every tab
+        // (see opencodePanes). An empty title frame clears a stale dynTitle.
+        try {
+          const openPanes = await opencodePanes(vmName);
+          if (openPanes.has(session)) t = await opencodeSessionTitle(vmName) || '';
+        } catch {}
         if (t) t = 'OC | ' + t;
-      }
-      if (t && t !== lastTitle && ws.readyState === ws.OPEN) {
+        if (t !== lastTitle && ws.readyState === ws.OPEN) {
+          lastTitle = t;
+          ws.send('\x00\x00' + JSON.stringify({ type: 'title', title: t }));
+        }
+      } else if (t !== lastTitle && ws.readyState === ws.OPEN) {
         lastTitle = t;
-        ws.send('\x00\x00' + JSON.stringify({ type: 'title', title: t }));
+        ws.send('\x00\x00' + JSON.stringify({ type: 'title', title: '' }));
       }
     };
     sendTitle();

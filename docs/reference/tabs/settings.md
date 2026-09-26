@@ -1,6 +1,6 @@
 # Settings Tab
 
-> Last updated: 2026-08-17
+> Last updated: 2026-09-27
 
 Container-level operations for an agent: recreate/update, health checkup, docker access, network routing, custom workspace + extra volumes, build & lifecycle commands, dev container sync, and delete. Lives at the end of the tab bar in the agent detail page.
 
@@ -56,6 +56,8 @@ Runs a generic, driver-agnostic Docker-level checkup: diffs the **declared** com
 - **Status pill** (next to the button) shows the last passive report: `✓ Healthy` / `~ N issues` / `✗ N problems`; click it to reopen the full report. Fetched on mount from `GET /api/agents/:name/health`.
 
 Checks (11): compose file · container exists + status (with OOM/exit-code reason) · Docker healthcheck probe · restart policy · image · network mode + peer · volumes/bind mounts (incl. `/workspace` host-path split-brain detection) · docker socket mount · published ports · env keys (secrets excluded).
+
+The published-ports row reads the **door** whenever the compose declares one, labelled `Ports (via door)`: a peer-networked agent publishes nothing itself, so every declared port rides on its `-door` sidecar and comparing against the agent container would report an empty set as healthy. A default-network pad reads its own container under the plain `Ports` label. A declared port that is not bound reports `error` with `none bound` (never `(none)`, which reads as "nothing is exposed"); a door that is gone reports `warn: not verifiable (door missing)`. The comparison is the pure `containerHealth.checkPublishedPorts(compose, ctr, door, doorCtr)`.
 
 Driver-aware app-level checks are planned but not yet implemented — see `plans/20-health-check-driver-aware.md`.
 
