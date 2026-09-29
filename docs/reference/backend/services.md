@@ -1,6 +1,6 @@
 # Backend Services
 
-> Last updated: 2026-09-27
+> Last updated: 2026-09-29
 
 ## PAD Discovery (agent-registry.js)
 
@@ -153,9 +153,17 @@ and its own image tag (`paddock-vm-&lt;name&gt;:latest`). See
 - `pruneDanglingImages(onLog)` — `docker image prune -f` (dangling `&lt;none&gt;` layers only, never images a container references). Runs at the end of create, rebuild (`updateAgent`/`recreateAgent`) and delete to reclaim the layers each `docker compose build` orphans when it retags the per-PAD image; reports reclaimed space via `onLog`, never throws.
 - `resetVm(name)` — remove container + wipe data + recreate + compose up; the compose regen reads the full persisted binding set from `meta.env`/`web.json` (docker, network, web, extra volumes/ports, workspace) so a reset never drops a bind
 - `startAgent(name)` / `stopAgent(name)` / `restartAgent(name)` — docker lifecycle; also start/stop the socat door with the agent (`startDoors`/`stopDoors`)
- - `generateInstanceCompose(name, agent, password, port, { allowDocker, network, sshCport, workspaceHost, workspaceDir, extraVolumes, extraPorts, webService, webPeerNetwork })` — builds the compose as a structured JS object and serializes it with `JSON.stringify(..., null, 2)` (JSON is valid YAML) — never hand-concatenated YAML. `allowDocker` adds the `/var/run/docker.sock` volume, `network` adds `network_mode: container:&lt;name&gt;`, `extraPorts`/`webService`/`sshCport` produce `ports:` bindings (or door mappings in peer mode), `workspaceHost`/`workspaceDir` add a second volume line. Named-volume rows (plan 40 D5) emit their service mount **and** a top-level `volumes:` section — `external: true` when the volume already exists, a fresh-volume declaration otherwise (so never-started projects work on first up). When the pad has a persisted `SUBNET` in `meta.env`, the compose also declares `networks.default` with that explicit subnet (merged alongside any door `webbridge` network) — see the pad subnet pool note below. Builds from `instances/&lt;name&gt;/build` with `image: paddock-vm-&lt;name&gt;:latest`; the `build.args:` block is generated from the instance Dockerfile's `ARG` lines (values interpolated from the instance `build.env`).
+ - `buildInstanceCompose(name, agent, password, port, opts)` — the pure compose **model** (a structured JS object, never hand-concatenated YAML). `allowDocker` adds the `/var/run/docker.sock` volume, `network` adds `network_mode: container:<name>`, `extraPorts`/`webService`/`sshCport` produce `ports:` bindings (or door mappings in peer mode), `workspaceHost`/`workspaceDir` add a second volume line. Named-volume rows (plan 40 D5) emit their service mount **and** a top-level `volumes:` section — `external: true` when the volume already exists, a fresh-volume declaration otherwise (so never-started projects work on first up). Builds from `instances/<name>/build` with `image: paddock-vm-<name>:latest`; the `build.args:` block is generated from the instance Dockerfile's `ARG` lines (values interpolated from the instance `build.env`).
+ - `usesProjectDefaultNetwork(services)` — true when a service in the model has **no** `network_mode`, i.e. it joins the project `default` network. A peer-networked pad's service shares the peer's namespace and its door rides the peer's own network, so nothing joins `default` and it must not reserve a `/24`.
+ - `generateInstanceCompose(...)` — read-only preview: serializes the model with `JSON.stringify(..., null, 2)` (JSON is valid YAML) and, when `usesProjectDefaultNetwork` and the pad has a persisted `SUBNET`, merges `networks.default` with that explicit subnet alongside any door `webbridge` network. It never reserves or releases anything.
+ - `writeInstanceCompose(name, agent, password, port, opts)` — resolves the subnet for the services that were just built, then writes the file. Default-network pad → `ensurePadSubnet(name)` (carve / re-pick / keep) and declare it; peer pad → `releasePadSubnet(name)` and declare no `default` network at all. Never both.
  - `writeInstanceCompose(name, agent, password, port, opts)` — write the serialized compose to disk. Calls `ensurePadSubnet(name)` first so a never-started pad is assigned its fixed `/24` (persisted as meta `SUBNET`) before the generator reads it.
- - **Pad subnet pool** — the host daemon's `default-address-pools` are finite (`192.168.0.0/16` at `/20`, plus the stock `172.16.0.0/12`). When every slot is taken, `docker compose up` for a new pad dies with `all predefined address pools have been fully subnetted` — the subnet is unspecified, so the daemon tries to allocate from the pool. New pads sidestep the pools: `ensurePadSubnet` carves the lowest free `/24` from `10.200.0.0/16` (256 pads; disjoint from the pools and the office LAN) and persists it as meta `SUBNET`, and the generated compose declares it explicitly. Existing pads' networks are never touched — when `&lt;name&gt;_default` already exists, `ensurePadSubnet` returns empty and the compose stays subnet-less so a regen can't force a disruptive network recreate. Deleting a pad (`removeVm`) removes `&lt;name&gt;_default` and frees its `/24`.
+ - **Pad subnet pool** — the host daemon's `default-address-pools` are finite (`192.168.0.0/16` at `/20`, plus the stock `172.16.0.0/12`). When every slot is taken, `docker compose up` for a new pad dies with `all predefined address pools have been fully subnetted` — the subnet is unspecified, so the daemon tries to allocate from the pool. New pads sidestep the pools: `ensurePadSubnet` carves the lowest free `/24` from `10.200.0.0/16` (256 pads; disjoint from the pools and the office LAN), persists it as meta `SUBNET`, and the generated compose declares it. **Only a pad with a service on the project `default` network gets a reservation** — a peer-networked pad reserves nothing, because such a reservation collides the moment that pad is switched to the default network (`Pool overlaps with other one on this address space`).
+   - **A reservation is not a network.** `claimedPadSubnetOctets(name)` unions live Docker networks (`usedPadSubnetOctets`) with every *other* pad's meta `SUBNET` (`reservedPadSubnetOctets`, hidden/quarantine dirs excluded), and `pickFreePadSubnet` only hands out an octet in neither. A reservation with no network behind it is still a claim — that is what stops two pads being handed the same `/24` and one of them failing at `docker compose up`.
+   - **A live network wins.** When `<name>_default` already exists, `ensurePadSubnet` returns empty and the compose stays subnet-less, so a regen can never force a disruptive network recreate (this is also how a pad that already carries a legacy compose-pool network keeps it).
+   - **`ensurePadSubnet` validates a persisted `SUBNET`** against both sources and re-picks a free octet when the value is claimed by another pad or disagrees with a live `<name>_default`; it still throws on genuine pool exhaustion. `releasePadSubnet(name)` drops a reservation only when **no** live `<name>_default` network holds it, so a peer pad whose network still exists keeps the claim and the two can never diverge.
+   - Deleting a pad (`removeVm`) removes `<name>_default` and frees its `/24`.
+ - `cleanStaleDoorDirs({ isRegisteredAgent })` — boot sweep for legacy `<pad>-door` / `<pad>-web` **instance directories** left over from when the socat door was a real PAD. A candidate must match `^<existing-pad>-(door|web)$`, have no `AGENT=` in `meta.env`, no agent data dir, no registered-agent row, and either no container at all or only the managed socat door container. Matches are **moved** to `instances/.stale-door-dirs/<name>` (frees the `/24` and the name, stays reversible); the live door container is never removed. The SQLite `agents` table is not authoritative for the veto — pass the disk-derived registry list, or a deleted pad's stale row will protect its own leftover dir forever.
  - `applySettings(name, { allowDocker, userMode, network, sshPort, sshCport, workspaceHost, workspaceDir, extraVolumes, extraPorts, password })` — regenerates compose + writes the changed `meta.env` keys (`DOCKER`, `USER_MODE`, `NETWORK`, `PORT`, `SSH_CPORT`, `ROOT_PASSWORD`, `WORKSPACE_*`, `EXTRA_PORTS`, `EXTRA_VOLUMES`, `SUBNET`); returns the new state. **Async** — reads the active `web.json` binding itself and regenerates with `webService` + the resolved `webPeerNetwork` for the new network, so a network/docker-toggle change never drops a published web app.
 - `applyAgentChanges(name, opts, { onLog, onStep })` — the **consolidated mutation flow**: settings POST, web/ports POST, and the MCP `recreate` tool all funnel through it (stop → regen → reconcile door → up → boot hooks → verify → rollback on failure). Detects `userModeChanged` (via `prepareAgentChanges`); switching an existing pad to user mode triggers `ensureUserModeBuildFiles` + an image rebuild when `imageHasPadUser` reports the current image lacks the pad user, then the normal recreate. Summary line reports `containerUser=&lt;mode&gt;`, reason `'user'`.
 - `updateAgent(name, { onLog, onStep })` — streams `docker compose --env-file &lt;instance&gt;/build/build.env -f &lt;compose&gt; build --pull &lt;name&gt;` (900s) then `up -d --no-deps --force-recreate &lt;name&gt;` (300s); steps `build`/`recreate`/`cleanup`. No forced build args — the image is per-PAD, so the rebuild reads the instance Dockerfile + `build.env` directly. `applyAgentChanges` then runs an existing post-create script after every recreation.
@@ -277,7 +285,10 @@ store captures each container's logs into a rolling file at
   loss and duplicate captures. A recreated container's logs naturally append
   with no dupes/gaps. File is trimmed past 8MB/20k lines.
 - `captureAll(containerNames)` — the 30s `setInterval` sweep in app.js over all
-  `safeVmName` containers.
+  `safeVmName` containers **minus managed door containers**. A door is a socat
+  forwarder, not an agent: nothing ever reads its captured log, and capturing
+  one `mkdir`s `instances/<pad>-door/logs/`, which resurrects the very
+  instance dir `cleanStaleDoorDirs` quarantines — every 30 seconds.
 - `readLogs(name, tail)` — read the captured file (used by the Logs tab and the
   MCP `agent_logs` tool).
 - `logFile(name)` — the log file path.
@@ -436,13 +447,13 @@ the same owner-scoping as the REST API: admin → all agents, user → owned age
 ## MCP Tools (mcp.js)
 
 `src/mcp.js` mounts the paddock's own MCP server at `/mcp` (Streamable HTTP). It
-exposes 29 tools. Every tool is a thin adapter over the same `src/services/`
+exposes 34 tools. Every tool is a thin adapter over the same `src/services/`
 functions the REST API uses — behavior lives in the services, never in the tool
 handlers (no duplication between REST and MCP).
 
 | Tool | Purpose | Backed by |
 |------|---------|-----------|
-| `list_agents` | List PADs (owner-scoped) | `registry.discoverAgents()` |
+| `list_agents` | List PADs (owner-scoped); every row is openable; carries `scope` / `agentsTotal` / per-row `owner` | `registry.discoverAgents()` + `registry.getAgent()` |
 | `get_agent` | Details + optional `logs` tail (≤500) | `registry` + `logStore` |
 | `agent_logs` | Container logs tail (≤5000) | `logStore.capture/readLogs` |
 | `config_get` | Driver config file (JSON redacted; yaml/toml verbatim) | `vm.readAgentConfig(agent)` |
@@ -458,19 +469,53 @@ handlers (no duplication between REST and MCP).
 | `recreate` | The one mutation tool — see below | `vm.applyAgentChanges(name, opts)` |
 | `update` | Alias for `recreate {pull: true}` | `vm.updateAgent(name, { pull: true })` |
 | `delete_agent` | Delete PAD; needs `confirm: true` | `vm.removeVm` + `registry.removeAgentFromDb` |
-| `exec` | Run a shell command in the PAD (optional `stdin`) | `docker exec` |
+| `exec` | Run a shell command in the PAD (optional `stdin`, optional `cwd`); reports where it ran | `docker exec` |
 | `job_status` | Poll a long-running job (see Jobs below) | `jobLog.getStatus` + `jobLog.listJobs` |
 | `job_log` | Read a job's streamed log lines | `jobLog.logLines` |
 | `help` | The "how to use Paddock through MCP" guide (§§1–4, plan 35a) | `llm-guide.js` |
 | `agent_commands` | Set B — non-interactive command catalog for an agent type | `llm-guide.js` → `drivers` `llmCommands` |
-| `task_submit` … `task_priority` (8 tools) | The opencode task queue: push/pull/result/cancel | `services/task-runner.js` |
+| `task_submit` … `task_cancel` (8 tools) | HIDDEN from the MCP surface (user decision 2026-09-29; re-enable with `PADDOCK_TASK_QUEUE=1`) — service kept | `services/task-runner.js` |
+| `mission_projects` | The Mission projects (PAD + folder) the key may see, with session/live/open counts, the PAD's status, and per-session `busy`; narrow it with `project_id` / `name` / `folder`, and ask for nested sessions with `include_sessions` | `mission.listProjects` + `withLive` + `withAgentBusyProjects` |
+| `mission_sessions` | Sessions list (filter by `project_id` / `agent`), or one session's metadata + pane state + screen tail; every row carries `busy` / `busyKnown` / `open` / `kind`, and detail mode also returns `canSend` (+ `sendRefusal`) | `mission.listSessions` / `listAllSessions` / `screen` + `withAgentBusy` |
+| `mission_project_create` | Create a project row (folder probed inside the PAD) | `mission.projectFolders` + `mission.createProject` |
+| `mission_session_start` | Open a session: `msn-*` tmux session at the project folder + the driver's TUI | `mission.startSession` |
+| `mission_send` | Type into a live session — refuses a dead, shell, solo-locked or permission-parked one, and confirms the pane took it | `mission.sendText` |
+| `mission_permission_answer` | Answer a permission dialog the pane is parked on (`once` / `reject` from an agent; `always` is the human's route) | `mission.answerPermission` |
 
 Rules:
 
 - Tool names carry no `paddock_` prefix — the consuming MCP client namespaces
   the server's tools itself.
-- `create_agent` is the only tool that takes a *bare* agent name; every other
-  tool takes the full name. `name` is the **final** container name:
+- **Every `name` argument is resolved, never taken literally** (plan 61). A PAD has
+  three spellings in circulation — the container name `pad-opencode-proj`, the bare
+  name `create_agent` accepts, and the `display_name` `list_agents` prints — so all
+  three are accepted by every tool that takes a `name`. `resolveAgentName()` tries
+  them in that order, then falls back to a **unique** substring of either. Two
+  precedence rules matter:
+  - A **prefixed exact match beats substring ambiguity** — `proj` is the exact bare
+    name of `pad-opencode-proj`, so it resolves there instead of being refused as
+    ambiguous against `pad-proj2`.
+  - **Genuine ambiguity refuses and names the candidates** (`opencode` matches five
+    PADs). Guessing would mean running a command on the wrong agent.
+- **Resolution runs BEFORE the grant check, and the grant and the action both use
+  the resolved name.** This is the security half of the resolver: gating on the raw
+  string means a target-restricted key is refused for the wrong reason, and a tool
+  that gates on one identity then acts on the caller's spelling does work on a PAD
+  it never authorized. `requirePad(tool, name)` performs
+  **resolve-then-gate-then-act** in one call and returns the agent, so no handler
+  can skip the last step. Job keys
+  resolve the same way, so a `display_name` finds its job.
+- A **non-PAD container is named as one.** When a name resolves to nothing,
+  `notFoundMessage()` also probes `docker ps -a`; a real host container that
+  Paddock does not manage is reported as such ("`schlorp` IS a container on this
+  host, but it is not a Paddock-managed PAD"), which is distinguishable from a
+  typo and implies the opposite next move. It says *container*, not *running
+  container*, because the probe includes stopped ones. This is a near-miss hint
+  for a name the caller already has — it is **not** `list_containers`, which is
+  deliberately absent (see Design decisions).
+- `create_agent` still takes a *bare* name, because it is the tool that mints one;
+  every other tool resolves whatever spelling you have (above). `name` is the
+  **final** container name:
   `createNameFor` prepends `CONTAINER_PREFIX` + `-` only when the caller left it
   off, and never inserts the agent type — `blog-bot` becomes `pad-blog-bot`, and
   `opencode-tester` becomes `pad-opencode-tester`. The result echoes
@@ -503,7 +548,19 @@ Rules:
     UI's raw `listContainers` is untouched): the webui and every socat door are
     dropped, a PAD appears only when it publishes something, the page is capped
     at 10, and `availableNetworksTotal` + `availableNetworksTruncated` make
-    truncation explicit. The selected peer carries `isCurrent`.
+    truncation explicit. The selected peer carries `isCurrent`. Because a
+     caller who already knows a container's name is asking "is THIS valid?", not
+     "show me ten", the optional `networkFilter` argument searches the **whole**
+     candidate list and skips the cap entirely, setting
+     `availableNetworksSearchedAll: true` — so an empty result is a real "no"
+     instead of being indistinguishable from a truncated page. The filter is
+     applied **before** the limit, not after a widened one: filtering a
+     truncated list and then claiming `searchedAll` is the same silent maybe
+     with a bigger number in front of it. The default (unfiltered) list is
+     still capped at 10 and makes no `searchedAll` claim.
+  - A PAD that is **not** listed here is usually excluded for publishing no ports,
+    not by the 10-cap. The two are different filters, so a missing name is not
+    evidence of an invalid peer until `networkFilter` has been tried.
   - `workspaceDevcontainer` describes the **workspace's** `.devcontainer`, not
     the PAD's own, so it states `scope: "workspace"`, `shared`, `sharedWith`
     (the other PADs on that workspace) and a `note`. Its `ports` are a plan; the
@@ -511,12 +568,241 @@ Rules:
     PAD's `userMode`/`containerUser` rather than reporting blanks.
 - Destructive tools require a guard: `delete_agent` needs `confirm: true`
   (and `create_agent` too — it adds fleet members).
+- The five `mission_*` tools (plan 55) are the agent-visible half of the Mission
+  page, and they have their own contract:
+  - **Grants** — `mission_projects` + `mission_sessions` join `READ_TOOLS` (a
+    `read` key may *watch* the human work, not type into it);
+    `mission_project_create` maps to the `create` bucket; `mission_session_start`
+    and `mission_send` map to `exec` (they do work in a PAD, so they share the
+    bucket `task_submit` uses). No new API-key scope was added.
+  - **The gate is resolve-then-check** — a session is reachable only through its
+    project, so the PAD name (and therefore `targetAllowed` → `requireAccess` →
+    `toolAllowed`) always comes from the project row. A project on another user's
+    PAD is refused as `mission_project_forbidden` rather than 403, so a read never
+    confirms that someone else's row exists. List tools scope by the caller's
+    owned agents plus the key's target grant (`missionVisibleAgents`).
+  - **Errors carry the store's machine code** — a `MissionError` is re-thrown as
+    `<code>: <message>` (`mission_session_locked`, `mission_session_dead`,
+    `mission_agent_stopped`, `mission_folder_missing`,
+    `mission_unsupported_agent`, `mission_project_forbidden`) because the LLM
+    branches on the code and the SDK's own error path only prints `message`.
+  - **Liveness is decoration** — one `list-sessions` per PAD
+    (`mission.withLive` / `withLiveSessionsByAgent`), and a PAD that cannot be
+    listed leaves its sessions marked dead rather than failing the read. The
+    screen tail is clamped in the schema (1–200 lines) because an unbounded
+    `capture-pane` floods an LLM context.
+  - **"Mid-turn" is a separate, cached pass** — after liveness, the tools chain
+    the same `withAgentBusy` / `withAgentBusyProjects` step the REST routes use,
+    so `busy` / `busyKnown` / `open` reach the LLM on the same row as `live`.
+    It is grouped and cached per (PAD, folder) by the store, so it is one probe
+    per project and never one per row. `busyKnown: false` is **unknown, not
+    idle** — the server exposes no idle-presence registry — so the tool projects
+    the field only when the store stamped it, and the guide tells the LLM never
+    to read it as licence to type. Without this the agent could only see "live"
+    and would talk over a session the human was actively driving.
+  - `mission_send` goes through `mission.sendText`, the single writer path the
+    page's terminal uses, so the per-session solo lock is honoured in one place.
+
+### Liveness truth (plan 62)
+
+`live`, `busy`, `busyKnown` and `open` are four different questions, and the
+whole point of the vocabulary is that none of them can be inferred from another.
+Before plan 62 a dead row reported `busy: true, open: true`, a project header
+could print `openCount > liveCount`, and a live pane running only `bash` read as
+an agent you were invited to type into.
+
+- **One function computes the verdict, and every path calls it.**
+  `mission.stampTruth(s, probe)` is the single source for `(live, busy,
+  busyKnown, open)`, and both list mode and detail mode run it. Detail mode
+  (`mission.screen`) is the parity fix (plan 62 1d): the same row read on its own
+  used to answer differently from the row in the list, so a caller that checked
+  before typing got two different verdicts from the same session.
+  - `busy` **requires** `live`. A dead row reports `busy: false`, carries a
+    terminal `state: "dead"`, and preserves `wasBusy: true` when the server still
+    claims the conversation — the forensics without the lie.
+  - `open` means **a live TUI is attached**: never a dead row, never a bare
+    shell. It is deliberately *not* the send verdict; see `canSend` below.
+  - `busyKnown: false` means the probe **could not answer**. The opencode status
+    probe is folder-scoped, so when the pane's cwd differs from the project
+    folder the answer is stamped UNKNOWN rather than idle (1e) — an unanswerable
+  probe never yields `busyKnown: true`.
+  - `kind: "agent" | "shell"` is on every row, so the destructive trap is
+    visible *before* the write. The shell test fails **closed**: an unknown or
+    empty `pane_current_command` is treated as a shell, never as an agent.
+
+- **`canSend` is the store's verdict, not a field the client re-derives.**
+  `mission.sendVerdict(session, perm)` answers "would a send be accepted right
+  now", and `sendText` gates on the *same function* it projects. That is the
+  discipline: a verdict computed anywhere but the gate is a guess, exactly like
+  the gate-then-act split in the name resolver. It refused, with a code:
+  `mission_session_dead`, `mission_not_an_agent` (a shell — the text would run as
+  shell commands), `mission_session_locked` (the human is driving alone), and
+  `mission_permission_pending`. Only detail mode can carry the permission arm,
+  because only there was a screen captured; list mode makes no such claim rather
+  than guessing.
+
+- **`open` and `canSend` are separate on purpose.** A solo-locked row is still
+  *open* — the human is driving it, and unlighting its dot would be a new lie
+  pointed the other way. What differs is whether the *agent* may type, so that is
+  the field that answers it.
+
+- **A permission dialog is a state, not idle capacity** (1c). `detectPermission`
+  reads the screen for the `Permission required` / `Allow once` / `Reject` shape
+  and reports `blockedOn: "permission"` with the tool and path, so a session
+  parked on a dialog no longer looks like free capacity.
+  `mission_permission_answer {session_id, choice}` answers it **by key**
+  (`Home`+`Enter` / `End`+`Enter`), never by typing text — text sent at a dialog
+  lands in whatever it was waiting for. An agent may answer `once` or `reject`
+  only; `always` is a durable policy change made by a machine and is refused at
+  the store. The human's `POST /api/mission/sessions/:id/permission` route passes
+  `allowAlways: true`, because a person pressed the button.
+
+- **A write is confirmed by the pane CHANGING, not by the pane existing** (1h).
+  `sendText` captures before the write and polls (≤1.5s) until the content
+  differs, then throws `mission_tui_not_ready` if it never did. A live pane is
+  not an acknowledgement, and a bare `ok: true` for a keystroke that went nowhere
+  is the failure this replaces. The same comparison doubles as the post-send
+  repaint wait (1g) — the new content *is* the evidence, so there is no separate
+  repaint step to get wrong.
+
+- **Two clocks, not one** (1f). `last_seen_at` is a **probe** clock and moves on
+  every read. `last_output_at` is the one a caller actually wants, and it moves
+  only when the pane's content genuinely changed — a sha1 of the screen is stored
+  beside it (`last_output_hash`) so "changed" is answerable across requests, since
+  there is no in-memory cache that survives a restart. A field that advanced on
+  every read would be the same lie under a better name.
+
+- **A write says where it landed** (1i). `mission_send` and
+  `mission_session_start` echo `project: {id, name}` and the resolved
+  `session_id`, and **every** Mission error carries the same
+  `[project:… session:…]` suffix — a label is operator-set, often empty, and a
+  wrong one is worse than none because it looks like an answer. The agent's own
+  conversation title is exposed as `session.title` (via
+  `driver.sessionTitle`, keyed by the agent's session id) and kept separate from
+  the operator's `label`.
+
+- **The client is not allowed to re-derive any of it.** `SessionList` used to
+  compute `open` as `live || busy`, which lit the dot for exactly the shell pane
+  the server had just refused. A server field re-derived on the client is a
+  second source of truth, and it was the wrong one; the row now reads the store's
+  value and only falls back when the field is absent. A `shell` pane gets a
+  visible `shell` badge rather than a second dot, so the dot keeps meaning exactly
+  one thing.
+
+  - **A project is found by id, name or folder, and a miss says which**
+    (plan 67, 67.2). `mission_projects` takes `project_id`, `name` and `folder`,
+    because a project's `name` is not its `folder` (`paddock` → `/www2/paddock`)
+    and a caller holding a directory — "the sessions in xdl" — could not look it
+    up at all before. Zero matches and several matches are BOTH reported
+    (`mission_project_not_found` / `mission_project_ambiguous`, with the
+    candidates) rather than falling back to the unfiltered list: an unfiltered
+    answer to a narrow question is the one response a caller cannot tell apart
+    from success. The near-miss hint tests name containment **both ways**,
+    because the common miss is a typo and `"paddock"` does not contain
+    `"paddockk"`. Candidates come from what the caller may already see, so this
+    never confirms that a project on someone else's PAD exists. Each project also
+    carries `agentStatus` — the same repo is often mounted by two PADs and the one
+    named after it is not always the running one, so reachability no longer costs
+    a second tool.
+  - **Session provenance is WHO, not just the kind** (plan 67, 67.3). `origin`
+    (`human` / `agent`) says the *kind* of starter; the new `createdBy` says the
+    *who* — `key:<id>` when an MCP key opened it, `user:<id>` when the web UI
+    did. It is emitted only when stamped, so a row created before this existed
+    says nothing rather than claiming a value nobody recorded, and the migration
+    deliberately does not back-fill a guess. "Is a human or an agent driving
+    this?" is the first question before `mission_send`, and it is now auditable
+    after the fact instead of resting on the caller's own memory of its calls.
+  - **`mission_projects` is a summary, not a superset of `mission_sessions`**
+    (plan 67, 67.4). The nested `sessions` array is behind `include_sessions`
+    (default false) and the response names the flag in a `hint`; `sessionCount`
+    / `liveCount` / `openCount` are serialized **before** it, because those are
+    the answer. One unfiltered call used to return every session of every
+    project — 26 full rows for a six-project fleet, with the five that were not
+    yours first. The REST route is untouched: the Mission page still gets its
+    nested rows.
+  - **The counts are liveness, not progress** (plan 67). `liveCount` / `openCount`
+    sit next to the project row and read as "how far along is this?" — they are
+    not. A session that did 400 tool calls and one that opened and died are both
+    `live: false`, and nothing in the Mission vocabulary says what a project is
+    *working on*. The tool description says so in as many words rather than
+    leaving the distinction to be inferred from `liveCount`. What a project is
+    actually doing is the plans facility (plan 64: `plan_list` / `plan_activity`),
+    which is deliberately not reimplemented here.
+  - **`openCount` is always a number, and that is not a formatting detail.**
+    `withAgentBusyProjects` used to `return projects` early when no row needed the
+    busy probe, which skipped the *counting* along with it, so a project with zero
+    sessions came back with no `openCount` at all — a field its neighbours carried
+    and this one did not. A count that appears for one project and vanishes for the
+    next reads as "unknown", and a caller who has to guard for that is how the
+    count ends up unused. Zero sessions is, definitively, zero open. The one case
+    that stays absent is a project the caller never loaded sessions for: we did not
+    look, so we have no opinion.
+  - **The schema migration is tested, because it is the only part of the schema
+    that runs against real rows.** `CREATE TABLE IF NOT EXISTS` skips a table that
+    already exists, so on any database created before plan 67 the `created_by`
+    column is added by the `ALTER` alone — and a migration that silently does
+    nothing does not error at boot, it errors later as an `INSERT` against a
+    missing column on whatever request happened to be next. `PAD_DB_PATH`
+    (production: unset) lets `src/test/db-migration.test.js` point the real
+    `getDb()` at a fixture, which is built by letting `db.js` create today's
+    schema and then dropping exactly the columns the `ALTER`s own. The suite
+    asserts the column arrives, existing rows survive with `created_by` NULL
+    rather than a back-filled guess, a later boot does not clobber a recorded
+    value, and re-running is idempotent.
+  - **`last_output_at` + `last_output_hash` are a PAIR, added the same way**
+    (plan 62 1f). The timestamp is the number a caller wants; the hash is what
+    makes "the pane changed" answerable. Ship only the timestamp and every read
+    looks like output — the half-migration would behave like the bug it was meant
+    to fix. Both stay `NULL` until something has actually captured a pane, and
+    `noteOutput` returns the timestamp it *stored* so the row handed back and the
+    row in the database can never differ by a millisecond.
 - Secrets are write-only in the tools (`sshPassword`, `web.password`): empty
   means "keep current", never echo a stored secret back.
 - The endpoint requires a bearer API key (`Authorization: Bearer` or
   `x-api-key`) and returns 406 unless the client sends
   `Accept: application/json, text/event-stream`. Responses are SSE
   (`event: message` + `data:` JSON lines).
+
+### Pad name resolution (plan 61)
+
+The precedence order behind those rules, in full — `resolveAgentName(input)` in
+`src/mcp.js` is the single resolver every name-taking tool goes through:
+
+1. exact container name — `pad-proj2`
+2. the prefixed form of a bare name — `proj2` → `pad-proj2`, mirroring the rule
+   `create_agent` itself applies
+3. exact `display_name`, case-insensitively — `Proj2` → `pad-proj2`
+4. a **unique** substring of either the container name or the `display_name`
+
+Rules 1–3 are exact, so they cannot be ambiguous. A name matching more than one
+PAD under rule 4 resolves to none of them and the error names every candidate.
+
+`requireTool(user, tool, name)` runs this **before** any grant check and applies
+the target, owner, and tool checks to the canonical `agent.name`; `requirePad(tool,
+name)` wraps it and returns that agent, so a handler cannot gate on one identity
+and act on another. Every call site acts on the returned `agent.name` — the VM
+call, the workspace path, the job key, and the response field. An unresolvable
+name falls through to the raw string for the grants, which then fail closed: a
+name that is not a PAD cannot pass an owner check or a target grant.
+
+`notFoundMessage()` builds the miss, and it separates the two cases a caller must
+not confuse — an ambiguous name lists the candidates, while a name that is a real
+host container but not a PAD is named as one, with the reason
+(`no instances/<name>/meta.env`) and the remedy. The container probe uses
+`docker ps -a`, so a stopped container is still recognized.
+
+`list_agents` rows are filtered through `registry.getAgent()`, so a row is only
+listed when it is openable: the listing is where a caller forms their belief
+about what exists, and an unopenable row there poisons every later call. Because
+`buildAgent` is disk-derived and carries no owner, the owner is read once from the
+`agents` table rather than per row. `agentsTotal` counts the rows in the
+response — after the ownership and resolvability filters — so a short list is
+never mistaken for the whole fleet.
+
+`list_containers` — a tool that *lists* host containers which are not PADs — is
+**not** built. The near-miss hint covers the "you named a real container" case;
+discovering containers by list is a new read tool and needs the user's approval
+first (see [Design decisions](#design-decisions-settled--do-not-add-tools-without-re-checking-the-user)).
 
 ### Jobs (`job-log.js`)
 
@@ -536,11 +822,16 @@ Job keys are shared with the REST routes so one name identifies one job:
 
 Both tools take the bare PAD name plus an optional `kind`; omitting `kind`
 resolves to the newest job for that PAD whichever operation it came from, so the
-common case is `job_status { name }`. `job_status` returns
+common case is `job_status { name }`. The name goes through the resolver first, so
+a `display_name` finds the job that was started under the container name.
+`job_status` returns
 `{ state, step, done, failed, error, lineCount, expiresIn }` and an optional
 `tail`; `job_log` returns rendered `[stream] text` / `[step] …` lines with `tail`
-and `since`. A name with no job answers `{ found: false, hint, liveJobs }` so a
-caller can see what does exist instead of a bare miss.
+and `since`. A name with no job answers
+`{ found: false, padExists, hint, liveJobs }`, where `padExists` separates the two
+misses that used to look alike: a PAD with no job in memory versus a name that is
+not a PAD at all — and for the latter the hint is the resolver's own
+not-found message, never a suggestion to go look up a name that does not exist.
 
 Jobs are dropped 5 minutes after they finish, and only when no SSE subscriber is
 still attached; a webui restart clears them all (the UI shows the same
@@ -566,6 +857,19 @@ Three additions let an LLM drive Paddock headlessly:
   place a secret in `command`. `stdin` is never included in tool responses,
   errors, or logs (see `dockerExec` in `mcp.js`). Commands whose catalog entry
   has `credentialInput: "stdin"` expect the value there.
+- **`exec.cwd`** — an optional working directory *inside* the container, applied
+  by prefixing a quoted `cd`. The response carries the resolved `name`, the
+  **actual** `cwd` the command ran in, `requestedCwd` (what was asked for),
+  `exitCode`, `stdout`, and `stderr` — a bare `stdout` never says where it was
+  produced. Two contracts make the field trustworthy:
+  - The reported `cwd` is probed with the **same `cd`** the command received, not
+    a bare `pwd` in a second `docker exec`. A bare probe reports the container's
+    default directory, so the payload would say `cwd: "/www1"` next to
+    `stdout: "/www1/craftpip.com"` — a self-contradicting answer, which is worse
+    than reporting nothing at all. (This was caught only by the live test.)
+  - A `cwd` that does not exist **fails loudly** (exit 2, nothing run) rather than
+    falling through to another directory. The value is caller-controlled and
+    interpolated into `sh -lc`, so it is shell-quoted.
 
 ### Design decisions (settled — do not add tools without re-checking the user)
 
@@ -593,6 +897,19 @@ was built. Adding a tool that breaks them needs a re-check first.
 - **`update` is kept as a convenience alias** for `recreate {pull: true}` — the
   friendliest form of the common "update to latest" flow; dropping it is not on
   the table while it reads as `recreate {pull:true}`.
+- **The `mission_*` tools are the one sanctioned exception to the read-fold
+  rule** (plan 55, user request): a Mission session is a live TUI the human and
+  the agent share, so "see what they are doing right now" is not a field on a
+  PAD — it is a different object with its own read, and folding it into
+  `settings_get` would put a screen capture on every PAD read. Two nouns, two
+  read tools, no verb soup.
+- **`list_containers` is deliberately absent** (plan 61, user decision): a tool
+  that lists host containers which are *not* PADs stays unbuilt until the user
+  asks for it. The non-PAD case is still answered at the point of use — a name
+  that is a real container but not a PAD is named as one in the error — because
+  a near-miss hint costs nothing while a new read tool adds surface the user did
+  not ask for. Note the distinction: the *identity* case is solved, the
+  *discovery* case is deferred.
 
 ## Vault (vault.js)
 

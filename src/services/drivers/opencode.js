@@ -280,6 +280,34 @@ const OPENCODE = {
   async availableVersion() {
     return '';
   },
+
+  /** The title the AGENT gives one of its own conversations (plan 62 1i).
+   *  Keyed by the session id, so it is the title of THAT conversation and not
+   *  "whatever was updated last" — the terminal's title is the latter, because
+   *  it has one window. A row's `label` is the operator's name for it and is
+   *  often empty or stale, which is worse than no label at all because it looks
+   *  like an answer, so the two are kept apart and the caller shows this one.
+   *
+   *  Returns '' rather than throwing: the sqlite3 dependency is a lazy install
+   *  and a title is never worth an error. */
+  async sessionTitle(name, sessionId) {
+    const id = String(sessionId || '').trim();
+    if (!id) return '';
+    const q = id.replace(/'/g, "'\\''");
+    try {
+      const r = await runCmd('docker', [
+        'exec',
+        name,
+        'sh',
+        '-lc',
+        `sqlite3 /root/.opencode/data/opencode/opencode.db "SELECT title FROM session WHERE id='${q}' AND time_archived IS NULL LIMIT 1" 2>/dev/null`,
+      ], { timeout: 15000, check: false });
+      const t = String(r.stdout || '').trim();
+      return t ? t.slice(0, 200) : '';
+    } catch {
+      return '';
+    }
+  },
 };
 
 module.exports = OPENCODE;

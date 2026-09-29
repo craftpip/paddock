@@ -10,6 +10,21 @@ const { StringDecoder } = require('string_decoder');
 const { Writable } = require('stream');
 const Docker = require('dockerode');
 
+// The webui is a control plane, not a worker: it supervises every PAD, holds
+// every terminal WebSocket and every job log. Node's default is to PRINT AND
+// EXIT on an unhandled rejection or an uncaught exception, which means one bad
+// throw anywhere (a single MCP tool call by a single agent was enough — it took
+// this process down every ~45s) costs every open terminal at once and looks to
+// the user like a randomly glitching UI. Log loudly and stay up instead; the
+// alternative is a crash loop that is far harder to diagnose than the original
+// error.
+process.on('unhandledRejection', (err) => {
+  console.error('[fatal-guard] unhandled rejection (staying up):', err?.stack || err);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[fatal-guard] uncaught exception (staying up):', err?.stack || err);
+});
+
 const dockerClient = new Docker({ socketPath: '/var/run/docker.sock' });
 
 const vault = require('./services/vault');
@@ -293,8 +308,31 @@ const TMUX_HISTORY = 10000;
  * Single-client policy: the NEWEST connection wins. Any older connection for
  * the same key is kicked with close code 4001 (`replaced`), and the client
  * treats 4001 as "do not auto-reconnect". This guarantees exactly one attached
- * tmux client per session, so scrollback survives. */
+ * tmux client per session, so scrollback survives.
+ *
+ * EXCEPTION — `msn-*` (Mission sessions): several clients attaching at once is
+ * the entire point of that feature. The human has the session open in Mission
+ * while the agent types into the same pane through `mission_send`, and the
+ * agent-detail page's terminal is allowed to watch a session the user is
+ * already driving. Kicking the user's tab because someone else looked would
+ * make the shared workplace impossible, so mission sessions attach
+ * multi-client and accept the tmux full-redraw trade-off. The kick AND the
+ * attach sweep are both skipped for them — sweeping would kill the other
+ * clients' tmux processes anyway. */
 const activeTerminals = new Map();
+
+/** Mission sessions opt out of the single-client terminal policy. */
+const MISSION_SESSION_RE = /^msn-[A-Za-z0-9._-]+$/;
+
+/** Live multi-client connections per `${vmName}/${session}`.
+ *
+ *  Multi-client sessions cannot sweep on every disconnect (that would kill the
+ *  live clients), but a crashed client leaves an orphaned `tmux attach` process
+ *  behind — destroying the hijacked stream does not reliably kill the exec, and
+ *  those orphans pile up on a session nobody ever closes. Counting the real
+ *  clients lets cleanup sweep exactly when the last one leaves, which is the
+ *  only moment every remaining attach is garbage. */
+const terminalClients = new Map();
 
 function safeSessionName(s) {
   if (typeof s === 'string' && SESSION_NAME_RE.test(s)) return s;
@@ -314,6 +352,72 @@ function safeSessionName(s) {
 async function sweepStaleAttaches(vmName, session) {
   try {
     await runCmd('docker', ['exec', ...termUserArgs(vmName), vmName, 'sh', '-lc', `pkill -f '[t]mux attach-session -t ${session}' 2>/dev/null || true`], { timeout: 10000, check: false });
+  } catch {}
+}
+
+/** Identifies this webui process's own attaches. The boot sweep must never
+ *  touch one: it runs on the first mission attach, but the `await` before it
+ *  reaches the container means later connects have already written their pid
+ *  files by then, and sweeping by bare glob killed those live clients. A token
+ *  in the filename separates "orphaned by a previous process" from "mine". */
+const ATTACH_BOOT_TOKEN = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+
+/** Where a mission attach records its own PID. The mission attach runs as
+ *  `sh -c 'echo $$ > <pidfile>; exec tmux attach-session -t <s>'`, so the PID
+ *  is the tmux process's own (exec keeps it) and the file names that one
+ *  connection. Regular terminals do not write one: they are swept by name. */
+function attachPidPath(connId) {
+  return `/tmp/paddock-at-${ATTACH_BOOT_TOKEN}-${connId}.pid`;
+}
+
+/** Kill exactly the attach client THIS connection started, and nothing else.
+ *
+ *  The broad `sweepStaleAttaches` cannot be used while other clients are live
+ *  (it pkills every client of the session, which is exactly what would kick a
+ *  second tab). Per-connection PIDs make targeted cleanup possible, which is
+ *  what stops a session accumulating orphan clients while a tab stays open.
+ *  The PID is re-verified against /proc before the kill: PIDs get reused, and a
+ *  human's own `tmux attach` over SSH must never be swept up by mistake. */
+async function reapAttachByPid(vmName, session, connId) {
+  try {
+    const r = await runCmd('docker', ['exec', ...termUserArgs(vmName), vmName, 'sh', '-c',
+      `p=${attachPidPath(connId)}; pid=$(cat "$p" 2>/dev/null) || exit 0; rm -f "$p"; ` +
+      `[ -n "$pid" ] || exit 0; ` +
+      `case "$(tr '\\0' ' ' < /proc/$pid/cmdline 2>/dev/null)" in ` +
+      `*tmux*attach-session*-t\ ${session}*) kill "$pid" 2>/dev/null && echo "killed $pid" ;; esac; exit 0`
+    ], { timeout: 10000, check: false });
+    const killed = String(r?.stdout || '').trim();
+    if (killed) console.log(`[wss/terminal] ${connId} reaped own attach on ${session} (${killed})`);
+  } catch {}
+}
+
+const attachPidSwept = new Set(); // PAD names whose leftover pid files are swept
+
+/** Kill attach clients orphaned by a previous webui process, once per PAD.
+ *
+ *  `activeTerminals` is in-memory, so a webui restart loses track of the exec'd
+ *  `tmux attach` processes it started — they outlive it and stay attached
+ *  forever, inflating the per-repaint fan-out (tmux pushes every repaint to
+ *  every client). The pid files survive in the container, so the first mission
+ *  attach after a boot reaps them. Two safety properties, both load-bearing:
+ *  the file name carries ATTACH_BOOT_TOKEN, so only the PREVIOUS process's
+ *  files are touched (this process's live clients are skipped even if they
+ *  connected while the sweep was in flight), and each PID is re-verified
+ *  against /proc before the kill, so PID reuse or a human's own
+ *  `tmux attach` over SSH is never hit. */
+async function sweepOrphanAttachPids(vmName) {
+  if (attachPidSwept.has(vmName)) return;
+  attachPidSwept.add(vmName);
+  try {
+    const r = await runCmd('docker', ['exec', ...termUserArgs(vmName), vmName, 'sh', '-c',
+      'for f in /tmp/paddock-at-*.pid; do [ -e "$f" ] || continue; ' +
+      `case "$f" in */paddock-at-${ATTACH_BOOT_TOKEN}-*) continue ;; esac; ` +
+      'pid=$(cat "$f" 2>/dev/null); rm -f "$f"; [ -n "$pid" ] || continue; ' +
+      'case "$(tr "\\0" " " < /proc/$pid/cmdline 2>/dev/null)" in ' +
+      '*tmux*attach-session*) kill "$pid" 2>/dev/null && echo "$pid" ;; esac; done; exit 0'
+    ], { timeout: 15000, check: false });
+    const killed = String(r?.stdout || '').trim().split(/\s+/).filter(Boolean);
+    if (killed.length) console.log(`[wss/terminal] reaped ${killed.length} attach client(s) orphaned by a previous webui in ${vmName}: ${killed.join(',')}`);
   } catch {}
 }
 
@@ -1608,8 +1712,12 @@ app.post('/api/env', (req, res) => {
 });
 
 app.post('/api/env/restart', async (req, res) => {
+  // Logged loudly: this tears down every open terminal WebSocket and orphans
+  // every tmux attach client, so an unexplained call needs to be attributable.
+  console.warn(`[env/restart] CALLED by ${req.socket.remoteAddress} ua=${(req.headers['user-agent'] || '?').slice(0, 60)}`);
   res.json({ ok: true, message: 'Webui restarting in 1s…' });
   setTimeout(async () => {
+    console.warn('[env/restart] executing docker restart paddock (t=1)');
     try {
       const c = await dockerClient.getContainer('paddock');
       await c.restart({ t: 1 });
@@ -1620,8 +1728,11 @@ app.post('/api/env/restart', async (req, res) => {
 });
 
 app.post('/api/env/recreate', async (req, res) => {
+  // Same as /api/env/restart — an unexplained recreate is just as destructive.
+  console.warn(`[env/recreate] CALLED by ${req.socket.remoteAddress} ua=${(req.headers['user-agent'] || '?').slice(0, 60)}`);
   res.json({ ok: true, message: 'Webui recreating in 1s…' });
   setTimeout(async () => {
+    console.warn('[env/recreate] executing docker compose up -d --force-recreate webui');
     try {
       await runCmd('docker', ['compose', '-f', '/workspace/docker-compose.yml', 'up', '-d', '--force-recreate', 'webui'], { timeout: 120000 });
     } catch (e) {
@@ -2370,10 +2481,15 @@ app.get('/api/agents/:name/mission-folders', async (req, res) => {
 app.get('/api/mission/projects', (req, res) => {
   try {
     const projects = mission.listProjects({ agent: req.query.agent || '', agents: missionAllowedAgents(req) });
-    mission.withLive(projects).then(
-      (live) => res.json({ projects: live }),
-      () => res.json({ projects }) // liveness is decoration; never fail the list on it
-    );
+    // liveness, then the agent's own "is this conversation working" view. Both
+    // are decoration on the list: neither is allowed to fail it.
+    mission
+      .withLive(projects)
+      .then((live) => mission.withAgentBusyProjects(live))
+      .then(
+        (live) => res.json({ projects: live }),
+        () => res.json({ projects }) // liveness is decoration; never fail the list on it
+      );
   } catch (e) {
     missionFail(res, e);
   }
@@ -2401,10 +2517,17 @@ app.get('/api/mission/projects/:id', (req, res) => {
   const project = missionProject(req, res);
   if (!project) return;
   try {
-    mission.withLiveSessions(mission.listSessions({ projectId: project.id }), project.agent_name).then(
-      (sessions) => res.json({ project, sessions }),
-      () => res.json({ project, sessions: mission.listSessions({ projectId: project.id }) })
-    );
+    mission
+      .withLiveSessions(mission.listSessions({ projectId: project.id }), project.agent_name)
+      // The folder is REQUIRED here, not optional: the agent's status probe is
+      // scoped to a directory, and a live row carries no folder of its own. Left
+      // off, every row silently reports `busy: false` — which reads as "nothing
+      // is working" and is exactly the wrong answer this probe exists to avoid.
+      .then((sessions) => mission.withAgentBusy(sessions, () => project.agent_name, () => project.folder))
+      .then(
+        (sessions) => res.json({ project, sessions }),
+        () => res.json({ project, sessions: mission.listSessions({ projectId: project.id }) })
+      );
   } catch (e) {
     missionFail(res, e);
   }
@@ -2440,27 +2563,92 @@ app.delete('/api/mission/projects/:id', csrfCheck, (req, res) => {
   }
 });
 
+/** Every live session across every project, each tagged with its project — the
+ *  backend half of the page's "All projects" scope (plan 53 Phase 6). Same
+ *  shape as the per-project list plus a `project` object per row, because a
+ *  session label on its own cannot say which folder it belongs to. The tmux
+ *  check is grouped per AGENT (one `list-sessions` per PAD), not per project. */
+app.get('/api/mission/sessions', (req, res) => {
+  const allow = (agentName) => canTouchAgent(req, agentName);
+  let all;
+  try {
+    all = mission.listAllSessions({ allow });
+  } catch (e) {
+    return missionFail(res, e);
+  }
+  mission
+    .withLiveSessionsByAgent(all.sessions, (s) => s.project?.agent_name)
+    // Each row is asked about in ITS OWN project's folder — in this scope a
+    // single list spans folders, and a session's status only exists in the
+    // directory it is running in.
+    .then((sessions) => mission.withAgentBusy(sessions, (s) => s.project?.agent_name, (s) => s.project?.folder))
+    .then((sessions) => res.json({ sessions, projects: all.projects }),
+      () => res.json({ sessions: all.sessions, projects: all.projects }));
+});
+
+/** The same "All projects" scope for the agent's own history: every project's
+ *  conversations merged and date-sorted. A project that cannot be read is
+ *  reported in `errors` instead of failing the whole read — one stopped PAD
+ *  must not blank the column. */
+app.get('/api/mission/history', (req, res) => {
+  mission
+    .allAgentHistory({
+      limit: parseInt(req.query.limit, 10) || 50,
+      includeSubfolders: req.query.subfolders === '1',
+      allow: (agentName) => canTouchAgent(req, agentName),
+    })
+    .then((h) => res.json(h), (e) => missionFail(res, e));
+});
+
 app.get('/api/mission/projects/:id/sessions', (req, res) => {
   const project = missionProject(req, res);
   if (!project) return;
   try {
-    mission.withLiveSessions(mission.listSessions({ projectId: project.id }), project.agent_name).then(
-      (sessions) => res.json({ sessions }),
-      () => res.json({ sessions: mission.listSessions({ projectId: project.id }) })
-    );
+    mission
+      .withLiveSessions(mission.listSessions({ projectId: project.id }), project.agent_name)
+      .then((sessions) => mission.withAgentBusy(sessions, () => project.agent_name, () => project.folder))
+      .then(
+        (sessions) => res.json({ sessions }),
+        () => res.json({ sessions: mission.listSessions({ projectId: project.id }) })
+      );
   } catch (e) {
     missionFail(res, e);
   }
 });
 
+/** The conversations that already happened in this project's folder, read from
+ *  the agent's OWN store (opencode.db / codex rollouts / claude jsonl) — not
+ *  from `mission_sessions`. This is what makes a project that points at a
+ *  folder you have already worked in show that work instead of an empty column.
+ *  `?subfolders=1` widens it to conversations that ran in nested folders. */
+app.get('/api/mission/projects/:id/history', (req, res) => {
+  const project = missionProject(req, res);
+  if (!project) return;
+  mission
+    .agentHistory(project.id, {
+      limit: parseInt(req.query.limit, 10) || 50,
+      includeSubfolders: req.query.subfolders === '1',
+    })
+    .then((h) => res.json(h), (e) => missionFail(res, e));
+});
+
 /** Open a session: create the tmux session rooted at the project's folder and
  *  launch the agent's TUI into it. No headless variant by design — the work
- *  must be visible. */
+ *  must be visible. `agentSessionId` resumes a conversation from the agent's
+ *  own history instead of starting a fresh one. */
 app.post('/api/mission/projects/:id/sessions', csrfCheck, (req, res) => {
   const project = missionProject(req, res);
   if (!project) return;
   mission
-    .startSession(project.id, { label: req.body.label, origin: req.body.origin })
+    .startSession(project.id, {
+      label: req.body.label,
+      origin: req.body.origin,
+      agentSessionId: req.body.agentSessionId,
+      // Same actor stamp as the MCP path (`key:<id>` there, `user:<id>` here) so
+      // a `human` row can be audited later instead of resting on the caller's
+      // memory (plan 67, 67.3).
+      createdBy: req.session && req.session.userId ? `user:${req.session.userId}` : null,
+    })
     .then(({ session, state }) => res.json({ session, state }), (e) => missionFail(res, e));
 });
 
@@ -2477,12 +2665,31 @@ app.get('/api/mission/sessions/:id', (req, res) => {
 
 /** Type into a live session. The human mostly types in the attached terminal
  *  instead; this is the API the MCP `mission_send` tool calls, kept here so both
- *  go through the same solo-lock check. */
+ *  go through the same solo-lock check. The response mirrors the MCP tool's:
+ *  where the write landed (project + session id) and the pane's screen after
+ *  it, because a bare `ok: true` is a success for keystrokes that went nowhere
+ *  (plan 62 1h/1i). */
 app.post('/api/mission/sessions/:id/send', csrfCheck, (req, res) => {
   const found = missionSession(req, res);
   if (!found) return;
   mission.sendText(found.session.id, req.body.text).then(
-    (r) => res.json({ ok: true, sent: r.sent, session: r.session }),
+    (r) => res.json({ ok: true, sent: r.sent, project: r.project, session_id: r.session_id, session: r.session, screen: r.screen }),
+    (e) => missionFail(res, e)
+  );
+});
+
+/** Answer a permission dialog the pane is parked on (plan 62 1c). The HUMAN's
+ *  route, so `always` is allowed here — the durable-policy refusal is the MCP
+ *  tool's rule, because that is the machine caller. */
+app.post('/api/mission/sessions/:id/permission', csrfCheck, (req, res) => {
+  const found = missionSession(req, res);
+  if (!found) return;
+  const choice = String(req.body.choice || '');
+  if (!['once', 'always', 'reject'].includes(choice)) {
+    return res.status(400).json({ error: 'Bad choice', code: 'mission_bad_permission_choice' });
+  }
+  mission.answerPermission(found.session.id, choice, { allowAlways: true }).then(
+    (r) => res.json(r),
     (e) => missionFail(res, e)
   );
 });
@@ -2493,6 +2700,16 @@ app.post('/api/mission/sessions/:id/relaunch', csrfCheck, (req, res) => {
   const found = missionSession(req, res);
   if (!found) return;
   mission.relaunchTui(found.session.id).then((r) => res.json(r), (e) => missionFail(res, e));
+});
+
+/** Restart a session whose tmux pane is GONE. Separate from relaunch, which
+ *  refuses a dead session: a restart re-creates the same pane rooted at the
+ *  project folder and brings back the same agent conversation, keeping the
+ *  mission session id. */
+app.post('/api/mission/sessions/:id/restart', csrfCheck, (req, res) => {
+  const found = missionSession(req, res);
+  if (!found) return;
+  mission.restartSession(found.session.id).then((r) => res.json(r), (e) => missionFail(res, e));
 });
 
 app.patch('/api/mission/sessions/:id', csrfCheck, (req, res) => {
@@ -2887,17 +3104,43 @@ const server = app.listen(6789, () => console.log('VM WebUI listening on port 67
 // never opened. Capture is also done on every logs fetch and right before any
 // backend-driven recreate/delete — this sweep just closes the gap for changes
 // made outside Paddock (docker CLI, compose, crash loops).
+//
+// Forwarding doors are excluded: they are socat forwarders, not agents, so
+// nothing ever reads their log file — but capturing one creates
+// `instances/<pad>-door/logs/`, which resurrects the very instance directory
+// the boot sweep below quarantines, every 30 seconds.
 (async function logSweep() {
   try {
     const containers = await dockerPsList();
-    await logStore.captureAll(Object.keys(containers).filter((n) => safeVmName(n)));
+    await logStore.captureAll(Object.keys(containers)
+      .filter((n) => safeVmName(n) && !vm.isManagedDoorContainer(n)));
   } catch {}
   setTimeout(logSweep, 30000);
 })();
 
-// Boot-time cleanup of forwarding-door containers whose agent was deleted.
+// Boot-time cleanup of forwarding-door containers whose agent was deleted,
+// then of the legacy `<pad>-door` instance DIRECTORIES the same feature left
+// behind (plan 59). The dir sweep is the one that matters beyond tidiness:
+// each stale dir kept a `SUBNET=` pool reservation that nothing freed, so the
+// same /24 ended up on two pads' books and the second one to create its
+// `default` network failed with "Pool overlaps with other one on this address
+// space".
+//
+// The "is this a real agent?" veto is the CURRENT agent list (disk-derived, and
+// it already excludes doors) rather than a bare `agents` table lookup: the
+// table is a cache that keeps a row for every pad that ever existed — including
+// `pad-opencode-user1-door`, promoted before the door filter existed — so
+// trusting it would veto exactly the dirs this sweep exists to clean, and would
+// still miss a dir whose meta lost its `AGENT=` line.
 (async function orphanDoorSweep() {
   try { await cleanOrphanDoors(); } catch {}
+  try {
+    const live = new Set(registry.discoverAgents().map((a) => a.name));
+    const moved = await vm.cleanStaleDoorDirs({ isRegisteredAgent: (n) => live.has(n) });
+    if (moved.length) console.log(`[stale-door-dir] quarantined ${moved.length} legacy door dirs`);
+  } catch (e) {
+    console.error('[stale-door-dir] sweep failed:', e.message);
+  }
 })();
 
 // One-time migration to per-instance build files (plan 25). Runs in the
@@ -2970,8 +3213,18 @@ wss.on('connection', async (ws, req) => {
     const cols = Math.max(40, Math.min(400, parseInt(url.searchParams.get('cols') || '120', 10) || 120));
     const rows = Math.max(12, Math.min(120, parseInt(url.searchParams.get('rows') || '32', 10) || 32));
     const session = safeSessionName(url.searchParams.get('session') || 'main');
+    // A client that is SWITCHING between sessions on one page already holds a
+    // rendered buffer, and the attach repaint below overwrites the screen
+    // anyway — so replaying the scrollback into it is redundant work that also
+    // lands the new session's history *under* the outgoing session's output.
+    // It costs two `docker exec` round trips (~700ms here) before the first
+    // byte, which is the whole "switching sessions takes a moment" pause. Such a
+    // client sends `history=0`; a first connect / reload (the case the replay
+    // exists for) keeps the default and still gets its scrollback.
+    const wantHistory = url.searchParams.get('history') !== '0';
 
     const termKey = `${vmName}/${session}`;
+    const multiClient = MISSION_SESSION_RE.test(session);
     let dockerExec = null;
     let dockerStream = null;
     let closed = false;
@@ -2992,9 +3245,25 @@ wss.on('connection', async (ws, req) => {
       // tmux clients as a backstop. Otherwise orphaned attach processes pile
       // up (multi-client redraws kill scrollback). Skipped when this
       // connection was superseded — the newer connection has already attached
-      // (or is about to) and a sweep here would kill ITS tmux client too.
+      // (or is about to) and a sweep here would kill ITS tmux client too. For
+      // multi-client (mission) sessions the sweep is deferred until the LAST
+      // client leaves, so live clients are never killed but orphans still go.
       if (entry.replaced) {
         console.log(`[wss/terminal] ${connId} replaced — skipping sweep`);
+      } else if (multiClient) {
+        // Always reap THIS connection's own attach client, even while other
+        // clients remain: the sweep below cannot run in that case, and that
+        // gap is what let a session a user left open accumulate orphans.
+        reapAttachByPid(vmName, session, connId);
+        const set = terminalClients.get(termKey);
+        if (set) set.delete(connId);
+        if (set && set.size > 0) {
+          console.log(`[wss/terminal] ${connId} left ${termKey} — ${set.size} client(s) still attached, skipping sweep`);
+        } else {
+          terminalClients.delete(termKey);
+          console.log(`[wss/terminal] ${connId} was the last client on ${termKey} — sweeping orphans`);
+          sweepStaleAttaches(vmName, session);
+        }
       } else {
         sweepStaleAttaches(vmName, session);
       }
@@ -3006,21 +3275,62 @@ wss.on('connection', async (ws, req) => {
 
     // Single-client policy: this connection replaces any older one for the
     // same PAD/session. Kicking it with 4001 makes its client stop retrying,
-    // so two attached clients can never fight each other again.
+    // so two attached clients can never fight each other again. Mission
+    // sessions keep every client (see the note on activeTerminals).
+    if (multiClient) {
+      // The session is identified by tmux id here, but its truth lives in the
+      // DB row. If the row is gone the session was closed: refuse to attach
+      // instead of letting the lazy tmux ensure below resurrect it as a bare
+      // shell, which would make "Close" un-do itself for every attached client
+      // (each one reconnects and re-creates it).
+      if (!mission.getSessionByTmux(session)) {
+        console.log(`[wss/terminal] ${connId} refused ${termKey} — mission session is closed`);
+        if (ws.readyState === ws.OPEN) ws.send(`\r\n\x1b[31m[Session closed — it is no longer on the Mission page]\x1b[0m\r\n`);
+        // 4003, NOT 4002. 4002 means "the PAD is stopped" and the client retries
+        // it with backoff until the PAD comes back — correct there, but this
+        // session is CLOSED and will never return, so retrying turned one close
+        // into an endless refusal storm against the server (measured: 29
+        // refusals in 90s, still going). 4003 tells the client to stop.
+        ws.close(4003, 'mission session closed');
+        return;
+      }
+    }
+
     const prev = activeTerminals.get(termKey);
-    if (prev && prev.ws && prev.ws.readyState === ws.OPEN) {
+    if (!multiClient && prev && prev.ws && prev.ws.readyState === ws.OPEN) {
       console.log(`[wss/terminal] ${connId} supersedes ${prev.connId} (${termKey})`);
       prev.replaced = true;
       try { prev.ws.close(4001, 'replaced by a newer terminal connection'); } catch {}
+    } else if (multiClient) {
+      console.log(`[wss/terminal] ${connId} joins ${termKey} (multi-client, ${prev ? 'a client is already attached' : 'first client'})`);
+      if (!terminalClients.has(termKey)) terminalClients.set(termKey, new Set());
+      terminalClients.get(termKey).add(connId);
     }
     activeTerminals.set(termKey, entry);
 
     try {
       // Make sure the tmux session exists (lazily installs tmux on old images).
       // Sweep stale attaches from crashed connections first so exactly one
-      // client attaches below.
-      await sweepStaleAttaches(vmName, session);
-      await ensureTmuxSession(vmName, session, cols, rows);
+      // client attaches below — but never for a multi-client (mission)
+      // session, where the attaches it would kill are LIVE clients: doing it
+      // anyway makes every new tab drop the previous one and the two reconnect
+      // forever, which is the exact loop this policy exists to prevent.
+      if (!multiClient) await sweepStaleAttaches(vmName, session);
+      // …and the same goes for the ensure, on the mission path only.
+      // `createSession` costs two `docker exec` round trips (`ensureTmux` +
+      // `hasSession`) before it can conclude what is already true for a mission
+      // session: Mission created that tmux session itself, and the DB row was
+      // verified a few lines above. Paying for it on every attach is what made
+      // switching rows in col 2 pause for ~1s before the first pixel arrived
+      // (measured: first byte at 1013–1159ms, of which ~700ms was these two
+      // execs and the rest the attach itself).
+      //
+      // Skipping it is also the safer behaviour for a session whose tmux pane has
+      // died: `createSession` used to silently RE-CREATE it as a bare shell, so
+      // "Close" appeared to un-do itself and the pane looked alive when it was
+      // not. Now the attach below simply fails, and the page's own pane state
+      // (paneState().live) drives the dead-pane Restart affordance.
+      if (!multiClient) await ensureTmuxSession(vmName, session, cols, rows);
     } catch (err) {
       console.error('[wss/terminal] tmux setup error:', err.message);
       if (ws.readyState === ws.OPEN) ws.send(`\r\n\x1b[31m[Terminal error: ${err.message}]\x1b[0m\r\n`);
@@ -3050,26 +3360,28 @@ wss.on('connection', async (ws, req) => {
     // that screen, so replaying it would make a refresh look like blank lines
     // were entered after the prompt.
     try {
-      const history = await runCmd(
-        'docker',
-        ['exec', ...termUserArgs(vmName), vmName, 'tmux', 'display-message', '-p', '-t', session, '#{history_size}'],
-        { timeout: 15000, check: false }
-      );
-      const historySize = Math.max(0, parseInt(history.stdout, 10) || 0);
-      if (historySize > 0) {
-        const hist = await runCmd(
+      if (wantHistory) {
+        const history = await runCmd(
           'docker',
-          ['exec', ...termUserArgs(vmName), vmName, 'sh', '-lc', `tmux capture-pane -t ${session} -p -e -S -${TMUX_HISTORY} 2>/dev/null`],
-          { timeout: 20000, check: false }
+          ['exec', ...termUserArgs(vmName), vmName, 'tmux', 'display-message', '-p', '-t', session, '#{history_size}'],
+          { timeout: 15000, check: false }
         );
-        if (hist.code === 0 && hist.stdout && ws.readyState === ws.OPEN) {
-          // capture-pane emits LF-only lines. xterm needs CRLF to return to
-          // column zero; otherwise each restored line starts after the last.
-          // It also includes every unused row below the cursor. Replaying those
-          // viewport blanks as history makes reconnects look like random Enter
-          // presses after the prompt, so preserve content but drop that padding.
-          const replay = hist.stdout.replace(/(?:\r?\n)+$/, '');
-          if (replay) ws.send(replay.replace(/\r?\n/g, '\r\n'));
+        const historySize = Math.max(0, parseInt(history.stdout, 10) || 0);
+        if (historySize > 0) {
+          const hist = await runCmd(
+            'docker',
+            ['exec', ...termUserArgs(vmName), vmName, 'sh', '-lc', `tmux capture-pane -t ${session} -p -e -S -${TMUX_HISTORY} 2>/dev/null`],
+            { timeout: 20000, check: false }
+          );
+          if (hist.code === 0 && hist.stdout && ws.readyState === ws.OPEN) {
+            // capture-pane emits LF-only lines. xterm needs CRLF to return to
+            // column zero; otherwise each restored line starts after the last.
+            // It also includes every unused row below the cursor. Replaying those
+            // viewport blanks as history makes reconnects look like random Enter
+            // presses after the prompt, so preserve content but drop that padding.
+            const replay = hist.stdout.replace(/(?:\r?\n)+$/, '');
+            if (replay) ws.send(replay.replace(/\r?\n/g, '\r\n'));
+          }
         }
       }
     } catch (err) {
@@ -3079,6 +3391,9 @@ wss.on('connection', async (ws, req) => {
     try {
       const container = dockerClient.getContainer(vmName);
       const userMeta = readMeta(vmName);
+      // Reap clients orphaned by a previous webui process before this attach
+      // claims a pid file of its own (mission sessions only).
+      if (multiClient) await sweepOrphanAttachPids(vmName);
       dockerExec = await container.exec({
         AttachStdin: true,
         AttachStdout: true,
@@ -3094,7 +3409,15 @@ wss.on('connection', async (ws, req) => {
         // Attach to the persistent tmux session instead of spawning a throwaway
         // `bash -i`. On WS close the attach client dies but the session stays,
         // so reloads and tab switches pick up exactly where they left off.
-        Cmd: ['tmux', 'attach-session', '-t', session],
+        //
+        // Mission sessions wrap the attach in `sh -c` so it records its own PID
+        // (targeted cleanup, and a boot sweep of the previous process's
+        // orphans). `sh -c` not `-lc`: a login shell would print profile output
+        // into the user's terminal. `exec` keeps the same PID, so the file
+        // names the tmux process itself.
+        Cmd: multiClient
+          ? ['sh', '-c', `echo $$ > ${attachPidPath(connId)}; exec tmux attach-session -t ${session}`]
+          : ['tmux', 'attach-session', '-t', session],
       });
       dockerStream = await dockerExec.start({ hijack: true, stdin: true, stdout: true, stderr: true });
     } catch (err) {

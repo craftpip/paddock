@@ -65,10 +65,40 @@ async function hasTmux(vmName) {
   return r.code === 0;
 }
 
+/** The PAD-wide tmux options, applied once per PAD per webui process.
+ *
+ *  Not the create path on purpose: `createSession` returns early when the
+ *  session already exists — which is what an attach to a live terminal does —
+ *  so options set after that check never reached a session that was already
+ *  there, and the Terminal tab kept tmux's defaults for the whole life of the
+ *  PAD. `ensureTmux` is the one chokepoint every tmux path goes through
+ *  (create, attach-through-create, list, kill) and it is already memoised per
+ *  PAD, so the options land on the first touch no matter which path that is.
+ *  The tmux server outlives the webui, so a restart re-applies harmlessly.
+ *
+ *  `escape-time` is the one that was user-visible. tmux holds an ambiguous ESC
+ *  for up to that many ms waiting to see whether it starts a key sequence
+ *  (`\x1b[A`); at the 500ms default a quick ESC press is held, and a second
+ *  press 100ms later falls INSIDE the same window — so the first press reads as
+ *  lost and only the later one lands. That is the whole "I have to press it
+ *  twice" report, and it is not a client-side debounce: nothing on the
+ *  keystroke path batches (plan 58 §6). 10ms is far below human key-repeat and
+ *  still lets an arrow key arrive as one sequence; 0 would disable the window
+ *  entirely and break arrows on a slow link, so 10 is the conservative choice.
+ *
+ *  `status off` because the webui draws its own session chrome — a tmux status
+ *  bar in the pane would only duplicate it. */
+async function applyGlobalOptions(vmName) {
+  await tmuxExec(vmName, ['set-option', '-g', 'history-limit', String(TMUX_HISTORY)], { timeout: 15000, check: false });
+  await tmuxExec(vmName, ['set-option', '-g', 'status', 'off'], { timeout: 15000, check: false });
+  await tmuxExec(vmName, ['set-option', '-g', 'escape-time', '10'], { timeout: 15000, check: false });
+}
+
 /** Lazy-install tmux once per PAD (images that predate the Dockerfile change). */
 async function ensureTmux(vmName) {
   if (TMUX_READY.has(vmName)) return;
   if (await hasTmux(vmName)) {
+    await applyGlobalOptions(vmName);
     TMUX_READY.add(vmName);
     return;
   }
@@ -79,6 +109,7 @@ async function ensureTmux(vmName) {
   );
   if (inst.code !== 0) throw new Error(`tmux install failed: ${String(inst.stderr || inst.stdout || '').trim()}`);
   if (!(await hasTmux(vmName))) throw new Error('tmux still missing after install');
+  await applyGlobalOptions(vmName);
   TMUX_READY.add(vmName);
 }
 
@@ -176,11 +207,9 @@ async function createSession(vmName, session, { cwd = '', cols = 0, rows = 0 } =
     }
     throw new Error(err || 'tmux new-session failed');
   }
-  // Enough history that a fresh attach has something real to replay.
-  await tmuxExec(vmName, ['set-option', '-g', 'history-limit', String(TMUX_HISTORY)], { timeout: 15000, check: false });
-  // The webui draws its own session chrome — a tmux status bar in the pane
-  // would only duplicate it. Idempotent.
-  await tmuxExec(vmName, ['set-option', '-g', 'status', 'off'], { timeout: 15000, check: false });
+  // Enough history that a fresh attach has something real to replay, and a
+  // bare ESC that is not held for half a second: both are PAD-wide tmux options
+  // and are applied by `ensureTmux` above, on the first tmux touch of any kind.
   return { created: true, session: name };
 }
 
@@ -200,6 +229,17 @@ async function sendText(vmName, session, text, { enter = true } = {}) {
     if (enter) await tmuxExec(vmName, ['send-keys', '-t', name, 'Enter'], { timeout: 15000, check: false });
   }
   return { lines: lines.length };
+}
+
+/** Send raw tmux key names (Home, End, Escape, Enter, Left …) — how a
+ *  permission dialog gets answered explicitly. Unlike sendText, these are NOT
+ *  literal: each entry is a tmux key name. */
+async function sendKeys(vmName, session, keys = []) {
+  const name = assertSessionName(session);
+  for (const k of keys) {
+    await tmuxExec(vmName, ['send-keys', '-t', name, String(k)], { timeout: 15000, check: false });
+  }
+  return { keys: keys.length };
 }
 
 /** Run a shell command inside the pane — how a TUI gets launched. Literal
@@ -242,7 +282,7 @@ async function paneState(vmName, session) {
   );
   if (r.code !== 0) return { live: false, tuiAlive: false, command: '', cwd: '', reason: 'no-pane' };
   const [command = '', cwd = ''] = String(r.stdout || '').trim().split('|');
-  return { live: true, tuiAlive: !/^(ba|z|da)?sh$/.test(command), command, cwd };
+  return { live: true, tuiAlive: !isShellCommand(command), command, cwd };
 }
 
 async function killSession(vmName, session) {
@@ -269,6 +309,53 @@ async function listSessions(vmName) {
   return sessions;
 }
 
+/** One-call-per-PAD pane map: session name → { command, cwd }.
+ *  `list-sessions` tells us a tmux session exists; it cannot tell a live agent
+ *  TUI from a pane that dropped back to a shell, or where that pane is rooted.
+ *  `list-panes -a` answers both in the same O(PADs) budget — never one
+ *  `paneState` per row — so list mode can carry `kind`/`cwd` without scaling
+ *  with the session count. A PAD that cannot be listed yields an empty map. */
+async function listPanes(vmName) {
+  const map = new Map();
+  try {
+    await ensureTmux(vmName);
+    const r = await tmuxExec(
+      vmName,
+      ['list-panes', '-a', '-F', '#{session_name}|#{pane_current_command}|#{pane_current_path}'],
+      { timeout: 15000, check: false }
+    );
+    if (r.code !== 0) return map;
+    for (const line of String(r.stdout || '').split('\n')) {
+      if (!line.trim()) continue;
+      const idx1 = line.indexOf('|');
+      if (idx1 < 0) continue;
+      const idx2 = line.indexOf('|', idx1 + 1);
+      if (idx2 < 0) continue;
+      const name = line.slice(0, idx1);
+      const command = line.slice(idx1 + 1, idx2);
+      const cwd = line.slice(idx2 + 1).trim();
+      if (!name) continue;
+      if (!map.has(name)) map.set(name, { command, cwd });
+    }
+  } catch {
+    /* empty map — same soft failure as listSessions */
+  }
+  return map;
+}
+
+/** Shell test shared by paneState + list-mode kind stamping.
+ *  Fails CLOSED: anything that is not recognisably an agent's process counts as
+ *  a shell. This gates a destructive action — `mission_send` types text, and
+ *  text typed into a bash pane runs as a command. A wrong 'shell' refuses a
+ *  send the caller can retry; a wrong 'agent' executes whatever it sent. The
+ *  reachable states are unaffected (a live pane's command is never empty), so
+ *  this only decides the case where we did not really look. */
+function isShellCommand(command) {
+  const c = String(command || '').trim();
+  if (!c) return true;
+  return /^(ba|z|da)?sh$/.test(c);
+}
+
 module.exports = {
   TMUX_HISTORY,
   SESSION_NAME_RE,
@@ -284,11 +371,14 @@ module.exports = {
   folderExists,
   createSession,
   sendText,
+  sendKeys,
   sendCommand,
   captureScreen,
   paneState,
   killSession,
   listSessions,
+  listPanes,
+  isShellCommand,
   _setForTests: (opts = {}) => {
     if (opts.runCmd) runCmd = opts.runCmd;
     if (opts.resetReady) TMUX_READY.clear();

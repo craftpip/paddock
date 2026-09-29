@@ -212,6 +212,73 @@ describe('pad-tmux - reading a session back', () => {
     s = await padTmux.paneState('pad-x', 'msn-abcd1234');
     assert.deepEqual(s, { live: false, tuiAlive: false, command: '', cwd: '', reason: 'no-session' });
   });
+
+  it('builds a whole PAD\'s pane map in one call, keyed by session name', async () => {
+    // The point of `list-panes -a` is that list mode can say "shell" for 20
+    // sessions with ONE exec. A per-session `paneState` here is the O(sessions)
+    // cost this replaced, so the argv is pinned.
+    const out = [
+      'msn-abcd1234|node|/www2/paddock',
+      'msn-efgh5678|bash|/www1/other',
+      'term-1|zsh|/root',
+    ].join('\n');
+    const { calls, fake } = recorder({ 'list-panes': { stdout: out }, 'has-session': { code: 0 } });
+    padTmux._setForTests({ runCmd: fake });
+    const map = await padTmux.listPanes('pad-x');
+    const a = findCall(calls, 'list-panes').args;
+    assert.ok(a.includes('-a'), 'every pane on the PAD, not one session\'s');
+    assert.deepEqual([...map.keys()], ['msn-abcd1234', 'msn-efgh5678', 'term-1']);
+    assert.deepEqual(map.get('msn-abcd1234'), { command: 'node', cwd: '/www2/paddock' });
+    assert.deepEqual(map.get('msn-efgh5678'), { command: 'bash', cwd: '/www1/other' });
+    assert.equal(findCall(calls, 'display-message'), undefined, 'no per-row probe');
+  });
+
+  it('an unreadable pane map is empty, not a thrown list', async () => {
+    const { fake } = recorder({ 'list-panes': { code: 1, stderr: 'no server running' } });
+    padTmux._setForTests({ runCmd: fake });
+    const map = await padTmux.listPanes('pad-x');
+    assert.equal(map.size, 0, 'callers treat empty as "no claim", which is the safe direction');
+  });
+
+  it('a malformed line is skipped rather than producing a half-parsed pane', async () => {
+    const out = ['msn-abcd1234|node', '|', 'msn-efgh5678|bash|/www1/other', ''].join('\n');
+    const { fake } = recorder({ 'list-panes': { stdout: out }, 'has-session': { code: 0 } });
+    padTmux._setForTests({ runCmd: fake });
+    const map = await padTmux.listPanes('pad-x');
+    assert.deepEqual([...map.keys()], ['msn-efgh5678'], 'only the complete line survived');
+  });
+
+  it('isShellCommand knows the shells a pane actually falls back to', () => {
+    // `pane_current_command` is a single word, so this is a closed list: an
+    // unknown value is treated as a shell because "not evidence of a TUI" is the
+    // safe direction — a wrong 'shell' refuses a send, a wrong 'agent' types
+    // text into a bash pane.
+    for (const s of ['bash', 'zsh', 'sh', 'dash', ' sh ']) {
+      assert.equal(padTmux.isShellCommand(s), true, `${s} is a shell`);
+    }
+    for (const c of ['node', 'opencode', 'python3', 'vim', 'ssh']) {
+      assert.equal(padTmux.isShellCommand(c), false, `${c} is not a shell`);
+    }
+    assert.equal(padTmux.isShellCommand(''), true, 'an unknown command is not evidence of a TUI');
+  });
+
+  it('sends key NAMES, so the dialog moves — the opposite of sendText\'s -l', async () => {
+    // `-l` means "type these bytes literally", so `send-keys -l Home` types the
+    // four characters H-o-m-e into the pane instead of pressing Home. That is
+    // exactly what sendText needs and exactly what would break a permission
+    // dialog, so the ABSENCE of -l here is the contract, and asserting its
+    // presence is the mistake this test exists to prevent.
+    const { calls, fake } = recorder({ 'send-keys': { code: 0 } });
+    padTmux._setForTests({ runCmd: fake });
+    await padTmux.sendKeys('pad-x', 'msn-abcd1234', ['Home', 'Enter']);
+    const sent = calls.filter((c) => c.args.join(' ').includes('send-keys'));
+    assert.equal(sent.length, 2, 'one exec per key: "Home Enter" as one string would depend on tmux\'s separator parsing');
+    for (const s of sent) {
+      assert.ok(!s.args.includes('-l'), `a key name must be interpreted, not typed: ${s.args.join(' ')}`);
+    }
+    assert.equal(sent[0].args[sent[0].args.length - 1], 'Home');
+    assert.equal(sent[1].args[sent[1].args.length - 1], 'Enter');
+  });
 });
 
 describe('pad-tmux - cleanup', () => {

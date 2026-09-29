@@ -16,6 +16,7 @@ const { getGuide, getCommandCatalog, listCatalogTypes } = require('./services/ll
 const { getDb } = require('./services/db');
 const taskRunner = require('./services/task-runner');
 const jobLog = require('./services/job-log');
+const mission = require('./services/mission');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const PREFIX = process.env.CONTAINER_PREFIX || 'vm';
@@ -116,6 +117,9 @@ const READ_TOOLS = new Set([
   // Job readers are pure reads on the in-memory job store, so a read-only key
   // may poll the progress of a create/recreate it is not allowed to start.
   'job_status', 'job_log',
+  // Mission reads (plan 55): the agent can WATCH the human work without being
+  // able to type into it — that separation is the point of the read bucket.
+  'mission_projects', 'mission_sessions',
 ]);
 
 const TOOL_GRANT_FOR = {
@@ -134,6 +138,18 @@ const TOOL_GRANT_FOR = {
   task_complete: 'exec',
   task_priority: 'exec',
   task_cancel: 'exec',
+  // Mission writers (plan 55). A project is a row, so it rides the same `create`
+  // bucket as create_agent. Starting a session spawns a real TUI that burns
+  // tokens, and mission_send types into a live conversation — both are work in
+  // a PAD, so both ride `exec` (52 F2's "the verbs that do work" bucket).
+  mission_project_create: 'create',
+  mission_session_start: 'exec',
+  mission_send: 'exec',
+  // Answering a permission dialog is a WRITE into a live conversation, and the
+  // most consequential answer available to an agent — so it rides `exec` with
+  // mission_send rather than the read bucket, and `always` is refused in the
+  // handler regardless of what the key may do.
+  mission_permission_answer: 'exec',
 };
 
 function keyGrants(user) {
@@ -173,9 +189,20 @@ function toolAllowed(user, tool, agentName) {
 
 /** Gate every tool: target grant, then owner/admin, then tool grant.
  *  create_agent has no pre-existing row to owner-check, so it only runs the
- *  grant checks (the key's owner becomes the new agent's owner). */
+ *  grant checks (the key's owner becomes the new agent's owner).
+ *
+ *  The name is RESOLVED first (plan 61) and every grant is then checked
+ *  against the resolved name, never the raw string the caller typed. That
+ *  ordering is the security half of the resolver: a key scoped to
+ *  `target:agent:pad-proj2` must still be refused when someone passes the
+ *  `display_name`, because a grant checked on the unresolved string would
+ *  compare `Proj2` against the target and could be talked past. A name that
+ *  resolves to nothing is refused before any grant runs, so a scoped key
+ *  cannot use the resolver to probe for names outside its target. */
 function requireTool(user, tool, agentName) {
-  const name = agentName || '';
+  const raw = agentName || '';
+  const resolved = raw ? resolveAgentName(raw).name : '';
+  const name = resolved || raw;
   if (!targetAllowed(user, name)) {
     throw new McpError(ErrorCode.InvalidRequest, `Not permitted by API key target grant: ${name || 'this action'}`);
   }
@@ -185,10 +212,151 @@ function requireTool(user, tool, agentName) {
   }
 }
 
-function requireAgent(agentName) {
-  const agent = registry.getAgent(agentName);
-  if (!agent) throw new McpError(ErrorCode.InvalidRequest, `Agent not found: ${agentName}`);
-  return agent;
+/** Single-quote a caller-supplied string for `sh -lc`. The `cwd` argument is
+ *  caller-controlled, so interpolating it raw would let a name like
+ *  `/www1; rm -rf /` become two commands. Closes the quote first, which is the
+ *  only way a single-quoted string can be escaped out of. */
+function shellQuote(s) {
+  return `'${String(s == null ? '' : s).replace(/'/g, `'\\''`)}'`;
+}
+
+/** Which pad did the caller mean? (plan 61, findings 1e/1f/1b)
+ *
+ *  The surface handed out three different names for the same agent — the
+ *  container name, the bare name `create_agent` accepts, and the
+ *  `display_name` it *lists* — and accepted only one of them. So a caller who
+ *  reads a name off `list_agents` and passes it straight back used to get
+ *  "Agent not found", and the cheapest way to be wrong was `pad-proj` (not a
+ *  pad) vs `pad-proj2` (is).
+ *
+ *  Resolution order, cheapest first:
+ *    1. exact container name            — `pad-proj2`
+ *    2. bare name + prefix              — `proj2` → `pad-proj2`, mirroring
+ *                                         `create_agent`'s own naming rule.
+ *                                         Checked BEFORE substring, so a
+ *                                         prefixed exact match wins even when
+ *                                         it is a substring of another pad
+ *                                         (`proj` → `pad-opencode-proj`, not
+ *                                         refused as ambiguous vs `pad-proj2`).
+ *    3. exact `display_name`            — `Proj2` → `pad-proj2`
+ *    4. exactly one container containing it — `glm` → `pad-proj2`. This
+ *                                         RESOLVES, rather than only hinting:
+ *                                         uniqueness is the proof, so the
+ *                                         caller is not left to guess. The
+ *                                         resolved name is echoed back in the
+ *                                         response so a caller can see which
+ *                                         pad it really got.
+ *
+ *  Returns `{ name, agent, candidates }`. An ambiguous name resolves to no name
+ *  at all (`name: ''`) and carries every candidate in `candidates`, so a caller
+ *  is told which ones exist rather than handed a plausible wrong one; the read
+ *  tools surface that list in the error instead of refusing outright, because
+ *  the whole finding is that the caller was left with nowhere to go.
+ *
+ *  IMPORTANT: this runs BEFORE `requireTool`, never after. A grant must be
+ *  checked against the RESOLVED name — resolving first and granting on the
+ *  raw string is how a target-restricted key gets talked into another pad. */
+function resolveAgentName(input) {
+  const raw = String(input == null ? '' : input).trim();
+  if (!raw) return { name: '', agent: null, candidates: [] };
+
+  const fleet = registry.discoverAgents();
+  const exact = fleet.find((a) => a.name === raw);
+  if (exact) return { name: exact.name, agent: registry.getAgent(exact.name), candidates: [] };
+
+  // The prefix create_agent itself applies, so a name it would have produced
+  // resolves back to the same pad.
+  const prefixed = raw.startsWith(registry.PREFIX || 'pad-') ? null : `${registry.PREFIX || 'pad-'}${raw}`;
+  if (prefixed) {
+    const hit = fleet.find((a) => a.name === prefixed);
+    if (hit) return { name: hit.name, agent: registry.getAgent(hit.name), candidates: [] };
+  }
+
+  const byDisplay = fleet.find((a) => a.display_name && String(a.display_name).toLowerCase() === raw.toLowerCase());
+  if (byDisplay) return { name: byDisplay.name, agent: registry.getAgent(byDisplay.name), candidates: [] };
+
+  // A substring hit is only acted on when it is UNIQUE. Two matches means the
+  // caller's name is genuinely ambiguous and guessing would be the exact
+  // "command on the wrong agent" failure this exists to prevent.
+  const needle = raw.toLowerCase();
+  const partial = fleet.filter((a) =>
+    a.name.toLowerCase().includes(needle) ||
+    (a.display_name && String(a.display_name).toLowerCase().includes(needle))
+  );
+  if (partial.length === 1) {
+    return { name: partial[0].name, agent: registry.getAgent(partial[0].name), candidates: [partial[0].name] };
+  }
+  return { name: '', agent: null, candidates: partial.map((a) => a.name) };
+}
+
+/** True when `name` is a real container on the host that Paddock does not
+ *  manage (plan 61, finding 1b). Without this, "Agent not found" is
+ *  indistinguishable between "no such pad" and "you are looking at a container
+ *  that is not a pad" — the caller's next move (go and make a pad for it) is
+ *  completely different in each case. */
+async function foreignContainerName(name) {
+  const raw = String(name == null ? '' : name).trim();
+  if (!raw) return '';
+  try {
+    // `runCmd` returns a PROMISE. Reading `out.stdout` off it without awaiting
+    // yields undefined, so this probe silently reported "not a container" for
+    // every input — a dead check that looks like a working one.
+    const out = await runCmd('docker', ['ps', '-a', '--format', '{{.Names}}'], { timeout: 15000 });
+    const names = String(out.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean);
+    return names.includes(raw) ? raw : '';
+  } catch {
+    return '';
+  }
+}
+
+/** The not-found message a caller can act on: say what was wrong with the name
+ *  AND, when the name is a host container, that it exists but is not a pad. */
+async function notFoundMessage(input, candidates) {
+  const raw = String(input == null ? '' : input).trim();
+  const parts = [`Agent not found: ${raw}`];
+  if (candidates && candidates.length === 1) {
+    parts.push(`Did you mean "${candidates[0]}"?`);
+  } else if (candidates && candidates.length > 1) {
+    parts.push(`Ambiguous — it matches ${candidates.length} pads: ${candidates.join(', ')}. Pass an exact name.`);
+  } else {
+    // Only on the miss path, so the docker probe costs nothing on a hit.
+    const foreign = await foreignContainerName(raw);
+    if (foreign) {
+      parts.push(`"${foreign}" IS a container on this host, but it is not a Paddock-managed PAD (no instances/${foreign}/meta.env). Paddock cannot open it — create a PAD for it if you want to work in it.`);
+    }
+  }
+  return parts.join(' ');
+}
+
+async function requireAgent(agentName) {
+  const r = resolveAgentName(agentName);
+  if (r.agent) return r.agent;
+  throw new McpError(ErrorCode.InvalidRequest, await notFoundMessage(agentName, r.candidates));
+}
+
+/** Gate the call AND hand back the agent, so a tool cannot gate on the raw
+ *  string and then act on it. Every `name`-taking tool should start with this
+ *  and use `agent.name` from there on — a tool that calls `requireTool` and
+ *  then passes the caller's own `name` to `vm.startAgent` is doing the work on
+ *  whatever it was handed, not on whatever it authorized. */
+async function requirePad(tool, agentName) {
+  requireTool(currentUser(), tool, agentName);
+  return await requireAgent(agentName);
+}
+
+/** The registry's agent object carries `web.token` — the bearer credential for a
+ *  published openclaw Control UI, used by the dashboard to build the
+ *  tokenized `#token=…` console link. It must NOT cross the MCP boundary: a
+ *  caller sweeping the fleet with `get_agent` would collect every published pad's
+ *  credential into one output, and the guide promises read tools never return web
+ *  secrets. So every agent object the tools return goes through here first.
+ *  `tokenConfigured` is the honest answer ("there is one"), matching what
+ *  `health` / `settings_get` already do for other write-only fields. */
+function publicAgent(agent) {
+  if (!agent) return agent;
+  if (!agent.web || agent.web.token === undefined) return agent;
+  const { token, ...rest } = agent.web;
+  return { ...agent, web: { ...rest, tokenConfigured: !!token } };
 }
 
 /** Task-tool gate (plan 47). A task that names a PAD — assigned at submit, or
@@ -217,55 +385,360 @@ function taskError(fn) {
   }
 }
 
+// ─── Mission (plan 55) ─────────────────────────────────────────────
+// The agent-visible half of the Mission page: it can see the human's projects
+// and sessions, read what a session's TUI is showing, open a session, and type
+// into one. Every tool is a thin adapter over `src/services/mission.js` — the
+// same functions `/api/mission/*` uses, so the two surfaces cannot drift.
+//
+// `/mcp` has no caller-PAD identity (it sees an API key and nothing else), so
+// the gate is per call: resolve the row → read the PAD name off it → requireTool.
+
+/** A MissionError's machine code is what an LLM branches on
+ *  (`mission_session_locked` → do not retry, `mission_folder_missing` → fix the
+ *  project first). errorResult only prints err.message, so the code would be
+ *  lost — put it in the text explicitly. */
+function missionFail(err) {
+  if (err instanceof mission.MissionError) {
+    throw new McpError(ErrorCode.InvalidRequest, `${err.code}: ${err.message}`);
+  }
+  if (err instanceof McpError) throw err;
+  console.error('[mcp] mission tool failed:', err?.message || err);
+  throw new McpError(ErrorCode.InvalidRequest, String(err?.message || err));
+}
+
+/** Run a service call with its MissionError turned into a clean tool error. */
+async function missionCall(fn) {
+  try {
+    return await fn();
+  } catch (e) {
+    missionFail(e);
+  }
+}
+
+/** PAD names this caller may see Mission rows for: owner-scoped like every other
+ *  read, then narrowed by the key's target grant. Returns [] for a user who owns
+ *  nothing, which the store already treats as "no projects" (`listProjects`
+ *  short-circuits on an empty agents array) rather than as an error. */
+function missionVisibleAgents(user) {
+  if (!user) return null; // no identity = no filter (same as an unauthenticated read)
+  let rows = [];
+  try {
+    rows = getDb().prepare('SELECT name FROM agents').all();
+  } catch {
+    return [];
+  }
+  return rows.map((r) => r.name).filter((n) => canAccess(user, n) && targetAllowed(user, n));
+}
+
+/** May this caller see Mission rows for this PAD? */
+function missionMaySee(user, agentName) {
+  const names = missionVisibleAgents(user);
+  return !names || names.includes(agentName);
+}
+
+/** A project the caller may touch. A project on someone else's PAD is reported
+ *  as "no project you can access" rather than 403 — a read that confirms the row
+ *  exists leaks the other user's naming. */
+function missionRequireProject(user, tool, projectId) {
+  const project = missionCallSync(() => mission.getProject(projectId));
+  if (!missionMaySee(user, project.agent_name)) {
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      `mission_project_forbidden: no Mission project ${projectId} that your key can access`
+    );
+  }
+  requireTool(user, tool, project.agent_name);
+  return project;
+}
+
+/** Narrow a project list to the one a caller meant, by id, name or folder
+ *  (plan 67, 67.2).
+ *
+ *  A project's `name` is not its `folder` (`paddock` → `/www2/paddock`), and
+ *  without this the only way to resolve "the paddock project" was to fetch every
+ *  project and match client-side — paying the whole fleet to answer a question
+ *  about one of them. Both spellings are accepted because a caller reaching for
+ *  a project usually holds the directory, and a caller reading a board holds
+ *  the name.
+ *
+ *  A miss and a collision are BOTH reported, with the candidates, instead of
+ *  falling back to the unfiltered list: an unfiltered answer to a narrow
+ *  question is the one response a caller cannot tell apart from success. The
+ *  candidate list is drawn from what the caller may already see, so this never
+ *  confirms that a project on someone else's pad exists. */
+function missionSelectProjects(projects, { projectId = '', name = '', folder = '' } = {}) {
+  const wantId = String(projectId || '').trim();
+  const wantName = String(name || '').trim();
+  const wantFolder = String(folder || '').trim();
+  if (!wantId && !wantName && !wantFolder) return projects;
+  const describe = (p) => `${p.id} (${p.name}, ${p.folder}, on ${p.agent_name})`;
+
+  if (wantId) {
+    const hit = projects.filter((p) => p.id === wantId);
+    if (hit.length === 1) return hit;
+    // A caller who has the id wants THAT project; anything else is a mistake
+    // worth naming, not a reason to hand back the fleet.
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      `mission_project_not_found: no Mission project with id ${wantId} that your key can access` +
+        (hit.length ? '' : ` — projects you can see: ${projects.slice(0, 12).map(describe).join('; ')}`)
+    );
+  }
+
+  const exact = projects.filter((p) => p.name.toLowerCase() === wantName.toLowerCase());
+  const byFolder = projects.filter((p) => p.folder === wantFolder);
+  const hits = wantName ? exact : byFolder;
+  const via = wantName ? 'name' : 'folder';
+  if (hits.length === 1) return hits;
+  if (hits.length > 1) {
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      `mission_project_ambiguous: ${via} "${wantName || wantFolder}" matches ${hits.length} projects — ` +
+        `${hits.map(describe).join('; ')} — pass project_id instead`
+    );
+  }
+  // Nothing matched: offer the nearest names so the caller can correct itself
+  // instead of re-listing everything. Containment is tested BOTH ways on
+  // purpose — the common miss is a typo ("paddockk") and a one-way substring
+  // test is blind to exactly that, since "paddock" does not contain "paddockk".
+  const q = wantName.toLowerCase();
+  const near = wantName
+    ? projects.filter((p) => {
+        const n = p.name.toLowerCase();
+        return n.includes(q) || q.includes(n);
+      })
+    : projects;
+  throw new McpError(
+    ErrorCode.InvalidRequest,
+    `mission_project_not_found: no Mission project with ${via} "${wantName || wantFolder}" that your key can access` +
+      (near.length ? ` — close: ${near.slice(0, 8).map(describe).join('; ')}` : ` — projects you can see: ${projects.slice(0, 12).map(describe).join('; ')}`)
+  );
+}
+
+/** The same, for a session: a session is reachable only through its project, so
+ *  the PAD name (and therefore the grant check) always comes from there. */
+function missionRequireSession(user, tool, sessionId) {
+  const session = missionCallSync(() => mission.getSession(sessionId));
+  const project = missionRequireProject(user, tool, session.project_id);
+  return { session, project };
+}
+
+/** The sync half of missionCall (the store throws, the tmux half returns a
+ *  promise). Same conversion, no async. */
+function missionCallSync(fn) {
+  try {
+    return fn();
+  } catch (e) {
+    missionFail(e);
+  }
+}
+
+/** Liveness is decoration: one `list-sessions` per PAD, and a PAD that cannot
+ *  be listed leaves every one of its sessions marked dead rather than failing
+ *  the whole read. Same rule as the REST list routes. */
+async function missionWithLive(fn) {
+  try {
+    return await fn();
+  } catch {
+    return null;
+  }
+}
+
+/** Compact session row for the LLM: the DB columns it would otherwise have to
+ *  know, renamed to the field names the rest of the MCP surface uses. */
+// The store's busy-detection stamps `busy` / `busyKnown` / `open` while it
+// merges its per-(PAD, folder) probes. They are projected only when the store
+// actually stamped them, so a row is never given a `false` that means "we did
+// not look". `busyKnown: false` is NOT "idle" — it is "the probe could not
+// answer" (the server exposes no idle-presence registry), and an LLM must not
+// read it as licence to type into a session.
+function missionActivity(s) {
+  const out = {};
+  if (s.busy !== undefined) out.busy = !!s.busy;
+  if (s.busyKnown !== undefined) out.busyKnown = !!s.busyKnown;
+  if (s.open !== undefined) out.open = !!s.open;
+  if (s.state !== undefined) out.state = s.state;
+  // A dead row the server STILL calls busy is the case a caller must be able to
+  // see without re-deriving it: the conversation exists somewhere we cannot
+  // reach. Omitted when it is absent, never defaulted to false.
+  if (s.wasBusy !== undefined) out.wasBusy = !!s.wasBusy;
+  return out;
+}
+
+/** What is IN the pane, visible before anyone types (plan 62 1b). `kind` is the
+ *  word a caller can act on — "shell" means a send would run commands — and
+ *  `tuiAlive` is the same fact as a boolean for older readers. Emitted only
+ *  when the pane map had an answer, so a missing field stays missing. */
+function missionPaneKind(s) {
+  const out = {};
+  if (s.tuiAlive !== undefined) out.tuiAlive = !!s.tuiAlive;
+  if (s.kind !== undefined) out.kind = s.kind;
+  if (s.command !== undefined) out.command = s.command;
+  if (s.cwd !== undefined) out.cwd = s.cwd;
+  return out;
+}
+
+function missionSessionRow(s, project) {
+  return {
+    id: s.id,
+    tmux_id: s.tmux_id,
+    label: s.label || '',
+    origin: s.origin,
+    // The WHO, not the kind: `key:<id>` when an MCP key opened it, `user:<id>`
+    // when the web UI did, absent on rows created before this existed (plan 67,
+    // 67.3). "Is a human or an agent driving this?" is the first question before
+    // typing into a session, and `origin` alone cannot be audited later.
+    ...(s.created_by ? { createdBy: s.created_by } : {}),
+    locked: !!s.locked,
+    live: s.live === undefined ? null : !!s.live,
+    agent_session_id: s.agent_session_id || null,
+    agent: project ? project.agent_name : undefined,
+    folder: project ? project.folder : undefined,
+    project_id: s.project_id,
+    project: project ? { id: project.id, name: project.name } : undefined,
+    ...missionActivity(s),
+    ...missionPaneKind(s),
+    created_at: s.created_at,
+    // `last_seen_at` advances on every probe of a LIVE pane (plan 62 1f). It is a
+    // probe clock, not a heartbeat of agent activity — a session that is being
+    // worked on by nobody in our terminal can still be advanced by the poller.
+    // It is the last time this row was looked at, and nothing more.
+    last_seen_at: s.last_seen_at,
+  };
+}
+
+/** One project, with its COUNTS before its nested sessions.
+ *
+ *  The counts are the answer; the sessions are the detail, and inlining every
+ *  session of every project made this read a superset of `mission_sessions`
+ *  (26 full rows for a six-project fleet, plan 67 / 67.4) with the summary
+ *  arriving *after* the data it summarizes. `includeSessions` is therefore
+ *  opt-in: `mission_sessions` is the tool for the rows.
+ *
+ *  `agentStatus` rides along because "can I reach this project?" otherwise
+ *  needs a second tool — the same repo is often mounted by two pads and the
+ *  one named after it is not always the one running (67.2). */
+function missionProjectRow(p, { includeSessions = false } = {}) {
+  const agent = registry.getAgent(p.agent_name);
+  return {
+    id: p.id,
+    name: p.name,
+    agent: p.agent_name,
+    agent_type: p.agent_type,
+    ...(agent && agent.status ? { agentStatus: agent.status } : {}),
+    folder: p.folder,
+    sessionCount: p.sessionCount,
+    liveCount: p.liveCount,
+    ...(p.openCount === undefined ? {} : { openCount: p.openCount }),
+    ...(includeSessions ? { sessions: (p.sessions || []).map((s) => missionSessionRow(s, p)) } : {}),
+    created_at: p.created_at,
+  };
+}
+
 function textResult(obj) {
   return { content: [{ type: 'text', text: JSON.stringify(obj, null, 2) }] };
 }
 
+/** A failed tool call, as an MCP tool result rather than a thrown exception.
+ *  The caller reads the message; `isError` is what makes an LLM treat it as a
+ *  failed call instead of as output to act on. */
+function errorResult(err) {
+  const text = err instanceof Error ? err.message : String(err);
+  return { isError: true, content: [{ type: 'text', text }] };
+}
+
+/** Register a tool with its handler wrapped so a THROW becomes a tool error.
+ *
+ *  This is not cosmetic: the installed MCP SDK's request wrapper does
+ *  `result = await Promise.resolve(handler(request, extra))` with no catch, so
+ *  any handler that throws (every `requireTool`/`requireAgent` authorization
+ *  rejection, `requireHostBrowsable` in the workspace tools, a bad argument)
+ *  escapes as an unhandled rejection and takes the WHOLE webui process down.
+ *  That happened for real: one agent repeatedly listing a workspace it is not
+ *  host-browsable killed the control plane every ~45s, which dropped every
+ *  terminal WebSocket, orphaned every `tmux attach` client and made the
+ *  Mission terminal look like it was glitching on a timer. One bad tool call
+ *  must never be fatal to the server that hosts the agents. */
+function registerTool(server, name, config, handler) {
+  server.registerTool(name, config, async (...args) => {
+    try {
+      return await handler(...args);
+    } catch (err) {
+      // McpError carries protocol-meaningful codes; let those keep their shape.
+      if (err instanceof McpError) throw err;
+      console.error(`[mcp] tool ${name} failed:`, err?.message || err);
+      return errorResult(err);
+    }
+  });
+}
+
 function registerTools(server) {
+  // Every tool is registered through the wrapper above so a throwing handler
+  // degrades to a tool error instead of killing the webui.
+  const registerToolBound = (name, config, handler) => registerTool(server, name, config, handler);
+
   // ─── Read / inspect ─────────────────────────────────────────
 
-  server.registerTool(
+  registerToolBound(
     'list_agents',
     {
       title: 'List PADs',
-      description: 'List all PAD agents managed by paddock. Returns name, status, agent type, and container ref. Admins see the full fleet; regular users see only the agents they own.',
+      description: 'List all PAD agents managed by paddock. Returns name, status, display_name, agent type, container ref, and owner. Every row here is OPENABLE — a row is only listed when the pad resolves, so a name from this list always works with get_agent / exec / settings_get, in any of the three spellings. Admins see the full fleet; regular users see only the agents they own. `scope` says which of the two you got ("all" or "owned") and `agentsTotal` is how many rows you were given, so a short list is never mistaken for a whole fleet.',
       inputSchema: {},
     },
     async (args) => {
       const user = currentUser();
-      const agents = registry.discoverAgents()
+      const all = registry.discoverAgents();
+      const visible = all
         .filter((a) => !user || (canAccess(user, a.name) && targetAllowed(user, a.name)))
-        .map((a) => ({
-          name: a.name,
-          status: a.status,
-          display_name: a.display_name,
-          agent_type: a.agent_type,
-          runtime_ref: a.runtime_ref,
-        }));
-      return textResult({ agents });
+        // A row must be openable. `discoverAgents` is directory-derived today,
+        // so this is belt-and-braces — but the listing is the one place a
+        // caller forms their belief about what exists, and an unopenable row
+        // there poisons every later call (plan 61, finding 1a).
+        .filter((a) => !!registry.getAgent(a.name));
+      // `buildAgent` is disk-derived and carries no owner, so read it once
+      // rather than per row — an owned-scope caller should be able to see
+      // WHICH owner each row belongs to without a query per pad.
+      const owners = new Map();
+      try {
+        for (const r of getDb().prepare('SELECT name, owner_id FROM agents').all()) owners.set(r.name, r.owner_id);
+      } catch {}
+      const agents = visible.map((a) => ({
+        name: a.name,
+        status: a.status,
+        display_name: a.display_name,
+        agent_type: a.agent_type,
+        runtime_ref: a.runtime_ref,
+        owner: owners.get(a.name) || null,
+      }));
+      return textResult({
+        agents,
+        scope: user && user.role !== 'admin' ? 'owned' : 'all',
+        agentsTotal: visible.length,
+      });
     }
   );
 
-  server.registerTool(
+  registerToolBound(
     'get_agent',
     {
       title: 'Get PAD details',
-      description: 'Get full details about a single PAD agent. Pass `logs` (number of tail lines, max 500) to also include recent container logs.',
+      description: 'Get full details about a single PAD agent. Pass `logs` (number of tail lines, max 500) to also include recent container logs. The published-web row reports `tokenConfigured: true|false` and never the token itself — see the write-only-secrets rule in `help`.',
       inputSchema: {
         name: z.string().describe('PAD name'),
         logs: z.number().int().min(1).max(500).optional().describe('Include the last N container log lines (max 500)'),
       },
     },
     async ({ name, logs }) => {
-      requireTool(currentUser(), 'get_agent', name);
-      const agent = requireAgent(name);
+      const agent = publicAgent(await requirePad('get_agent', name));
       if (!logs) return textResult(agent);
       await logStore.capture(agent.name);
       return textResult({ ...agent, logs: logStore.readLogs(agent.name, logs) });
     }
   );
 
-  server.registerTool(
+  registerToolBound(
     'agent_logs',
     {
       title: 'PAD container logs',
@@ -276,52 +749,59 @@ function registerTools(server) {
       },
     },
     async ({ name, tail }) => {
-      requireTool(currentUser(), 'agent_logs', name);
-      const agent = requireAgent(name);
+      const agent = await requirePad('agent_logs', name);
       await logStore.capture(agent.name);
       const logs = logStore.readLogs(agent.name, Math.min(tail || 100, 5000));
-      return textResult({ name, logs });
+      // Echo the RESOLVED name, not the caller's spelling: the whole point of
+      // the resolver is that a response tells the caller which pad it really
+      // read, so `Proj` in the request must not come back as `Proj`.
+      return textResult({ name: agent.name, logs });
     }
   );
 
-  server.registerTool(
+  registerToolBound(
     'config_get',
     {
       title: 'Read PAD config',
-      description: 'Read a PAD\'s driver config file (openclaw.json, opencode.json, config.json, config.yaml, config.toml). JSON configs are parsed with secrets redacted; yaml/toml configs are returned verbatim.',
+      description: 'Read a PAD\'s driver config file (openclaw.json, opencode.json, config.json, config.yaml, config.toml). REDACTED: every credential is replaced with "[REDACTED]" in BOTH `config` and `configRaw` — anything under a `headers` map, and any authorization/api_key/token/secret/password/*-key key at any depth. A redacted value is not recoverable here: to USE a secret, run the agent\'s own command through `exec` with the secret on `stdin`, never through this tool.',
       inputSchema: { name: z.string().describe('PAD name') },
     },
     async ({ name }) => {
-      requireTool(currentUser(), 'config_get', name);
-      const agent = requireAgent(name);
-      return textResult({ name, ...vm.readAgentConfig(agent) });
+      const agent = await requirePad('config_get', name);
+      return textResult({ name: agent.name, ...vm.readAgentConfig(agent, { redact: true }) });
     }
   );
 
-  server.registerTool(
+  registerToolBound(
     'settings_get',
     {
       title: 'Get PAD settings + published-web state',
-      description: 'The single read tool for a PAD — the full picture before a `recreate`. Returns allowDocker, network peer, SSH (host + container port), custom workspace mount, extra volumes/ports, image/version, networkHealth, the available network-peer containers, AND the published-web state (active, webService, networkMode, passwordConfigured, startCommand, actualPorts). `availableNetworks` is FILTERED to running containers that make sense as a peer (the whole host\'s container list is not useful here) and capped at 10 — read `availableNetworksTotal` / `availableNetworksTruncated` to know if you are seeing all of them. `workspaceDevcontainer` describes the .devcontainer in the WORKSPACE (shared by every pad on that workspace, NOT this pad\'s own config) — `sharedWith` lists the other pads using it.',
-      inputSchema: { name: z.string().describe('PAD name') },
+      description: 'The single read tool for a PAD — the full picture before a `recreate`. Returns allowDocker, network peer, SSH (host + container port), custom workspace mount, extra volumes/ports, image/version, networkHealth, the available network-peer containers, AND the published-web state (active, webService, networkMode, passwordConfigured, tokenConfigured, actualPorts). The web password itself is never returned — `web.authToken` and `web.startCommand` come back empty/redacted because both embed it. `availableNetworks` is FILTERED to running containers that make sense as a peer (the whole host\'s container list is not useful here) and capped at 10 — read `availableNetworksTotal` / `availableNetworksTruncated` to know if you are seeing all of them. `workspaceDevcontainer` describes the .devcontainer in the WORKSPACE (shared by every pad on that workspace, NOT this pad\'s own config) — `sharedWith` lists the other pads using it.',
+      inputSchema: {
+        name: z.string().describe('PAD name'),
+        networkFilter: z.string().optional().describe('Search `availableNetworks` for one named container instead of taking the first 10. Use this to CONFIRM a specific peer before you set `network` on a recreate — without it a valid peer past the cap is simply absent, which reads exactly like "not a valid peer".'),
+      },
     },
-    async ({ name }) => {
-      requireTool(currentUser(), 'settings_get', name);
-      requireAgent(name);
-      const settings = await vm.readSettings(name);
+    async ({ name, networkFilter }) => {
+      const agent = await requirePad('settings_get', name);
+      const settings = await vm.readSettings(agent.name, { redact: true });
       const currentPeer = (settings && settings.network) || '';
-      const nets = await vm.listNetworkPeers({ currentPeer });
+      const nets = await vm.listNetworkPeers({ currentPeer, filter: networkFilter });
       return textResult({
-        name,
+        name: agent.name,
         ...settings,
         availableNetworks: nets.peers,
         availableNetworksTotal: nets.total,
         availableNetworksTruncated: nets.truncated,
+        // Only set when `networkFilter` was used. An empty `availableNetworks`
+        // is ambiguous on its own — "no such peer" and "past the cap" look
+        // identical — so a searched answer says it was exhaustive.
+        ...(networkFilter ? { availableNetworksSearchedAll: true } : {}),
       });
     }
   );
 
-  server.registerTool(
+  registerToolBound(
     'health',
     {
       title: 'Run PAD health checkup',
@@ -329,14 +809,13 @@ function registerTools(server) {
       inputSchema: { name: z.string().describe('PAD name') },
     },
     async ({ name }) => {
-      requireTool(currentUser(), 'health', name);
-      requireAgent(name);
-      const report = await containerHealth.checkContainerHealth(name);
+      const agent = await requirePad('health', name);
+      const report = await containerHealth.checkContainerHealth(agent.name);
       return textResult(report);
     }
   );
 
-  server.registerTool(
+  registerToolBound(
     'workspace_list',
     {
       title: 'List PAD workspace directory',
@@ -347,14 +826,13 @@ function registerTools(server) {
       },
     },
     async ({ name, path: relPath }) => {
-      requireTool(currentUser(), 'workspace_list', name);
-      const agent = requireAgent(name);
+      const agent = await requirePad('workspace_list', name);
       const listing = workspace.listDir(agent.name, relPath || '/');
-      return textResult({ name, ...listing });
+      return textResult({ name: agent.name, ...listing });
     }
   );
 
-  server.registerTool(
+  registerToolBound(
     'workspace_read',
     {
       title: 'Read PAD workspace file',
@@ -365,19 +843,18 @@ function registerTools(server) {
       },
     },
     async ({ name, path: relPath }) => {
-      requireTool(currentUser(), 'workspace_read', name);
-      const agent = requireAgent(name);
+      const agent = await requirePad('workspace_read', name);
       const stat = workspace.statFile(agent.name, relPath);
       if (!stat) throw new McpError(ErrorCode.InvalidRequest, `File not found: ${relPath}`);
       if (stat.size > MAX_READ_BYTES) {
         throw new McpError(ErrorCode.InvalidRequest, `File too large to read (${stat.size} bytes, max ${MAX_READ_BYTES}): ${relPath}`);
       }
       const file = workspace.readFile(agent.name, relPath);
-      return textResult({ name, path: relPath, size: file.size, modified: file.modified, content: file.content });
+      return textResult({ name: agent.name, path: relPath, size: file.size, modified: file.modified, content: file.content });
     }
   );
 
-  server.registerTool(
+  registerToolBound(
     'workspace_write',
     {
       title: 'Write PAD workspace file',
@@ -389,14 +866,13 @@ function registerTools(server) {
       },
     },
     async ({ name, path: relPath, content }) => {
-      requireTool(currentUser(), 'workspace_write', name);
-      const agent = requireAgent(name);
+      const agent = await requirePad('workspace_write', name);
       const result = workspace.writeFile(agent.name, relPath, content);
-      return textResult({ name, path: relPath, ...result });
+      return textResult({ name: agent.name, path: relPath, ...result });
     }
   );
 
-  server.registerTool(
+  registerToolBound(
     'start_agent',
     {
       title: 'Start PAD',
@@ -404,16 +880,15 @@ function registerTools(server) {
       inputSchema: { name: z.string().describe('PAD name') },
     },
     async ({ name }) => {
-      requireTool(currentUser(), 'start_agent', name);
-      requireAgent(name);
-      await vm.startAgent(name);
+      const agent = await requirePad('start_agent', name);
+      await vm.startAgent(agent.name);
       registry.dockerPsList(true);
-      const agent = registry.getAgent(name);
-      return textResult({ ok: true, name, status: agent ? agent.status : 'running' });
+      const fresh = registry.getAgent(agent.name);
+      return textResult({ ok: true, name: agent.name, status: fresh ? fresh.status : 'running' });
     }
   );
 
-  server.registerTool(
+  registerToolBound(
     'stop_agent',
     {
       title: 'Stop PAD',
@@ -421,16 +896,15 @@ function registerTools(server) {
       inputSchema: { name: z.string().describe('PAD name') },
     },
     async ({ name }) => {
-      requireTool(currentUser(), 'stop_agent', name);
-      requireAgent(name);
-      await vm.stopAgent(name);
+      const agent = await requirePad('stop_agent', name);
+      await vm.stopAgent(agent.name);
       registry.dockerPsList(true);
-      const agent = registry.getAgent(name);
-      return textResult({ ok: true, name, status: agent ? agent.status : 'exited' });
+      const fresh = registry.getAgent(agent.name);
+      return textResult({ ok: true, name: agent.name, status: fresh ? fresh.status : 'exited' });
     }
   );
 
-  server.registerTool(
+  registerToolBound(
     'restart_agent',
     {
       title: 'Restart PAD',
@@ -438,16 +912,15 @@ function registerTools(server) {
       inputSchema: { name: z.string().describe('PAD name') },
     },
     async ({ name }) => {
-      requireTool(currentUser(), 'restart_agent', name);
-      requireAgent(name);
-      await vm.restartAgent(name);
+      const agent = await requirePad('restart_agent', name);
+      await vm.restartAgent(agent.name);
       registry.dockerPsList(true);
-      const agent = registry.getAgent(name);
-      return textResult({ ok: true, name, status: agent ? agent.status : 'running' });
+      const fresh = registry.getAgent(agent.name);
+      return textResult({ ok: true, name: agent.name, status: fresh ? fresh.status : 'running' });
     }
   );
 
-  server.registerTool(
+  registerToolBound(
     'create_agent',
     {
       title: 'Create a PAD agent',
@@ -550,7 +1023,7 @@ function registerTools(server) {
     }
   );
 
-  server.registerTool(
+  registerToolBound(
     'delete_agent',
     {
       title: 'Delete PAD',
@@ -561,19 +1034,18 @@ function registerTools(server) {
       },
     },
     async ({ name, confirm }) => {
-      requireTool(currentUser(), 'delete_agent', name);
-      requireAgent(name);
+      const agent = await requirePad('delete_agent', name);
       if (confirm !== true) {
         throw new McpError(ErrorCode.InvalidRequest, 'Refusing to delete without confirm: true (destructive, no undo).');
       }
-      await vm.removeVm(name);
-      registry.removeAgentFromDb(name);
+      await vm.removeVm(agent.name);
+      registry.removeAgentFromDb(agent.name);
       registry.dockerPsList(true);
-      return textResult({ ok: true, name, deleted: true });
+      return textResult({ ok: true, name: agent.name, deleted: true });
     }
   );
 
-  server.registerTool(
+  registerToolBound(
     'recreate',
     {
       title: 'Recreate PAD container — single mutation tool',
@@ -612,17 +1084,16 @@ function registerTools(server) {
     },
     async (args) => {
       const { name } = args;
-      requireTool(currentUser(), 'recreate', name);
-      requireAgent(name);
+      const agent = await requirePad('recreate', name);
       if (args.reset && args.confirm !== true) {
         throw new McpError(ErrorCode.InvalidRequest, 'Refusing to reset without confirm: true (wipes the data dir).');
       }
       if (args.reset) {
-        requireTool(currentUser(), 'reset', name);
+        requireTool(currentUser(), 'reset', agent.name);
       }
       // Same job key the REST apply route uses, so a recreate that outlives the
       // MCP call timeout stays observable via job_status / job_log.
-      const job = jobLog.getOrCreateJob(`update:${name}`);
+      const job = jobLog.getOrCreateJob(`update:${agent.name}`);
       const log = [];
       const onLog = (type, msg) => {
         log.push(`[${type}] ${msg}`);
@@ -631,19 +1102,19 @@ function registerTools(server) {
       const onStep = (step, state, cmd) => jobLog.setStep(job, step, state, cmd);
       let result;
       try {
-        result = await vm.applyAgentChanges(name, { ...args, force: true }, { onLog, onStep });
+        result = await vm.applyAgentChanges(agent.name, { ...args, force: true }, { onLog, onStep });
       } catch (e) {
         jobLog.fail(job, e.message);
         throw new McpError(ErrorCode.InvalidRequest, `Recreate failed: ${e.message}`);
       }
       registry.dockerPsList(true);
       registry.discoverAgents();
-      jobLog.finish(job, true, { name });
+      jobLog.finish(job, true, { name: agent.name });
       return textResult({ ...result, log });
     }
   );
 
-  server.registerTool(
+  registerToolBound(
     'update',
     {
       title: 'Update PAD to latest image',
@@ -651,21 +1122,20 @@ function registerTools(server) {
       inputSchema: { name: z.string().describe('PAD name') },
     },
     async ({ name }) => {
-      requireTool(currentUser(), 'update', name);
-      requireAgent(name);
-      const job = jobLog.getOrCreateJob(`update:${name}`);
+      const agent = await requirePad('update', name);
+      const job = jobLog.getOrCreateJob(`update:${agent.name}`);
       const onLog = (type, msg) => jobLog.line(job, type, msg);
       const onStep = (step, state, cmd) => jobLog.setStep(job, step, state, cmd);
       try {
-        await vm.updateAgent(name, { pull: true, onLog, onStep });
+        await vm.updateAgent(agent.name, { pull: true, onLog, onStep });
       } catch (e) {
         jobLog.fail(job, e.message);
         throw new McpError(ErrorCode.InvalidRequest, `Update failed: ${e.message}`);
       }
       registry.dockerPsList(true);
       registry.discoverAgents();
-      jobLog.finish(job, true, { name });
-      return textResult({ ok: true, name, action: 'updated' });
+      jobLog.finish(job, true, { name: agent.name });
+      return textResult({ ok: true, name: agent.name, action: 'updated' });
     }
   );
 
@@ -678,17 +1148,22 @@ function registerTools(server) {
   /** The job key for a PAD. `kind` narrows it: 'create' → `<name>`,
    *  'recreate'/'update' → `update:<name>`, 'health' → `health:<name>`.
    *  Omitted → the most recently started job of any kind for this pad. */
+  /** Jobs are keyed by the RESOLVED pad name (`update:pad-proj2`), so a caller
+   *  that holds a `display_name` or a bare name would otherwise get "no job in
+   *  memory" for a job that is genuinely running. Resolving first is what makes
+   *  the job readers agree with the tools that created the job. */
   function resolveJobName(name, kind) {
+    const resolved = resolveAgentName(name).name || name;
     if (kind) {
-      if (kind === 'create') return name;
-      if (kind === 'health') return `health:${name}`;
-      return `update:${name}`;
+      if (kind === 'create') return resolved;
+      if (kind === 'health') return `health:${resolved}`;
+      return `update:${resolved}`;
     }
-    const jobs = jobLog.listJobs().filter((j) => j.name === name || j.name.endsWith(`:${name}`));
-    return jobs.length ? jobs[0].name : name;
+    const jobs = jobLog.listJobs().filter((j) => j.name === resolved || j.name.endsWith(`:${resolved}`));
+    return jobs.length ? jobs[0].name : resolved;
   }
 
-  server.registerTool(
+  registerToolBound(
     'job_status',
     {
       title: 'Progress of a create / recreate / update',
@@ -705,10 +1180,18 @@ function registerTools(server) {
       const status = jobLog.getStatus(jobName);
       if (!status) {
         const known = jobLog.listJobs().map((j) => j.name);
+        // Do not point a caller at a pad that does not exist. The old hint sent
+        // them to `get_agent` / `list_agents` for the very name that has no
+        // instance directory, so following it only produced a second
+        // contradiction (plan 61, finding 1a).
+        const exists = !!resolveAgentName(name).name;
         return textResult({
           found: false,
           job: jobName,
-          hint: 'No job in memory for this operation. Either it finished more than 5 minutes ago, the webui restarted, or the operation never started. Check the pad itself with get_agent / list_agents.',
+          padExists: exists,
+          hint: exists
+            ? 'No job in memory for this operation. Either it finished more than 5 minutes ago, the webui restarted, or the operation never started. Check the pad itself with get_agent.'
+            : await notFoundMessage(name, resolveAgentName(name).candidates),
           liveJobs: known,
         });
       }
@@ -718,7 +1201,7 @@ function registerTools(server) {
     }
   );
 
-  server.registerTool(
+  registerToolBound(
     'job_log',
     {
       title: 'Log of a create / recreate / update',
@@ -745,7 +1228,7 @@ function registerTools(server) {
     }
   );
 
-  server.registerTool(
+  registerToolBound(
     'help',
     {
       title: 'How to use Paddock through MCP',
@@ -755,7 +1238,7 @@ function registerTools(server) {
     async () => textResult({ guide: getGuide() })
   );
 
-  server.registerTool(
+  registerToolBound(
     'agent_commands',
     {
       title: 'Non-interactive command catalog for an agent type',
@@ -770,35 +1253,55 @@ function registerTools(server) {
     }
   );
 
-  server.registerTool(
+  registerToolBound(
     'exec',
     {
       title: 'Run command in PAD',
-      description: 'Run a shell command inside a PAD container (docker exec). Returns stdout and stderr. Use for `openclaw ...` and other in-container commands. No TTY is allocated — interactive commands hang or fail, so use the non-interactive alternatives from `agent_commands`. Optional `stdin` is written verbatim to the process stdin and is the ONLY safe channel for secrets (API keys, tokens) — it is never echoed back or logged.',
+      description: 'Run a shell command inside a PAD container (docker exec). Returns stdout, stderr, exit code, and the `cwd` it actually ran in — read `cwd` before assuming anything about where a command landed, because the default is the CONTAINER\'s working directory (often the mounted workspace, sometimes not), not the workspace root you may have had in mind. Pass `cwd` to be explicit; it is resolved inside the container and the response echoes what was used. Use for `openclaw ...` and other in-container commands. No TTY is allocated — interactive commands hang or fail, so use the non-interactive alternatives from `agent_commands`. Optional `stdin` is written verbatim to the process stdin and is the ONLY safe channel for secrets (API keys, tokens) — it is never echoed back or logged.',
       inputSchema: {
         name: z.string().describe('PAD name'),
         command: z.string().describe('Shell command to run inside the PAD'),
+        cwd: z.string().optional().describe('Directory to run in, INSIDE the container (e.g. the workspace mount /www1). Defaults to the container working directory.'),
         stdin: z.string().optional().describe('Optional text written verbatim to the command\'s stdin (secrets only — never place a secret in `command`)'),
         timeout: z.number().int().min(1000).max(600000).optional().describe('Timeout in ms (default 30000)'),
       },
     },
-    async ({ name, command, stdin, timeout }) => {
-      requireTool(currentUser(), 'exec', name);
-      const agent = requireAgent(name);
+    async ({ name, command, cwd, stdin, timeout }) => {
+      const agent = await requirePad('exec', name);
       const containers = registry.dockerPsList();
       if ((containers[agent.runtime_ref] || '').toString().toLowerCase() !== 'running') {
-        throw new McpError(ErrorCode.InvalidRequest, `Container is not running: ${name}`);
+        throw new McpError(ErrorCode.InvalidRequest, `Container is not running: ${agent.name}`);
       }
-      const r = await dockerExec(agent.runtime_ref, command, timeout || 30000, stdin);
-      return textResult({ name, stdout: r.stdout, stderr: r.stderr });
+      // The cwd is applied by prefixing `cd`, so an invalid directory fails
+      // loudly instead of silently running somewhere else. This matters: a
+      // forgotten `cd` used to be a *plausible, wrong, successful* listing.
+      const runIn = cwd ? `cd ${shellQuote(cwd)} && { ${command}\n}` : command;
+      const r = await dockerExec(agent.runtime_ref, runIn, timeout || 30000, stdin);
+      // Report where it ACTUALLY ran, not where we asked. The probe must carry
+      // the SAME `cd`, or it reports the container's own default while the
+      // command ran somewhere else — the exact confusion this field exists to
+      // remove, reintroduced one line below.
+      const probe = await dockerExec(agent.runtime_ref, cwd ? `cd ${shellQuote(cwd)} && pwd` : 'pwd', 10000, null);
+      return textResult({
+        name: agent.name,
+        cwd: String(probe.stdout || '').trim(),
+        requestedCwd: cwd || null,
+        exitCode: r.code === undefined ? 0 : r.code,
+        stdout: r.stdout,
+        stderr: r.stderr,
+      });
     }
   );
 
-  // ─── Task queue (plan 47) ───────────────────────────────────────────────
-  // Push mode runs `opencode run` inside a PAD. Pull mode is the TaskPeace
-  // loop: a worker claims from the ranked pool, works it itself, reports back.
+  // ─── Task queue (plan 47) — HIDDEN, not removed ──────────────────────────
+  // The 8 task_* tools are unregistered from the MCP surface (user decision
+  // 2026-09-29): Mission sessions + plans are the workflow, the headless queue
+  // only caused conflicts. The service underneath (task-runner.js, its tables,
+  // grants, requireTaskGrant) stays intact, so re-enabling is one flag.
+  // Set PADDOCK_TASK_QUEUE=1 to bring the tools back.
+  if (process.env.PADDOCK_TASK_QUEUE === '1') {
 
-  server.registerTool(
+  registerToolBound(
     'task_submit',
     {
       title: 'Submit a task to an opencode PAD (or the shared pool)',
@@ -817,14 +1320,18 @@ function registerTools(server) {
     async (args) => {
       const user = currentUser();
       const pad = args.name || '';
+      let target;
       if (pad) {
         requireTool(user, 'task_submit', pad);
-        requireAgent(pad);
+        // Resolve before submitting: the gate proved the RESOLVED pad is
+        // permitted, so the task must be addressed to that one. Passing the
+        // raw string onward would check one name and file against another.
+        target = await requireAgent(pad);
       } else if (user && !toolAllowed(user, 'task_submit', '')) {
         throw new McpError(ErrorCode.InvalidRequest, 'Not permitted by API key tool grant: task_submit');
       }
       const id = taskError(() => taskRunner.submitTask({
-        name: pad || undefined,
+        name: target ? target.name : undefined,
         prompt: args.prompt,
         model: args.model,
         agent: args.agent,
@@ -838,7 +1345,7 @@ function registerTools(server) {
     }
   );
 
-  server.registerTool(
+  registerToolBound(
     'task_get_next',
     {
       title: 'Claim the next queued task for a PAD',
@@ -848,14 +1355,13 @@ function registerTools(server) {
       },
     },
     async ({ name }) => {
-      requireTool(currentUser(), 'task_get_next', name);
-      requireAgent(name);
-      const task = taskError(() => taskRunner.claimNextTask(name));
+      const agent = await requirePad('task_get_next', name);
+      const task = taskError(() => taskRunner.claimNextTask(agent.name));
       return textResult(task ? { task } : { task: null, queueEmpty: true });
     }
   );
 
-  server.registerTool(
+  registerToolBound(
     'task_complete',
     {
       title: 'Report a claimed task finished',
@@ -874,7 +1380,7 @@ function registerTools(server) {
     }
   );
 
-  server.registerTool(
+  registerToolBound(
     'task_priority',
     {
       title: 'Re-rank a queued task',
@@ -891,7 +1397,7 @@ function registerTools(server) {
     }
   );
 
-  server.registerTool(
+  registerToolBound(
     'task_status',
     {
       title: 'Task status',
@@ -923,7 +1429,7 @@ function registerTools(server) {
     }
   );
 
-  server.registerTool(
+  registerToolBound(
     'task_result',
     {
       title: 'Task result',
@@ -947,7 +1453,7 @@ function registerTools(server) {
     }
   );
 
-  server.registerTool(
+  registerToolBound(
     'task_list',
     {
       title: 'List tasks',
@@ -983,7 +1489,7 @@ function registerTools(server) {
     }
   );
 
-  server.registerTool(
+  registerToolBound(
     'task_cancel',
     {
       title: 'Cancel a task',
@@ -1000,6 +1506,289 @@ function registerTools(server) {
         throw new McpError(ErrorCode.InvalidRequest, 'Refusing to cancel without confirm: true.');
       }
       return textResult({ task: taskError(() => taskRunner.cancelTask(task_id)) });
+    }
+  );
+
+  } // end PADDOCK_TASK_QUEUE gate — service below stays loaded
+
+  // ─── Mission (plan 55) ───────────────────────────────────────────────────
+  // A project is (PAD, folder); a session is the only unit of work — a live TUI
+  // in that folder that the human and the agent both type into and both watch.
+  // Only the three coding drivers have Mission projects (opencode, codex,
+  // claude), enforced in the service so this surface cannot walk around it.
+
+  registerToolBound(
+    'mission_projects',
+    {
+      title: 'List Mission projects',
+      description: "The Mission page's projects: each is a (PAD, folder) pair, with its sessions and how many are live. Only the coding agents (opencode, codex, claude) have projects — a personal agent (openclaw, picoclaw, hermes) cannot. Scoped to what your key may see, so a project on someone else's PAD is simply absent. **These counts are LIVENESS, not progress**: `sessionCount` is how many sessions the project ever had, `liveCount` how many hold a pane, `openCount` how many hold a live TUI. A session that did 400 tool calls and one that opened and died look identical here — for what a project is actually WORKING ON, see the plans facility (plan_list / plan_activity). Filter with `agent` (one PAD), `project_id`, `name` or `folder`; a name or folder that matches zero or several is reported with the candidates rather than returning the whole list, and a project also carries `agentStatus` so you can see whether its pad is running without a second tool. Each session also carries `busy` / `busyKnown` / `open` / `kind`, so you can tell \"the human is typing right now\" from \"here but idle\" from \"a dead pane\" from \"a live shell\" without opening the session — but read `mission_sessions` for the rows themselves: they are opt-in here via `include_sessions`.",
+      inputSchema: {
+        agent: z.string().optional().describe('Only this PAD\'s projects'),
+        project_id: z.string().optional().describe('Exactly this project (from a previous call)'),
+        name: z.string().optional().describe('One project by its Mission name (e.g. "paddock") — refused with the candidates if it matches zero or several'),
+        folder: z.string().optional().describe('One project by its folder inside the PAD (e.g. "/www2/paddock") — a project\'s name is NOT its folder, so this is usually what a caller holding a directory has'),
+        include_sessions: z.boolean().optional().describe('Also inline each session (default false — use mission_sessions)'),
+      },
+    },
+    async ({ agent, project_id, name, folder, include_sessions }) => {
+      const user = currentUser();
+      if (agent) requireTool(user, 'mission_projects', agent);
+      const projects = missionCallSync(() =>
+        mission.listProjects({ agent: agent || '', agents: missionVisibleAgents(user) })
+      );
+      // Never fail the list on liveness: fall back to un-stamped rows. The busy
+      // pass is the page's own second step (`withAgentBusyProjects`) — it is what
+      // turns "live" into "the human is mid-turn", and it is cached per
+      // (PAD, folder), so it costs one probe per project, not per row.
+      const live = (await missionWithLive(() => mission.withLive(projects))) || projects;
+      const marked = (await missionWithLive(() => mission.withAgentBusyProjects(live))) || live;
+      const selected = missionSelectProjects(marked, { projectId: project_id || '', name: name || '', folder: folder || '' });
+      const rows = selected.map((p) => missionProjectRow(p, { includeSessions: !!include_sessions }));
+      return textResult({
+        projects: rows,
+        total: rows.length,
+        ...(name || folder || project_id ? { matched: rows.length } : {}),
+        ...(include_sessions ? {} : { hint: 'Sessions omitted — pass include_sessions: true, or read mission_sessions {project_id}.' }),
+        supportedAgentTypes: mission.supportedTypes(),
+      });
+    }
+  );
+
+  registerToolBound(
+    'mission_sessions',
+    {
+      title: 'List Mission sessions — or read one session\'s screen',
+      description: "A session IS the unit of work on the Mission page: a live agent TUI in a project's folder, typed into by the human and by you. List mode (no `session_id`) returns every session your key can see, with its project, agent, folder and live/dead state — filter with `project_id` / `agent`. Detail mode (`session_id`) returns that session's metadata, its pane state, and the tail of what its TUI is showing RIGHT NOW, so you can see what the human is doing without them narrating it. Read `mission_sessions` before typing into a session you did not start; a session with `locked: true` is the human's deliberate \"driving alone\" switch.\n\n**LIVENESS, and the three fields are not interchangeable.** `live` = we hold a tmux pane. `busy` = a turn is streaming RIGHT NOW, and it requires `live` (a dead row is never busy; if a dead row carries `wasBusy: true` the conversation is still working somewhere you cannot reach). `open` = a LIVE TUI is attached to the conversation — never a dead row, never a bare shell. It is NOT the send verdict: a solo-locked row and a permission-parked row are both still `open` (the human may be driving them). Ask `canSend` in detail mode, which is the same check the write path applies. `busyKnown: false` means the probe COULD NOT ANSWER, which is not the same as idle, so never treat it as licence to type. `state: \"dead\"` is a corpse. Each row also carries `kind`: `\"agent\"` means a TUI is in the pane, `\"shell\"` means a send would run SHELL COMMANDS (mission_send refuses it) — check this before typing.\n\nDetail mode reports `blockedOn: \"permission\"` (with the tool and path) when the pane is parked on a permission dialog: that session is blocked, NOT idle, and `mission_send` refuses it — answer it with `mission_permission_answer`.",
+      inputSchema: {
+        session_id: z.string().optional().describe('One session in full — metadata + pane state + screen tail'),
+        project_id: z.string().optional().describe('Only this project\'s sessions'),
+        agent: z.string().optional().describe('Only sessions on this PAD'),
+        lines: z.number().int().min(1).max(200).optional().describe('Screen tail length in detail mode (default 40, max 200)'),
+        limit: z.number().int().min(1).max(200).optional().describe('List mode: how many sessions to return, newest first (default 50, max 200)'),
+      },
+    },
+    async ({ session_id, project_id, agent, lines, limit }) => {
+      const user = currentUser();
+
+      // Detail mode — one session, with its screen. The row is stamped by
+      // `mission.screen` itself (plan 62 1d): it already probes the pane, so
+      // running a second decoration pass here would either duplicate the probe
+      // or — because the raw row has no `live` — stamp every session as a
+      // corpse. The list/detail parity rule is satisfied by the STORE owning
+      // the truth, not by both call sites remembering to decorate.
+      if (session_id) {
+        const { session, project } = missionRequireSession(user, 'mission_sessions', session_id);
+        const r = await missionCall(() => mission.screen(session.id, lines || 40));
+        return textResult({
+          session: missionSessionRow(r.session, project),
+          state: r.state,
+          live: r.live,
+          screen: r.screen,
+          ...(r.blockedOn ? { blockedOn: r.blockedOn, permission: r.permission } : {}),
+          // The detail view carries what a send would do, before anyone sends —
+          // and it is the STORE's verdict (the same function the write path
+          // gates on), never `open` re-derived here. Deriving it from `open`
+          // promised `canSend: true` for a locked row and for a pane parked on
+          // a permission dialog, both of which the write then refused.
+          canSend: r.canSend === true,
+          ...(r.canSend === true ? {} : { sendRefusal: r.refusal }),
+          hint: r.live
+            ? undefined
+            : 'The tmux session is gone — the human can restart it on the Mission page, or a session can be started again with mission_session_start.',
+        });
+      }
+
+      // List mode. `agent` gets an explicit gate (a clear refusal beats a
+      // silently empty list); the store filter does the per-row owner scoping.
+      if (agent) requireTool(user, 'mission_sessions', agent);
+      const scoped = missionVisibleAgents(user);
+      const byId = new Map();
+      let sessions;
+      let projects;
+      if (project_id) {
+        const project = missionRequireProject(user, 'mission_sessions', project_id);
+        byId.set(project.id, project);
+        sessions = missionCallSync(() => mission.listSessions({ projectId: project.id }));
+      } else {
+        const all = missionCallSync(() => mission.listAllSessions({ allow: (n) => missionMaySee(user, n) }));
+        for (const p of all.projects) byId.set(p.id, p);
+        sessions = all.sessions.filter((s) => {
+          const name = s.project?.agent_name;
+          if (agent && name !== agent) return false;
+          return true;
+        });
+        projects = all.projects.filter((p) => (!agent || p.agent_name === agent) && missionMaySee(user, p.agent_name));
+      }
+
+      const live = (await missionWithLive(() =>
+        project_id
+          ? mission.withLiveSessions(sessions, byId.get(project_id).agent_name)
+          : mission.withLiveSessionsByAgent(sessions, (s) => s.project?.agent_name)
+      )) || sessions;
+      // Same second step the REST route takes: stamp busy/open so the LLM can
+      // see that the human is mid-turn before it types. Grouped and cached per
+      // (PAD, folder) by the store; a failure here costs the stamp, not the list.
+      const marked = (await missionWithLive(() =>
+        mission.withAgentBusy(
+          live,
+          (s) => byId.get(s.project_id)?.agent_name,
+          (s) => byId.get(s.project_id)?.folder
+        )
+      )) || live;
+      const capped = marked.slice(0, limit || 50);
+      return textResult({
+        sessions: capped.map((s) => missionSessionRow(s, byId.get(s.project_id))),
+        total: marked.length,
+        truncated: marked.length > capped.length,
+        projects: projects || undefined,
+        hint: capped.length
+          ? undefined
+          : 'No sessions yet — open one with mission_session_start on a project (from mission_projects).',
+      });
+    }
+  );
+
+  registerToolBound(
+    'mission_project_create',
+    {
+      title: 'Create a Mission project',
+      description: "Create a Mission project — a (PAD, folder) pair — on a coding agent your key owns, the LLM-side twin of the page's \"+ New project\" dialog. Row only: no container, no tmux session, no shell. A folder you pass must be an absolute path that exists INSIDE the PAD (it is probed there, and refused otherwise); omit it to use that agent type's default workspace. The project appears in the Mission page's first column immediately. Not for openclaw / picoclaw / hermes — they do not support Mission.",
+      inputSchema: {
+        name: z.string().describe('Project name (shown in the Mission page)'),
+        agent: z.string().describe('PAD name — must be an opencode, codex or claude agent you own'),
+        folder: z.string().optional().describe('Absolute container path (default: that agent type\'s workspace dir)'),
+      },
+    },
+    async ({ name, agent, folder }) => {
+      const user = currentUser();
+      // Gate BEFORE the probe: the probe is a container command on that PAD.
+      requireTool(user, 'mission_project_create', agent);
+
+      // Probe a PASSED folder inside the PAD before writing the row — a host path
+      // that is not mounted in the container looks perfectly valid from here and
+      // would only fail later, at session start. projectFolders resolves the
+      // agent itself, so a mistyped PAD name is mission_agent_not_found rather
+      // than a type complaint. With no folder the store picks the driver default
+      // (what the page's dialog does), so there is nothing to probe.
+      let dir = '';
+      if (folder) {
+        dir = missionCallSync(() => mission.normalizeFolder(folder));
+        const probe = await missionCall(() => mission.projectFolders(agent, dir));
+        if (!probe.exists || !probe.isDir) {
+          throw new McpError(
+            ErrorCode.InvalidRequest,
+            `mission_folder_missing: ${dir} does not exist as a directory inside ${agent}` +
+              (probe.entries.length ? ` — nearby: ${probe.entries.slice(0, 8).map((e) => e.name).join(', ')}` : '')
+          );
+        }
+      }
+
+      const project = missionCallSync(() =>
+        mission.createProject({ name, agent, folder: dir, createdBy: (user && user.userId) || null })
+      );
+      return textResult({ project: missionProjectRow({ ...project, sessions: [], sessionCount: 0, liveCount: 0 }) });    }
+  );
+
+  registerToolBound(
+    'mission_session_start',
+    {
+      title: 'Open a Mission session (start an agent TUI)',
+      description: "Start a session in a Mission project: a fresh `msn-*` tmux session created ROOTED AT THE PROJECT FOLDER, with the agent's own TUI launched into it. This is the server path behind the page's \"+ New session\" — the TUI is launched on purpose, because a session is only useful when the human can watch it. The row is stamped `origin='agent'`, so the page badges it \"started by agent\". Refuses when the PAD is stopped (409 `mission_agent_stopped`) or the folder has vanished inside it (`mission_folder_missing`) — start the PAD or fix the project. Pass `agent_session_id` (from a session's history) to resume that conversation instead of starting a fresh one.",
+      inputSchema: {
+        project_id: z.string().describe('Project id from mission_projects'),
+        label: z.string().optional().describe('Label shown on the session row (default: none)'),
+        agent_session_id: z.string().optional().describe("Resume this conversation id from the agent's own history instead of starting fresh"),
+      },
+    },
+    async ({ project_id, label, agent_session_id }) => {
+      const user = currentUser();
+      const project = missionRequireProject(user, 'mission_session_start', project_id);
+      // The key id is recorded on the row, so "did I start this?" and "was that
+      // really an agent?" stay answerable after the fact instead of resting on
+      // the caller's own memory (plan 67, 67.3).
+      const createdBy = user && user.keyId ? `key:${user.keyId}` : null;
+      const r = await missionCall(() =>
+        mission.startSession(project.id, {
+          label: label || '',
+          origin: 'agent',
+          agentSessionId: agent_session_id || '',
+          createdBy,
+        })
+      );
+      return textResult({
+        session: missionSessionRow({ ...r.session, live: r.state ? r.state.live : null }, project),
+        state: r.state,
+        project: { id: project.id, name: project.name, folder: project.folder, agent: project.agent_name },
+        createdBy,
+        // The pane's folder is the thing that silently goes wrong (tmux starts
+        // in the parent when -c is given a missing dir), so it is reported, not
+        // left for the caller to discover.
+        startedInFolder: r.state ? r.state.cwd : null,
+        expectedFolder: project.folder,
+        inExpectedFolder: !!(r.state && r.state.cwd && r.state.cwd === project.folder),
+      });
+    }
+  );
+
+  registerToolBound(
+    'mission_send',
+    {
+      title: 'Type into a live Mission session',
+      description: "Type a line into a session's live TUI — your way of working IN a session that already exists, side by side with the human. The session must be live AND running an agent; a solo-locked session (`locked: true`, the human's \"drive alone\" switch) is refused with `mission_session_locked`, a pane running a shell is refused with `mission_not_an_agent` (a send there would run your text as shell commands), and a pane parked on a permission dialog is refused with `mission_permission_pending` (answer it with mission_permission_answer). In every one of those cases NOTHING is typed — do not retry, use another session, relaunch, or ask. Read `mission_sessions` first when you did not start the session: you are typing into the human's conversation. Multi-line text is typed as separate lines; each line is submitted. The response echoes the project and session and returns the pane's screen, so you can see the text actually landed.",
+      inputSchema: {
+        session_id: z.string().describe('Session id from mission_sessions'),
+        text: z.string().describe('Text to type into the TUI (submitted with Enter)'),
+      },
+    },
+    async ({ session_id, text }) => {
+      const user = currentUser();
+      const { session, project } = missionRequireSession(user, 'mission_send', session_id);
+      // mission.sendText is the ONE writer path (human or agent), so this is
+      // also the one place the solo lock is enforced.
+      const r = await missionCall(() => mission.sendText(session.id, text));
+      return textResult({
+        ok: true,
+        sent: r.sent,
+        // Echo where the text went (plan 62 1i): an operator-set `label` is
+        // often empty or stale, and a write that does not say which project it
+        // landed in cannot be checked afterwards.
+        project: r.project,
+        session_id: r.session_id,
+        session: missionSessionRow(r.session, project),
+        // The pane's screen after the write, so "the TUI took it" is visible
+        // rather than asserted (1h).
+        screen: r.screen,
+        hint: 'The text was typed into the TUI. Read it back with mission_sessions {session_id} to see the answer.',
+      });
+    }
+  );
+
+  registerToolBound(
+    'mission_permission_answer',
+    {
+      title: 'Answer a permission prompt blocking a Mission session',
+      description: "A live session parked on an agent permission dialog (`△ Permission required` — a tool call waiting for a human) is BLOCKED, not idle: mission_send refuses it with `mission_permission_pending`, and the text you would send would land in the dialog and press its confirm key. This tool answers the dialog explicitly. `choice: \"once\"` selects the FIRST option (`Allow once`) and confirms; `choice: \"reject\"` selects the LAST (`Reject`) and confirms. `choice: \"always\"` is REFUSED with `mission_permission_refused` — \"Allow always\" is a durable policy change to a machine's permissions, which is the human's decision, not yours. Read the dialog's tool and path first (`mission_sessions {session_id}` reports `blockedOn: \"permission\"` with them) and prefer `reject` if you did not expect that call.",
+      inputSchema: {
+        session_id: z.string().describe('Session id from mission_sessions — the one showing the permission dialog'),
+        choice: z.enum(['once', 'reject']).describe('\"once\" allows this single call, \"reject\" refuses it. \"always\" is not available to an agent caller.'),
+      },
+    },
+    async ({ session_id, choice }) => {
+      const user = currentUser();
+      const { session, project } = missionRequireSession(user, 'mission_permission_answer', session_id);
+      const r = await missionCall(() => mission.answerPermission(session.id, choice));
+      return textResult({
+        ok: true,
+        choice: r.choice,
+        project: r.project,
+        session_id: r.session_id,
+        session: missionSessionRow(r.session, project),
+        stillPending: r.stillPending,
+        screen: r.screen,
+        hint: r.stillPending
+          ? 'The dialog is still on screen — read it with mission_sessions {session_id} before answering again.'
+          : 'The prompt is gone. Read the session to see what the agent did next.',
+      });
     }
   );
 }
@@ -1073,4 +1862,8 @@ function mountMcp(app) {
   app.use('/mcp', router);
 }
 
-module.exports = { mountMcp, authenticateRequest, registerTools, createServer, SERVER_NAME, SERVER_VERSION, keyGrants, targetAllowed, toolAllowed, requireTool };
+// The grant + Mission gate helpers are exported for the same reason the grant
+// ones are: they are the policy, and `mcp.test.js` asserts on them directly.
+// `mcpContext` is exported so a test can run a tool call under a synthetic
+// identity (it is the same store mountMcp fills per request).
+module.exports = { mountMcp, authenticateRequest, registerTools, createServer, SERVER_NAME, SERVER_VERSION, keyGrants, targetAllowed, toolAllowed, requireTool, mcpContext, missionVisibleAgents, missionMaySee, missionRequireProject, missionRequireSession, missionFail, publicAgent, resolveAgentName, notFoundMessage, shellQuote, missionSelectProjects };

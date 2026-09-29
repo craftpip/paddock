@@ -17,6 +17,224 @@ learning:
 
 Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow → AGENTS.md.**
 
+## Pointing at UI elements
+
+- **Every element on the Mission page carries a stable `msn-*` class** (page
+  shell, all three columns, rows, buttons, badges, confirms, the project
+  dialog). They are pure hooks — no styles — so when the user points at
+  something ("the del button in the project row", "the text under Running")
+  look the selector up in `plans/53-mission-workspace.md` §6 and edit exactly
+  that element instead of re-guessing the layout.
+- **Never route a UI complaint through bash/curl/reading the JSX.** Load the
+  page, click the thing, look at it. The user has hit real bugs in this UI
+  (a confirm prompt that outlived the row it belonged to; a scrollbar that
+  shoved the column sideways when a list grew) that all survived a green test
+  run and a careful code read.
+- **When a fix lands, verify the interaction end to end in the browser** — click
+  the button, then assert on the *resulting* DOM (element gone, banner gone,
+  gutter reserved), not just that the handler fired.
+- **A JSX handler that references an identifier from another component's scope
+  builds fine, passes every test, and throws only when clicked.** Moving state
+  from a child to its parent (e.g. a two-step confirm) leaves the child's handler
+  referring to `confirmClose`/`id` that no longer exist there — the × button on
+  every Mission session row was dead for a full build+test cycle this way, and
+  only `btn.click()` in the browser surfaced it (`confirmClose is not defined`).
+  Free variables in JSX are not compile errors. After ANY refactor that moves
+  state across a component boundary, click every affected control in the page.
+- **A MISSING IMPORT is a runtime error, not a build error — so `npm run build`
+  passing says nothing about whether the page RENDERS.** `Mission.jsx` called
+  `useConfirm()` with no import for it. Green build, green tests, and `/mission`
+  was a blank page: an unbound identifier in JSX is a `ReferenceError` when the
+  handler runs, exactly like the cross-component free variable above. Vite/esbuild
+  will not catch it, so **after adding a hook/provider/modal to a file, load the
+  page** — do not infer "it works" from the build.
+- **Mission col 3 is pinned to `openSession` in the store, NOT to the row and NOT
+  to `selectedProjectId`.** It is a snapshot taken at the moment the session was
+  opened, and the project it resolves for `<Terminal>` comes from
+  `openSession.projectId` — deliberately *not* col 1's `selectedProjectId`, so an
+  all-projects row from another project is not corrected back to the col-1 one.
+  Col 1 and col 3 pointing at different projects is correct and expected. The
+  rule this replaced ("anything that changes `selectedSessionId` must move
+  `selectedProjectId` with it, or the terminal shows one project's PAD under
+  another project's name") is exactly the bug: `setScope` and `select()` both
+  moved the highlight for reasons unrelated to the terminal, and the terminal
+  followed. **Only `selectSession` (row click) and `startSession` write
+  `openSession`; only `closeSession` clears it; a refresh may update its display
+  fields but never which session is open.**
+- **A column that is refetched must not be what the next column renders from.**
+  Col 3 used to derive its session from the listing, and `setScope` empties that
+  listing on purpose before refetching — so for ~200ms col 3 was `null`,
+  `<Terminal>` unmounted, the WS closed, and the list landing remounted it (fresh
+  xterm, fresh `tmux attach`, redraw) for a conversation nobody asked to change.
+  Any value derived from a list is only as stable as that list's emptiest moment.
+- **`startSession` must re-read pane state after setting `openSession`** (it
+  calls `get().fetchSessionState(id)`), because the snapshot is taken when the
+  TUI has been *asked* to launch and has not yet appeared — a snapshot-only fix
+  renders a brand-new session as closed. *A snapshot taken at open time is
+  correct for a session that was already running and wrong for one still
+  starting.*
+- **tmux `show-options -g` will NOT list `escape-time`** — it printed
+  `history-limit` and `status` and silently omitted the one option under test, so
+  a "did it take?" check that greps `-g` output silently passes on a PAD where
+  nothing was applied. Always read an individual option back with
+  `tmux show-options -gv <name>`. (`pad-tmux.applyGlobalOptions` now sets
+  `escape-time 10` as a PAD global, which is why ESC registers immediately
+  instead of waiting on tmux's 500ms ambiguity window.)
+- **A poll or a mutation that refreshes the *selected project's* list will leave
+  the all-projects list frozen.** Every refresh path goes through
+  `refreshActive()`, which reads the active `scope`.
+- **"Hidden" has three different meanings in CSS and only one of them is free.**
+  Chasing "put this on the right / stop it taking space" through
+  `ml-auto` → `hidden` → `opacity-0` burned three builds on the Mission session
+  row, and the trap generalises: (1) `ml-auto` on the *wrong* element leaves the
+  target merely trailing its neighbour, flush by accident; (2) `hidden` +
+  `reveal-on-hover` reserves nothing but **`display: none` children cannot take
+  focus**, so a hover-revealed control is unreachable by keyboard and
+  `focus-within` cannot rescue it (it only matches something that already has
+  focus — tabbing onto the parent reveals the control, the next Tab blurs the
+  parent, the reveal vanishes, focus falls to `<body>`); (3) `opacity-0` in flow
+  keeps it focusable but **an invisible flex child still reserves its width** —
+  that is the "you are hiding it but it still takes space" complaint, one element
+  over. The answer is **absolute + `opacity-0`**: no reserved space, never
+  `display: none` (focusability intact), and the element it covers fades out
+  instead of being overlapped. And `pointer-events-none` on anything invisible is
+  a **safety** requirement, not tidiness — `opacity: 0` still takes clicks, so a
+  click aimed at the visible neighbour behind it hits the invisible control
+  (here: the Close button, which would kill the user's session). Assert it with
+  `document.elementFromPoint` at the visible element's own coordinates, in the
+  idle state — and mind that a row still holding focus, or one the pointer is
+  really over, will legitimately show the control, so filter on
+  `!r.matches(':hover') && !r.querySelector(':focus')` first or the check lies.
+
+- **A name the surface HANDS OUT must be a name the surface ACCEPTS, and
+  the resolver must run BEFORE the grant check, not after.** The MCP surface had
+  three spellings per pad (container name `pad-proj2`, the bare name
+  `create_agent` accepts, and the `display_name` `list_agents` prints) and
+  accepted only one, so the cheapest mistake — copy a name off the listing and
+  pass it back — returned `Agent not found`. Order matters: **resolve, then grant on
+  the RESOLVED name, then act on the RESOLVED name.** Granting on the raw string
+  means a target-restricted key is refused for the wrong reason, and a tool that
+  gates then uses the caller's own `name` is doing work on a pad it never
+  authorized. `requirePad(tool, name)` returns the agent precisely so no call site
+  can forget the last part. Two precedence rules worth keeping: a **prefixed exact
+  match beats substring ambiguity** (`proj` is `pad-proj`'s exact bare name, so it
+  must not be rejected as ambiguous against `pad-proj2`), and genuine ambiguity
+  **refuses and names the candidates** rather than guessing, because guessing here
+  means running a command on the wrong agent.
+- **A "here is where it ran" probe must carry the SAME environment change as the
+  command, or it reports the truth and the answer disagrees with it.** `exec`
+  gained a `cwd` and reported the *actual* directory by running `pwd` in a second
+  `docker exec` — which, lacking the `cd`, reported the container default while the
+  command had run in the requested one. The payload then said
+  `cwd: "/www1"` next to `stdout: "/www1/craftpip.com"`: a self-contradicting
+  response is worse than no `cwd`, because the caller has to decide which half to
+  believe. The probe now takes the same `cd`. **Only the live test caught this** —
+  the code was correct-looking, and the unit test could not have run a container.
+  Same shape: a `cwd` is caller-controlled and interpolated into `sh -lc`, so
+  quote it, and let a bad path FAIL (exit 2, nothing run) rather than fall through
+  to somewhere else.
+- **"This list is capped at 10" and "your item is not in it" look identical to the
+  caller — so any list a caller may need to SEARCH needs a filter that searches
+  everything, applied BEFORE the cap.** `availableNetworks` was capped, and a named
+  container past the cap read exactly like an invalid one. `networkFilter` now
+  filters the **whole** candidate list and skips the limit entirely (a caller who
+  already knows the name is asking "is THIS valid?", not "show me ten"), setting
+  `availableNetworksSearchedAll: true` so an empty result is a real "no". **The
+  first fix here was the same bug with a bigger number in front of it**: it
+  "widened the limit" to 200 and then filtered, so past 200 peers the flag was a
+  lie and the silent maybe returned. A filter that runs after any cap is not a
+  search — put it inside the selector, before the `slice`. **Also: verify the
+  reported cause.** The original finding blamed the cap for hiding `pad-proj2`, but
+  that pad is excluded because it publishes no ports — two different filters, and
+  only one was a reporting bug. Chasing the stated cause would have shipped the
+  wrong fix.
+- **A resolver that returns the canonical name is only half a fix — the name has to
+  reach the ACTION and the RESPONSE too.** `update` resolved `Proj` to
+  `pad-opencode-proj`, authorized on that, and then called
+  `vm.updateAgent(name, …)` with the **raw** argument: the exact gate-then-act split
+  the resolver exists to prevent, surviving because the gate looked right in review.
+  `agent_logs`/`workspace_read` read the right pad and echoed the caller's own
+  spelling back, so the answer was indistinguishable from "it did nothing". Audit
+  `grep -n "textResult({ name" src/mcp.js` for echoes and check the *action* argument
+  on every tool you touched, not just the gate. When a test has to pin this down
+  without running a container, read the tool's source with `fs.readFileSync` and
+  assert the two arguments match — and slice the handler to the NEXT
+  `registerToolBound(`, because `indexOf('});')` stops inside the inputSchema and
+  the test then passes on a fragment it never really read.
+- **A list tool that can be FILTERED must never fall back to the unfiltered list,
+  because that answer is indistinguishable from success.** Asked for one project by
+  name and given six, a caller has no way to tell "you matched it, here it is" from
+  "I did not understand, here is everything" — and the failure is silent, so it
+  surfaces as a confidently wrong answer much later. So zero matches and several
+  matches are BOTH refusals carrying the candidates (`mission_project_not_found` /
+  `mission_project_ambiguous`). Three things that make the hint actually work:
+  **accept every spelling the caller is likely to hold** (a project's `name` is not
+  its `folder`, so filtering on one axis silently misses the other); **match
+  containment BOTH ways** (the common miss is a typo, and `"paddock"` does not
+  contain `"paddockk"` — a one-way `includes` is blind to exactly the case you
+  wrote the hint for); and **draw candidates from what the caller may already
+  see**, because a hint that lists someone else's rows converts a scoping rule
+  into an existence oracle. Related: once a filter exists, **the neighbouring
+  vocabulary has to come along** — a project that cannot say whether its own pad is
+  running sends the caller to a second tool, and the same repo is often mounted by
+  two pads with the one named after it stopped.
+- **A count that sits next to a data array will be READ as the thing it measures.**
+  `liveCount` / `openCount` beside a project's `sessions` array reads as "how far
+  along is this?" and it is not: a session that did 400 tool calls and one that
+  opened and died are both `live: false`. The caller's mistake is invisible (no
+  second call contradicts it), so the tool description has to **say the difference
+  in words** — `LIVENESS, not progress` — rather than trust it to be inferred from
+  the field names. The same reasoning makes the summary come FIRST in the row and
+  the detail opt-in: inlining every session of every project made the read a
+  superset of the dedicated list tool, and the counts were serialized *after* the
+  data they summarized. A read that costs the whole fleet before the caller knows
+  which row it wants is a read with a filter missing, not a style problem.
+
+- **A field the SERVER computes must not be re-derived on the client, and a
+  verdict must not be computed anywhere but the gate.** Plan 62 fixed both halves
+  of the same defect, and each was invisible to the other. The store stamped
+  `open: false` for a pane running only `bash`, and `SessionList` computed
+  `open = live || busy` — so the dot lit for exactly the trap `mission_send` had
+  just refused, and a correct server fix looked like it had done nothing. **A
+  client that re-derives a server field is a second source of truth, and it is
+  the wrong one**, because it was written before the field existed. The fix is
+  to use the server's value and fall back ONLY when the field is absent. The
+  mirror image: `canSend` was `session.open`, which means "a TUI is attached", so
+  a solo-locked row and a permission-parked row both answered `canSend: true` and
+  then the write refused them — a verdict computed anywhere but the gate is a
+  guess, the same shape as the gate-then-act split in the name resolver. Route
+  both surfaces through ONE function (`mission.sendVerdict`, which `sendText`
+  gates on). **And do not fold every refusal into one field to force it to mean
+  everything**: a locked session is still *open* (the human is driving it), so
+  absorbing `locked` into `open` would trade one lie for another. `open` says a
+  TUI is attached; `canSend` says the agent may type. Related: a
+  **fake pane that returns a frozen string is not a neutral stub, it is a black
+  hole** — once a write is confirmed by comparing the screen, every test whose
+  fake pane never echoes has to be given an echo, once in `beforeEach` rather
+  than per test.
+
+- **Assert a clock CHANGED, and give the test a gap bigger than its resolution.**
+  `last_output_at` is millisecond-resolution, so two reads inside one millisecond
+  stamp identical values and every "it advanced" assertion becomes a coin flip
+  that fails roughly one run in ten — which reads as a real bug and is not. Two
+  things followed, and the first is the one worth keeping: the store now returns
+  the timestamp it *stored* instead of computing a second one, so the row handed
+  to the caller and the row in the database can never differ by a millisecond;
+  and the test sleeps past the resolution before each read that must move. A
+  `notStrictEqual` on two timestamps is only a real assertion if the code cannot
+  make them equal — and the control that proves it is a control you have to run:
+  my first version passed with the fix removed, because "non-null" was true
+  anyway after an earlier read. **Assert the CHANGE, not the value.**
+
+- **A stale row survives a write that just happened in the same function.**
+  `screen()` read its session, then updated the row, then returned the row it had
+  read — so the response reported `last_output_at: null` for the very call that
+  had set it. Nothing crashes and nothing looks wrong: the next read is correct,
+  which is why it would have shipped. The rule is that a function which mutates
+  a row it also returns must stamp the return value from the write's own result
+  (or re-read), and "did the clock move?" is a far easier test to write against a
+  response than a diff of the implementation.
+
 ## Project Map
 
 - **`docker-compose.yml`** defines the `webui` service (container `paddock`,
@@ -32,7 +250,18 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   Old EJS routes/`routes/agents.js` are dead code.
 - **`instances/<pad>/`** — per-PAD dir: `<agent>/` bind-mounted data dir,
   `docker-compose.yml`, **`meta.env`** (critical state), `logs/`.
+- **`src/client/src/components/OverlayScroll.jsx`** — the floating scrollbar the
+  Mission listings use. A native bar always reserves layout space, so in a 260px
+  column it eats a tenth of the listing, and `scrollbar-gutter: stable` only
+  hides that space rather than returning it. This hides the native bar
+  (`scrollbar-width: none` → reserves nothing in any overflow state) and draws
+  the thumb itself. Two things it taught: **use a native `addEventListener('scroll')`,
+  not React's `onScroll`** (scroll doesn't bubble, so a delegated handler never
+  fires and the thumb silently stops tracking), and **do not transition the
+  thumb's opacity** — see the headless gotcha below.
 - **`backups/`**, **`plans/`** — archives and idea files.
+- **`infinite.md`** — the forever task queue the user appends plan paths to;
+  see § Infinite loop below.
 - **`friction/`** — chat-test findings log: what LLM callers of the MCP
   surface couldn't understand or do (`friction/README.md` has the shape).
 
@@ -63,6 +292,247 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
 
 ## Critical Operational Gotchas
 
+- **A terminal that drops "every few seconds" was the webui DYING, not a client
+  bug.** Check this FIRST whenever the user reports the terminal glitching,
+  stuttering, or randomly disconnecting — it is the cheapest and most often
+  correct explanation, and it is invisible in the browser:
+  `docker logs paddock --since 10m | grep -c "listening on port"` — more than one
+  boot means the process is dying. A JS death prints a stack trace ending
+  `Node.js v20.20.2`; a container stop instead shows up in `docker events` as
+  `kill sig=15` → `kill sig=9` (10s later) → `die exit=137` → `start`. The
+  number of "listening" lines in the last 10 minutes is the health signal.
+  Each death drops every WS **and** orphans every `tmux attach` it owned
+  (`activeTerminals` is in-memory), so the two symptoms travel together.
+- **The installed MCP SDK does NOT catch a throwing tool handler.**
+  `@modelcontextprotocol/sdk/.../server/index.js` `wrappedHandler` does
+  `result = await Promise.resolve(handler(request, extra))` with no try/catch, so
+  the rejection escapes as unhandled and **kills the webui**. Every
+  `requireTool` / `requireAgent` / `requireHostBrowsable` rejection is therefore
+  fatal unless the tool is registered through the `registerTool` wrapper in
+  `mcp.js` (which returns `{ isError: true, … }` instead). New tools MUST go
+  through that wrapper. `app.js` also installs `unhandledRejection` /
+  `uncaughtException` handlers that log and stay up — a control plane must not
+  die because one agent's tool call threw.
+- **A redactor that reads like it normalizes, but doesn't, ships the secret it
+  was written to stop (plan 60).** Three of the four bugs in the MCP config
+  redactor were found by *testing*, not by re-reading it: `isSecretKey` had a
+  comment saying keys are normalized (camelCase split, separators unified) while
+  the body tested the raw string, so `xMcpKey` passed and only `x_mcp_key` was
+  caught; the depth cutoff was `if (depth > 8) return obj` — i.e. **handed over
+  untouched** exactly what it was too deep to inspect, so a cutoff must fail
+  CLOSED (`return '[REDACTED]'`); and the headers rule was `^headers?$`, so
+  `httpHeaders` slipped. Then the first *fix* for that over-redacted config the
+  LLM needs (`tokenLimit`, `passwordPolicy`, `monacoKeyBinding`) by matching any
+  *segment* — which is why the rule is a `_-terminated SUFFIX` plus a short
+  `NON_SECRET_KEY_SUFFIX` noun allowlist. Redact by **shape** (any value under a
+  `headers` map, whatever the header is named), not by an equality list of key
+  names. Two more traps in the same area: a redaction must cover **every field**
+  that carries the value, not the one that was reported — `configRaw` and
+  `web.startCommand` each leaked a second copy the fix would have missed; and
+  **redact at the MCP boundary, not in the store** — `agent-registry.js` still
+  holds `web.token` because the dashboard's open-console link needs it, and
+  `readAgentConfig` is shared with a REST route the config editor round-trips, so
+  redacting it there writes `[REDACTED]` into the user's real config on save.
+  Redact the raw read only where it leaves the process, and pin BOTH halves in a
+  test. Finally: **a secret-leak fix does not un-leak the secret** — the
+  credentials themselves are still burned and need rotating at the source.
+- **Never syntax-check the webui by `node -e "require('/www2/paddock/src/app.js')"`
+  — it BOOTS the app** (binds 6789, opens the DB, runs migrations) and leaves a
+  second server plus root-owned DB files behind. Use `node --check src/app.js`
+  for syntax, `docker restart paddock` to load.
+- **opencode's `/session/status` answers `{}` unless you pass `?directory=` — and
+  `{}` is indistinguishable from "nothing is working".** This is the only
+  server-side way to see a conversation the agent is working on from ANY client
+  (web UI, SDK script, a second TUI) rather than only from our own tmux, so it
+  backs the session-list dot. Called unscoped it returns `{}` *even while a turn
+  is streaming* — measured: an 8.2s turn, 25 polls during it, `{}` every time.
+  Scoped to the folder the turn runs in it returns
+  `{"ses_…":{"type":"busy"}}` immediately. The other two ways to get the same
+  silent `{}`: the wrong **port** (use the PAD's own `web.containerPort` — the
+  driver default says 8080 while the running server here is 7890) and a missing
+  **folder** (a `mission_sessions` row carries no folder, so the call site must
+  pass the project's). Also: group such probes by **(PAD, folder)**, never by
+  PAD alone — `paddock`, `schlorp` and `craftpip` all run on
+  `pad-opencode-proj`, and a PAD-keyed group stamps the first folder's answer on
+  the other projects' rows. The map is a live-work registry, not a presence list:
+  it empties when the turn ends, and there is no client/connection endpoint, so
+  an idle tab open in the web UI is NOT detectable.
+- **A "dead" row is not a dead conversation.** A mission session whose tmux pane
+  died while the user is chatting with that same conversation in the opencode web
+  UI is open and working. The two questions are separated by **`busy`**, not by a
+  client-side pane flag: a row's `open` is the server's `live || busy`, so the
+  web-UI conversation lights its dot with no session of ours on it, while a
+  genuinely idle row with no pane reads as simply *not open*. The client no
+  longer computes a "gone" state at all (plan 58) — so if you are tempted to add
+  one back, remember it is what made the listing say "the pane is no longer
+  there" in a language the user never asked for.
+- **Mission sessions (`msn-*`) are multi-client; a second tab must not kick the
+  first.** Three places in the terminal WS in `app.js` implement that, and all
+  three must agree or you get the reconnect-fight loop back: (1) connect skips
+  the supersede close, (2) connect skips `sweepStaleAttaches` (its second call
+  site — the one in the try-block before `ensureTmuxSession`; the first is in
+  cleanup), (3) cleanup only sweeps when the **last** client leaves, tracked in
+  `terminalClients`. The sweep is what reaps orphaned `tmux attach` processes
+  (`dockerStream.destroy()` does not reliably kill the exec), so skipping it
+  entirely lets orphans pile up on long-lived mission sessions.
+- **The terminal WS may lazily re-create a missing tmux session — that
+  resurrects a CLOSED mission session.** An attached client reconnects, the
+  server re-creates the tmux session, and "Close" silently un-closes it as a
+  bare shell. `mission.getSessionByTmux()` in the WS connect path is what stops
+  it: no DB row → refuse with a message + close 4002. Any new attach path for
+  `msn-*` needs the same guard.
+- **An attached terminal can resurrect a killed tmux session as a bare shell**,
+  so "the pane is gone" must come from the pane state (`paneState().live`),
+  never from the session existing. Mission splits the two recoveries: live pane
+  without a TUI → **relaunch** (`POST .../relaunch`, keeps the conversation);
+  no tmux session at all → **restart** (`POST .../restart`, recreates with
+  `-c <project.folder>`, same tmux id, same `agent_session_id`, and refuses with
+  `mission_folder_missing` rather than starting in the wrong directory).
+- **A "Loading…" line in a list that already has data is a bug, not a
+  placeholder.** Every 15s poll and every action flips `sessionsLoading` /
+  `historyLoading`, so an unconditional placeholder pushes the listing down a
+  line and back on each tick. Show it only when there is genuinely nothing yet
+  (`loadedFor !== project.id`, `!history`) — `loadedFor` is set on SUCCESS, not
+  when the fetch starts, or the placeholder can never appear at all. Also: two
+  group headers both `sticky top-0` in one scroller stack on top of each other;
+  the second one needs the first one's height as its offset.
+- **The headless test browser (cloakbrowser) produces NO frames, which breaks
+  three classes of check that otherwise look like product bugs.** `requestAnimationFrame`
+  never fires, **a CSS transition sits at its start value forever** (so
+  `getComputedStyle(el).opacity` reads `0` for an element that is *supposed* to
+  be fading in — confirm by nulling the transition before "fixing" the CSS), and
+  **`el.scrollTop = 400` dispatches no `scroll` event at all** (a probe listener
+  counts 0; `el.dispatchEvent(new Event('scroll'))` then fires 1 and the handler
+  runs). So a "does the scrollbar thumb follow the scroll?" test must dispatch the
+  event itself, and any reveal/hide that depends on a transition must be
+  verified by its end state, not its animated value. Also: `Browser.setWindowBounds`
+  does not resize the layout viewport here, so you cannot force a list to overflow
+  that way — append filler to the scroller instead.
+- **A fast number is not a verified number: re-measure with the OLD setting as a
+  control, changing nothing else.** Proving tmux `escape-time` was the ESC delay
+  meant measuring the same live pane twice, minutes apart, flipping only that one
+  option: median 16.8ms at `escape-time 10`, 506.9ms at tmux's 500ms default.
+  Either figure alone proves nothing — a path that was never slow looks exactly
+  like a fix, and "I pressed ESC and it felt instant" is how a wrong cause gets
+  shipped. The control costs one extra run and is the only thing that
+  distinguishes "fixed it" from "was never broken here".
+- **A synthetic `keydown` on `.xterm-helper-textarea` reaches the pane, and that
+  is how you time a keystroke end to end.** xterm does not check `isTrusted`, so
+  `ta.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape', code:'Escape',
+  keyCode:27, bubbles:true}))` exercises the identical xterm → WS → stream → tmux
+  path — and, unlike a tool-per-keypress loop, `performance.now()` can be
+  stamped immediately before the dispatch, so a tool round-trip never lands
+  inside the measurement. Read the result by polling `.xterm-rows` with
+  `setTimeout` (rAF is dead here, but xterm's `refreshRows` writes to the DOM
+  synchronously, so echoes *do* appear). Two gotchas: a synthetic `-` is
+  **dropped** unless it is the first key after a newline, so paste command text
+  through a `ClipboardEvent('paste')` instead; and to make ESC visible at all,
+  run `cat -v` first — a bare shell prompt echoes nothing for it.
+- **A `Splitter`'s own `min` can make a panel uncollapsible by hand, and the
+  fix is not to lower `min`.** `Splitter.clamp` floors the width it *reports*, so
+  with `min={200}` the parent never sees a value below 200 and cannot decide to
+  collapse on "dragged under the minimum". A snap-to-collapsed rule belongs in
+  the parent: give the divider the floor width (`min={RAIL_W}`) and turn the
+  number into a decision there (`< COL1_MIN` → collapse, `>= COL1_MIN` from
+  collapsed → open). Two more traps in the same component: the divider must stay
+  **mounted in both states** (hiding it when collapsed removes the only way to
+  fold by hand), and the arrow keys nudge by a *delta from the current width*, so
+  from a floor they can never cross it — hence the `openAt` prop (first press
+  jumps to the width the parent calls open). Live-verified both ways with
+  synthetic `PointerEvent`s on `.msn-splitter-1`.
+- **Two rules for a fold/expand that must not MOVE anything — measure BOTH gaps,
+  and branch the drag rule on the FOLDED state, not the stored one.** (1) A
+  collapsed column has to stay *centred*, and the inset that does it is forced:
+  for a 56px rail holding a 32px control it is `(56-32)/2 = 12`, so the head, the
+  body and the rows all share one 12px gutter and every control measures 12 left /
+  12 right. Asserting only `x` hides the whole bug — a head left at the toolbar's
+  `px-2` puts the arrow at x=8 with 8px on the left and 16px on the right, which
+  every left-edge assertion still passes. Add `colRight - controlRight`. Related:
+  `items-center` silently DISCARDS horizontal padding in a narrow column (it
+  re-centres the 32px button at 12), so a container that needs its inset honoured
+  must be `items-start`. (2) A fold that can also be driven automatically (a
+  narrow-viewport fold via an override flag) has TWO sources of truth. Branching
+  the drag handler on the *stored* flag left the auto-folded rail a dead end: it
+  called `setCol1(200)` and the column stayed folded, because the fold was still
+  being computed from the other flag. Branch on the derived `col1Folded`. Same
+  trap in one place: a character glyph (`‹`/`›`) renders ~5px wide inside a 32px
+  button, which reads as "so small" and is genuinely hard to hit — use a stroked
+  SVG for a control's only icon, but pick its size by LOOKING at it, not by
+  reasoning: 5px was unusable, the first 20px SVG read as too heavy next to the
+  avatars, 14px is right. Scale `strokeWidth` with the box.
+- **Deleting a Mission project kills that AGENT's tmux sessions, not just that
+  project's.** Several projects can point at one PAD (`paddock`, `schlorp`,
+  `craftpip` all ran on `pad-opencode-proj`), and the delete confirm's
+  "the agent's tmux sessions are closed" is literal — the tmux sessions die with
+  whatever project rows pointed at that agent, including the LIVE conversation
+  you were looking at. So the junk-project cleanup rule below has a sting: after
+  deleting junk, the user's real session on that same agent shows col 3's
+  explicit `The tmux session is gone` state (with its own *Restart the TUI*
+  button). Don't click that restart for them — it launches an agent process in
+  their conversation; report it and let them choose.
+- **`matchMedia` is untestable in a headless tab, `window.innerWidth` on a
+  `resize` listener is.** `Browser.setWindowBounds` does not change the layout
+  viewport (already noted below), so a responsive feature keyed on a
+  `MediaQueryList` cannot be exercised at all: `window.matchMedia(q)` returns a
+  FRESH object per call, so a test dispatches `change` on an object the component
+  does not hold and nothing happens (it looks exactly like a missing listener),
+  and `Page.addScriptToEvaluateOnNewDocument` did not apply here either. A
+  `resize` listener reading `window.innerWidth` is the same behaviour, cheaper,
+  and testable: stub the getter with
+  `Object.defineProperty(window, 'innerWidth', { get: () => 1400 })` and dispatch
+  `new Event('resize')`. For the initial load use `Target.createTarget`'s
+  `viewport` (works: verified 900px and 700px) — the rest is the resize path.
+- **Coordinate clicks on the Mission page can submit a form you never aimed at.**
+  The `Input` click tool reports `clicked: true` for the element you named, but
+  during a session it twice created a junk project (`~` and then `root`, both
+  `pad-opencode-proj` on `/root`) out of the "+ New project" dialog. After using
+  it on this page, **check `GET /api/mission/projects` and delete anything that
+  is not the user's** — the user had 3 (paddock, schlorp, craftpip). Prefer
+  `el.click()` on a specific element; it lands where you say and does nothing
+  else. Deleting a project also closes that agent's tmux sessions.
+- **Count the Mission projects at the END of any browser session on that page,
+  not only after a coordinate click.** A third junk `root` (again `pad-opencode-proj`
+  on `/root`) appeared with no coordinate click anywhere near it, so the trigger
+  is not fully explained by that tool — the user may also be clicking in their
+  own tab while the agent works. `GET /api/mission/projects` is cheap; a silent
+  junk row also shows up as a stray extra avatar in the new col-1 rail, which is
+  how it was caught. Do not delete a row you cannot attribute without asking
+  first: it may be something the user just made on purpose.
+- **`src/test/mission.test.js` is SAFE to run now — it uses its own throwaway
+  database.** It used to run against the live dev DB and wipe the Mission tables
+  (projects + sessions), which is why this file carried a "back up `app.db*` and
+  recreate the user's projects" warning. That warning cost a restore TWICE in one
+  session before the cause was fixed rather than worked around. It now sets
+  `PAD_DB_PATH` to a `mkdtemp` file **before** requiring anything that loads
+  `db.js` (the path is read at module load, so setting it later does nothing), so
+  the real code path and the real migrations still run and the user's rows are
+  never at risk. **`PAD_DB_PATH` is the general answer to "this suite destroys
+  data"** — reach for it before adding a backup ritual, and while you are there
+  check for residue the earlier live runs left behind (`pad-msn-*` agent rows
+  accumulated exactly this way). Note that an agent row can have a real
+  `activity_events` audit trail from months ago even when its instance dir is
+  gone, so "no instance dir" means residue for a row created *today* and not
+  necessarily for an old one.
+- **A hand-written "old schema" fixture is not a weaker test, it is a WRONG
+  one — derive it from the real schema and delete the columns under test.** The
+  db-migration suite (`src/test/db-migration.test.js`) covers the one schema code
+  path that touches a *populated* database, because `CREATE TABLE IF NOT EXISTS`
+  skips an existing table so only the `ALTER`s can add a column — and a migration
+  that silently does nothing does not error at boot, it surfaces much later as an
+  `INSERT` against a missing column, on whatever request happened to be next.
+  Writing the fixture by hand failed twice before passing, both times for reasons
+  that had nothing to do with what it was meant to prove: a guessed `tasks` table
+  omitted `agent_name`, so `CREATE INDEX idx_tasks_agent` blew up; and a guessed
+  `mission_projects` omitted `agent_type`/`prompt`'s NOT NULL siblings. So the
+  fixture is built by letting `db.js` create today's schema, populating it, then
+  dropping exactly the two columns the `ALTER`s own. Two more things worth keeping:
+  **an assertion that cannot fail is worse than none** — the suite ships with a
+  control where the migration is removed and 4 of 6 tests go red, because a green
+  run of a migration test proves only that the column exists somewhere; and
+  **a migration's most common case is "already migrated"**, since every restart
+  re-runs it, so idempotence is asserted explicitly rather than assumed (a
+  migration that threw on the second boot would break every restart after an
+  upgrade). `DB_PATH` honours `PAD_DB_PATH` purely for this; unset in production.
 - **`openclaw models auth paste-api-key` destroys the whole `openclaw.json`**
   (rewrites it with auth info only). Save the config first and merge it back
   after. It reads the key from stdin — use `spawn`, not `execFile` (hangs).
@@ -138,6 +608,85 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   that (`src/test/pad-tmux.test.js` asserts on the recorded argv AND the
   options) because a fake `runCmd` that ignores options will happily pass a
   call that only breaks against real docker.
+- **The `mission_*` MCP tools may `require('./services/mission')` — never
+  `./app`.** `mission.js` is a service (db, drivers, pad-tmux, workspace only),
+  so the five tools (`mission_projects`, `mission_sessions`,
+  `mission_project_create`, `mission_session_start`, `mission_send`, plan 55)
+  are thin adapters over it, exactly like `/api/mission/*`. Two contracts worth
+  keeping: a MissionError's **machine code** is re-thrown as
+  `<code>: <message>` (the SDK's error path only prints `message`, and the LLM
+  branches on the code), and every tool is **resolve-then-gate** — resolve the
+  project, read the PAD name off it, *then* `requireTool` — because
+  `requireTool` needs a name. Liveness must stay **one `list-sessions` per PAD**
+  (  `mission.withLive` / `withLiveSessionsByAgent`), never `paneState` per row,
+  and a failed probe marks sessions dead rather than failing the read.
+- **"Is the human mid-turn?" is a SECOND pass, not part of liveness — and an
+  MCP list that skips it silently lies to the LLM.** `withLive*` only stamps
+  `live` (a tmux session exists). `busy` / `busyKnown` / `open` are stamped by
+  the separate `withAgentBusy` / `withAgentBusyProjects` (the opencode server's
+  `/session/status`, which needs `?directory=`, cached per (PAD, folder)), so
+  every list/detail path must chain both — exactly like `/api/mission/*` at
+  `app.js:2488/2526/2584`. `withAgentBusy(sessions, agentOf, folderOf)` resolves
+  the PAD and folder through the *row's project*, so a row with no project
+  (rare) simply gets no stamp. `busyKnown: false` means UNKNOWN, never idle,
+  and an MCP projection must emit the field only when the store stamped it
+  rather than defaulting it to `false`.
+- **An MCP handler that stops at the first enrichment pass is a parity bug, not
+  a shortcut.** When a parallel agent adds a second decoration to the Mission
+  service, every MCP list/detail path has to pick it up: check
+  `app.js`'s route for the `withLive*` chain and mirror it. `mission_projects`
+  with only `withLive` returns no `openCount`/`busy`; `mission_sessions` with
+  only `withLiveSessions*` returns no `busy`. The LLM then cannot tell "the
+  human is typing right now" from "here but idle" and talks over a live
+  conversation — the one failure the Mission page exists to prevent.
+- **Never resolve an agent's TYPE yourself — `getDriver` FALLS BACK TO
+  OPENCLAW**, so a lookup that yields `undefined` (a mistyped name, a row that
+  moved, a `|| {}` default) silently becomes an *openclaw* answer instead of a
+  not-found. `mission_project_create` did exactly this: it read
+  `SELECT agent_type FROM agents WHERE name = ?` itself, so a typo produced
+  `mission_unsupported_agent: openclaw does not support Mission workspaces` for
+  a PAD that never existed. Let `mission.agentRow` (via `projectFolders`,
+  `createProject`, `startSession`) do the resolution — it throws
+  `mission_agent_not_found` with a 404. And note the **grant gate runs first**:
+  `requireTool` fails closed on an unknown agent, so a handler must never rely
+  on the store to report a bad name.
+- **A pad's `SUBNET` reservation and its live `_default` network are two
+  different claims, and only a pad with a service on the project `default`
+  network should hold either.** A peer-networked pad's service is
+  `network_mode: container:<peer>` and its door rides the peer's own network, so
+  it joins nothing — reserving a `/24` for it just parks a claim that collides
+  the day the user switches that pad **to** default (`Pool overlaps with other
+  one on this address space`, apply exits 1 and rolls back).
+  `writeInstanceCompose` now gates on the *generated* services
+  (`usesProjectDefaultNetwork`), not on `NETWORK` being unset, so a pad with no
+  ports and no door behaves too. Two traps in the same area: (1) a **live
+  network wins** — when `<name>_default` already exists (including a legacy
+  compose-pool `172.x`/`192.168.x` one) `ensurePadSubnet` returns empty and the
+  compose stays subnet-less, so a regen can never force a network recreate, and
+  `releasePadSubnet` must NOT drop a reservation a live network still holds;
+  (2) counting only `docker network ls` under-commits the pool — a reservation
+  with no network behind it is still a claim, so `claimedPadSubnetOctets` unions
+  live networks with every other pad's meta `SUBNET` (skip hidden/quarantine
+  dirs). Verify with `docker exec paddock sh -c 'cd /app && node -e "..."'`
+  against the exported helpers — `pickFreePadSubnet('<pad>')` is a read-only
+  way to see what a pad WOULD get, and a stale `SUBNET` in a pad's meta simply
+  means that pad has not been rewritten since: its next apply/recreate resolves
+  it. Never hand-edit meta to "free" an octet, and never force-remove a live
+  network to release one.
+- **The stale-door sweep will fight you forever if anything still writes
+  `instances/<pad>-door/`.** `cleanStaleDoorDirs` quarantines legacy
+  `<pad>-door` dirs into `instances/.stale-door-dirs/<name>`, but the 30s log
+  sweep called `logStore.capture()` for **every** container whose name passed
+  `safeVmName` — including the live socat door, whose nobody-reads-it log file
+  `mkdir`s `instances/<pad>-door/logs/`. The dir reappeared after every restart
+  and looked exactly like "the sweep isn't working"; the fix is excluding
+  `isManagedDoorContainer` names from that sweep. When a cleanup pass keeps
+  losing ground, look for a *writer* rather than tightening the matcher. Related:
+  the sweep's veto must come from the **disk-derived** registry
+  (`registry.discoverAgents()`), not the SQLite `agents` table — a deleted
+  pad's stale row makes its own leftover dir untouchable. It moves the dir, it
+  never `docker rm`s the live door container, and it skips a candidate whose
+  `<pad>` is a real agent.
 - **Per-PAD image builds orphan disk.** Every create/rebuild retags
   `paddock-vm-<name>:latest` and orphans the old build as a dangling image;
   delete removes the tag and `pruneDanglingImages` (`docker image prune -f`,
@@ -169,6 +718,79 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   That's by design (the webui can't clobber external workspaces), not a bug.
 - **JSX/CSS edits need `cd src/client && npm run build` + `docker restart
   paddock`** — the SPA serves the built bundle from `src/public/`.
+- **A hand-written SVG `d` with a run-together arc flag silently kills the whole
+  icon, and the browser console is the only cheap oracle.** An arc is
+  `rx ry rot large-arc sweep dx dy`, and the rot + both flags are single
+  characters that must be comma/space delimited — `a2 2 002 2` makes Chrome
+  abort the path with `Expected arc flag ('0' or '1')` and the rest of the icon
+  simply does not draw. 24 such paths had accumulated in this app and were
+  logging on every page. **Do not hand-parse `d` strings to find them** — two
+  regex validators written for this were both wrong in different ways (one
+  tokenized `0118` as one number and would have *dropped* arc parameters; the
+  other flagged `z` as an unknown command). Instead mount every `d` from the
+  source into one throwaway page in `src/public/` and read the console: Chrome
+  names the exact malformed path. Two traps that cost a build each: a **zero
+  radius** (`a2 0 …` where every sibling corner is `a2 2`) is invalid and
+  reports a misleading "Expected arc flag", and an arc with only 6 parameters
+  cannot be repaired by any rule — it needs a human. Verify the repair by
+  `getTotalLength()` + `getBBox()` per icon, since a path can parse cleanly and
+  still be the wrong shape. Note `npm run build` **wipes `src/public/`**, so
+  regenerate the scratch page after every build.
+- **A token that no SOURCE FILE uses never gets a class — so a token consumed by
+  hand-written CSS has to be read as a VARIABLE, not a utility.** Tailwind only
+  emits `.shadow-tooltip` if some `.jsx` writes it; the tooltip's shadow lived
+  in a hand-written `index.css` rule that spelled the value out inline, so
+  `--shadow-tooltip` was defined, documented, and used by nobody. Fix is
+  `box-shadow: var(--shadow-tooltip)` in the CSS rule. After any token change,
+  grep the BUILT css for **every** token you touched, and remember the built
+  bundle's name changes on every build (`src/public/assets/index-*.css` — use
+  `ls -t`, never a hardcoded hash).
+
+- **`tailwind-merge` resolves a conflict in favour of the LAST class, so
+  `className` must be the last argument of every primitive's `cx()`.** In
+  `Input.jsx` the base took `className` and the component then appended
+  `'py-2 resize-y'` / `'pr-8'` AFTER it — so `resize-none` on a `Textarea` was
+  silently a no-op and an `AgentDetail` editor had to fall back to an inline
+  `style={{resize:'none'}}`. `base()` must NOT accept `className`; each
+  component ends its own `cx(base(...), ownStructure, className)`. When a
+  primitive's own class needs to lose, that is a missing prop
+  (`Card plain`), never a class the caller can pass.
+
+- **`tailwind-merge` does NOT put `shadow-card` and `shadow-none` in the same
+  group**, so both rules emit and the result is a stylesheet-order coin flip.
+  Same trap for any "remove a primitive's default" attempt: use the `plain`
+  prop.
+
+- **Reading the DOM in the same `Runtime.evaluate` as a React `el.click()` is a
+  FALSE NEGATIVE** — React batches the re-render, so the assertion runs against
+  the pre-click tree and reports the feature as broken. Click in one evaluate,
+  assert in a second. (Cost a false "the `msn-selected` hook is missing"
+  diagnosis on `ProjectDialog`.)
+
+- **A dense listing needs its own control scale — do not force the form scale
+  onto it.** `Button`'s `ctl-sm`/`ctl-md` min-heights make sense on a form but
+  would make every Mission project row taller than its content, and `icon`
+  pins an inline width that overrides a caller's `h-8 w-8`. Hence `size="bare"`
+  (no height, no font size) plus `variant="link" | "dangerLink" | "dangerSoft" |
+  "none"`. `none` matters twice over: an unknown variant string silently falls
+  back to `secondary` and adds a border nobody asked for.
+
+- **A colour utility whose token is not in `@theme` is dropped SILENTLY — no
+  build error, no class in the CSS, and it fails only in dark mode.** Tailwind
+  v4 generates utilities from the `--color-*` names in `index.css` `@theme
+  inline`; anything else (`bg-ok`, `text-warn`, `text-error`, `text-amber`,
+  `hover:bg-danger-hover` — none of which exist) simply produces no rule, so the
+  element falls back to the inherited colour and the border/fill silently
+  vanishes. The palette (`styles/palette.css`) names statuses
+  **success / warning / danger / info / brand** — never ok/warn/error — and there
+  is no `-hover` shade for the status fills, only for the surfaces
+  (raised/raised-hover) and the accent. A solid fill also needs its matching
+  `-ink` text token, NOT `text-ink`: `bg-accent text-ink` is dark brown in
+  light mode but **cream in dark mode**, which is how the whole Mission page
+  ended up with light text on orange. Rule: `bg-<x>` → `text-<x>-ink`,
+  `bg-<x>-soft` → `text-<x>`. Verify by grepping the BUILT css
+  (`src/public/assets/index-*.css`) for the class, and by reading
+  `getComputedStyle` in the browser in BOTH modes — not by reading the JSX.
 - **`api(path, { body })` wants a plain object, not `JSON.stringify`ed** —
   `src/client/src/lib/api.js` does the `JSON.stringify` itself, so passing a
   pre-stringified body sends a quoted string and the backend sees the wrong
@@ -234,6 +856,64 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   openclaw driver** (never crashes).
 - Config formats: openclaw/picoclaw/opencode `json`, hermes `yaml`, codex
   `toml`. Non-`json` formats are served/written verbatim, no secret redaction.
+
+## Infinite loop (`infinite.md`)
+
+The user keeps a **forever task queue** at the repo root: `infinite.md`, a
+plain checklist of **plan paths**. They append lines; the agent works them, in
+order, and ticks them off. It is a convention, not a feature — nothing in `src/`
+reads it. **Infinite means infinite**: once started on the queue
+("check infinite" / "keep going" / "drain" or any work-the-queue instruction),
+keep working plan after plan without stopping until the queue is empty.
+Never stop after one task to ask what is next. Never build a daemon around it
+unless the user explicitly asks for unattended runs.
+
+```
+## Queue                     ## Done
+- [ ] plans/58-x.md          - [x] plans/57-y.md — absorbed 2026-09-27
+```
+
+The loop, in order:
+
+1. **Read `infinite.md` first**, before picking anything up, even when the user's
+   message names no plan. Work the **first `- [ ]` line** — order IS priority.
+   **Then read `## Needs your call` and surface any entries in your report.** They
+   are deliberately not `- [ ]` lines so this loop cannot act on them: they are
+   decisions the agent has no standing to make (closing a live session, deleting a
+   pad with an audit trail, rotating a credential). Mentioning them is the job;
+   guessing is how a user's conversation gets killed unattended.
+2. **Claim before working**: rewrite the line to `- [~] plans/<file> — started
+   <date>` as your FIRST act. A crash or a truncated turn then leaves an honest
+   trace instead of silently re-picking the same item forever.
+3. **A path whose file is gone is DONE, not an error** — the plan was absorbed
+   into `docs/` and deleted per the plan workflow. Move the line to `## Done`
+   with today's date and continue to the next one. Never report a missing plan
+   as a blocker.
+4. **Do the plan**, following the normal plan workflow above: build it, verify it
+   live in the browser, keep its `## Status:` header and checklist current.
+5. **Test it, commit it, then tick it** — run the relevant tests individually
+   (never the combined `node --test test/` suite), verify live in the browser,
+   then `git add` only intended files + `git commit`. **Tick `[x]` only on real
+   completion** — the plan's own `## Status:` reads `Complete`, the work is
+   tested + committed + verified, and the plan has been absorbed into `docs/`
+   and its file removed. Then move the line into `## Done` as
+   `- [x] <path> — absorbed <date>`.
+6. **Blocked is not done**: leave the line `- [ ]` and append the blocker to it
+   (`— blocked: <what is needed>`), commit what is done, then move to the next
+   item immediately — never stop the run for a blocker. A partial plan that is
+   nearly done stays `[ ]` and gets finished next time — never tick a plan that
+   still has open items.
+7. **Never stop after one — move to the next**: after test + commit + tick,
+   immediately start the next `- [ ]` line in the same run. Repeat until the
+   queue is empty. Report progress between items but do not wait for user input.
+   "One plan per turn" is abolished — **infinite means keep going**.
+8. **An empty queue means STOP.** Report "queue empty" and do nothing else.
+   **Never invent a plan, feature, or todo to fill an empty queue** — that is
+   the single failure mode that turns this into an unattended agent building
+   things nobody asked for.
+9. Keep the `## Queue` and `## Done` sections tidy as you go: exactly one
+   `[~]` line exists at a time, finished lines leave the queue, and the file
+   stays short enough to read at a glance.
 
 ## Documentation (docs/)
 

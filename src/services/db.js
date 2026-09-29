@@ -4,7 +4,12 @@ const fs = require('fs');
 
 const { ensureDbOwned } = require('./ownership');
 
-const DB_PATH = path.join(__dirname, '..', 'data', 'app.db');
+// The env override exists so a test can point at a FIXTURE — the migrations below
+// are the one part of the schema that runs against a real, populated database on
+// every boot, and they had no coverage: a migration that silently does nothing
+// (column missing) only surfaces much later as a failing INSERT. Unset in
+// production, where the path is the one below.
+const DB_PATH = process.env.PAD_DB_PATH || path.join(__dirname, '..', 'data', 'app.db');
 
 let _db = null;
 
@@ -160,6 +165,7 @@ function migrate(db) {
       tmux_id TEXT NOT NULL,
       label TEXT NOT NULL DEFAULT '',
       origin TEXT NOT NULL DEFAULT 'human',
+      created_by TEXT,
       locked INTEGER NOT NULL DEFAULT 0,
       agent_session_id TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -193,6 +199,32 @@ function migrate(db) {
   const taskCols = db.prepare("PRAGMA table_info(tasks)").all().map(c => c.name);
   if (!taskCols.includes('last_output_at')) {
     db.exec("ALTER TABLE tasks ADD COLUMN last_output_at TEXT");
+  }
+
+  // Which key (or which signed-in user) opened a Mission session (plan 67,
+  // 67.3). `origin` only says the KIND of starter — human or agent — so
+  // "did I start this one?" and "was that really an agent?" both had no
+  // answer beyond the caller's own memory. Fresh DBs get the column from the
+  // CREATE above; existing ones need the ALTER, and their rows stay NULL
+  // rather than being back-filled with a guess.
+  const sessionCols = db.prepare("PRAGMA table_info(mission_sessions)").all().map(c => c.name);
+  if (!sessionCols.includes('created_by')) {
+    db.exec("ALTER TABLE mission_sessions ADD COLUMN created_by TEXT");
+  }
+
+  // `last_seen_at` moved a long time and a caller could not tell what it meant:
+  // it was a PROBE clock (something asked) sitting under a name that reads as
+  // ACTIVITY (the agent did something). Plan 62 1f splits the two. `last_output_at`
+  // is the one a caller actually wants — it advances only when the pane's content
+  // genuinely CHANGED, so a stale one means the agent has gone quiet. The hash
+  // is what makes "changed" answerable: without it every read would look like
+  // output and the field would be the same lie wearing a new name. Rows stay NULL
+  // until something has actually captured a pane — a guess would be worse.
+  if (!sessionCols.includes('last_output_at')) {
+    db.exec("ALTER TABLE mission_sessions ADD COLUMN last_output_at TEXT");
+  }
+  if (!sessionCols.includes('last_output_hash')) {
+    db.exec("ALTER TABLE mission_sessions ADD COLUMN last_output_hash TEXT");
   }
 }
 
