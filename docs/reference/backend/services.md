@@ -329,7 +329,7 @@ and its own image tag (`paddock-vm-&lt;name&gt;:latest`). See
   `buildWebHook` starts web servers through `tee`: output remains in
   `&lt;dataDir&gt;/web.log` and is also written to `/proc/1/fd/1` for `docker logs`
   and the Logs tab.
-- `getNetworkHealth(name)` — resolves the compose `network_mode: container:&lt;peer&gt;` against live docker state → `none` / `ok` / `stale` (peer recreated, recorded ID dead) / `peer-stopped`
+- `getNetworkHealth(name, { declaredPeer })` — the pad's network peer verdict; see § [Network peer truth](#network-peer-truth). `declaredPeer` is meta `NETWORK` and is **required for the verdict to be right**
 - `validateWorkspaceMount(name, agent, host, dir)` — the single authority for custom workspace binds (plan 24); returns `{ host, container, webuiVisible, hostBrowsable }` or throws
 - `autoSshPort()` — next free host port starting at 43817 (scans web/extra/ssh host ports)
 - `readSshCport(name)` — persisted SSH container port (meta `SSH_CPORT`, default `22`); `ensureSshStartBlock(name)` — backfills the `SSH_PORT` block into an old instance's own `build/start.sh` (idempotent)
@@ -419,9 +419,82 @@ Each check: `{ key, label, status: 'ok'|'warn'|'error', expected, actual, hint }
 - `checkContainerHealth(name, onCheck?)` — runs all checks. With `onCheck`, each check is streamed as produced (health-check job); without, the full report is returned at once. Returns `{ name, status, checks, counts }` via `summarize(name, checks)`.
 - `summarize(name, checks)` — tallies counts, derives `status` (`error` if any, else `warn` if any, else `ok`).
 
+A **compose file that cannot be read is not a fact about the container.** Every check
+after the container block derives its *expectation* from it, so with no readable
+declaration there is nothing to compare against: the check records the missing
+declaration and returns, rather than carrying on (which dereferenced `null` and
+reported a `TypeError` in place of the container facts — running/health/image —
+already gathered). Reproduced against `HEAD` on `paddock`; the hint names which
+checks were skipped.
+
+The network check **is** the shared peer verdict plus this service's own
+presentation — see § [Network peer truth](#network-peer-truth). `staleBinding` is a
+**warn**, not an error, because the peer is healthy and recreating *it* would
+change nothing.
+
 **Checks (11):** compose file exists · container exists/status (with OOM-kill + exit-code reason) · Docker healthcheck probe (`healthy`/`starting` warn/otherwise error) · restart policy vs compose · image (declared vs actual; warn on mismatch) · network mode + `container:` peer existence/running state · volumes/bind mounts (incl. `/workspace` host-path split-brain detection) · docker socket mount · published ports · environment keys (secrets excluded via `/(password|token|key|secret)/i`).
 
 Driver-aware app-level checks are planned — see `plans/20-health-check-driver-aware.md`.
+
+## Network peer truth (services/net-peer.js) — plan 66
+
+**One rule, one place, for a question with two consumers.** A peer-networked pad
+records `network_mode: container:<peer>` as a container **ID** at create time. If
+that peer container is later recreated, the recorded ID dies and the pad cannot
+start (`joining network namespace of container: No such container`). The surface
+has to distinguish that from a peer that is merely stopped, because they need
+**opposite** actions — and the old code could not:
+
+- **`services/net-peer.js`** — `inspectPeer(ref)` resolves a peer by **name or
+  id** (`docker inspect … {{.Name}}|{{.Id}}|{{.State.Status}}`), never throws, and
+  returns `null` only for a reference that does not resolve. `classifyNetworkPeer(
+  { mode, bound, declaredRef, declared })` is **pure** — it rules on lookups it is
+  handed and knows nothing about docker. `defaultRun` is the default runner, so a
+  caller cannot silently pass none.
+- **Consumers:** `vm-manager.getNetworkHealth(name, { declaredPeer })` (settings /
+  `settings_get`, from the live `NetworkMode` + meta `NETWORK`) and
+  `container-health`'s network check (from the compose `network_mode` +
+  the live `NetworkMode`). They used to be **two copies of one rule, from two
+  different inputs** — which is how settings could say `stale` about a peer the
+  health check had just called running. `list_agents` carries no health, so there
+  is no third consumer.
+
+**States** — four distinct problems, because only one needs the peer touched:
+
+| state | means | the fix |
+| --- | --- | --- |
+| `ok` | default network, or bound to the running peer it was configured for | none |
+| `staleBinding` | the configured peer is **running and needs nothing**; only this pad's binding is dead (or points at a different peer) | recreate **this pad** to rebind |
+| `peer-stopped` | the named peer exists but is not running | start **the peer** first |
+| `stale` | no peer we can name exists at all | create it, or pick another |
+
+Fields: `state`, `networkMode`, `peerId` (the id this pad is bound to),
+`peerName`, `peerState`, `peerCurrentId` (the configured peer's id now),
+`staleBinding`, and **`reason` on every non-`ok` state** — no state is a shrug.
+`peerId !== peerCurrentId` **is** the stale binding.
+
+Two answers that must never be confused, and how they are kept apart:
+
+- **A pad that could not be inspected** is `{ state: 'none', checked: false,
+  reason }`. `readSettings` used to catch the throw and leave its
+  `{ state: 'ok' }` default in place, so an unreadable answer read as the one
+  healthy state there is. `checked: false` is **not** a healthy pad.
+- **A peer reference that does not resolve** is `stale`/`peer-stopped` — a fact
+  about the peer. It is never "we could not look", because a lookup that never
+  *ran* looks identical to an absent peer: that is why `inspectPeer` has a default
+  runner, and why wiring the health service to the rule was verified live rather
+  than by unit test alone.
+
+**Measured on the live fleet (2026-09-29):** 3 of 5 peer-networked pads were bound
+to deleted peer ids while their declared peer was **running** — reported
+`stale` with `peerName: ""`/`peerState: ""`. Two of them were `exited`, with
+docker's own reason being the dead namespace, so the misleading answer had a real
+consequence: the pad could not start. All 5 now agree between `settings_get` and
+`health`.
+
+This is **peer liveness, not addressing** — the pad subnet pool (plan 59) is a
+separate concern. `net-peer.js` inspects containers only; no network or subnet
+object is ever read.
 
 ## Log Store (log-store.js)
 
@@ -803,6 +876,13 @@ Rules:
     (the other PADs on that workspace) and a `note`. Its `ports` are a plan; the
     PAD's live bindings are the `actualPorts` in the web state. It inherits the
     PAD's `userMode`/`containerUser` rather than reporting blanks.
+  - `networkHealth` is the peer verdict — read it **before** deciding a pad is
+    broken, and see § [Network peer truth](#network-peer-truth) for the states.
+    The short version: `staleBinding` means the peer is running and **only this
+    pad** must be recreated; `peer-stopped` means **the peer** must be started
+    first. `checked: false` is not a healthy pad, and `reason` is present on
+    every non-`ok` state. The `health` tool reports the same verdict on its
+    `network` check (`peerName`/`peerState`), so the two can be compared.
 - Destructive tools require a guard: `delete_agent` needs `confirm: true`
   (and `create_agent` too — it adds fleet members).
 - The `mission_*` tools (plan 55, extended by plan 65) are the agent-visible half

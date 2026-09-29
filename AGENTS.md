@@ -304,6 +304,48 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   slice, and if the fetch itself is capped say so (`fetch_capped`) rather than
   letting `total` become a silent maybe. This is the same shape as the
   `availableNetworks` cap in `settings_get`.
+- **A lookup that was never RUN is indistinguishable from a fact it would have
+  found — and the unit tests stay green while it ships.** Wiring plan 66's shared
+  peer rule into `container-health` called `inspectPeer(ref)` with no runner; the
+  function's old `if (!run) return null` guard turned that into a null, so both
+  lookups said "no such container" and all five peer-networked pads reported
+  `stale`/`error` while three peers were demonstrably running. Nothing in the
+  suite caught it because the tests cover the PURE classifier and
+  `checkPublishedPorts`, never the docker path — so the fix was a **default
+  runner** plus one test that asserts the default really reaches docker, and the
+  lesson is the shape: **a function that returns a falsy value for "I could not
+  look" is indistinguishable from one that returns it for "it is not there", and
+  no unit test over the pure half will ever see it.** Re-probe LIVE after wiring
+  any new consumer to a lookup, and compare the consumers against each other
+  (settings vs health on the same pad) — agreement is the cheapest oracle there
+  is for this class.
+- **The right answer to "the surface contradicts itself" is usually that TWO
+  components each re-derived it, so fix the derivation, not the two
+  answers.** Plan 66's `networkHealth` said `stale` (with `peerName: ""`) for a pad
+  whose peer was running, and the health check said something else — because
+  `vm-manager` read the live `HostConfig.NetworkMode` while `container-health` read
+  the compose `network_mode`, and each had its own copy of the rule. Both were
+  locally reasonable and the pad had two answers. Extracting the rule into a pure
+  `classifyNetworkPeer()` (`services/net-peer.js`) that both call is what made the
+  contradiction **impossible** rather than fixed; the two inputs (compose's
+  declared name vs the live bound id) are what make the case real, so pass BOTH
+  rather than picking one. Note the state that mattered: `staleBinding` — the peer
+  is running and needs nothing, only the pad's binding is dead. Collapsing it
+  into `stale` is what told a caller to recreate a peer that was fine **and** hid
+  that the pad could not start (docker's own error: `joining network namespace of
+  container: No such container`). When a verdict splits into "which of these two
+  things is wrong", that is the finding — one combined state is what sent the
+  caller to the wrong object.
+- **Verify a refactor that changes a SOURCE-TEXT assertion: the assertion is a
+  pin on where the fact LIVES, so moving the fact turns the test red for a
+  reason that is not a bug.** After extracting the rule, three tests failed on
+  wording and location, not behaviour: a `reason` that said `Start it` where the
+  test read `/start it/`, and an assertion that the health hint says `IS running`
+  when the sentence had moved into `net-peer.js`. The fix is to re-point the
+  assertion at the fact's new home and say why in a comment — **never** to relax
+  it into something that passes. Re-run the mutation control afterwards: the
+  guard is only proven by the tests going red when the code is removed, and a
+  control that no longer bites proves nothing about the restored code either.
 - **A summary field derived from two facts is a SECOND answer to a question the
   row already answers, and it will contradict it.** `task_submit` returned
   `mode: pad ? 'push' : 'pool'` at the top while the row inside the same response

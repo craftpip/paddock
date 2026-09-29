@@ -14,6 +14,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
 const { buildEnvPath } = require('./instance-image');
+const { inspectPeer, classifyNetworkPeer } = require('./net-peer');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const HOST_WORKSPACE = process.env.HOST_WORKSPACE_ROOT || WORKSPACE;
@@ -63,17 +64,6 @@ async function resolveCompose(name) {
     const r = await runCmd('docker', args, { timeout: 20000 });
     const data = JSON.parse(r.stdout);
     return data.services || null;
-  } catch {
-    return null;
-  }
-}
-
-/** Resolve a container peer (name or id) to { name, id, state }. */
-async function resolvePeer(peer) {
-  try {
-    const r = await runCmd('docker', ['inspect', peer, '--format', '{{.Name}}|{{.Id}}|{{.State.Status}}'], { timeout: 15000 });
-    const [name, id, state] = (r.stdout || '').split('|');
-    return { name: (name || '').replace(/^\//, ''), id: (id || '').trim(), state: (state || '').trim().toLowerCase() };
   } catch {
     return null;
   }
@@ -130,10 +120,17 @@ async function checkContainerHealth(name, onCheck) {
   const compose = services && services[name];
   const ctr = await inspectContainer(name);
 
-  if (!compose) {
+  // A compose file we could not read is not a fact about the container. Every
+  // check after the container block derives its EXPECTATION from it, so with no
+  // compose there is nothing to compare against — and the old code carried on and
+  // dereferenced `null`, so a pad with no compose file reported a TypeError
+  // instead of the container facts it had just established. Record it, and
+  // resume once the compose-independent checks are in.
+  const composeMissing = !compose;
+  if (composeMissing) {
     add({
       key: 'compose', label: 'Compose file', status: 'error', expected: 'docker-compose.yml', actual: null,
-      hint: `No compose file at ${composePath(name)} — recreate the agent to regenerate it.`,
+      hint: `No compose file at ${composePath(name)} — recreate the agent to regenerate it. The container facts below are real; every check that compares the declaration against the container was skipped.`,
     });
   }
 
@@ -173,6 +170,11 @@ async function checkContainerHealth(name, onCheck) {
     }
   }
 
+  // Everything below compares the DECLARATION against the container, so with no
+  // readable compose there is nothing to compare to. Stop here rather than
+  // dereferencing a null and reporting a TypeError in place of a report.
+  if (composeMissing) return summarize(name, checks);
+
   // ── Restart policy ─────────────────────────────────────────
   const rp = (ctr.HostConfig && ctr.HostConfig.RestartPolicy) || {};
   const expRestart = (compose.restart || '').trim() || 'no';
@@ -197,24 +199,35 @@ async function checkContainerHealth(name, onCheck) {
   // ── Network mode / peer ────────────────────────────────────
   const expNet = compose.network_mode || '';
   const actNet = (ctr.HostConfig && ctr.HostConfig.NetworkMode) || '';
+
   if (expNet && expNet.startsWith('container:')) {
-    const peerRef = expNet.slice('container:'.length).trim();
-    const peer = await resolvePeer(peerRef);
-    if (!peer) {
-      add({
-        key: 'network', label: 'Network peer', status: 'error', expected: expNet, actual: actNet,
-        hint: `The network peer '${peerRef}' no longer exists (it was likely recreated). Recreate this container so it re-joins the current one.`,
-      });
-    } else if (peer.state !== 'running') {
-      add({
-        key: 'network', label: 'Network peer', status: 'error', expected: `${peerRef} (running)`, actual: `${peerRef} (${peer.state})`,
-        hint: `The network peer '${peerRef}' is not running. Start it, then recreate this container.`,
-      });
-    } else if (actNet === `container:${peer.id}` || actNet === `container:${peerRef}`) {
-      add({ key: 'network', label: 'Network mode', status: 'ok', expected: expNet, actual: actNet });
-    } else {
-      add({ key: 'network', label: 'Network mode', status: 'warn', expected: expNet, actual: actNet, hint: 'Container is bound to a different peer than the compose file. Recreate to rebind.' });
-    }
+    // The SAME classification settings_get uses, on the same inputs — so the
+    // two cannot drift into disagreeing about one pad (plan 66). The compose
+    // file names the peer; the live container records the id it was bound to.
+    const declaredRef = expNet.slice('container:'.length).trim();
+    const verdict = classifyNetworkPeer({
+      mode: actNet,
+      bound: await inspectPeer(actNet.startsWith('container:') ? actNet.slice('container:'.length).trim() : ''),
+      declaredRef,
+      declared: await inspectPeer(declaredRef),
+    });
+
+    // Presentation is health's own business; the VERDICT is not. A pad bound to
+    // a dead id while its peer runs is a warning about the binding, not an error
+    // about the peer — recreating the peer would change nothing at all.
+    const STATUS = { ok: 'ok', staleBinding: 'warn', 'peer-stopped': 'error', stale: 'error' };
+    add({
+      key: 'network',
+      label: verdict.state === 'ok' ? 'Network mode' : 'Network peer',
+      status: STATUS[verdict.state] || 'error',
+      expected: verdict.peerName ? `${verdict.peerName} (${verdict.peerState})` : expNet,
+      actual: actNet,
+      peerName: verdict.peerName,
+      peerState: verdict.peerState,
+      peerCurrentId: verdict.peerCurrentId,
+      staleBinding: verdict.staleBinding,
+      hint: verdict.state === 'ok' ? undefined : verdict.reason,
+    });
   } else if (expNet) {
     const networks = Object.keys((ctr.NetworkSettings && ctr.NetworkSettings.Networks) || {});
     if (networks.includes(expNet)) {

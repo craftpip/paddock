@@ -78,3 +78,20 @@ describe('container-health - published ports are read off the door', () => {
     assert.strictEqual(checkPublishedPorts({ ports: [] }, { NetworkSettings: { Ports: {} } }, door, withTcpOnly).status, 'error', 'a tcp binding does not satisfy a udp port');
   });
 });
+
+describe('container-health — a compose file we could not read', () => {
+  // Found live while working plan 66: `paddock` has no readable compose file,
+  // and the check ran straight past the "no compose" note into
+  // `compose.restart` — a TypeError, so the caller got an opaque failure
+  // instead of the container facts (running, health, image) already gathered.
+  // Verified live on `paddock`; this is a source pin because the function calls
+  // docker and cannot be exercised without it, and a pin is better than the
+  // crash coming back unnoticed.
+  it('stops before the first check that needs the declaration', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'container-health.js'), 'utf8');
+    assert.match(src, /if \(composeMissing\) return summarize\(name, checks\);/,
+      'the declaration-dependent checks are skipped, not dereferenced');
+    assert.match(src, /hint: `No compose file at \$\{composePath\(name\)\}/,
+      'and the note still says what could not be read');
+  });
+});

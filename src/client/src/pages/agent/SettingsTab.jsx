@@ -407,7 +407,9 @@ export default function SettingsTab({ agent }) {
   async function handleRecreateNetwork() {
     const ok = await confirm({
       title: 'Recreate container to fix network?',
-      message: `This agent routes through ${networkPeerLabel}, which has been recreated or stopped. The container can't start until it re-joins the current peer.\n\nRecreating will stop and recreate ${agent.name} so it rebinds to the current network peer. No settings change — the compose file already points at ${settings?.network || 'the peer'} by name.`,
+      message: `${networkStaleBinding
+        ? `${networkPeerLabel} is already running — this pad is only bound to an older, deleted peer container, so it can't start until it rebinds.`
+        : `This agent routes through ${networkPeerLabel}, which has been recreated or stopped. The container can't start until it re-joins the current peer.`}\n\nRecreating will stop and recreate ${agent.name} so it rebinds to the current network peer. No settings change — the compose file already points at ${settings?.network || 'the peer'} by name.`
       confirmText: 'Recreate',
       cancelText: 'Cancel',
     })
@@ -449,9 +451,15 @@ export default function SettingsTab({ agent }) {
   const toggleDocker = !!settings?.allowDocker
   const currentNetwork = settings?.network || ''
   const networkHealth = settings?.networkHealth || {}
+  // `staleBinding` is its own state (plan 66) because it is a different problem
+  // with a different cause: the declared peer is RUNNING and only this pad's
+  // bound container id is dead. It still needs a recreate to rebind, so it must
+  // raise the same banner — a state the UI does not know about is a pad that
+  // silently stops warning.
   const networkStale = networkHealth.state === 'stale'
+  const networkStaleBinding = networkHealth.state === 'staleBinding'
   const networkPeerStopped = networkHealth.state === 'peer-stopped'
-  const networkBroken = networkStale || networkPeerStopped
+  const networkBroken = networkStale || networkStaleBinding || networkPeerStopped
   const networkPeerLabel = networkHealth.peerName || networkHealth.peerId || currentNetwork || 'the network peer'
   const networkOptions = (containers.some((c) => c.name === currentNetwork) || !currentNetwork
     ? containers
@@ -754,14 +762,18 @@ export default function SettingsTab({ agent }) {
       {networkBroken && (
         <section className="bg-warning-soft border border-warning-line/70 rounded-xl p-5">
           <h3 className="text-sm font-medium text-warning">
-            {networkStale ? 'Network peer is stale — container can\u2019t start' : 'Network peer is stopped'}
+            {networkStaleBinding
+              ? `Network peer ${networkPeerLabel} is running — this pad is bound to the wrong one`
+              : networkStale ? 'Network peer is stale — container can\u2019t start' : 'Network peer is stopped'}
           </h3>
           <p className="text-xs text-warning/90 mt-1 max-w-lg">
-            {networkStale
+            {networkStaleBinding
+              ? `${networkPeerLabel} is up and needs nothing. This container is still bound to an older peer container that no longer exists, so starting fails with "No such container". Recreate to rebind to ${networkPeerLabel}.`
+              : networkStale
               ? `This agent routes through ${networkPeerLabel}, which has been recreated since this container was created. Docker still points at the old (now-deleted) container, so starting fails with "No such container". This is not a Paddock issue — the peer moved.`
               : `This agent routes through ${networkPeerLabel}, which exists but is currently stopped. The agent can't start until the peer is running. Start ${networkPeerLabel} first, then recreate this agent.`}
           </p>
-          {networkStale && (
+          {(networkStale || networkStaleBinding) && (
             <button
               onClick={handleRecreateNetwork}
               disabled={saving}

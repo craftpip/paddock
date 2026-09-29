@@ -6,6 +6,7 @@ const { getDriver, drivers } = require('./drivers');
 const { imageFor, legacySharedImage, buildDir, buildEnvPath, readBuildEnv, setBuildEnv, argsFromDockerfile, readCustomBuild, writeCustomBuild } = require('./instance-image');
 const { ensureOwned, normalizeTree, isSelfManagedAgentData, USER_UID, USER_GID } = require('./ownership');
 const devcontainer = require('./devcontainer');
+const { inspectPeer, classifyNetworkPeer } = require('./net-peer');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const HOST_WORKSPACE = process.env.HOST_WORKSPACE_ROOT || WORKSPACE;
@@ -610,41 +611,50 @@ async function runCompose(name, args, opts = {}) {
  *  records the peer as a container ID at create time. If that peer is later
  *  recreated (gluetun rebuild/restart), the recorded ID dies and `docker
  *  start` fails with "cannot join network namespace ... No such container".
+ *
+ *  The bug this is shaped around (plan 66): the bound ID is not the only way to
+ *  ask about the peer. A pad bound to a DEAD id whose *declared* peer is alive
+ *  and running is a healthy peer with a stale binding — a different problem
+ *  from a peer that is gone, and reporting the second as the first tells the
+ *  caller to recreate something that does not need it while hiding that the
+ *  other thing needs starting. So the declared name is the fallback lookup, and
+ *  every answer carries `checked` + `reason`: a field nobody could compute must
+ *  never read the same as a field that says "broken".
+ *
+ *  `declaredPeer` is the pad's meta `NETWORK` (the name compose points at). Pass
+ *  it; without it the fallback cannot happen and a stale binding is reported as
+ *  an unresolvable peer.
+ *
  *  Returns:
- *    { state: 'none' }                 — container doesn't exist yet
- *    { state: 'ok', networkMode }      — default network or live peer
- *    { state: 'stale', ... }           — peer container is gone (needs recreate)
- *    { state: 'peer-stopped', ... }    — peer exists but is not running
+ *    { state: 'none',         checked:false, reason } — the pad is not inspectable
+ *    { state: 'ok',           checked:true,  networkMode }            — default network
+ *    { state: 'ok',           checked:true,  peerName, peerState }    — live peer
+ *    { state: 'staleBinding', checked:true,  … }  — peer is RUNNING; only our bound id is dead
+ *    { state: 'peer-stopped', checked:true,  … }  — the named peer exists, not running
+ *    { state: 'stale',        checked:true,  … }  — no peer we can name
  */
-async function getNetworkHealth(name) {
+async function getNetworkHealth(name, { declaredPeer = '', run = runCmd } = {}) {
   let mode = '';
   try {
-    const r = await runCmd('docker', ['inspect', name, '--format', '{{.HostConfig.NetworkMode}}'], { timeout: 15000 });
+    const r = await run('docker', ['inspect', name, '--format', '{{.HostConfig.NetworkMode}}'], { timeout: 15000 });
     mode = (r.stdout || '').trim();
   } catch {
-    return { state: 'none', networkMode: '' };
+    // The pad's OWN container could not be inspected. That is not a verdict
+    // about the peer at all, so it gets its own state: a caller must be able to
+    // tell "I could not check" from "I checked and it is broken".
+    return { state: 'none', networkMode: '', checked: false, reason: 'pad container not inspectable' };
   }
 
-  if (!mode.startsWith('container:')) {
-    return { state: 'ok', networkMode: mode };
-  }
-
-  const peerId = mode.slice('container:'.length).trim();
-  let peerName = '';
-  let peerState = '';
-  try {
-    const r = await runCmd('docker', ['inspect', peerId, '--format', '{{.Name}}|{{.State.Status}}'], { timeout: 15000 });
-    const [n, s] = (r.stdout || '').split('|');
-    peerName = (n || '').replace(/^\//, '');
-    peerState = (s || '').trim().toLowerCase();
-  } catch {
-    return { state: 'stale', networkMode: mode, peerId, peerName: '', peerState: '' };
-  }
-
-  if (peerState !== 'running') {
-    return { state: 'peer-stopped', networkMode: mode, peerId, peerName, peerState };
-  }
-  return { state: 'ok', networkMode: mode, peerId, peerName, peerState };
+  // One rule, one place (net-peer.js), shared with the health check: the two
+  // used to classify the same question from different inputs and could disagree.
+  const boundRef = mode.startsWith('container:') ? mode.slice('container:'.length).trim() : '';
+  const declared = declaredPeer ? await inspectPeer(declaredPeer, { run }) : null;
+  return classifyNetworkPeer({
+    mode,
+    bound: await inspectPeer(boundRef, { run }),
+    declaredRef: declaredPeer,
+    declared,
+  });
 }
 
 /** Read the persisted custom workspace mount (meta.env WORKSPACE_HOST/WORKSPACE_DIR)
@@ -3228,10 +3238,18 @@ async function readSettings(name) {
   try {
     version = (await driver.currentVersion(name)) || version;
   } catch {}
-  let networkHealth = { state: 'ok' };
+  let networkHealth = { state: 'ok', checked: false, reason: 'not checked' };
   try {
-    networkHealth = await getNetworkHealth(name);
-  } catch {}
+    // The declared peer NAME is what makes the lookup total: without it a dead
+    // bound id is all we have, and a live peer would be reported as unnameable.
+    networkHealth = await getNetworkHealth(name, { declaredPeer: meta.NETWORK || '' });
+  } catch (e) {
+    // A thrown probe used to be swallowed into a bare `state: 'ok'` — the one
+    // outcome that is a lie in the direction that matters (it hides a pad whose
+    // peer is unreachable). An unreadable answer must never read as a healthy one.
+    networkHealth = { state: 'none', checked: false, reason: `network health probe failed: ${(e && e.message) || e}` };
+  }
+
   let workspaceMount = null;
   try {
     workspaceMount = readWorkspaceMount(name, agentType);
@@ -4275,6 +4293,7 @@ module.exports = {
   applySettings, updateAgent, recreateAgent, setMetaFlag,
   instanceComposePath, getComposePath,
   getNetworkHealth,
+  inspectPeer,
   existingServices, startAgent, stopAgent, restartAgent,
   readAgentConfig, redactSecrets, listDoors, startDoors, stopDoors,
    readWebService, applyWebServices, webHookPath, buildWebHook,
