@@ -32,6 +32,27 @@ Business logic: See `overview/business-logic.md` — PAD Discovery and State.
 
 Business logic: See `overview/business-logic.md` — Workspace File Browser.
 
+**The host-browsing gate (plan 64).** `workspace.writeFile` (and every other write
+here) may only touch a path the pad is allowed to browse, and that is TWO
+independent questions — a `hostBrowsable` CAPABILITY and a per-pad PERMISSION:
+
+- **Capability** — can the webui see that folder on the host at all? A workspace
+  that lives inside the project root does, as does the agent's own data dir
+  (`insideDataDir`); one mounted from outside (`/www1`) does not.
+- **Permission** — `HOST_BROWSE=1` in that pad's `meta.env`, and **only** for a
+  mount that is also inside the project root. Granting the flag cannot buy access
+  to a mount the capability says is invisible.
+
+`workspaceMountInfo()` reports both as `hostBrowsable` plus a
+`hostBrowseReason` sentence, so a refusal is always explainable, and
+`settings_get` surfaces it. As of 2026-09-29 exactly one pad is opted in
+(`pad-opencode-paddock-dev`, the paddock repo); every other pad refuses. The
+MCP surface deliberately has **no browse tool** — `workspace_list` /
+`workspace_read` were retired in plan 64 — because listing a whole tree into a
+model's context is a large, usually unwanted read; `exec` on a running pad and
+`workspace_write` are the routes. `plans.js` re-uses this same gate for plan
+reads and writes rather than re-deriving it.
+
 All functions take `(agentId, relativePath)` and internally:
 1. Look up agent by ID via `getAgent()`
 2. Resolve path via `resolveSafePath()` (canonicalize + traversal check)
@@ -42,6 +63,110 @@ All functions take `(agentId, relativePath)` and internally:
 **Max upload size:** 100MB (via `MAX_UPLOAD_SIZE`)
 
 **Legacy functions (kept for compat):** `listParentDir`, `readParentFile`, `downloadParentFile`, `writeParentFile` — these allow browsing above workspace root. Only used by old EJS routes; the React SPA no longer uses them.
+
+## Plans (services/plans.js) — plan 64
+
+A **plan** is one markdown file per piece of work, in that PAD's workspace under
+`plans/`. It is the durable record: a conversation scrolls, is scoped to one
+agent, and ends; a plan does not. Finished plans move to `plans/archive/` — that
+is a human decision (move the file), not a field the tools flip.
+
+**Location is per-PAD, so `agent` is REQUIRED on every plan tool.** Three pads
+routinely share one workspace (`paddock`, `schlorp` and `craftpip` all ran on
+`pad-opencode-proj`), and `/www2/paddock/plans` on one of them sits *outside*
+that pad's workspace root, where traversal is refused. A tool that inferred the
+root would write into somebody else's project.
+
+**Frontmatter is machine-managed; the body is the caller's.** `plans.js` never
+rewrites prose. The stamps each follow one rule, because a wrong stamp is a wrong
+answer later:
+
+| Field | Rule |
+| --- | --- |
+| `created` | set once on first write, never moved |
+| `started` | set once, when the plan first binds a session |
+| `session` | the session given now; a re-bind keeps `started` |
+| `last_activity` | bumped on every write — this is what makes the listing answer "what is being worked on *right now*" |
+| `done` | the human's to set |
+
+Derived on read: `ageMs`, `idleMs`, `elapsedMs`, plus `title` and `status`
+from the file's own first heading and `## Status:` line — the convention this
+repo already uses. A plan with an unparseable frontmatter is still listed, with
+`unreadable` on the row: the body is the durable record, so a broken header must
+not hide the file.
+
+**Writes go through the workspace service, never a private write.**
+`writePlan` calls `workspace.createDirectories()` and `workspace.writeFile()`,
+so it inherits the same path clamp and the same host-browsability gate as every
+other write. `plansRoot()` re-checks that gate itself, because the *read* paths
+need it too. `plans/README.md` (harness guidance) is created on the first plan
+and excluded from the listing — a row with no `created` and no `## Status:` reads
+as a plan nobody wrote.
+
+**`withSessionState` stamps the conversation behind each plan** using the Mission
+service, not a second probe. `mission` owns `live`/`open`/`busy`/`busyKnown`;
+re-deriving any of them here would be a second source of truth written before the
+field existed, and the busy probe is scoped to (PAD, folder), so a stamp computed
+from the plan's folder rather than the session's project would answer about the
+wrong conversation. A plan whose session has no Mission row is `sessionTracked:
+false` with `sessionLive: null` — **unknown, not dead**: the conversation may
+have been started outside the page. All four fields are always present, because a
+missing field and a null one are different to a caller.
+
+## Activity store (services/agent-store.js) — plan 64 §4
+
+Reads one agent conversation out of that agent's **own** store, on the host. Per
+driver:
+
+| Driver | Store | Read |
+| --- | --- | --- |
+| opencode | `data/opencode/opencode.db` (sqlite) | `session` + `message` + `part` |
+| codex | `codex/sessions/**/*.jsonl` (rollout) | `session_meta` / `turn_context` / `event_msg` / `response_item` |
+| claude | `claude/projects/**/*.jsonl` | `type: user|assistant`, `message.content` parts |
+
+The **first path segment is the per-PAD data dir name** (compose mounts
+`<instance>/codex` at `/root/.codex`), so a codex rollout is at
+`<workspace_root>/codex/sessions`. Reading `<workspace_root>/sessions` is a
+`no-store` on every codex pad ever created — a tool that is right about opencode
+and wrong about the other two is the worst kind of wrong.
+
+**Why the queries look the way they do** (measured on a real 731-message
+session, not reasoned about): `part` has an index on `session_id` *alone*, so
+`order by time_created` over parts is a full sort — 10–21 ms per query. A
+bounded window over *messages* does not reach the user either, because each
+assistant **step** is its own message: the newest 12 messages were 12 assistant
+steps and `lastMessage.user` came back null on a session that plainly had one.
+The role is therefore part of the **query**, and the result is one pass answering
+all three questions in ~2 ms. Both `lastMessage.user` and `lastToolCall` walk a
+bounded window of *older* messages of the same role, because the newest message
+of a role is often a step with nothing in it — the in-flight step, or a step that
+only says something.
+
+**A stopped pad still answers.** The store lives in the agent data dir on the
+host, so the read never touches the container: `padRunning` (the container
+state) and `store.available` (could we read it) are different questions, and a
+failure is reported, never smoothed into "no activity". `store.reason` separates
+`no-store` (no such store / empty folder), `empty-store` (the file exists with
+no schema — a pad that has never run its agent), `unreadable` (there and did not
+open) and `session-not-found` (the store *has* transcripts, none of them this
+one, and `store.candidates` then names them). For the JSONL stores a session is
+matched by its **file name**; a store holding exactly one file is answered from
+it and says `matched: "only-file"`, which is a guess, so prefer the id the
+agent's own history printed.
+
+For codex, the human's turn is read from `event_msg` → `user_message`, **not**
+from the `role: user` response items: those carry injected context and
+environment blocks, so the "last user message" from them is the machine talking
+to itself. A call with no output row yet is `running`, not `completed` — the
+quiet lie is the one that says a live tool call is done.
+
+**Redaction happens where the read leaves the process** (`redactSecrets` over the
+whole payload at once, so no field carrying a value is missed). The boundary is
+deliberate and stated in the tool description: secret-*shaped* configuration — any
+`api_key`/`token`/`password`/`*-key` field, any `headers` map, and config/env
+lines carrying such a value — is scrubbed wherever it appears, including inside
+dumped config text; free **prose** is not pattern-matched, so a key pasted into a
+sentence comes back as written.
 
 ## Path Probe (path-probe.js)
 
@@ -527,7 +652,7 @@ the same owner-scoping as the REST API: admin → all agents, user → owned age
 ## MCP Tools (mcp.js)
 
 `src/mcp.js` mounts the paddock's own MCP server at `/mcp` (Streamable HTTP). It
-exposes 34 tools. Every tool is a thin adapter over the same `src/services/`
+exposes 28 tools. Every tool is a thin adapter over the same `src/services/`
 functions the REST API uses — behavior lives in the services, never in the tool
 handlers (no duplication between REST and MCP).
 
@@ -561,6 +686,9 @@ handlers (no duplication between REST and MCP).
 | `mission_session_start` | Open a session: `msn-*` tmux session at the project folder + the driver's TUI | `mission.startSession` |
 | `mission_send` | Type into a live session — refuses a dead, shell, solo-locked or permission-parked one, and confirms the pane took it | `mission.sendText` |
 | `mission_permission_answer` | Answer a permission dialog the pane is parked on (`once` / `reject` from an agent; `always` is the human's route) | `mission.answerPermission` |
+| `plan_list` | The plans in one PAD's workspace (`path` for one plan + its body, `archive` for `plans/archive`, `folder` to scope to one Mission project), each row with `status`, `session`, derived `ageMs`/`idleMs`/`elapsedMs`, the bound conversation's liveness and its `sessionProject` | `plans.listPlans` + `plans.withSessionState` + `plans.scopeByProjectFolder` |
+| `plan_write` | Write one plan file; frontmatter is machine-managed, the body is the caller's; the folder is created on the first plan | `plans.writePlan` (via `workspace`) |
+| `plan_activity` | What one conversation is doing, from the agent's own store on the host: last user + assistant text, last tool call and `lastActivityAt`. Works on a **stopped** pad. Cost is **per driver**: opencode ~2 ms (one indexed query), codex/claude parse that conversation's rollout file. Redacted | `agentStore.readActivity` |
 
 Rules:
 
@@ -682,6 +810,31 @@ Rules:
     and would talk over a session the human was actively driving.
   - `mission_send` goes through `mission.sendText`, the single writer path the
     page's terminal uses, so the per-session solo lock is honoured in one place.
+
+### Project progress: the plans facility (plan 64, closing 67 §67.1)
+
+There is deliberately **no progress field on a project**. `mission_projects`
+reports liveness, and a project whose sessions all died still reports the same
+counts it did while they were alive — that is what the counts mean. "What has this
+project been worked on?" is answered by the **plan files**: `mission_projects
+{folder}` gives the project's `folder`, and `plan_list {agent, folder}` returns
+the plans worked in it, with the conversation each is bound to and its real
+timings. The plan file is the human's own record, so nothing is inferred.
+
+The link runs through the **session**, not the filesystem: plan files live in the
+PAD's workspace `plans/`, which is not a project's folder, so each stamped row
+carries `sessionProject` (`{id, name, folder}`) taken from the Mission session's
+own project row. Two consequences worth stating, because both are ways to lie
+here. A plan whose conversation the page has never seen cannot be attributed, so
+a folder-scoped listing reports `sessionUnattributed` rather than dropping those
+rows — a short list that looks complete is the failure the filter exists to
+prevent. And putting a copy of the plan list under each project folder would be a
+second source of truth for the same thing, kept in step by hand.
+
+Plan 53 Phase 9 (`mission_notes` + a checklist table) is **superseded by this**:
+a plan *is* the checklist item, with the session it is worked in and its timings
+attached, and a second table would be a competing source of truth for the same
+thing. Do not build it.
 
 ### Liveness truth (plan 62)
 

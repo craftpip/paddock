@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { getDb } = require('./db');
 const { getDriver } = require('./drivers');
-const { workspaceMountInfo, readWebService, readWebAuth, isManagedDoorContainer } = require('./vm-manager');
+const { workspaceMountInfo, containerViewOf, readWebService, readWebAuth, isManagedDoorContainer } = require('./vm-manager');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const INSTANCES_DIR = path.join(WORKSPACE, 'instances');
@@ -151,7 +151,13 @@ function buildAgent(vmName, dockerState) {
   let wsMount = null;
   try {
     wsMount = (meta.WORKSPACE_HOST && meta.WORKSPACE_DIR)
-      ? workspaceMountInfo(vmName, agentType, meta.WORKSPACE_HOST, meta.WORKSPACE_DIR)
+      ? workspaceMountInfo(vmName, agentType, meta.WORKSPACE_HOST, meta.WORKSPACE_DIR, {
+          // Explicit per-pad opt-in for host browsing. Deliberately NOT derived
+          // from `webuiVisible`: the webui can reach the whole project root, but
+          // a pad pointed at one subfolder of it must not silently gain host
+          // browsing over its parent.
+          allowHostBrowse: meta.HOST_BROWSE === '1',
+        })
       : null;
   } catch {}
   let effectiveWsDir = driver.workspaceDir || '';
@@ -231,6 +237,21 @@ function buildAgent(vmName, dockerState) {
     runtime_ref: vmName,
     status,
     workspace_root: agentDir,
+    // Where host-scope file operations are clamped (plan 64 3b). Equal to
+    // workspace_root unless the pad opted into host browsing, in which case it
+    // is the workspace mount's own source. The workspace service reads THIS
+    // rather than recomputing the rule, so clearing `hostBrowsable` cannot
+    // leave the clamp pointing somewhere else.
+    //
+    // It must be the webui's OWN view of that source (`containerViewOf`), not
+    // the host path spelled out. `/www2` is mounted `:ro` while the project root
+    // is `.:/workspace:rw` — so writing to the host path's own spelling hits a
+    // read-only mirror and fails EROFS, even with browsing switched on. The
+    // refusal then looks like the gate failing when the gate passed: a third
+    // kind of "not available" that no flag could have predicted.
+    host_browse_root: wsMount && wsMount.hostBrowsable
+      ? (containerViewOf(wsMount.host) || agentDir)
+      : agentDir,
     config_root: configRoot,
     data_dir: driver.dataDir,
     workspace_dir: effectiveWsDir,

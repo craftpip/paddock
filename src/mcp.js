@@ -17,6 +17,8 @@ const { getDb } = require('./services/db');
 const taskRunner = require('./services/task-runner');
 const jobLog = require('./services/job-log');
 const mission = require('./services/mission');
+const plans = require('./services/plans');
+const agentStore = require('./services/agent-store');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const PREFIX = process.env.CONTAINER_PREFIX || 'vm';
@@ -89,6 +91,12 @@ function getUserRole(userId) {
 }
 
 function canAccess(user, agentName) {
+  // A call with no request context (a script driving the handlers directly, a
+  // future call site that forgot `mcpContext.run`) has no identity to check, and
+  // the honest answer to "may this identity reach this pad" is NO. Dereferencing
+  // the null instead turned a refusal into a TypeError the caller reads as a
+  // broken tool.
+  if (!user) return false;
   if (user.role === 'admin') return true;
   if (!user.userId) return false;
   try {
@@ -112,7 +120,7 @@ function requireAccess(user, agentName) {
 
 const READ_TOOLS = new Set([
   'list_agents', 'get_agent', 'agent_logs', 'config_get', 'settings_get',
-  'health', 'workspace_list', 'workspace_read', 'help', 'agent_commands',
+  'health', 'help', 'agent_commands',
   'task_status', 'task_result', 'task_list',
   // Job readers are pure reads on the in-memory job store, so a read-only key
   // may poll the progress of a create/recreate it is not allowed to start.
@@ -120,6 +128,8 @@ const READ_TOOLS = new Set([
   // Mission reads (plan 55): the agent can WATCH the human work without being
   // able to type into it — that separation is the point of the read bucket.
   'mission_projects', 'mission_sessions',
+  // Plans reads (plan 64). `plan_write` is NOT here — see TOOL_GRANT_FOR.
+  'plan_list', 'plan_activity',
 ]);
 
 const TOOL_GRANT_FOR = {
@@ -154,6 +164,10 @@ const TOOL_GRANT_FOR = {
   // mission_send rather than the read bucket, and `always` is refused in the
   // handler regardless of what the key may do.
   mission_permission_answer: 'exec',
+  // plan_write puts a file into a real workspace, so it rides `exec` with the
+  // other verbs that do work — never the read bucket, however harmless "write
+  // my own plan down" sounds next to plan_list.
+  plan_write: 'exec',
 };
 
 function keyGrants(user) {
@@ -451,6 +465,29 @@ function taskRow(t, { full = false } = {}) {
 //
 // `/mcp` has no caller-PAD identity (it sees an API key and nothing else), so
 // the gate is per call: resolve the row → read the PAD name off it → requireTool.
+
+/** A PlansError's machine code is what an LLM branches on
+ *  (`plan_path_invalid` → fix the argument, `plan_workspace_not_host_visible` →
+ *  a different PAD, `plan_session_unknown` → the id is stale). Same reason as
+ *  missionFail: errorResult prints only err.message, so the code goes in the
+ *  text explicitly. */
+function plansFail(err) {
+  if (err instanceof plans.PlansError) {
+    throw new McpError(ErrorCode.InvalidRequest, `${err.code}: ${err.message}`);
+  }
+  if (err instanceof McpError) throw err;
+  console.error('[mcp] plans tool failed:', err?.message || err);
+  throw new McpError(ErrorCode.InvalidRequest, String(err?.message || err));
+}
+
+/** Run a service call with its PlansError turned into a clean tool error. */
+async function plansCall(fn) {
+  try {
+    return await fn();
+  } catch (e) {
+    plansFail(e);
+  }
+}
 
 /** A MissionError's machine code is what an LLM branches on
  *  (`mission_session_locked` → do not retry, `mission_folder_missing` → fix the
@@ -874,59 +911,26 @@ function registerTools(server) {
   );
 
   registerToolBound(
-    'workspace_list',
-    {
-      title: 'List PAD workspace directory',
-      description: 'List the contents of a directory inside a PAD\'s workspace. Safe path resolution prevents traversal.',
-      inputSchema: {
-        name: z.string().describe('PAD name'),
-        path: z.string().optional().describe('Relative workspace path (default: root)'),
-      },
-    },
-    async ({ name, path: relPath }) => {
-      const agent = await requirePad('workspace_list', name);
-      const listing = workspace.listDir(agent.name, relPath || '/');
-      return textResult({ name: agent.name, ...listing });
-    }
-  );
-
-  registerToolBound(
-    'workspace_read',
-    {
-      title: 'Read PAD workspace file',
-      description: 'Read a text file from a PAD\'s workspace. Text only; files larger than 256KB are rejected.',
-      inputSchema: {
-        name: z.string().describe('PAD name'),
-        path: z.string().describe('Relative workspace file path'),
-      },
-    },
-    async ({ name, path: relPath }) => {
-      const agent = await requirePad('workspace_read', name);
-      const stat = workspace.statFile(agent.name, relPath);
-      if (!stat) throw new McpError(ErrorCode.InvalidRequest, `File not found: ${relPath}`);
-      if (stat.size > MAX_READ_BYTES) {
-        throw new McpError(ErrorCode.InvalidRequest, `File too large to read (${stat.size} bytes, max ${MAX_READ_BYTES}): ${relPath}`);
-      }
-      const file = workspace.readFile(agent.name, relPath);
-      return textResult({ name: agent.name, path: relPath, size: file.size, modified: file.modified, content: file.content });
-    }
-  );
-
-  registerToolBound(
     'workspace_write',
     {
       title: 'Write PAD workspace file',
-      description: 'Write text content to a file in a PAD\'s workspace. Creates or overwrites the file.',
+      description: 'Write text content to a file in a PAD\'s workspace. Creates or overwrites the file. Refused with a clear reason when the PAD is not host-browsable (settings_get.workspaceMount.hostBrowseReason says why); the container workspace via `exec` is the path in that case.',
       inputSchema: {
         name: z.string().describe('PAD name'),
         path: z.string().describe('Relative workspace file path'),
         content: z.string().describe('Full file content to write'),
       },
     },
+    // The `await` is load-bearing (plan 64 3a). `workspace.writeFile` is async,
+    // so without it the `requireHostBrowsable` refusal became an unhandled
+    // rejection — it escaped BEFORE the registerTool wrapper could convert it —
+    // and the handler went on to return a bare `{name}` as if it had written the
+    // file. A tool that reports success while writing nothing is worse than one
+    // that is simply missing, because the caller believes the file is there.
     async ({ name, path: relPath, content }) => {
       const agent = await requirePad('workspace_write', name);
-      const result = workspace.writeFile(agent.name, relPath, content);
-      return textResult({ name: agent.name, path: relPath, ...result });
+      const result = await workspace.writeFile(agent.name, relPath, content);
+      return textResult({ ok: true, name: agent.name, path: relPath, ...result });
     }
   );
 
@@ -1917,6 +1921,127 @@ function registerTools(server) {
         hint: r.stillPending
           ? 'The dialog is still on screen — read it with mission_sessions {session_id} before answering again.'
           : 'The prompt is gone. Read the session to see what the agent did next.',
+      });
+    }
+  );
+  // --- plans (plan 64) ----------------------------------------------------
+  // The durable record of a piece of work, kept as a MARKDOWN FILE in the PAD's
+  // workspace under `plans/`, plus the live conversation state layered on top by
+  // plan_activity. `agent` is REQUIRED on all three: three pads share /www1, so
+  // "the workspace" has no single referent across the fleet and guessing one
+  // would file somebody's plan in the wrong project.
+
+  registerToolBound(
+    'plan_list',
+    {
+      title: 'List the plans in a PAD workspace',
+      description: "The plan files in one PAD's workspace, newest activity first. A plan is a markdown file under `plans/` carrying machine-managed frontmatter (`session`, `created`, `started`, `last_activity`, `done`) and the `## Status:` header this project already uses — so a plan is the durable record of a piece of work and stays readable with `exec cat` when this tool is not available. Each row carries `status` (the `## Status:` line), `session` (the agent conversation it is bound to — pass it to `plan_activity`), and the DERIVED `ageMs` / `idleMs` / `elapsedMs`, so \"is this stale?\" is one field instead of date arithmetic. A plan with no session has never been worked in; one with `done` is finished. A bound plan also carries `sessionProject` ({id, name, folder}) — that project is what a Mission project's progress is made of, and `folder` narrows the listing to one project for you. A bound plan also carries the state of its conversation: `sessionTracked` (is this conversation one the Mission page knows at all — `false` means it was started outside the page, NOT that it is dead) and then `sessionLive` / `sessionOpen` / `sessionBusy` / `sessionBusyKnown`, taken from the Mission service rather than re-probed here. Archived (finished) plans live in `plans/archive` and are listed with `archive: true`.",
+      inputSchema: {
+        agent: z.string().describe('PAD name — required: the plans folder is per-PAD'),
+        path: z.string().optional().describe('Narrow to ONE plan FILE, e.g. "64-plans-facility.md", and get its body. Omit for the whole folder (a folder listing is archive: true, not a path).'),
+        archive: z.boolean().optional().describe('List plans/archive (finished plans) instead of plans/ (default false)'),
+        folder: z.string().optional().describe("Only plans being worked in the Mission project at this folder (a project's folder from mission_projects). Plans FILES live in the pad workspace, so a plan is matched through the project of the conversation it is bound to; a plan whose session the page does not know cannot be attributed, and those are reported as sessionUnattributed rather than quietly dropped. Cannot be combined with `path` — that reads one file, this scopes the list."),
+      },
+    },
+    async ({ agent, path: relPath, archive, folder }) => {
+      const pad = await requirePad('plan_list', agent);
+      return plansCall(async () => {
+        const row = plans.requireAgent(pad.name);
+        const dir = plans.plansDir(row, { archive: !!archive });
+        // `path` and `folder` are two DIFFERENT questions — one file, versus the
+        // set belonging to a project — and the one-file branch returns before the
+        // scope is applied. Answering with the file anyway would make a filter
+        // that looks like it ran and did not, which is indistinguishable from a
+        // match. Refuse, and say which call answers the conjunction.
+        if (relPath && folder) {
+          throw new plans.PlansError(
+            'plan_path_and_folder',
+            '`path` reads ONE plan file and `folder` scopes the LIST to a Mission project — they are two different questions. Call plan_list {agent, folder} to see the project\'s plans, then read the one you want with {agent, path}.'
+          );
+        }
+        // ONE plan named → that plan, with its body. The listing is metadata, and
+        // a caller holding a file name wants the file; answering with a one-row
+        // list of titles and no way to get the text would send them to
+        // `exec cat`, which is the thing this facility exists to replace.
+        if (relPath) {
+          const one = plans.readPlan(row, relPath, { archive: !!archive });
+          if (!one) {
+            return textResult({
+              agent: pad.name, archive: !!archive, path: relPath, found: false, count: 0, plans: [],
+              hint: 'No such plan in this folder. plan_list with no path lists what is there.',
+            });
+          }
+          const [stamped] = await plans.withSessionState(row, [one]);
+          return textResult({ agent: pad.name, archive: !!archive, found: true, count: 1, plans: [stamped] });
+        }
+        const stamped = await plans.withSessionState(row, plans.listPlans(row, { archive: !!archive }));
+        // Scoped AFTER the stamp: attribution comes from the session's project, so
+        // filtering first would compare a folder against a field nothing has set.
+        const { rows: listed, unattributed } = plans.scopeByProjectFolder(stamped, folder);
+        return textResult({
+          agent: pad.name, archive: !!archive, plansFolder: dir,
+          ...(folder ? { folder, sessionUnattributed: unattributed } : {}),
+          count: listed.length, plans: listed,
+        });
+      });
+    }
+  );
+
+  registerToolBound(
+    'plan_write',
+    {
+      title: 'Create or update a plan in a PAD workspace',
+      description: "Write a plan file into one PAD's workspace `plans/` folder, creating the folder on first use. The BODY is yours — this never rewrites your prose — but the frontmatter is machine-managed: `created` is stamped once and never moved, `last_activity` is bumped on every write (that is what makes `plan_list` able to answer \"what is being worked on right now\"), and `started` is stamped the first time you bind a `session`. Pass `session` (the agent's own conversation id — `ses_…` for opencode, the rollout uuid for codex, the `projects/*.jsonl` filename for claude) to bind the plan to a conversation; it is the same id you would resume with, and `plan_activity` takes it. Ending a plan is a human decision: move the file to `plans/archive/`, do not just stop writing to it.",
+      inputSchema: {
+        agent: z.string().describe('PAD name — required: the plans folder is per-PAD'),
+        path: z.string().describe('Plan file name relative to plans/, e.g. "64-plans-facility.md"'),
+        content: z.string().describe('Full markdown body of the plan, WITHOUT frontmatter (it is managed for you)'),
+        session: z.string().optional().describe('Agent conversation id this plan is worked in'),
+      },
+    },
+    async ({ agent, path: relPath, content, session }) => {
+      const pad = await requirePad('plan_write', agent);
+      // The callback is async BECAUSE the write is: plan_write goes through the
+      // workspace service, so a rejection arrives as a promise. A sync callback
+      // here would return a Promise as the tool's RESULT — the caller would get
+      // a half-written object instead of a refusal, which is the exact shape
+      // of the 3a bug this facility was built on.
+      return await plansCall(async () => {
+        const row = plans.requireAgent(pad.name);
+        const body = String(content == null ? '' : content);
+        // A caller that pastes the file it just read back must not end up with
+        // two frontmatter blocks, so the old one is stripped before the new
+        // stamps go on. The body the caller sent wins either way.
+        const clean = plans.stripFrontmatter(body);
+        const written = await plans.writePlan(row, relPath, clean.startsWith('\n') ? clean.slice(1) : clean, { session: session || null });
+        return textResult({ agent: pad.name, path: written.path, ...written });
+      });
+    }
+  );
+
+  registerToolBound(
+    'plan_activity',
+    {
+      title: 'What a conversation is doing right now',
+      description: "The LIVE half of the plans facility: the last chat and its timings for one agent conversation, read from that agent's own store. Returns `lastMessage` as a readable PAIR (`user` and `assistant` text with timestamps), `lastToolCall` with a `status` of `running` / `completed` / `error` — `running` means in flight right now — and `lastActivityAt`. This is the answer to \"what is this session actually doing?\", which a tmux screen tail cannot give (it is a picture, not messages) and cannot give at all once the container is stopped.\n\n**`padRunning` and `store.available` are different questions and must not be conflated.** `padRunning` is the container state; `store.available` is whether the transcript could be read. A STOPPED pad with `available: true` has a complete transcript — that is the whole point of reading the host store — and a running pad with `available: false` means the read failed, which is NOT the same as \"no activity\". Cheap enough to poll one live session at 5 s, and never `docker exec` — but the cost is PER DRIVER, so do not loop this over every id: on **opencode** it is one indexed sqlite query over a handful of rows (~2 ms measured); on **codex** and **claude** it parses that one conversation's rollout file, so the cost grows with the transcript's length. `running` is decided per driver: on opencode it is the tool part's own status, on codex AND claude a call with no result row behind it — a call is written when it is requested and its result in a later record, so an unanswered one is in flight. An unknown `session_id` refuses with `plan_session_unknown` rather than returning an empty success.\n\n**When the store cannot be read, `store.reason` says which way it failed, and they are not interchangeable:** `no-store` (this agent type keeps no transcript this tool reads, or the folder is empty), `empty-store` (the store file exists but has no schema yet — the pad has never run its agent), `unreadable` (the file is there and did not open), `session-not-found` (the store HAS transcripts, none of them this session — `store.candidates` then names the ones it has, because \"not found\" here is never a reason to read someone else's). For the JSONL stores a session is matched by its FILE NAME; when a store holds exactly one file the tool answers from it and says `matched: \"only-file\"`, which is a guess — prefer passing the id the agent's own history printed. \n\n**Redaction boundary, so you know what you are reading:** secret-shaped configuration (any `api_key`/`token`/`password`/`*-key` field, any `headers` map, and config/env lines carrying such a value) is scrubbed wherever it appears, including inside dumped config text. Free PROSE is not pattern-matched, so a key pasted into a sentence comes back as written — do not paste secrets into a conversation you intend to read this way.",
+      inputSchema: {
+        agent: z.string().describe('PAD name — required'),
+        session_id: z.string().describe('Agent conversation id (from a plan\'s `session`, or from mission_sessions)'),
+      },
+    },
+    async ({ agent, session_id }) => {
+      const pad = await requirePad('plan_activity', agent);
+      return plansCall(() => {
+        const row = plans.requireAgent(pad.name);
+        const id = String(session_id || '').trim();
+        if (!id) {
+          throw new plans.PlansError('plan_session_required', 'A session_id is required — the agent conversation id, e.g. "ses_…".');
+        }
+        const activity = agentStore.readActivity(row, id, { agentRunning: row.status === 'running' });
+        if (!activity.store.available && activity.store.reason === 'no-store' && activity.store.detail && /no transcript/.test(activity.store.detail)) {
+          throw new plans.PlansError('plan_session_unknown', `No transcript for ${id} on ${pad.name}.`);
+        }
+        return textResult({ agent: pad.name, ...activity });
       });
     }
   );

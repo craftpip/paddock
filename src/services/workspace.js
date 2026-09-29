@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
-const { getAgent } = require('./agent-registry');
+const registry = require('./agent-registry');
 const { ensureOwned } = require('./ownership');
 
 const MAX_UPLOAD_SIZE = 100 * 1024 * 1024; // 100MB
@@ -74,8 +74,159 @@ function resolveSafePath(workspaceRoot, relativePath) {
 // `docker exec <pad> node -e "<helper>"` with the payload as JSON on stdin
 // (no shell escaping of user paths needed).
 
+/**
+ * Source of the in-container history reader, injected into CONTAINER_HELPER
+ * below. String.raw so every backslash reaches the PAD's node exactly as
+ * written — a plain template literal would turn `\n` into a real newline and
+ * break the inner script.
+ *
+ * The agent's OWN past conversations — the history that already lives in the
+ * PAD, NOT the `mission_sessions` rows. Each coding agent stores its history
+ * somewhere different and nothing exposes it uniformly, so this reads the store
+ * directly and returns one common shape:
+ *
+ *   opencode — the `session` table of opencode.db (id/title/directory/time_*).
+ *     The CLI (`opencode session list`) blocks behind a running TUI's lock and
+ *     re-bootstraps the instance, so the table is the safe read, and
+ *     `directory` is what scopes a conversation to a folder.
+ *   codex    — one `rollout-*.jsonl` per conversation: line 1 is session_meta
+ *     (session_id + cwd) and the first role=user response_item is the title.
+ *     The CLI has no list command — the picker IS the list.
+ *   claude   — one `.jsonl` per conversation under ~/.claude/projects/.
+ *
+ * Rows are filtered in JS, never in SQL: the folder is user-supplied and the
+ * whole table is at most a few thousand rows.
+ */
+const AGENT_SESSIONS_FN = String.raw`
+function agentSessions(q) {
+  const type = q.type;
+  const folder = String(q.folder || '').replace(/\/+$/, '');
+  const limit = Math.min(Math.max(parseInt(q.limit, 10) || 50, 1), 200);
+  const iso = (v) => (v == null ? null : new Date(Number(v)).toISOString());
+  const none = (reason) => ({ source: type, available: false, reason, exact: [], subfolders: [] });
+
+  // Read the head of a jsonl without loading the whole rollout: these files get
+  // large and the meta + first user message are at the top.
+  const headLines = (file, max) => {
+    const fd = fs.openSync(file, 'r');
+    try {
+      const size = Math.min(fs.fstatSync(fd).size, 128 * 1024);
+      const buf = Buffer.alloc(size);
+      fs.readSync(fd, buf, 0, size, 0);
+      return buf.toString('utf8').split('\n').slice(0, max).filter(Boolean);
+    } finally { fs.closeSync(fd); }
+  };
+  const firstUserText = (lines) => {
+    for (const l of lines) {
+      let o; try { o = JSON.parse(l); } catch (e) { continue; }
+      const p = o && o.payload;
+      if (!p || (p.role !== 'user' && p.type !== 'user_message')) continue;
+      let txt = '';
+      if (typeof p.content === 'string') txt = p.content;
+      else if (Array.isArray(p.content)) txt = p.content.map((c) => (c && (c.text || c.input_text)) || '').join(' ');
+      else if (typeof p.message === 'string') txt = p.message;
+      txt = txt.replace(/\s+/g, ' ').trim();
+      // codex opens every session with a synthetic <environment_context> blob,
+      // not a prompt from the human — that is not a title.
+      if (!txt || txt.startsWith('<environment_context')) continue;
+      return txt.slice(0, 120);
+    }
+    return '';
+  };
+  const walk = (dir, depth, acc) => {
+    if (depth > 6) return;
+    let ents = []; try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return; }
+    for (const e of ents) {
+      const fp = path.join(dir, e.name);
+      if (e.isDirectory()) walk(fp, depth + 1, acc);
+      else if (e.name.endsWith('.jsonl')) acc.push(fp);
+    }
+  };
+
+  let rows = [];
+  if (type === 'opencode') {
+    const db = '/root/.opencode/data/opencode/opencode.db';
+    if (!fs.existsSync(db)) return none('no-store');
+    const sql = 'SELECT id,title,directory,time_created,time_updated FROM session ORDER BY time_updated DESC';
+    let raw = '';
+    try { raw = cp.execFileSync('sqlite3', ['-json', db, sql], { maxBuffer: 256 * 1024 * 1024 }).toString(); }
+    catch (e) { return { source: type, available: false, reason: 'sqlite-failed', error: e.message, exact: [], subfolders: [] }; }
+    const all = raw.trim() ? JSON.parse(raw) : [];
+    rows = all.map((r) => ({
+      id: r.id,
+      title: r.title || '(untitled)',
+      directory: r.directory || '',
+      createdAt: iso(r.time_created),
+      updatedAt: iso(r.time_updated),
+    }));
+  } else if (type === 'codex') {
+    const base = '/root/.codex/sessions';
+    if (!fs.existsSync(base)) return none('no-store');
+    const files = []; walk(base, 0, files);
+    for (const f of files) {
+      const lines = headLines(f, 12);
+      let meta = null;
+      for (const l of lines) {
+        try { const o = JSON.parse(l); if (o.type === 'session_meta') { meta = o.payload || {}; break; } } catch (e) {}
+      }
+      if (!meta) continue;
+      let mtime = null;
+      try { mtime = fs.statSync(f).mtimeMs; } catch (e) {}
+      rows.push({
+        id: meta.session_id || meta.id || path.basename(f, '.jsonl'),
+        title: firstUserText(lines) || '(no prompt yet)',
+        directory: meta.cwd || '',
+        createdAt: meta.timestamp || iso(mtime),
+        updatedAt: iso(mtime),
+      });
+    }
+  } else if (type === 'claude') {
+    // NOT verified against a PAD that has real history (the test PAD has none)
+    // — see plan 53 §8. A wrong guess yields an empty list, never a crash.
+    const base = '/root/.claude/projects';
+    if (!fs.existsSync(base)) return none('no-store');
+    const files = []; walk(base, 0, files);
+    for (const f of files) {
+      let mtime = null;
+      try { mtime = fs.statSync(f).mtimeMs; } catch (e) {}
+      // claude mangles the cwd into the directory name: /www1/craftpip.com
+      // becomes -www1-craftpip-com. A cwd in the file itself wins if present.
+      const slug = path.basename(path.dirname(f));
+      let dir = '/' + slug.replace(/^-/, '').split('-').join('/');
+      const lines = headLines(f, 12);
+      for (const l of lines) {
+        try { const o = JSON.parse(l); const c = o && (o.cwd || (o.payload && o.payload.cwd)); if (c) { dir = c; break; } } catch (e) {}
+      }
+      rows.push({
+        id: path.basename(f, '.jsonl'),
+        title: firstUserText(lines) || '(no prompt yet)',
+        directory: dir,
+        createdAt: iso(mtime),
+        updatedAt: iso(mtime),
+      });
+    }
+  } else {
+    return none('unsupported');
+  }
+
+  rows.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+  const inBase = (d) => (folder ? d === folder : true);
+  const underBase = (d) => !!(folder && folder !== '/' && d && d.startsWith(folder + '/'));
+  return {
+    source: type,
+    available: true,
+    folder,
+    total: rows.length,
+    exactCount: rows.filter((r) => inBase(r.directory)).length,
+    subfolderCount: rows.filter((r) => underBase(r.directory)).length,
+    exact: rows.filter((r) => inBase(r.directory)).slice(0, limit),
+    subfolders: rows.filter((r) => underBase(r.directory)).slice(0, limit),
+  };
+}`;
+
 const CONTAINER_HELPER = `let s='';process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>{
-const fs=require('fs'),path=require('path');let out={};
+const fs=require('fs'),path=require('path'),cp=require('child_process');let out={};
+${AGENT_SESSIONS_FN}
 const hr=n=>{if(n==null||isNaN(n)||n<0)return null;if(n===0)return'0 B';const u=['B','KB','MB','GB','TB'];const i=Math.min(Math.floor(Math.log(n)/Math.log(1024)),u.length-1);const v=n/Math.pow(1024,i);return(v>=100?v.toFixed(0):v.toFixed(1))+' '+u[i]};
 try{
   const q=JSON.parse(s),p=q.path;
@@ -105,6 +256,7 @@ try{
     case 'readB64':{const stat=st(p);if(!stat)throw new Error('File not found');if(stat.isDirectory())throw new Error('Cannot download directory');
       out={content:fs.readFileSync(p).toString('base64'),name:path.basename(p),size:stat.size};break;}
     case 'writeB64':fs.writeFileSync(p,Buffer.from(q.content||'','base64'));out={ok:true};break;
+    case 'agentSessions':out=agentSessions(q);break;
     default:throw new Error('Unknown op');
   }
 }catch(e){out={error:e.message};}
@@ -125,23 +277,53 @@ function containerExec(agentName, payload, timeout = 30000) {
 }
 
 function requireAgent(agentId) {
-  const agent = getAgent(agentId);
+  const agent = registry.getAgent(agentId);
   if (!agent) throw new Error('Agent not found');
   return agent;
 }
 
+// The directory every host-scope operation is clamped to. It is the agent's
+// data dir by default, and the workspace mount's own source for a pad that has
+// opted in (meta HOST_BROWSE=1). The two must be read from ONE place: clearing
+// `hostBrowsable` without moving this root produced a pad that passed the gate
+// and was then rejected as a path traversal — the gate-then-act split, one
+// level down.
+function hostBrowseRoot(agent) {
+  return agent.host_browse_root || agent.workspace_root;
+}
+
+// "Go up one level" for the host browser. When the browse root IS the workspace
+// mount's own source (HOST_BROWSE=1) its parent is outside everything the
+// webui mounts — /www2/paddock → /www2 — so honouring "up" there would browse
+// the host filesystem beyond this project. The clamp root is the edge of what
+// host scope may read, so up is clamped to it and returns the root's own
+// listing instead of a directory the pad was never granted.
+function hostParentDir(agent) {
+  const root = hostBrowseRoot(agent);
+  if (root !== agent.workspace_root) return root;
+  return path.resolve(root, '..');
+}
+
 // Central host-scope authorization (plan 24). The host file browser is clamped
-// to `agent.workspace_root` (the agent's data dir on the host). A custom
-// workspace mount whose source sits OUTSIDE that folder cannot be reached by
-// the clamp — either the source is in another project folder (reachable by the
-// webui but outside workspace_root) or completely outside the webui's bind
-// mounts. In both cases every host operation must be rejected up front with a
-// clear message; container scope (docker exec) remains the way to browse that
-// workspace while the agent runs.
+// to the agent's data dir on the host. A custom workspace mount whose source
+// sits OUTSIDE that folder cannot be reached by the clamp — either the source
+// is in another project folder (reachable by the webui but outside the clamp)
+// or completely outside the webui's bind mounts. In both cases every host
+// operation must be rejected up front with a clear message; container scope
+// (docker exec) remains the way to browse that workspace while the agent runs.
+//
+// The message now carries the mount's OWN reason (plan 64 3b). The old text
+// asserted one cause ("outside the agent folder") for two very different
+// situations, and said nothing about a pad the webui can plainly reach — so a
+// caller could not tell a policy decision from a capability limit, and the two
+// need different next moves.
 function requireHostBrowsable(agent) {
   const mount = agent.workspace_mount;
   if (mount && !mount.hostBrowsable) {
-    throw new Error('Host file browser is not available for this agent — the workspace is mounted from a folder outside the agent folder. Use the container workspace while the agent is running.');
+    throw new Error(
+      `Host file browser is not available for this agent — ${mount.hostBrowseReason || 'its workspace is mounted from a folder outside the agent folder'}. ` +
+      'Use the container workspace while the agent is running.'
+    );
   }
   return agent;
 }
@@ -177,7 +359,7 @@ async function listDir(agentId, relativePath, scope) {
     return containerExec(agent.name, { op: 'list', path: relativePath || '/' });
   }
   requireHostBrowsable(agent);
-  return fsList(resolveHostPath(agent.workspace_root, relativePath || ''));
+  return fsList(resolveHostPath(hostBrowseRoot(agent), relativePath || ''));
 }
 
 // Mission folder picker (plan 53). Unlike `listDir` this NEVER throws for a
@@ -191,13 +373,26 @@ async function listFolders(agentName, absPath) {
   return result;
 }
 
+/** The agent's own conversation history, scoped to a folder (see
+ *  AGENT_SESSIONS_FN). `agentType` picks the store; the folder only ever
+ *  filters rows, it can never widen the read. */
+async function listAgentSessions(agentName, agentType, folder, limit = 50) {
+  const result = await containerExec(
+    agentName,
+    { op: 'agentSessions', type: agentType, folder: folder || '', limit },
+    60000
+  );
+  if (result && result.error) throw new Error(result.error);
+  return result;
+}
+
 async function readFile(agentId, relativePath, scope) {
   const agent = requireAgent(agentId);
   if (scope === 'container') {
     return containerExec(agent.name, { op: 'read', path: relativePath });
   }
   requireHostBrowsable(agent);
-  const absPath = resolveHostPath(agent.workspace_root, relativePath);
+  const absPath = resolveHostPath(hostBrowseRoot(agent), relativePath);
   if (!fs.existsSync(absPath)) throw new Error('File not found');
   const stat = fs.statSync(absPath);
   if (stat.isDirectory()) throw new Error('Cannot read directory');
@@ -216,7 +411,7 @@ async function writeFile(agentId, relativePath, content, scope) {
     return containerExec(agent.name, { op: 'save', path: relativePath, content });
   }
   requireHostBrowsable(agent);
-  const absPath = resolveHostPath(agent.workspace_root, relativePath);
+  const absPath = resolveHostPath(hostBrowseRoot(agent), relativePath);
   if (fs.existsSync(absPath)) {
     const stat = fs.statSync(absPath);
     if (stat.isDirectory()) throw new Error('Cannot write to directory');
@@ -236,7 +431,7 @@ async function readFileB64(agentId, relativePath, scope) {
     return containerExec(agent.name, { op: 'readB64', path: relativePath });
   }
   requireHostBrowsable(agent);
-  const absPath = resolveHostPath(agent.workspace_root, relativePath);
+  const absPath = resolveHostPath(hostBrowseRoot(agent), relativePath);
   if (!fs.existsSync(absPath)) throw new Error('File not found');
   const stat = fs.statSync(absPath);
   if (stat.isDirectory()) throw new Error('Cannot download directory');
@@ -256,16 +451,16 @@ async function writeFileB64(agentId, dirPath, fileName, buffer, scope) {
     return containerExec(agent.name, { op: 'writeB64', path: target, content: buffer.toString('base64') });
   }
   requireHostBrowsable(agent);
-  const destDir = resolveHostPath(agent.workspace_root, dirPath || '/');
+  const destDir = resolveHostPath(hostBrowseRoot(agent), dirPath || '/');
   fs.writeFileSync(path.join(destDir, safeName), buffer);
   ensureOwned(path.join(destDir, safeName));
   return { ok: true };
 }
 
 function statFile(agentId, relativePath) {
-  const agent = getAgent(agentId);
+  const agent = registry.getAgent(agentId);
   if (!agent) throw new Error('Agent not found');
-  const absPath = resolveSafePath(agent.workspace_root, relativePath);
+  const absPath = resolveSafePath(hostBrowseRoot(agent), relativePath);
 
   if (!fs.existsSync(absPath)) return null;
   const stat = fs.statSync(absPath);
@@ -286,7 +481,7 @@ async function createDirectories(agentId, dirPath, scope) {
     return containerExec(agent.name, { op: 'mkdirp', path: dirPath });
   }
   requireHostBrowsable(agent);
-  const absPath = resolveHostPath(agent.workspace_root, dirPath || '/');
+  const absPath = resolveHostPath(hostBrowseRoot(agent), dirPath || '/');
   fs.mkdirSync(absPath, { recursive: true });
   ensureOwned(absPath);
   return { ok: true };
@@ -298,7 +493,7 @@ async function createFolder(agentId, relativePath, folderName, scope) {
     return containerExec(agent.name, { op: 'mkdir', path: relativePath || '/', name: folderName });
   }
   requireHostBrowsable(agent);
-  const parentPath = resolveHostPath(agent.workspace_root, relativePath || '');
+  const parentPath = resolveHostPath(hostBrowseRoot(agent), relativePath || '');
   const safeName = path.basename(folderName);
   if (!safeName || safeName.startsWith('.')) throw new Error('Invalid folder name');
   const target = path.join(parentPath, safeName);
@@ -314,7 +509,7 @@ async function renameEntry(agentId, relativePath, newName, scope) {
     return containerExec(agent.name, { op: 'rename', path: relativePath, name: newName });
   }
   requireHostBrowsable(agent);
-  const absPath = resolveHostPath(agent.workspace_root, relativePath);
+  const absPath = resolveHostPath(hostBrowseRoot(agent), relativePath);
   if (!fs.existsSync(absPath)) throw new Error('Entry not found');
   const safeName = path.basename(newName);
   if (!safeName || safeName.startsWith('.')) throw new Error('Invalid name');
@@ -330,7 +525,7 @@ async function deleteEntry(agentId, relativePath, scope) {
     return containerExec(agent.name, { op: 'delete', path: relativePath });
   }
   requireHostBrowsable(agent);
-  const absPath = resolveHostPath(agent.workspace_root, relativePath);
+  const absPath = resolveHostPath(hostBrowseRoot(agent), relativePath);
   if (!fs.existsSync(absPath)) throw new Error('Entry not found');
   const stat = fs.statSync(absPath);
   if (stat.isDirectory()) {
@@ -346,8 +541,8 @@ async function moveEntry(agentId, fromPath, toPath, scope) {
     return containerExec(agent.name, { op: 'move', path: fromPath, to: toPath });
   }
   requireHostBrowsable(agent);
-  const src = resolveHostPath(agent.workspace_root, fromPath);
-  const dst = resolveHostPath(agent.workspace_root, toPath);
+  const src = resolveHostPath(hostBrowseRoot(agent), fromPath);
+  const dst = resolveHostPath(hostBrowseRoot(agent), toPath);
   if (src === dst) return { path: toPath };
   if (!fs.existsSync(src)) throw new Error('Source not found');
   if (fs.statSync(src).isDirectory() && dst.startsWith(src + path.sep)) throw new Error('Cannot move a folder into itself');
@@ -414,9 +609,9 @@ function getMimeType(filename) {
 }
 
 function listParentDir(agentId) {
-  const agent = getAgent(agentId);
+  const agent = registry.getAgent(agentId);
   if (!agent) throw new Error('Agent not found');
-  const parentDir = path.resolve(agent.workspace_root, '..');
+  const parentDir = hostParentDir(agent);
 
   if (!fs.existsSync(parentDir)) {
     return { path: '/', entries: [] };
@@ -457,9 +652,9 @@ function listParentDir(agentId) {
 }
 
 function resolveParentSafePath(agentId, relativePath) {
-  const agent = getAgent(agentId);
+  const agent = registry.getAgent(agentId);
   if (!agent) throw new Error('Agent not found');
-  const parentDir = path.resolve(agent.workspace_root, '..');
+  const parentDir = hostParentDir(agent);
   if (!relativePath || relativePath === '/') return parentDir;
   const cleaned = path.normalize(relativePath).replace(/^\/+/, '');
   const resolved = path.resolve(parentDir, cleaned);
@@ -489,6 +684,7 @@ function downloadParentFile(agentId, relativePath) {
 module.exports = {
   listDir,
   listFolders,
+  listAgentSessions,
   readFile,
   writeFile,
   readFileB64,
@@ -505,6 +701,7 @@ module.exports = {
   resolveSafePath,
   resolveHostPath,
   requireHostBrowsable,
+  hostBrowseRoot,
   CONTAINER_DATA_DIR,
   listParentDir,
   readParentFile,

@@ -91,3 +91,37 @@ describe('Workspace Service - Breadcrumbs', () => {
     assert.strictEqual(crumbs[2].path, '/src/components');
   });
 });
+
+// Plan 64 §3a/3b: the host-browsing gate, and the rule that an opt-in is
+// PERMISSION rather than capability.
+describe('Workspace - host browsing gate', () => {
+  const vm = require('../services/vm-manager');
+
+  it('the gate and the action root agree: browsable implies the root has a host view', () => {
+    const cases = [
+      ['data dir, no flag', vm.workspaceMountInfo('p', 'opencode', `${vm.HOST_WORKSPACE}/instances/p/opencode`, '/workspace')],
+      ['project, no flag', vm.workspaceMountInfo('p', 'opencode', vm.HOST_WORKSPACE, '/workspace')],
+      ['project, opted in', vm.workspaceMountInfo('p', 'opencode', vm.HOST_WORKSPACE, '/workspace', { allowHostBrowse: true })],
+      ['outside project, opted in', vm.workspaceMountInfo('p', 'opencode', '/www1/elsewhere', '/workspace', { allowHostBrowse: true })],
+      ['outside project, no flag', vm.workspaceMountInfo('p', 'opencode', '/www1/elsewhere', '/workspace')],
+    ];
+    for (const [label, m] of cases) {
+      if (m.hostBrowsable) {
+        // The one invariant: if the gate says yes, the folder the action will
+        // actually touch is one the webui can see. An opt-in that cleared the
+        // gate for a mount with no host view left the gate saying yes while
+        // `host_browse_root` fell back to the data dir — the same pad browsing
+        // two different folders depending on which question was asked.
+        assert.ok(vm.containerViewOf(m.host), `${label}: browsable, so the mount must have a host view`);
+      } else {
+        assert.ok(m.hostBrowseReason, `${label}: refused, so it must say why`);
+      }
+    }
+  });
+
+  it('HOST_BROWSE=1 cannot grant a folder the webui cannot reach', () => {
+    const m = vm.workspaceMountInfo('p', 'opencode', '/www1/elsewhere', '/workspace', { allowHostBrowse: true });
+    assert.strictEqual(m.hostBrowsable, false, 'permission is not capability');
+    assert.match(m.hostBrowseReason, /cannot reach it on the host/);
+  });
+});

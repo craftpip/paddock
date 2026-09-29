@@ -276,6 +276,70 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   (`route` / `outcome` / `timedOut`), and pin the negative in the schema test
   (`assert.ok(!cols.includes('claimedBy'))`) or the next person will add it as a
   "harmless convenience".
+- **A "browse the workspace" permission needs a CAPABILITY answer too, and
+  the two must be reported separately.** `HOST_BROWSE=1` said yes on
+  `pad-opencode-paddock-dev` and every browse still failed, because a workspace
+  mounted from outside the project root (`/www1`) is not on the webui's host at
+  all — permission cannot buy a capability. `workspaceMountInfo` now returns
+  `hostBrowsable` **plus** a `hostBrowseReason` sentence, so a refusal is always
+  explainable instead of being a shrug. The MCP surface deliberately has **no**
+  browse tool (`workspace_list`/`workspace_read` retired in plan 64): dumping a
+  tree into a model's context is a large, usually unwanted read, and `exec` on a
+  running pad plus `workspace_write` cover the real work. Removing a capability
+  because it is available another way is not a step backwards.
+- **A per-instance data dir is MOUNTED at a path the agent calls its home — so a
+  store path written from the agent's own docs is wrong by one segment.** codex
+  rollouts live at `\$HOME/.codex/sessions` because compose mounts
+  `<instance>/codex` there, so on the host they are
+  `<workspace_root>/codex/sessions`, not `<workspace_root>/sessions`. Reading
+  the shorter path returned `no-store` on every codex pad ever created, and the
+  opencode reader (correct for its own layout) made it look like a
+  driver-specific quirk rather than a mount mapping. **Verify a store path
+  against a real file before building a reader for it.**
+- **The newest message of a role is often not the answer, and the store's index
+  is not on the column you sort by.** Two measured facts, both of which produced
+  a confidently wrong `plan_activity`: `opencode`'s `part` table is indexed on
+  `session_id` ALONE, so `order by time_created` sorts the whole table
+  (10–21 ms, growing), and each assistant **step** is its own message — a bounded
+  window over messages returned 12 assistant steps and no user message at all on
+  a session that plainly had one. So: put the role in the **query**, take the
+  newest message of that role, and walk a bounded window of OLDER messages of the
+  same role for the user text. "Last message" is a windowed search, not `LIMIT 1`.
+- **A caller-controlled codex `user_message` is the human; a `role: user`
+  response item is the machine.** The rollout records both. Reading
+  `response_item`-only `user` messages returns injected CONTEXT and environment
+  blocks, so "what did the human last ask" came back as the agent talking to
+  itself. Codex's human turn is `event_msg` → `user_message`.
+- **A call with no output row is RUNNING, not completed.** codex records the
+  `function_call` and its `function_call_output` in separate records; treating
+  the call alone as finished makes a live tool call look done. The quiet lie is
+  the one that says work stopped when it did not.
+- **A stopped pad still has its store, so "the container is down" must not
+  become "there is no activity".** The stores are in the agent data dir on the
+  HOST, so the read never touches docker. `padRunning` (container state) and
+  `store.available` (could we read it) are different questions, and a read
+  failure is reported rather than smoothed into an empty answer. Also: a store
+  file that exists with NO SCHEMA is a pad that has never run its agent — that
+  is `empty-store`, not `unreadable`, and a 0-byte file is not a corrupt
+  answer. **Prove the stopped case with a row whose `status` is `stopped`, and
+  re-read the SAME transcript**: a control that only asserts "no crash" passes
+  just as well against a store that returns nothing.
+- **A per-driver facility has per-driver COSTS, so one claim about speed is a
+  lie for two of three drivers.** `plan_activity` on opencode is one indexed
+  sqlite query (~2 ms); on codex/claude it parses that one conversation's jsonl
+  file. "Indexed rows, never a scan" was true of the first and false of the
+  others, in the tool description, the guide, and here. State the cost where the
+  caller reads it, per driver, and say what it rules out (polling one live
+  session is fine; looping over every id is not).
+- **A plan belongs to a Mission project through its SESSION, not its folder.**
+  Plan files live in the PAD workspace `plans/`, which is not a project's folder,
+  so `plan_list {folder}` filters on `row.sessionProject.folder` — stamped from
+  the session's own project row — and **after** the state stamp, because a row is
+  only attributable once stamped. A plan whose conversation the page has never
+  seen cannot be attributed, so it comes back as `sessionUnattributed`: a
+  folder-scoped list that quietly dropped those would be short and look complete.
+  Same instinct as the `task_list` `total`: an unfiltered count next to a
+  filtered list is a second, wrong answer.
 - **A migration suite needs a control that asserts the MIGRATION ran, and the
   only honest one asserts the columns are ABSENT when it did not.** Every
   assertion in a migration suite also passes on a database that already has the
@@ -763,6 +827,37 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   any `services/drivers/*.js`) — Node caches `require()`; a stale process
   keeps old behavior or builds the wrong image via the openclaw-driver
   fallback. `docker restart paddock`.
+- **`src/` is BIND-MOUNTED into the paddock container, so a control run that
+  edits the container's copy edits YOUR WORKTREE.** Proving a guard works means
+  disabling it and watching a test go red — I did that with
+  `docker exec … node -e "s.replace('if (a && b) {', 'if (false) {')"` against
+  `/app/mcp.js`, and the replacement landed on the host file, silently turning
+  the real guard off. The tell is that a `docker cp` "restore" afterwards does
+  not help: you are copying the corrupted file back onto itself. Disable a guard
+  in a **throwaway copy** (`/tmp/...`), never in `/app`. Same reason `docker cp`
+  is not how you get an edit into a running webui — the bind mount already did it.
+- **A green run in the WORKTREE says nothing about what you are committing —
+  materialize the index and test THAT.** The worktree carries other people's
+  in-flight work, so a suite can be green on code that was never staged while the
+  staged snapshot is broken in a way only its own test run reveals (here: three
+  `vm-manager` pieces the commit needs — `workspaceMountInfo`, the redaction
+  block, `readAgentConfig` — were missing from the index, and two tests failed
+  against the staged tree while passing in the worktree). The recipe:
+  `git checkout-index -a --prefix=/tmp/staged/`, copy it into the container,
+  `ln -s /app/node_modules` (the copy has none, and `better-sqlite3` is the first
+  casualty — a missing module reads as a test failure, not a setup failure),
+  then run each file with `-w /tmp/staged/src`. Note `docker exec … node -e` with
+  `-w /app` on the HOST-mounted tree, and remember the container's app root is
+  `/app`, not `/app/src`.
+- **Partially staging one function out of a file means staging its whole BLOCK.**
+  `redactSecrets` called `isSecretKey` and `redactConfigText`, which were defined
+  a few lines above it in the worktree and did not exist in HEAD at all: splicing
+  the function alone produced a file that parses, passes `node --check`, and
+  throws `ReferenceError` at call time. Two traps in the splice itself: offsets
+  computed against HEAD go stale as soon as the first edit lands (apply the
+  edits back-to-front, or collect all ranges first), and `lastIndexOf('/**')` to
+  pick up a doc comment reaches back past *other functions* and deletes their
+  bodies. `node --check` is not a sufficient control here — only the suite is.
 - **Dev container sync/regenerate write into the workspace THROUGH the webui
   container** (plan 41): it works only for workspaces the paddock container
   mounts read-write (project root /www2/paddock). Workspaces mounted

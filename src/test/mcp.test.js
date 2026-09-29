@@ -39,6 +39,7 @@ describe('MCP Server - Handshake', () => {
     if (server) await server.close();
   });
 
+
   it('initializes and lists the tools', async () => {
     const result = await client.listTools();
     const names = result.tools.map((t) => t.name);
@@ -52,9 +53,12 @@ describe('MCP Server - Handshake', () => {
     assert.ok(names.includes('delete_agent'));
     assert.ok(names.includes('create_agent'));
     assert.ok(names.includes('exec'));
-    assert.ok(names.includes('workspace_list'));
-    assert.ok(names.includes('workspace_read'));
+    // Plan 64 §3e: the two read tools are GONE — they told a caller it could
+    // see inside a pad, which it usually could not. The write stays.
+    assert.ok(!names.includes('workspace_list'), 'workspace_list is retired');
+    assert.ok(!names.includes('workspace_read'), 'workspace_read is retired');
     assert.ok(names.includes('workspace_write'));
+    assert.ok(names.includes('plan_list') && names.includes('plan_write') && names.includes('plan_activity'));
     assert.ok(names.includes('agent_logs'));
     assert.ok(names.includes('config_get'));
     assert.ok(names.includes('settings_get'), 'has settings_get (the single get tool)');
@@ -180,6 +184,17 @@ describe('MCP Server - Mission grants (plan 55)', () => {
   const EXEC = ['mission_session_start', 'mission_send'];
   const CREATE = ['mission_project_create'];
 
+  it('a call with NO request context is refused, not crashed on', () => {
+    // A script that drives the registered handlers directly (a live check, a
+    // future integration) has no user in the AsyncLocalStorage. canAccess used
+    // to read user.role on that null and the caller got
+    // "Cannot read properties of null (reading 'role')" — a TypeError that reads
+    // as a broken tool rather than as the refusal it is. Found live, not by a
+    // test: the in-process live check of plan_list hit exactly this.
+    assert.throws(() => requireTool(null, 'list_agents', 'pad-x'), /Access denied|no access|denied/i,
+      'a missing identity is refused');
+  });
+
   it('a read key can WATCH the human work but cannot type into it', () => {
     const read = user(['read', 'target:agent:pad-x']);
     for (const t of READ) assert.strictEqual(toolAllowed(read, t, 'pad-x'), true, `read ${t}`);
@@ -298,8 +313,9 @@ describe('MCP Server - API key grants (plan 35b)', () => {
     const read = user(['read', 'target:agent:pad-test-agents']);
     assert.strictEqual(toolAllowed(read, 'config_get', 'pad-test-agents'), true);
     assert.strictEqual(toolAllowed(read, 'health', 'pad-test-agents'), true);
-    assert.strictEqual(toolAllowed(read, 'workspace_read', 'pad-test-agents'), true);
+    assert.strictEqual(toolAllowed(read, 'plan_list', 'pad-test-agents'), true);
     assert.strictEqual(toolAllowed(read, 'workspace_write', 'pad-test-agents'), false);
+    assert.strictEqual(toolAllowed(read, 'plan_write', 'pad-test-agents'), false);
     assert.strictEqual(toolAllowed(read, 'exec', 'pad-test-agents'), false);
     assert.strictEqual(toolAllowed(read, 'start_agent', 'pad-test-agents'), false);
   });
@@ -1307,6 +1323,22 @@ describe('MCP secret hygiene (plan 60)', () => {
     });
   });
 
+  it('the guide PLANS section exists and matches the tools that exist', () => {
+    // The tool surface promised "see Plans" while no such section existed: a
+    // pointer to a chapter that was never written is worse than no pointer,
+    // because the reader stops looking for the answer.
+    const { getGuide } = require('../services/llm-guide');
+    const g = getGuide();
+    assert.match(g, /## Plans/, "the section the tool surface points at is there");
+    for (const t of ['plan_list', 'plan_write', 'plan_activity']) {
+      assert.ok(g.includes(t), 'the section names ' + t);
+    }
+    assert.match(g, /REQUIRED on\s*\n?\s*every plan tool|is REQUIRED on/, "it says agent is required on every plan tool");
+    assert.match(g, /stopped\*{0,2} pad still answers/i, "it says a stopped pad still answers");
+    assert.match(g, /prose is not pattern-matched/i, "it states the redaction boundary instead of implying a scrub that does not happen");
+    assert.match(g, /liveness, not progress/i, "it separates the liveness counts from progress");
+  });
+
   it('the tool descriptions state the guarantee the code now keeps', () => {
     // A promise the guide makes and the tools do not keep is the finding itself.
     const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION }, { capabilities: { tools: {} } });
@@ -1513,10 +1545,11 @@ describe('MCP Server - fleet identity (plan 61)', () => {
   it('read responses echo the resolved name, so a caller can see which pad answered', async () => {
     // A response that echoes the caller's own spelling tells the LLM nothing:
     // it asked about `Proj` and got `Proj` back, with no way to learn that the
-    // answer came from `pad-opencode-proj`. `agent_logs` and `workspace_read`
-    // both did this.
+    // answer came from `pad-opencode-proj`. `agent_logs` did this, and so did
+    // the now-retired `workspace_read` (plan 64 §3e removed the tool rather
+    // than leave a known-wrong echo in the surface).
     const src = fs.readFileSync(path.join(__dirname, '..', 'mcp.js'), 'utf8');
-    for (const tool of ['agent_logs', 'workspace_read']) {
+    for (const tool of ['agent_logs']) {
       const body = toolBody(src, tool);
       const echo = body.match(/return textResult\(\{ name: ([A-Za-z.]+)/);
       assert.ok(echo, `${tool} echoes a name`);

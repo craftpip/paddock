@@ -231,6 +231,32 @@ function listSessions({ projectId = '', isLive = null } = {}) {
   return rows.map((s) => ({ ...s, live: isLive ? !!isLive(s) : null }));
 }
 
+/** Every session on ONE pad, each carrying its project (so the busy probe can be
+ *  scoped to the right FOLDER and the caller never has to re-derive either).
+ *
+ *  This exists because "the sessions of this pad" is a question other surfaces
+ *  ask without going through a project id — the plans facility, whose plans bind
+ *  to an agent conversation id and have no project of their own. Building it
+ *  here rather than in the caller keeps the agent→project mapping in ONE place:
+ *  a caller that filtered `listSessions()` by hand would have to re-derive the
+ *  project join, and the miss is a session marked dead because it belongs to a
+ *  project the caller did not recognise. */
+function listSessionsForAgent(agentName) {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT s.* FROM mission_sessions s
+        JOIN mission_projects p ON p.id = s.project_id
+       WHERE p.agent_name = ?
+       ORDER BY s.created_at DESC, s.rowid ASC`
+    )
+    .all(String(agentName));
+  const projects = new Map(
+    db.prepare('SELECT * FROM mission_projects WHERE agent_name = ?').all(String(agentName)).map((p) => [p.id, p])
+  );
+  return rows.map((s) => ({ ...s, project: projects.get(s.project_id) || null, live: null }));
+}
+
 /** Label and/or the solo lock. `locked` is the one privacy control in the
  *  feature: the agent may still READ a locked session, it just may not type
  *  into it (mission.js's send path is the only writer, and it checks here). */
@@ -1257,6 +1283,7 @@ module.exports = {
   createSession,
   getSession,
   listSessions,
+  listSessionsForAgent,
   listAllSessions,
   updateSession,
   assertNotLocked,

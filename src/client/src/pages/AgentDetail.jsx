@@ -316,7 +316,7 @@ function WorkspaceTab({ agent }) {
     return clean || '/'
   }
   const containerAvailable = agent.status === 'running'
-  const hostRoot = normalizePath(agent.workspace_root || `/workspace/instances/${agent.name}/openclaw`)
+  const hostRoot = normalizePath(agent.host_browse_root || agent.workspace_root || `/workspace/instances/${agent.name}/openclaw`)
   // Container-side roots come from the agent driver (data_dir = data dir,
   // workspace_dir = the workspace inside it).
   const containerRoot = normalizePath(agent.data_dir || '/root/.openclaw')
