@@ -261,10 +261,42 @@ function buildAgent(vmName, dockerState) {
     default_provider: defaultProvider,
     web,
     tags: [],
-    created_at: null,
-    updated_at: null,
-    last_activity_at: null,
+    // The three clocks, from the DB row that keeps them. Spread so an absent
+    // `last_activity_at` leaves the key out entirely instead of printing a null
+    // that reads as a time (see `dbStamps`).
+    ...(function stamps(s) {
+      return {
+        ...(s && s.created_at ? { created_at: s.created_at } : {}),
+        ...(s && s.updated_at ? { updated_at: s.updated_at } : {}),
+        ...(s && s.last_activity_at ? { last_activity_at: s.last_activity_at } : {}),
+      };
+    })(dbStamps(vmName)),
   };
+}
+
+/** The three activity clocks, read from the one place that keeps them.
+ *
+ *  `buildAgent` used to hardcode all three to `null` and only the FLEET listing
+ *  copied two of them back from SQLite afterwards — so `get_agent` on a perfectly
+ *  running pad answered `created_at: null, updated_at: null, last_activity_at:
+ *  null`, which reads as "this pad has never existed and never done anything".
+ *  Three nulls on a live pad is a bug in its own right, independent of anything
+ *  a session does.
+ *
+ *  They are read HERE, in the one builder both paths use, so the detail read and
+ *  the listing cannot answer differently about the same pad. A field with no
+ *  source is OMITTED rather than emitted as null: `last_activity_at` is written
+ *  only by `recordActivity`, so a pad that has genuinely never recorded an event
+ *  has no answer, and "no recorded activity" is a sentence — not a null that
+ *  reads as a timestamp of zero. */
+function dbStamps(vmName) {
+  try {
+    const row = getDb().prepare('SELECT created_at, updated_at, last_activity_at FROM agents WHERE name = ?').get(vmName);
+    if (!row) return null;
+    return row;
+  } catch {
+    return null;
+  }
 }
 
 function discoverAgents() {
@@ -288,12 +320,10 @@ function discoverAgents() {
 
     // sync to SQLite
     try {
-      const db = getDb();
-      const existing = db.prepare('SELECT created_at, last_activity_at FROM agents WHERE name = ?').get(agent.name);
-      if (existing) {
-        agent.created_at = existing.created_at;
-        agent.last_activity_at = existing.last_activity_at;
-      }
+      // `buildAgent` has already read `created_at` / `last_activity_at` for the
+      // row (see `dbStamps`), so this block only writes. The old copy-back from
+      // the row is gone: two places reading the same fact is how the detail read
+      // and the listing came to disagree.
       syncAgentToDb(agent);
     } catch {}
   }

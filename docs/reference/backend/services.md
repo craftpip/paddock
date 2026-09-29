@@ -707,11 +707,14 @@ handlers (no duplication between REST and MCP).
 | `agent_commands` | Set B — non-interactive command catalog for an agent type | `llm-guide.js` → `drivers` `llmCommands` |
 | `task_submit` … `task_cancel` (9 tools, incl. `task_retry`) | HIDDEN from the MCP surface (user decision 2026-09-29; re-enable with `PADDOCK_TASK_QUEUE=1`) — service kept, vocabulary per §Task Runner | `services/task-runner.js` |
 | `mission_projects` | The Mission projects (PAD + folder) the key may see, with session/live/open counts, the PAD's status, and per-session `busy`; narrow it with `project_id` / `name` / `folder`, and ask for nested sessions with `include_sessions` | `mission.listProjects` + `withLive` + `withAgentBusyProjects` |
-| `mission_sessions` | Sessions list (filter by `project_id` / `agent`), or one session's metadata + pane state + screen tail; every row carries `busy` / `busyKnown` / `open` / `kind`, and detail mode also returns `canSend` (+ `sendRefusal`) | `mission.listSessions` / `listAllSessions` / `screen` + `withAgentBusy` |
+| `mission_sessions` | Sessions list (filter by `project_id` / `agent`), or one session's metadata + pane state + screen tail; every row carries `busy` / `busyKnown` / `open` / `kind`, rows whose death has been observed carry `endedAt` / `endedBy`, and detail mode also returns `canSend` (+ `sendRefusal`), `screenFrom` and `lastScreenAt` | `mission.listSessions` / `listAllSessions` / `screen` + `withAgentBusy` |
 | `mission_project_create` | Create a project row (folder probed inside the PAD) | `mission.projectFolders` + `mission.createProject` |
-| `mission_session_start` | Open a session: `msn-*` tmux session at the project folder + the driver's TUI | `mission.startSession` |
+| `mission_session_start` | Open a session: `msn-*` tmux session at the project folder + the driver's TUI. `idempotency_key` (project-scoped) makes a retried timed-out call return the SAME row with `deduped: true` instead of a second session | `mission.startSession` |
 | `mission_send` | Type into a live session — refuses a dead, shell, solo-locked or permission-parked one, and confirms the pane took it | `mission.sendText` |
 | `mission_permission_answer` | Answer a permission dialog the pane is parked on (`once` / `reject` from an agent; `always` is the human's route) | `mission.answerPermission` |
+| `mission_session_close` | End a session deliberately: pane killed, row kept and stamped `endedBy: "closed"`, screen captured first. Refuses `mission_session_dead` rather than re-dating a corpse | `mission.endSession` |
+| `mission_session_relaunch` | Re-launch the TUI in a LIVE pane whose agent process died — keeps the conversation | `mission.relaunchTui` |
+| `mission_session_restart` | Re-create a GONE tmux session with the same id and `agent_session_id`, rooted at the project's folder (checked with `folderExists` first) | `mission.restartSession` |
 | `plan_list` | The plans in one PAD's workspace (`path` for one plan + its body, `archive` for `plans/archive`, `folder` to scope to one Mission project), each row with `status`, `session`, derived `ageMs`/`idleMs`/`elapsedMs`, the bound conversation's liveness and its `sessionProject` | `plans.listPlans` + `plans.withSessionState` + `plans.scopeByProjectFolder` |
 | `plan_write` | Write one plan file; frontmatter is machine-managed, the body is the caller's; the folder is created on the first plan | `plans.writePlan` (via `workspace`) |
 | `plan_activity` | What one conversation is doing, from the agent's own store on the host: last user + assistant text, last tool call and `lastActivityAt`. Works on a **stopped** pad. Cost is **per driver**: opencode ~2 ms (one indexed query), codex/claude parse that conversation's rollout file. Redacted | `agentStore.readActivity` |
@@ -802,13 +805,14 @@ Rules:
     PAD's `userMode`/`containerUser` rather than reporting blanks.
 - Destructive tools require a guard: `delete_agent` needs `confirm: true`
   (and `create_agent` too — it adds fleet members).
-- The five `mission_*` tools (plan 55) are the agent-visible half of the Mission
-  page, and they have their own contract:
+- The `mission_*` tools (plan 55, extended by plan 65) are the agent-visible half
+  of the Mission page, and they have their own contract:
   - **Grants** — `mission_projects` + `mission_sessions` join `READ_TOOLS` (a
     `read` key may *watch* the human work, not type into it);
-    `mission_project_create` maps to the `create` bucket; `mission_session_start`
-    and `mission_send` map to `exec` (they do work in a PAD, so they share the
-    bucket `task_submit` uses). No new API-key scope was added.
+    `mission_project_create` maps to the `create` bucket; `mission_session_start`,
+    `mission_send` and the three lifecycle verbs (`_close`, `_relaunch`,
+    `_restart`) map to `exec` (they do work in a PAD, so they share the bucket
+    `task_submit` uses). No new API-key scope was added.
   - **The gate is resolve-then-check** — a session is reachable only through its
     project, so the PAD name (and therefore `targetAllowed` → `requireAccess` →
     `toolAllowed`) always comes from the project row. A project on another user's
@@ -825,6 +829,10 @@ Rules:
     listed leaves its sessions marked dead rather than failing the read. The
     screen tail is clamped in the schema (1–200 lines) because an unbounded
     `capture-pane` floods an LLM context.
+  - **A session's LIFE is separate from its liveness** (plan 65). Liveness
+    (`live` / `busy` / `open`) answers "is it alive right now?"; `endedAt` /
+    `endedBy` answer "what happened to it, and when did we find out?" — see §Session
+    lifecycle below.
   - **"Mid-turn" is a separate, cached pass** — after liveness, the tools chain
     the same `withAgentBusy` / `withAgentBusyProjects` step the REST routes use,
     so `busy` / `busyKnown` / `open` reach the LLM on the same row as `live`.
@@ -867,6 +875,68 @@ Plan 53 Phase 9 (`mission_notes` + a checklist table) is **superseded by this**:
 a plan *is* the checklist item, with the session it is worked in and its timings
 attached, and a second table would be a competing source of truth for the same
 thing. Do not build it.
+
+### Session lifecycle (plan 65)
+
+Liveness above answers *is it alive right now?* This section is the other half:
+**what happened to it, and when did we find out?** Before plan 65 the answer was
+"you diff 29 rows and guess", and a dead session's chat was unreachable — a tmux
+screen tail only exists while the pane does.
+
+**The store keeps the pane's last screen.** `noteOutput` persists `last_screen`
+(every 200 chars or 2s, whatever landed first) alongside `last_screen_at`, capped
+at `SCREEN_STORE_LIMIT = 8000` with `last_screen_truncated` set. There is no
+teardown hook — tmux does not tell the webui a session died, and the container may
+be gone before we could look — so the last screen is stamped from the reads that
+*already* capture a pane. Detail mode reports `screenFrom` so an empty screen is
+never ambiguous: `live-pane` (showing now), `last-captured` (the last thing we were
+shown, and the only way to read a corpse), or `none` (never captured).
+
+**`endedAt` is the FIRST OBSERVATION of a death, not the time of death.** Nothing
+observes a Mission session dying, so only the deaths *we cause* are exactly dated:
+
+| `endedBy` | meaning | exact? |
+|---|---|---|
+| `recreate` | our `recreate` killed the PAD's tmux sessions | yes |
+| `closed` | `mission_session_close` killed this pane on purpose | yes |
+| `gone` | first time we LOOKED, it was already gone | **no — an upper bound** |
+
+A `gone` row was alive at its last probe and dead by the next one; the tool
+description and the LLM guide both say so in words, because a caller reading
+`endedAt` as a time of death is wrong on every `gone` row. An **absent** `endedAt`
+means "we have never observed it dead" — *not* "it is running"; `live` answers
+that. `syncEnded` stamps on the read paths (`screen`, the three list projections),
+so the stamp happens on the same pass that noticed the absence. The migration
+back-fills **nothing**: an invented death date is worse than a missing one.
+
+**A refused close must not stamp.** `endSession` on a row that is already dated —
+or undated with no live pane — raises `mission_session_dead` (409) and writes
+nothing. "Close the corpse" is precisely the request that would otherwise
+overwrite `gone` with `closed` and destroy the only evidence of what happened. The
+`endedBy`/`endedAt` are also cleared when a live observation returns, so a session
+that comes back is not permanently branded dead.
+
+**Three verbs, deliberately not four.** `mission_session_close` (end
+deliberately, keep the row), `_relaunch` (live pane, dead agent process → re-launch
+the TUI, keep the conversation) and `_restart` (tmux session gone → re-create it
+with the same id and `agent_session_id`, rooted at the project folder after
+`folderExists` — `tmux new-session -c <dir>` silently starts in the *parent* when
+the directory is missing). `mission_project_delete` is **not** built: it can end
+other users' live sessions, and that is the human's call.
+
+**A timeout is the client's, so the fix lives in the retry.**
+`mission_session_start {idempotency_key}` is project-scoped, and a partial unique
+index (`idx_mission_sessions_idem`) makes a *concurrent* retry dedupe at the
+database — the in-process pre-check alone loses that race. A deduped insert
+returns the existing row with `deduped: true` and never touches tmux, so the
+caller's retry cannot become a second live session.
+
+**`recreate` reports its own collateral.** `endSessionsForPad` marks only the
+LIVE rows of that PAD with `endedBy: "recreate"` and returns them as
+`sessionsEnded` (+ `sessionsEndedHidden` for rows the caller may not see), so a
+caller is told which of its sessions just died instead of having to re-list. The
+report carries an internal `agentName` purely for MCP visibility filtering and
+strips it from the response.
 
 ### Liveness truth (plan 62)
 

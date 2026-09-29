@@ -179,6 +179,12 @@ function migrate(db) {
       agent_session_id TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       last_seen_at TEXT,
+      last_screen TEXT,
+      last_screen_at TEXT,
+      last_screen_truncated INTEGER NOT NULL DEFAULT 0,
+      ended_at TEXT,
+      ended_by TEXT,
+      idempotency_key TEXT,
       FOREIGN KEY (project_id) REFERENCES mission_projects(id) ON DELETE CASCADE
     );
 
@@ -253,6 +259,42 @@ function migrate(db) {
   if (!sessionCols.includes('last_output_hash')) {
     db.exec("ALTER TABLE mission_sessions ADD COLUMN last_output_hash TEXT");
   }
+
+  // Plan 65 — the session's LIFE, which `live` alone cannot answer. The surface
+  // could resume a conversation but never read one (a dead session's chat was
+  // unreachable: `screen: ""`), and nothing dated a death, so a caller
+  // reconstructed it by diffing rows.
+  //
+  // `last_screen` / `last_screen_at` are stamped from the reads that ALREADY
+  // capture a pane, because there is no teardown hook: tmux does not tell the
+  // webui a session died, and the container that owned it may be gone before we
+  // could look. The pair is a screen AND its clock — "the last thing it said" and
+  // "the last thing it said three hours ago" are different answers, and a screen
+  // with no age is a lie. Existing rows stay NULL, which is honest: nothing
+  // captured them, and back-filling a guess would be worse than an empty one.
+  //
+  // `ended_at` / `ended_by` mean FIRST OBSERVED GONE, never "the moment it
+  // died" — the only deaths we can date exactly are the ones we cause
+  // (`ended_by: 'recreate'`), and those say so. NULL means no observation, so a
+  // row that was never probed reads "unknown", not "still running".
+  //
+  // `idempotency_key` is the caller's own retry token (plan 65 1f). A timeout is
+  // the CLIENT's to raise and a timed-out call has no response to help with, so
+  // the recovery has to live in the retry: a repeat call carrying the same key
+  // finds the row it already made. Uniqueness is per project and scoped to
+  // non-NULL keys, so a project with many un-keyed sessions is unaffected.
+  for (const [col, decl] of [
+    ['last_screen', 'TEXT'],
+    ['last_screen_at', 'TEXT'],
+    ['last_screen_truncated', 'INTEGER NOT NULL DEFAULT 0'],
+    ['ended_at', 'TEXT'],
+    ['ended_by', 'TEXT'],
+    ['idempotency_key', 'TEXT'],
+  ]) {
+    if (!sessionCols.includes(col)) db.exec(`ALTER TABLE mission_sessions ADD COLUMN ${col} ${decl}`);
+  }
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_mission_sessions_idem
+    ON mission_sessions(project_id, idempotency_key) WHERE idempotency_key IS NOT NULL`);
 }
 
 function close() {

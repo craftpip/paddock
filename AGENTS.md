@@ -226,6 +226,54 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   my first version passed with the fix removed, because "non-null" was true
   anyway after an earlier read. **Assert the CHANGE, not the value.**
 
+- **A first observation of a death is NOT the time of the death, and the honest
+  word for it is an upper bound.** Nothing watches a tmux session die — tmux does
+  not tell the webui, and the container may be gone before we could look — so
+  `endedAt` is stamped on whichever READ first noticed the pane missing. Only the
+  deaths *we cause* are exactly dated (`recreate`, `closed`); everything else says
+  `gone`, and a row with no stamp at all says "never observed dead", NOT "still
+  running" (`live` answers that). The trap is the word: any field called
+  `endedAt` reads as a moment, so the tool description, the LLM guide and the
+  docs all have to say "upper bound" in **words** — a caller inferring it from the
+  field name is wrong on every `gone` row and cannot tell. Two rules that follow:
+  the migration must back-fill **nothing** (an invented death date is worse than a
+  missing one — on this fleet all 36 pre-existing corpses got stamped by the first
+  read, which is the correct outcome), and **a refused `close` must stamp
+  nothing** — "close the corpse" is precisely the request that would overwrite
+  `gone` with `closed` and destroy the only evidence of what happened. That one
+  needed a live check to be sure of: assert the row's `endedBy`/`endedAt` are
+  *unchanged* after the refusal, not merely that a refusal came back.
+
+- **The retry is where a client-side timeout is fixed, and an in-process pre-check
+  is not enough.** A timed-out `mission_session_start` has no response, so the
+  server cannot help; the recovery has to live in the caller's RETRY, which means
+  a caller-supplied `idempotency_key`. Returning the existing row on a duplicate
+  key closes the *sequential* race and quietly loses the *concurrent* one, so the
+  key also needs a **partial unique index** — and a deduped insert must return
+  before it touches tmux, or the retry still spawns a second live session. The
+  general shape: when a guard is "did I already do this", ask whether two
+  processes can pass the check at once, and if so put the constraint in the
+  database rather than the handler.
+
+- **A source-text assertion is a pin on a name, not on a fact — refactor the
+  assertion, keep the fact.** Plan 67's provenance test matched
+  `createSession(project.id, { …, createdBy })` in `mission.js`, and plan 65's
+  idempotency work renamed that helper to `insertSession`. The test was right that
+  `startSession` threads the actor into the insert and wrong about which function
+  it goes through, so the fix was to match `(?:create|insert)Session(...createdBy...)`
+  — **weakening an assertion to make it pass is the failure mode, so match the
+  property and say in a comment why the name is free to change.** This is the same
+  instinct as dropping a per-test backup ritual once `PAD_DB_PATH` made it
+  unnecessary: a test pinning an implementation detail outlives the reason it was
+  written.
+
+- **A store test that mutates a module-level singleton must put it back, or the
+  next test inherits a bound copy.** The idempotency-race test replaces
+  `db.prepare` to force a UNIQUE violation; restoring it as a *bound* function
+  leaves the module permanently closed over its own receiver. It passes either way
+  (and so did every later suite), which is exactly why it is worth writing the
+  restore carefully rather than trusting the green run.
+
 - **A stale row survives a write that just happened in the same function.**
   `screen()` read its session, then updated the row, then returned the row it had
   read — so the response reported `last_output_at: null` for the very call that
@@ -409,6 +457,17 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   `vm-manager.test.js` needs the `GUARD_*` envs unset (see docs).
 
 ## Critical Operational Gotchas
+
+- **The subscription-exhaustion case is a once-per-day capture opportunity.**
+  The user reports no agent reply while OpenCode says the limit is over and
+  asks them to subscribe to Go. Follow `plans/75-provider-exhaustion-detection.md`
+  and preserve the actual notice plus session id before restarting, resuming,
+  retrying, or waiting for reset. Temporary 429 errors (even a response named
+  `FreeUsageLimitError`) are NOT proof of that subscription limit. Keep the
+  user's observed notice distinct from independently captured evidence; an
+  empty completed assistant message and idle status establish no successful
+  reply, not the cause. Save findings immediately so the next daily occurrence
+  does not require repeating the investigation.
 
 - **A terminal that drops "every few seconds" was the webui DYING, not a client
   bug.** Check this FIRST whenever the user reports the terminal glitching,

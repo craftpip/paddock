@@ -159,6 +159,13 @@ const TOOL_GRANT_FOR = {
   mission_project_create: 'create',
   mission_session_start: 'exec',
   mission_send: 'exec',
+  // The session lifecycle verbs (plan 65 1e) are work in a PAD like the others:
+  // relaunch runs the agent's TUI, restart re-creates its tmux session and a
+  // close kills one. None of them is a read, so none of them rides the read
+  // bucket — an agent that can watch a session must not be able to end it.
+  mission_session_close: 'exec',
+  mission_session_relaunch: 'exec',
+  mission_session_restart: 'exec',
   // Answering a permission dialog is a WRITE into a live conversation, and the
   // most consequential answer available to an agent — so it rides `exec` with
   // mission_send rather than the read bucket, and `always` is refused in the
@@ -532,6 +539,44 @@ function missionMaySee(user, agentName) {
   return !names || names.includes(agentName);
 }
 
+/** What a container-killing operation is about to take (plan 65 1d).
+ *
+ *  Two jobs, and the second is the one that is easy to skip: a recreate on a pad
+ *  that is NOT the caller's target would otherwise print the session ids of
+ *  somebody else's conversations. So the rows are filtered to what the key may
+ *  see, and — because a *filtered* count sitting next to a phrase like "every
+ *  session" is a lie the caller cannot detect — `sessionsEndedHidden` says how
+ *  many were withheld. Same rule as `task_list`'s `total` and the plans listing
+ *  that dropped its unattributable rows.
+ *
+ *  Best effort by design. A mission store that cannot be read, or a pad with no
+ *  projects, must not stop a settings change: the caller then gets
+ *  `sessionsEndedKnown: false` and the rows are dated `gone` by the next
+ *  liveness pass, which is a weaker but still true answer. */
+async function missionSessionsEnded(agentName, by = 'recreate') {
+  const user = currentUser();
+  let ended;
+  try {
+    ended = await missionCall(() => mission.endSessionsForPad(agentName, by));
+  } catch {
+    return { sessionsEndedKnown: false };
+  }
+  const maySee = (r) => {
+    const name = r && r.project && r.agentName ? r.agentName : agentName;
+    return missionMaySee(user, name);
+  };
+  const visible = ended.filter(maySee);
+  const hidden = ended.length - visible.length;
+  // Strip the internal agentName the service rides for scoping.
+  const rows = visible.map(({ agentName: _drop, ...r }) => r);
+  return {
+    sessionsEnded: rows,
+    sessionsEndedCount: rows.length,
+    ...(hidden ? { sessionsEndedHidden: hidden } : {}),
+    sessionsEndedKnown: true,
+  };
+}
+
 /** A project the caller may touch. A project on someone else's PAD is reported
  *  as "no project you can access" rather than 403 — a read that confirms the row
  *  exists leaks the other user's naming. */
@@ -658,6 +703,13 @@ function missionActivity(s) {
   // see without re-deriving it: the conversation exists somewhere we cannot
   // reach. Omitted when it is absent, never defaulted to false.
   if (s.wasBusy !== undefined) out.wasBusy = !!s.wasBusy;
+  // How the session's LIFE ended, and when we first saw it (plan 65 1b). Only
+  // present once a death has been observed, so an unprobed row reads "we do not
+  // know" rather than "it never ended". `endedAt` is the FIRST OBSERVATION of
+  // the death, not the instant of it — the tool description says so, because a
+  // caller reading it as the exact moment would be wrong about every `gone` row.
+  if (s.ended_at) out.endedAt = s.ended_at;
+  if (s.ended_by) out.endedBy = s.ended_by;
   return out;
 }
 
@@ -1111,7 +1163,7 @@ function registerTools(server) {
     'recreate',
     {
       title: 'Recreate PAD container — single mutation tool',
-      description: 'The one "gun" for every change that recreates the container: Settings-tab options (allowDocker, network peer, extraVolumes, custom workspace) AND Web-tab options (web publish, SSH expose, extraPorts). Only the options you SPECIFY change; everything unspecified is left untouched. Pass `[]` / `\'\'` / `false` to explicitly clear something. `pull: true` updates to the latest base image (rebuild + recreate). `reset: true` wipes the ENTIRE data dir before recreating (requires confirm: true).',
+      description: 'The one "gun" for every change that recreates the container: Settings-tab options (allowDocker, network peer, extraVolumes, custom workspace) AND Web-tab options (web publish, SSH expose, extraPorts). Only the options you SPECIFY change; everything unspecified is left untouched. Pass `[]` / `\'\'` / `false` to explicitly clear something. `pull: true` updates to the latest base image (rebuild + recreate). `reset: true` wipes the ENTIRE data dir before recreating (requires confirm: true).\n\n**A recreate ends every Mission session on that PAD.** The tmux sessions live inside the container, so they die with it — including live conversations the human is watching. The response reports exactly what it took in `sessionsEnded` ([{id, tmux_id, label, project, lastScreen, lastScreenAt}]), and those rows are stamped `endedBy: \"recreate\"` with the moment it happened, so the cost of the change is askable afterwards in one `mission_sessions` call. `sessionsEndedHidden` appears when the pad had sessions your key may not see — the count you are given is only ever the rows you can see. Recover one with `mission_session_restart` (same row, same conversation).',
       inputSchema: {
         name: z.string().describe('PAD name'),
         pull: z.boolean().optional().describe('Pull the base image + rebuild before recreating (update to latest)'),
@@ -1162,6 +1214,12 @@ function registerTools(server) {
         jobLog.line(job, type, msg);
       };
       const onStep = (step, state, cmd) => jobLog.setStep(job, step, state, cmd);
+      // BEFORE the recreate, because afterwards the sessions are gone and there
+      // is nothing left to report (plan 65 1d). Best effort: a pad with no
+      // Mission rows, or a mission store that cannot be read, must not stop a
+      // settings change — the cost is then simply not reported here, and the
+      // rows are dated `gone` by the next liveness pass instead.
+      const ended = await missionSessionsEnded(agent.name, 'recreate');
       let result;
       try {
         result = await vm.applyAgentChanges(agent.name, { ...args, force: true }, { onLog, onStep });
@@ -1172,7 +1230,7 @@ function registerTools(server) {
       registry.dockerPsList(true);
       registry.discoverAgents();
       jobLog.finish(job, true, { name: agent.name });
-      return textResult({ ...result, log });
+      return textResult({ ...result, log, ...ended });
     }
   );
 
@@ -1188,6 +1246,7 @@ function registerTools(server) {
       const job = jobLog.getOrCreateJob(`update:${agent.name}`);
       const onLog = (type, msg) => jobLog.line(job, type, msg);
       const onStep = (step, state, cmd) => jobLog.setStep(job, step, state, cmd);
+      const ended = await missionSessionsEnded(agent.name, 'recreate');
       try {
         await vm.updateAgent(agent.name, { pull: true, onLog, onStep });
       } catch (e) {
@@ -1197,7 +1256,7 @@ function registerTools(server) {
       registry.dockerPsList(true);
       registry.discoverAgents();
       jobLog.finish(job, true, { name: agent.name });
-      return textResult({ ok: true, name: agent.name, action: 'updated' });
+      return textResult({ ok: true, name: agent.name, action: 'updated', ...ended });
     }
   );
 
@@ -1691,7 +1750,7 @@ function registerTools(server) {
     'mission_sessions',
     {
       title: 'List Mission sessions — or read one session\'s screen',
-      description: "A session IS the unit of work on the Mission page: a live agent TUI in a project's folder, typed into by the human and by you. List mode (no `session_id`) returns every session your key can see, with its project, agent, folder and live/dead state — filter with `project_id` / `agent`. Detail mode (`session_id`) returns that session's metadata, its pane state, and the tail of what its TUI is showing RIGHT NOW, so you can see what the human is doing without them narrating it. Read `mission_sessions` before typing into a session you did not start; a session with `locked: true` is the human's deliberate \"driving alone\" switch.\n\n**LIVENESS, and the three fields are not interchangeable.** `live` = we hold a tmux pane. `busy` = a turn is streaming RIGHT NOW, and it requires `live` (a dead row is never busy; if a dead row carries `wasBusy: true` the conversation is still working somewhere you cannot reach). `open` = a LIVE TUI is attached to the conversation — never a dead row, never a bare shell. It is NOT the send verdict: a solo-locked row and a permission-parked row are both still `open` (the human may be driving them). Ask `canSend` in detail mode, which is the same check the write path applies. `busyKnown: false` means the probe COULD NOT ANSWER, which is not the same as idle, so never treat it as licence to type. `state: \"dead\"` is a corpse. Each row also carries `kind`: `\"agent\"` means a TUI is in the pane, `\"shell\"` means a send would run SHELL COMMANDS (mission_send refuses it) — check this before typing.\n\nDetail mode reports `blockedOn: \"permission\"` (with the tool and path) when the pane is parked on a permission dialog: that session is blocked, NOT idle, and `mission_send` refuses it — answer it with `mission_permission_answer`.",
+      description: "A session IS the unit of work on the Mission page: a live agent TUI in a project's folder, typed into by the human and by you. List mode (no `session_id`) returns every session your key can see, with its project, agent, folder and live/dead state — filter with `project_id` / `agent`. Detail mode (`session_id`) returns that session's metadata, its pane state, and the tail of what its TUI is showing RIGHT NOW, so you can see what the human is doing without them narrating it. Read `mission_sessions` before typing into a session you did not start; a session with `locked: true` is the human's deliberate \"driving alone\" switch.\n\n**LIVENESS, and the three fields are not interchangeable.** `live` = we hold a tmux pane. `busy` = a turn is streaming RIGHT NOW, and it requires `live` (a dead row is never busy; if a dead row carries `wasBusy: true` the conversation is still working somewhere you cannot reach). `open` = a LIVE TUI is attached to the conversation — never a dead row, never a bare shell. It is NOT the send verdict: a solo-locked row and a permission-parked row are both still `open` (the human may be driving them). Ask `canSend` in detail mode, which is the same check the write path applies. `busyKnown: false` means the probe COULD NOT ANSWER, which is not the same as idle, so never treat it as licence to type. `state: \"dead\"` is a corpse. Each row also carries `kind`: `\"agent\"` means a TUI is in the pane, `\"shell\"` means a send would run SHELL COMMANDS (mission_send refuses it) — check this before typing.\n\n**HOW A SESSION ENDED** (`endedAt` / `endedBy`, plan 65). `endedBy: \"recreate\"` is a death we CAUSED, dated exactly, when a recreate killed the PAD's tmux sessions. `endedBy: \"gone\"` means the first time we LOOKED and it was already gone — so `endedAt` is an upper bound, never the instant of death; the only exact claim is that it was alive at the last probe before it. An absent `endedAt` means the row was never observed dead, NOT that it is running: `live` answers that.\n\nDetail mode reports `blockedOn: \"permission\"` (with the tool and path) when the pane is parked on a permission dialog: that session is blocked, NOT idle, and `mission_send` refuses it — answer it with `mission_permission_answer`. `screenFrom` says WHICH screen you are reading: `live-pane` (showing now), `last-captured` (the last thing we saw before the pane went — the only way to read a dead session's chat, and never blank for a corpse that said something), or `none` (nothing was ever captured). Always read a screen with its `lastScreenAt`.",
       inputSchema: {
         session_id: z.string().optional().describe('One session in full — metadata + pane state + screen tail'),
         project_id: z.string().optional().describe('Only this project\'s sessions'),
@@ -1717,6 +1776,15 @@ function registerTools(server) {
           state: r.state,
           live: r.live,
           screen: r.screen,
+          // WHOSE screen this is, and how old it is (plan 65 1a). `live-pane` is
+          // what the TUI is showing now; `last-captured` is the last thing we
+          // were shown before the pane went, which for a dead row is the only
+          // way its chat can be read at all; `none` means nothing was ever
+          // captured. Without this, a dead row's `screen: ""` was ambiguous —
+          // an agent that had said nothing, or a capture we could not do.
+          screenFrom: r.screenFrom,
+          ...(r.lastScreenAt ? { lastScreenAt: r.lastScreenAt } : {}),
+          ...(r.lastScreenTruncated ? { lastScreenTruncated: true } : {}),
           ...(r.blockedOn ? { blockedOn: r.blockedOn, permission: r.permission } : {}),
           // The detail view carries what a send would do, before anyone sends —
           // and it is the STORE's verdict (the same function the write path
@@ -1727,7 +1795,7 @@ function registerTools(server) {
           ...(r.canSend === true ? {} : { sendRefusal: r.refusal }),
           hint: r.live
             ? undefined
-            : 'The tmux session is gone — the human can restart it on the Mission page, or a session can be started again with mission_session_start.',
+            : 'The tmux session is gone — mission_session_restart brings it back with the same conversation id; the screen above is the last one we captured.',
         });
       }
 
@@ -1826,14 +1894,15 @@ function registerTools(server) {
     'mission_session_start',
     {
       title: 'Open a Mission session (start an agent TUI)',
-      description: "Start a session in a Mission project: a fresh `msn-*` tmux session created ROOTED AT THE PROJECT FOLDER, with the agent's own TUI launched into it. This is the server path behind the page's \"+ New session\" — the TUI is launched on purpose, because a session is only useful when the human can watch it. The row is stamped `origin='agent'`, so the page badges it \"started by agent\". Refuses when the PAD is stopped (409 `mission_agent_stopped`) or the folder has vanished inside it (`mission_folder_missing`) — start the PAD or fix the project. Pass `agent_session_id` (from a session's history) to resume that conversation instead of starting a fresh one.",
+      description: "Start a session in a Mission project: a fresh `msn-*` tmux session created ROOTED AT THE PROJECT FOLDER, with the agent's own TUI launched into it. This is the server path behind the page's \"+ New session\" — the TUI is launched on purpose, because a session is only useful when the human can watch it. The row is stamped `origin='agent'`, so the page badges it \"started by agent\". Refuses when the PAD is stopped (409 `mission_agent_stopped`) or the folder has vanished inside it (`mission_folder_missing`) — start the PAD or fix the project. Pass `agent_session_id` (from a session's history) to resume that conversation instead of starting a fresh one.\n\n**Pass `idempotency_key` whenever you might retry.** The row and the tmux session exist well before the TUI is up, so this call is exactly the one a client times out on — and a timed-out call returns NOTHING, so a blind retry does not find the session, it starts a SECOND conversation and burns a second agent's tokens. A repeated key returns the session you already have (`deduped: true`) instead of making another. Give every start a fresh key; reuse a key only when you are retrying that same start.",
       inputSchema: {
         project_id: z.string().describe('Project id from mission_projects'),
         label: z.string().optional().describe('Label shown on the session row (default: none)'),
         agent_session_id: z.string().optional().describe("Resume this conversation id from the agent's own history instead of starting fresh"),
+        idempotency_key: z.string().optional().describe("Your own retry token for THIS start (e.g. the request id). Re-sending the same key returns the session already started (deduped) instead of opening a second one — the only safe response to a call that timed out. Use a new key per distinct start."),
       },
     },
-    async ({ project_id, label, agent_session_id }) => {
+    async ({ project_id, label, agent_session_id, idempotency_key }) => {
       const user = currentUser();
       const project = missionRequireProject(user, 'mission_session_start', project_id);
       // The key id is recorded on the row, so "did I start this?" and "was that
@@ -1846,10 +1915,15 @@ function registerTools(server) {
           origin: 'agent',
           agentSessionId: agent_session_id || '',
           createdBy,
+          idempotencyKey: idempotency_key || '',
         })
       );
       return textResult({
         session: missionSessionRow({ ...r.session, live: r.state ? r.state.live : null }, project),
+        // `deduped` is the whole point of the key, so it is never folded into a
+        // note: a caller that re-sent the key must be able to tell "you already
+        // had this" from a fresh start without reading the id.
+        ...(r.deduped ? { deduped: true, hint: 'This idempotency_key had already been used, so the existing session was returned — no second session was created.' } : {}),
         state: r.state,
         project: { id: project.id, name: project.name, folder: project.folder, agent: project.agent_name },
         createdBy,
@@ -1921,6 +1995,113 @@ function registerTools(server) {
         hint: r.stillPending
           ? 'The dialog is still on screen — read it with mission_sessions {session_id} before answering again.'
           : 'The prompt is gone. Read the session to see what the agent did next.',
+      });
+    }
+  );
+
+  // --- the session lifecycle (plan 65 1e) --------------------------------
+  // Until these existed, a dead session was a DEAD END for an agent: the tools
+  // could resume a conversation (mission_session_start {agent_session_id}) and
+  // read one (mission_sessions detail, plan 65 1a), but nothing could bring a
+  // session BACK or end one, so the only recovery was to ask the human. The two
+  // recovery paths are the Mission PAGE's own buttons — the service functions
+  // `relaunchTui` / `restartSession` already existed and are the half that was
+  // missing — so the MCP side refuses exactly where the page does.
+  //
+  // `mission_project_delete` is deliberately NOT here. Deleting a project takes
+  // the ROW and (per AGENTS.md) every tmux session on that agent with it,
+  // including live conversations the human is looking at; that is the one
+  // verb here whose blast radius is not the session you named, so it stays a
+  // human action on the page.
+
+  registerToolBound(
+    'mission_session_close',
+    {
+      title: 'End a Mission session (kill its pane, keep the record)',
+      description: "End a session deliberately: the pane is killed and the row is stamped `endedBy: \"closed\"` — the conversation is NOT deleted and the row STAYS, so the session remains auditable and resumable. (The Close button on the Mission page is the other thing: it also forgets the row, and that is a human's call.) The pane's screen is captured before the kill, so `lastScreen` on the row is the last thing the agent said. Refuses with `mission_session_dead` when the pane is already gone — the row is already dated, so there is nothing to do. Works on a solo-locked session, deliberately: `locked` says who may TYPE, not who may end a session. A permission dialog does NOT need answering first; closing discards it.",
+      inputSchema: {
+        session_id: z.string().describe('Session id from mission_sessions'),
+      },
+    },
+    async ({ session_id }) => {
+      const user = currentUser();
+      const { session, project } = missionRequireSession(user, 'mission_session_close', session_id);
+      const r = await missionCall(() => mission.endSession(session.id));
+      return textResult({
+        ok: true,
+        session_id: r.session.id,
+        session: missionSessionRow({ ...r.session, live: false }, project),
+        project: r.project,
+        // What the agent was last showing, captured BEFORE the kill. Reported
+        // here as well as stored, because a close is the one death this system
+        // gets to witness and the caller will not read the row again.
+        screen: r.screen,
+        // Resumable is ALWAYS true — the row, the tmux id and the pane come back.
+        // What varies is whether the CONVERSATION does, and that turns on the
+        // stored `agent_session_id`, so both facts are reported instead of
+        // collapsing them into one nullable field: `null` here would have read
+        // as "this session cannot be resumed", which is wrong for a row that
+        // mission_session_restart reopens today.
+        resumable: {
+          via: 'mission_session_restart (same row, same tmux id)',
+          conversation: r.session.agent_session_id ? 'same' : 'new (this row never recorded an agent session id)',
+          ...(r.session.agent_session_id ? { agent_session_id: r.session.agent_session_id } : {}),
+        },
+        hint: 'The pane is gone and the row is dated. Reopen it with mission_session_restart.',
+      });
+    }
+  );
+
+  registerToolBound(
+    'mission_session_relaunch',
+    {
+      title: 'Relaunch a session whose TUI exited (same pane, same conversation)',
+      description: "The recovery for a session whose tmux pane is still there but whose agent TUI dropped back to the shell — the pane is live, so the TUI is re-launched INTO it, resuming the SAME conversation when the row remembers its `agent_session_id`. Use this when `mission_sessions` reports `live: true` with `kind: \"shell\"`. Refuses with `mission_session_dead` when the pane is gone (use `mission_session_restart` instead) and with `mission_tui_already_running` when a TUI is live — retyping the launch command would start a SECOND conversation in the same pane. The pane is `cd`-ed to the project's folder first if it drifted.",
+      inputSchema: {
+        session_id: z.string().describe('Session id from mission_sessions — the one with kind: "shell"'),
+      },
+    },
+    async ({ session_id }) => {
+      const user = currentUser();
+      const { session, project } = missionRequireSession(user, 'mission_session_relaunch', session_id);
+      const r = await missionCall(() => mission.relaunchTui(session.id));
+      return textResult({
+        ok: true,
+        session_id: r.session.id,
+        session: missionSessionRow(r.session, project),
+        project,
+        state: r.state,
+        hint: 'The TUI is starting. mission_sessions {session_id} shows whether it has come up yet — this call does not wait for it.',
+      });
+    }
+  );
+
+  registerToolBound(
+    'mission_session_restart',
+    {
+      title: 'Restart a dead session (same row, same tmux id, same conversation)',
+      description: "The recovery for a session whose tmux session is GONE: the pane is re-created with the same tmux id, rooted at the PROJECT's folder, and the agent is re-launched resuming the same `agent_session_id` — so the row, the tmux name and the conversation all survive. Use this when `mission_sessions` reports `state: \"dead\"`. Refuses with `mission_tui_already_running` when a TUI is already live, and with `mission_folder_missing` when the project's folder no longer exists inside the PAD — it is checked BEFORE anything is created, because `tmux new-session -c` does not fail on a missing directory, it silently starts the pane in the PARENT. Clears the row's `endedAt`/`endedBy`, because the session is alive again.",
+      inputSchema: {
+        session_id: z.string().describe('Session id from mission_sessions — the dead one'),
+      },
+    },
+    async ({ session_id }) => {
+      const user = currentUser();
+      const { session, project } = missionRequireSession(user, 'mission_session_restart', session_id);
+      const r = await missionCall(() => mission.restartSession(session.id));
+      return textResult({
+        ok: true,
+        session_id: r.session.id,
+        session: missionSessionRow(r.session, project),
+        project: { id: project.id, name: project.name, folder: project.folder, agent: project.agent_name },
+        state: r.state,
+        // The folder is the thing that silently goes wrong (a pane in the
+        // parent of the folder you asked for), so it is reported rather than
+        // left for the caller to discover.
+        startedInFolder: r.state ? r.state.cwd : null,
+        expectedFolder: project.folder,
+        inExpectedFolder: !!(r.state && r.state.cwd && r.state.cwd === project.folder),
+        hint: 'The TUI is starting. mission_sessions {session_id} shows whether it has come up yet.',
       });
     }
   );

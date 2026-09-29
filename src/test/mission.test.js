@@ -1189,3 +1189,395 @@ describe('Mission - last_seen_at moves on a live pane (plan 62 1f)', () => {
     assert.strictEqual(rows[0].last_seen_at, mission.getSession(alive.id).last_seen_at);
   });
 });
+
+// Plan 65 — the session lifecycle an LLM can drive: a start that survives its
+// own timeout (1f), a dead session you can still READ (1a), a row that says HOW
+// it died (1b), a recreate that accounts for what it kills (1d), and a close that
+// is not a lie (1e). Each of these is a question a caller can only answer if the
+// service keeps the fact; the tests below are the answer, not the implementation.
+describe('Mission - plan 65: a session that can be retried (1f)', () => {
+  const padTmux = require('../services/pad-tmux');
+  const real = { ...padTmux };
+  let created = [];
+  let sent = [];
+
+  beforeEach(() => {
+    created = [];
+    sent = [];
+    padTmux.folderExists = async () => true;
+    padTmux.createSession = async (vm, tid) => { created.push(tid); };
+    padTmux.killSession = async () => {};
+    padTmux.sendCommand = async (vm, tid, cmd) => { sent.push(cmd); };
+    padTmux.paneState = async () => ({ live: true, tuiAlive: true, cwd: '/www1/beat' });
+  });
+
+  afterEach(() => {
+    for (const k of ['folderExists', 'createSession', 'killSession', 'sendCommand', 'paneState']) padTmux[k] = real[k];
+  });
+
+  it('the same idempotency_key returns the SAME session instead of a second one', async () => {
+    const p = mission.createProject({ name: 'beat', agent: 'pad-msn-oc', folder: '/www1/beat' });
+    const first = await mission.startSession(p.id, { idempotencyKey: 'caller-token-1' });
+    // The retry a timed-out client sends. The pane is up this time, which is the
+    // whole point: the duplicate would be created at exactly this moment.
+    const second = await mission.startSession(p.id, { idempotencyKey: 'caller-token-1' });
+
+    assert.strictEqual(second.session.id, first.session.id, 'the retry is the same session');
+    assert.strictEqual(second.deduped, true, 'and it is told so, rather than being allowed to look like a fresh start');
+    assert.strictEqual(mission.listSessions({ projectId: p.id }).length, 1, 'exactly one row exists');
+    assert.deepStrictEqual(created, [first.session.tmux_id], 'ONE tmux session — the retry did not bring up a second pane');
+    assert.strictEqual(sent.length, 1, 'and launched the TUI once');
+  });
+
+  it('two different keys are two different sessions', async () => {
+    // The control for the test above: a key that dedupes EVERYTHING would pass it
+    // while quietly collapsing real work. A caller that wants two sessions sends
+    // two keys, and it must get two.
+    const p = mission.createProject({ name: 'beat', agent: 'pad-msn-oc', folder: '/www1/beat' });
+    const a = await mission.startSession(p.id, { idempotencyKey: 'k-a' });
+    const b = await mission.startSession(p.id, { idempotencyKey: 'k-b' });
+    assert.notStrictEqual(a.session.id, b.session.id);
+    assert.notStrictEqual(a.session.tmux_id, b.session.tmux_id);
+    assert.strictEqual(b.deduped, undefined, 'a fresh start is not reported as a dedupe');
+    assert.strictEqual(mission.listSessions({ projectId: p.id }).length, 2);
+    assert.strictEqual(created.length, 2, 'two panes, as asked for');
+  });
+
+  it('the key is scoped to the PROJECT, not global', async () => {
+    // A key is the caller's token for one request in one project. Reusing the
+    // same string in a different project must not hand back the other project's
+    // session — that would resolve to a tmux id in a folder the caller never
+    // named, and the mismatch is invisible in the response.
+    const p1 = mission.createProject({ name: 'one', agent: 'pad-msn-oc', folder: '/www1/one' });
+    const p2 = mission.createProject({ name: 'two', agent: 'pad-msn-oc', folder: '/www1/two' });
+    const a = await mission.startSession(p1.id, { idempotencyKey: 'shared' });
+    const b = await mission.startSession(p2.id, { idempotencyKey: 'shared' });
+    assert.notStrictEqual(b.session.id, a.session.id, 'a different project is a different session');
+    assert.strictEqual(b.session.project_id, p2.id);
+  });
+
+  it('the CONCURRENT race returns the winner, not a second launch into its pane', async () => {
+    // The check-before-insert cannot see a sibling that has not committed yet, so
+    // the unique index is the authority and the losing insert has to report
+    // itself. Returning a bare row made the loser go on to create a tmux session
+    // on the WINNER's tmux id and launch a second TUI in it — the duplicate this
+    // whole mechanism exists to prevent, reached through the race rather than
+    // the retry. Simulated here by inserting the key between the check and the
+    // insert.
+    const p = mission.createProject({ name: 'race', agent: 'pad-msn-oc', folder: '/www1/race' });
+    // The winner commits for real, then the check is made blind. Patching the
+    // DB's own `prepare` (rather than the exported lookup) is what a race looks
+    // like from the code's side: the SELECT simply cannot see the row yet, and
+    // only the unique index can catch the loser.
+    const now = new Date().toISOString();
+    getDb().prepare(
+      `INSERT INTO mission_sessions (id, project_id, tmux_id, label, origin, created_by, agent_session_id, created_at, last_seen_at, idempotency_key)
+       VALUES (?, ?, ?, '', 'agent', NULL, NULL, ?, ?, ?)`
+    ).run('msn-winnerrrr', p.id, 'msn-winwinww', now, now, 'race-key');
+
+    const db = getDb();
+    // Hold the METHOD, not a copy of it bound to this db: `db.prepare` is a
+    // singleton the rest of the suite keeps using, so restoring a bound function
+    // here would leave it permanently closed over its own receiver.
+    const realPrepare = db.prepare;
+    let blind = false;
+    db.prepare = function (sql) {
+      if (!blind && /idempotency_key = \?/.test(sql)) {
+        blind = true;
+        return { get: () => undefined };
+      }
+      return realPrepare.call(db, sql);
+    };
+    try {
+      const r = await mission.startSession(p.id, { idempotencyKey: 'race-key' });
+      assert.ok(blind, 'sanity: the check really was blind to the committed sibling');
+      assert.strictEqual(r.session.id, 'msn-winnerrrr', 'the caller is handed the row that won');
+      assert.strictEqual(r.deduped, true, 'and is told it lost the race, not that it started a session');
+      assert.deepStrictEqual(created, [], 'the loser created NO pane');
+      assert.strictEqual(sent.length, 0, 'and launched no second TUI into the winner\'s pane');
+      assert.strictEqual(mission.listSessions({ projectId: p.id }).length, 1, 'one row, not two');
+    } finally {
+      db.prepare = realPrepare;
+    }
+  });
+
+  it('a failed launch leaves no row behind, so a retry is not deduped onto a corpse', async () => {
+    // The failure path deletes the row. If it did not, the retry with the same
+    // key would find a dead row and answer "deduped" — handing back a session
+    // that was never started, which is the one outcome the token cannot repair.
+    const p = mission.createProject({ name: 'boom', agent: 'pad-msn-oc', folder: '/www1/boom' });
+    padTmux.sendCommand = async () => { throw new Error('tmux exploded'); };
+    await assert.rejects(() => mission.startSession(p.id, { idempotencyKey: 'doomed' }), /tmux exploded/);
+    assert.strictEqual(mission.listSessions({ projectId: p.id }).length, 0, 'the row is gone');
+    assert.strictEqual(mission.getSessionByIdempotencyKey(p.id, 'doomed'), null, 'so the key is free again');
+
+    padTmux.sendCommand = async (vm, tid, cmd) => { sent.push(cmd); };
+    sent = [];
+    const ok = await mission.startSession(p.id, { idempotencyKey: 'doomed' });
+    assert.strictEqual(ok.deduped, undefined, 'the retry is a real start');
+    assert.ok(/^msn_/.test(ok.session.id), `with a real session id, got ${ok.session.id}`);
+    assert.strictEqual(sent.length, 1, 'and the TUI actually launched');
+  });
+});
+
+// Plan 65 1a — the surface could resume a conversation but never READ one. The
+// detail read answered `screen: ""` for a corpse, and an empty string is
+// ambiguous: an agent that said nothing, a broken capture, or a session we
+// cannot see any more all look identical. These tests pin the three answers the
+// caller can now tell apart, and the clock that dates the stored one.
+describe('Mission - plan 65: reading a dead session (1a)', () => {
+  const padTmux = require('../services/pad-tmux');
+  const real = { ...padTmux };
+  let paneIsLive;
+
+  beforeEach(() => {
+    paneIsLive = true;
+    padTmux.captureScreen = async () => (paneIsLive ? { text: 'the agent said this', live: true } : { text: '', live: false });
+    padTmux.paneState = async () => (paneIsLive
+      ? { live: true, tuiAlive: true, command: 'node', cwd: '/www1/beat' }
+      : { live: false, tuiAlive: false, command: '', cwd: '', reason: 'no-session' });
+    padTmux.listSessions = async () => (paneIsLive ? [{ name: 'msn-deadbeef' }] : []);
+    padTmux.listPanes = async () => new Map();
+  });
+
+  afterEach(() => {
+    for (const k of ['captureScreen', 'paneState', 'listSessions', 'listPanes']) padTmux[k] = real[k];
+  });
+
+  it('a live pane says so, and stores its screen for later', async () => {
+    const p = mission.createProject({ name: 'beat', agent: 'pad-msn-oc', folder: '/www1/beat' });
+    const s = mission.createSession(p.id, { tmuxId: 'msn-deadbeef' });
+    const r = await mission.screen(s.id);
+    assert.strictEqual(r.screenFrom, 'live-pane', 'a live capture is labelled as one');
+    assert.match(r.screen, /the agent said this/);
+    assert.ok(r.lastScreenAt, 'and dated');
+    // The screen is kept ON THE ROW, which is the whole design: no teardown hook
+    // to lose, and the read that already captured a pane is the only place we
+    // had the text anyway.
+    const row = mission.getSession(s.id);
+    assert.match(row.last_screen, /the agent said this/);
+    assert.ok(row.last_screen_at, 'with its own clock');
+    assert.strictEqual(row.last_screen_truncated, 0, 'and recorded that it was not cut');
+  });
+
+  it('a dead pane answers from the STORED screen, dated, and says which one it is', async () => {
+    const p = mission.createProject({ name: 'beat', agent: 'pad-msn-oc', folder: '/www1/beat' });
+    const s = mission.createSession(p.id, { tmuxId: 'msn-deadbeef' });
+    await mission.screen(s.id); // the live read that stores the tail
+    paneIsLive = false; // and now it dies
+
+    const r = await mission.screen(s.id);
+    assert.strictEqual(r.screenFrom, 'last-captured', 'the caller is told this is not a live pane');
+    assert.match(r.screen, /the agent said this/, 'and gets the last thing it said');
+    assert.ok(r.lastScreenAt, 'dated — "when" is the difference between history and now');
+    assert.strictEqual(r.live, false);
+  });
+
+  it('a dead pane with NOTHING stored says none — never an empty string standing in for a screen', async () => {
+    // The control on the test above. Without it, `screenFrom: 'last-captured'`
+    // passes on a store that never stored anything: an empty capture and a lost
+    // one are the same row. This session was NEVER read while alive.
+    const p = mission.createProject({ name: 'beat', agent: 'pad-msn-oc', folder: '/www1/beat' });
+    const s = mission.createSession(p.id, { tmuxId: 'msn-deadbeef' });
+    paneIsLive = false;
+    const r = await mission.screen(s.id);
+    assert.strictEqual(r.screenFrom, 'none', '"we never captured it" is the honest answer');
+    assert.strictEqual(r.screen, '', 'and there is genuinely nothing to show');
+    assert.strictEqual(r.lastScreenAt, undefined, 'with no clock for a capture that never happened');
+  });
+
+  it('the stored screen is capped, and SAYS it was cut', async () => {
+    // A row carries this text into every listing read, so it cannot grow without
+    // bound. But a screen that ended where we cut it and one trimmed to fit read
+    // identically otherwise, and the difference decides whether the top line is a
+    // real message or half of one — so the cut is stored, not implied.
+    const p = mission.createProject({ name: 'beat', agent: 'pad-msn-oc', folder: '/www1/beat' });
+    const s = mission.createSession(p.id, { tmuxId: 'msn-deadbeef' });
+    const long = 'x'.repeat(9000);
+    padTmux.captureScreen = async () => ({ text: long, live: true });
+    await mission.screen(s.id);
+    const row = mission.getSession(s.id);
+    assert.ok(row.last_screen.length <= 8000, `stored screen is capped, got ${row.last_screen.length}`);
+    assert.strictEqual(row.last_screen_truncated, 1, 'and the cut is recorded');
+    assert.ok(row.last_screen.endsWith('x'), 'the TAIL is what is kept — the newest output');
+  });
+});
+
+// Plan 65 1b — a row that says HOW it ended, and a `gone` that is a first
+// observation rather than a re-dating on every poll.
+describe('Mission - plan 65: how a session ended (1b)', () => {
+  const padTmux = require('../services/pad-tmux');
+  const real = { ...padTmux };
+  let alive;
+
+  beforeEach(() => {
+    alive = true;
+    padTmux.listSessions = async () => (alive ? [{ name: 'msn-1111aaaa' }, { name: 'msn-2222bbbb' }] : []);
+    padTmux.listPanes = async () => new Map();
+  });
+
+  afterEach(() => {
+    for (const k of ['listSessions', 'listPanes']) padTmux[k] = real[k];
+  });
+
+  it('first sighting of a gone pane is dated `gone`; later polls do not move it', async () => {
+    const p = mission.createProject({ name: 'beat', agent: 'pad-msn-oc', folder: '/www1/beat' });
+    const s = mission.createSession(p.id, { tmuxId: 'msn-1111aaaa' });
+    alive = false;
+    const rows = await mission.withLiveSessionsByAgent([s], () => 'pad-msn-oc');
+    assert.strictEqual(rows[0].ended_by, 'gone', 'the cause is on the row');
+    assert.ok(rows[0].ended_at, 'and the moment we first saw it');
+    const first = rows[0].ended_at;
+
+    // A second poll must not re-date it: the first observation is the best
+    // information we will ever have, and moving it turns "died at 10:04" into
+    // "died whenever someone last looked".
+    const again = await mission.withLiveSessionsByAgent([mission.getSession(s.id)], () => 'pad-msn-oc');
+    assert.strictEqual(again[0].ended_at, first, 'a second sighting is not a second death');
+  });
+
+  it('a session that comes back has its death CLEARED, and dies again only on a NEW sighting', async () => {
+    // The other half of "first sighting": resurrection is not a new session, so
+    // a stamp left behind would have the row claiming it died while it is
+    // demonstrably running. `clearEnded` is what makes the stamp trustworthy —
+    // a stamp that can outlive the fact is worse than no stamp.
+    const p = mission.createProject({ name: 'beat', agent: 'pad-msn-oc', folder: '/www1/beat' });
+    const s = mission.createSession(p.id, { tmuxId: 'msn-1111aaaa' });
+    alive = false;
+    await mission.withLiveSessionsByAgent([s], () => 'pad-msn-oc');
+    assert.strictEqual(mission.getSession(s.id).ended_by, 'gone');
+
+    alive = true;
+    const back = await mission.withLiveSessionsByAgent([mission.getSession(s.id)], () => 'pad-msn-oc');
+    assert.strictEqual(back[0].ended_at, null, 'the row no longer claims a death it survived');
+    assert.strictEqual(back[0].ended_by, null);
+    assert.strictEqual(mission.getSession(s.id).ended_by, null, 'and the DB agrees with the row it was handed');
+
+    alive = false;
+    const died = await mission.withLiveSessionsByAgent([mission.getSession(s.id)], () => 'pad-msn-oc');
+    assert.strictEqual(died[0].ended_by, 'gone', 'a later, real death is dated again');
+  });
+});
+
+// Plan 65 1d — a recreate answers with what it KILLED. The tool description
+// promised the sessions and the response did not carry them, so the caller
+// could not tell a pad with nobody working in it from one whose conversation
+// just died under them.
+describe('Mission - plan 65: what a recreate takes with it (1d)', () => {
+  const padTmux = require('../services/pad-tmux');
+  const real = { ...padTmux };
+
+  beforeEach(() => {
+    padTmux.listSessions = async () => [{ name: 'msn-1111aaaa' }];
+    padTmux.listPanes = async () => new Map();
+  });
+
+  afterEach(() => {
+    for (const k of ['listSessions', 'listPanes']) padTmux[k] = real[k];
+  });
+
+  it('reports each live session it is about to kill, with the project and what it last said', async () => {
+    const p = mission.createProject({ name: 'beat', agent: 'pad-msn-oc', folder: '/www1/beat' });
+    const s = mission.createSession(p.id, { tmuxId: 'msn-1111aaaa' });
+    const killed = await mission.endSessionsForPad('pad-msn-oc', 'recreate');
+    assert.strictEqual(killed.length, 1);
+    assert.strictEqual(killed[0].id, s.id);
+    assert.strictEqual(killed[0].project.id, p.id, 'the caller learns WHICH conversation died');
+    assert.strictEqual(killed[0].project.name, 'beat');
+    assert.strictEqual(killed[0].lastScreen, null, 'with "never captured" rather than an invented screen');
+    assert.strictEqual(mission.getSession(s.id).ended_by, 'recreate', 'stamped with the cause we caused');
+  });
+
+  it('an ALREADY dead row keeps its own cause — a recreate must not overwrite a real event', async () => {
+    // The ordering trap: the row is observed `gone`, and THEN a recreate runs.
+    // Re-dating it `recreate` would move the death later in time and attribute
+    // it to an operation that found it already dead. The first cause is the one
+    // we can defend, so a recreate reports only what it actually kills.
+    const p = mission.createProject({ name: 'beat', agent: 'pad-msn-oc', folder: '/www1/beat' });
+    const s = mission.createSession(p.id, { tmuxId: 'msn-1111aaaa' });
+    padTmux.listSessions = async () => []; // it died
+    await mission.withLiveSessionsByAgent([s], () => 'pad-msn-oc');
+    const diedAt = mission.getSession(s.id).ended_at;
+    assert.strictEqual(mission.getSession(s.id).ended_by, 'gone');
+
+    const killed = await mission.endSessionsForPad('pad-msn-oc', 'recreate');
+    assert.deepStrictEqual(killed, [], 'a row the recreate did not kill is not in its report');
+    assert.strictEqual(mission.getSession(s.id).ended_by, 'gone', 'and its cause is untouched');
+    assert.strictEqual(mission.getSession(s.id).ended_at, diedAt, 'as is its timestamp');
+  });
+
+  it('a pad with no sessions reports nothing rather than an empty wrapper', async () => {
+    assert.deepStrictEqual(await mission.endSessionsForPad('pad-msn-oc2', 'recreate'), []);
+  });
+});
+
+// Plan 65 1e — closing a session. The tool description promised a
+// `mission_session_dead` refusal that the service never performed, so a close
+// on a corpse silently RE-DATED a death we could still read: `gone` (or
+// `recreate`) became `closed`, crediting a deliberate end to an accident. A
+// description promising a guarantee the code does not keep is the finding
+// itself, so these pin the code, not the prose.
+describe('Mission - plan 65: closing a session (1e)', () => {
+  const padTmux = require('../services/pad-tmux');
+  const real = { ...padTmux };
+  let paneIsLive;
+  let killed;
+
+  beforeEach(() => {
+    paneIsLive = true;
+    killed = [];
+    padTmux.captureScreen = async () => (paneIsLive ? { text: 'last words', live: true } : { text: '', live: false });
+    padTmux.hasSession = async () => paneIsLive;
+    padTmux.killSession = async (vm, tid) => { killed.push(tid); };
+    padTmux.paneState = async () => ({ live: paneIsLive, tuiAlive: true, command: 'node', cwd: '/www1/beat' });
+  });
+
+  afterEach(() => {
+    for (const k of ['captureScreen', 'hasSession', 'killSession', 'paneState']) padTmux[k] = real[k];
+  });
+
+  it('kills the pane, keeps the ROW, and captures the screen before the kill', async () => {
+    const p = mission.createProject({ name: 'beat', agent: 'pad-msn-oc', folder: '/www1/beat' });
+    const s = mission.createSession(p.id, { tmuxId: 'msn-1111aaaa' });
+    const r = await mission.endSession(s.id);
+    assert.deepStrictEqual(killed, ['msn-1111aaaa'], 'the pane is gone');
+    assert.match(r.screen, /last words/, 'and the last thing it said was captured BEFORE the kill');
+    assert.ok(r.session.id, 'the row survives — closing is not deleting');
+    assert.strictEqual(mission.getSession(s.id).ended_by, 'closed', 'stamped with the deliberate cause');
+    assert.match(mission.getSession(s.id).last_screen, /last words/, 'so the conversation is still readable');
+  });
+
+  it('refuses an ALREADY-dated session WITHOUT re-dating it', async () => {
+    const p = mission.createProject({ name: 'beat', agent: 'pad-msn-oc', folder: '/www1/beat' });
+    const s = mission.createSession(p.id, { tmuxId: 'msn-1111aaaa' });
+    padTmux.listSessions = async () => [];
+    padTmux.listPanes = async () => new Map();
+    await mission.withLiveSessionsByAgent([s], () => 'pad-msn-oc');
+    const diedAt = mission.getSession(s.id).ended_at;
+    assert.strictEqual(mission.getSession(s.id).ended_by, 'gone');
+
+    await assert.rejects(() => mission.endSession(s.id), (e) => {
+      assert.strictEqual(e.code, 'mission_session_dead', 'the code the description names');
+      assert.match(e.message, /already ended/, 'and a sentence saying what to do instead');
+      return true;
+    });
+    assert.deepStrictEqual(killed, [], 'nothing was killed — it was already gone');
+    assert.strictEqual(mission.getSession(s.id).ended_by, 'gone', 'and the real cause survives the attempt');
+    assert.strictEqual(mission.getSession(s.id).ended_at, diedAt);
+  });
+
+  it('refuses an undated row whose pane is ALREADY gone, and does not blame `closed` for it', async () => {
+    // The harder half. The row says nothing (no listing has seen it die) but the
+    // pane is gone, so a blind stamp would credit a deliberate close to a death
+    // nobody performed. Refuse, and leave the row for the next liveness pass to
+    // date `gone` — the one witness to the event.
+    const p = mission.createProject({ name: 'beat', agent: 'pad-msn-oc', folder: '/www1/beat' });
+    const s = mission.createSession(p.id, { tmuxId: 'msn-1111aaaa' });
+    paneIsLive = false;
+    await assert.rejects(() => mission.endSession(s.id), /no live pane/);
+    assert.deepStrictEqual(killed, [], 'nothing to kill');
+    const row = mission.getSession(s.id);
+    assert.strictEqual(row.ended_by, null, 'NOT stamped `closed` — nobody closed it');
+    assert.strictEqual(row.ended_at, null, 'the row is left for the liveness pass to date honestly');
+  });
+});

@@ -49,8 +49,11 @@ sessions — with \`mission_sessions {session_id}\` you also get the tail of wha
 showing RIGHT NOW, so you know what they are doing without asking. Every row also says
 whether a turn is \`busy\` (streaming right now), so you can wait your turn instead of
 interrupting. \`mission_project_create\` (create bucket) adds a project row; \`mission_session_start\`
-and \`mission_send\` (exec bucket) open a session and type into one. All five are scoped to
-the PADs your key may see.
+and \`mission_send\` (exec bucket) open a session and type into one. A dead session is not a
+dead end: \`mission_session_restart\` (pane gone) and \`mission_session_relaunch\` (pane
+alive, TUI exited) bring it back on the SAME row and the same conversation, and
+\`mission_session_close\` ends one deliberately. All are scoped to the PADs your key
+may see.
 
 ## Caller rules — read this before mutating anything
 
@@ -92,8 +95,10 @@ the PADs your key may see.
   a session you did not start: you are writing into the human's live conversation. A
   session with \`locked: true\` is their deliberate "driving alone" switch — \`mission_send\`
   refuses it with \`mission_session_locked\` and types nothing. Do not retry that; use
-  another session, or ask. A \`live: false\` session needs a human to restart it (or your
-  own \`mission_session_start\`) — typing into it fails.
+  another session, or ask. A \`live: false\` session is one \`mission_session_restart\` away — same row,
+  same tmux id, same conversation — so read its \`lastScreen\` first (\`screenFrom:
+  "last-captured"\`) and restart it rather than asking the human. Typing into it fails
+  until you do.
 - **A session row tells you whether the human is mid-turn, and the answer has three
   states.** \`busy: true\` means a turn is streaming right now: let it finish, then read
   the screen. \`busy: false\` WITH \`busyKnown: true\` means genuinely idle. \`busyKnown:
@@ -178,10 +183,17 @@ dropped). Take the \`folder\` from \`mission_projects\`.
      that TUI. This is how you know where to help without being told. Check \`busy\` on the
      way past: a session mid-turn is not one to interrupt.
 13. **Work in a Mission session (the only way to do work here):** \`mission_session_start
-     {project_id}\` → the TUI comes up in the project folder and the page shows it →
-     \`mission_sessions {session_id}\` to read the answer → \`mission_send {session_id, text}\`
-     to type your next line. \`mission_project_create\` first if the PAD has no project for
-     the folder you need.
+     {project_id, idempotency_key}\` → the TUI comes up in the project folder and the page
+     shows it → \`mission_sessions {session_id}\` to read the answer → \`mission_send
+     {session_id, text}\` to type your next line. \`mission_project_create\` first if the PAD
+     has no project for the folder you need. \`idempotency_key\` is not optional in
+     spirit: start with one, and if this call times out send the SAME key again — a timed-out
+     call returns nothing, so a blind retry is what opens a second session.
+13b. **A session that died:** \`mission_session_restart {session_id}\` puts the pane and the
+     same conversation back (\`mission_session_relaunch\` when the pane is alive but the TUI
+     exited). Before restarting, read the last thing it said: \`mission_sessions {session_id}\`
+     returns it as \`screenFrom: "last-captured"\` with \`lastScreenAt\`. End one you are done
+     with using \`mission_session_close {session_id}\` — the row and the conversation survive.
 
 
 14. **See what a project is WORKING ON:** \`mission_projects {folder}\` for the project's

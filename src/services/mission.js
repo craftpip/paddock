@@ -190,29 +190,67 @@ function deleteProject(id) {
  *  the source of truth and tmux is the runtime. `origin` records the KIND of
  *  starter (human / agent) and `createdBy` the WHO — `key:<id>` for an MCP key,
  *  `user:<id>` for the web UI (plan 67, 67.3). */
-function createSession(projectId, { label = '', origin = 'human', tmuxId = '', agentSessionId = '', createdBy = null } = {}) {
+function createSession(projectId, opts = {}) {
+  return insertSession(projectId, opts).session;
+}
+
+/** The insert, told whether it actually made the row.
+ *
+ *  A caller that can be retried (plan 65 1f) must not learn "your key already
+ *  existed" as a bare row: it has a row either way, and the difference decides
+ *  whether it goes on to create a tmux session. Handing back only the row made
+ *  the concurrent path a silent SECOND launch into the winner's pane — the exact
+ *  duplicate the key exists to prevent, reached through the race rather than the
+ *  retry. `createSession` keeps the row-only shape for every other caller. */
+function insertSession(projectId, { label = '', origin = 'human', tmuxId = '', agentSessionId = '', createdBy = null, idempotencyKey = null } = {}) {
   const project = getProject(projectId);
   const who = origin === 'agent' ? 'agent' : 'human';
   const tid = tmuxId || newTmuxId();
   if (!TMUX_RE.test(tid)) throw new MissionError('mission_bad_session', 'Bad session name');
   const id = newId('msn');
-  getDb()
-    .prepare(
-      `INSERT INTO mission_sessions (id, project_id, tmux_id, label, origin, created_by, agent_session_id, created_at, last_seen_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    )
-    .run(
-      id,
-      project.id,
-      tid,
-      String(label || '').slice(0, 200),
-      who,
-      createdBy ? String(createdBy).slice(0, 120) : null,
-      String(agentSessionId || '') || null,
-      new Date().toISOString(),
-      new Date().toISOString()
-    );
-  return getSession(id);
+  try {
+    getDb()
+      .prepare(
+        `INSERT INTO mission_sessions (id, project_id, tmux_id, label, origin, created_by, agent_session_id, created_at, last_seen_at, idempotency_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        id,
+        project.id,
+        tid,
+        String(label || '').slice(0, 200),
+        who,
+        createdBy ? String(createdBy).slice(0, 120) : null,
+        String(agentSessionId || '') || null,
+        new Date().toISOString(),
+        new Date().toISOString(),
+        idempotencyKey ? String(idempotencyKey).slice(0, 200) : null
+      );
+  } catch (e) {
+    // The unique index is the authority, and this is the race two CONCURRENT
+    // calls with one key hit — the check-before-insert above cannot see a
+    // sibling that has not committed yet. A duplicate here is the retry the key
+    // was invented for, not a failure, so the caller's own row comes back rather
+    // than a SQLITE_CONSTRAINT the caller cannot interpret.
+    if (idempotencyKey && /UNIQUE|constraint/i.test(String(e && e.message))) {
+      const prior = getSessionByIdempotencyKey(project.id, String(idempotencyKey));
+      if (prior) return { session: prior, deduped: true };
+    }
+    throw e;
+  }
+  return { session: getSession(id), deduped: false };
+}
+
+/** The row a retry token already made (plan 65 1f). `live` is deliberately NOT
+ *  checked: a session whose pane has not come up yet is precisely the one a
+ *  timed-out caller is trying to find, and treating it as absent would hand back
+ *  the duplicate this exists to prevent. */
+function getSessionByIdempotencyKey(projectId, key) {
+  const k = String(key || '').trim();
+  if (!k) return null;
+  return getDb()
+    .prepare('SELECT * FROM mission_sessions WHERE project_id = ? AND idempotency_key = ?')
+    .get(String(projectId), k) || null;
 }
 
 function getSession(id) {
@@ -331,7 +369,8 @@ function touchSession(id) {
  *  The hash is what makes "changed" answerable across requests: there is no
  *  in-memory cache that survives a restart, and a column does. */
 function noteOutput(id, text) {
-  const hash = crypto.createHash('sha1').update(String(text || '')).digest('hex');
+  const body = String(text || '');
+  const hash = crypto.createHash('sha1').update(body).digest('hex');
   const db = getDb();
   const row = db.prepare('SELECT last_output_hash FROM mission_sessions WHERE id = ?').get(String(id));
   if (!row) return null;
@@ -341,8 +380,131 @@ function noteOutput(id, text) {
   // caller that compared the row it was handed against a later read would see a
   // change nobody made.
   const at = new Date().toISOString();
-  db.prepare('UPDATE mission_sessions SET last_output_at = ?, last_output_hash = ? WHERE id = ?').run(at, hash, String(id));
+  // The screen travels with its clock (plan 65 1a). Storing it HERE rather than
+  // in a teardown path is the whole design: `noteOutput` is called by the reads
+  // that have already captured a pane (the detail screen, the post-write
+  // confirmation), so this is the last thing the agent was seen saying — with no
+  // hook to lose and nothing extra to probe. It rides the hash check for free,
+  // because the content is only written when the content actually changed.
+  //
+  // Clamped, because a pane is a fixed size but a row is forever: an unbounded
+  // capture would put a few KB of terminal scrollback into every listing read.
+  // Whether we cut it is STORED, not implied: a screen that ended where we cut it
+  // and a screen we trimmed to fit read identically otherwise, and the difference
+  // decides whether the top line is a real message or half of one.
+  const cap = SCREEN_STORE_LIMIT;
+  const truncated = body.length > cap ? 1 : 0;
+  const keep = truncated ? body.slice(body.length - cap) : body;
+  db.prepare(`UPDATE mission_sessions SET last_output_at = ?, last_output_hash = ?,
+      last_screen = ?, last_screen_at = ?, last_screen_truncated = ? WHERE id = ?`)
+    .run(at, hash, keep, at, truncated, String(id));
   return at;
+}
+
+/** How much of the last pane a row keeps. A pane is a fixed size, so a full
+ *  capture is bounded already; this is the belt-and-braces cap for a driver that
+ *  hands back more than a screen (scrollback, or a very wide terminal), because
+ *  every session row carries this text into every listing. */
+const SCREEN_STORE_LIMIT = 8000;
+
+/** Record how a session's LIFE ended, and stamp the moment we first saw it gone
+ *  (plan 65 1b). Two writers, one function, so the two can never disagree:
+ *
+ *  - `endSessionsForPad` (below) names `recreate` — a death we CAUSED, dated
+ *    exactly, before the container goes.
+ *  - `stampEnded` runs from the liveness pass and names `gone` — the first
+ *    observation, which is an upper bound on when it actually happened. A caller
+ *    must not read `endedAt` as the instant of death, and the tool description
+ *    says so; a value we can defend beats a value we would have to invent.
+ *
+ *  A row that comes back (the pane was recreated, the tmux server restarted)
+ *  has its stamps CLEARED, because "ended" and "live" must never both be true on
+ *  the same row — that pair is a contradiction a caller cannot resolve. */
+function endSessions(ids, by, { at = null, reason = null } = {}) {
+  const list = (ids || []).filter(Boolean).map(String);
+  if (!list.length) return 0;
+  const stamp = at || new Date().toISOString();
+  const db = getDb();
+  const stmt = db.prepare('UPDATE mission_sessions SET ended_at = ?, ended_by = ? WHERE id = ? AND ended_at IS NULL');
+  const tx = db.transaction((rows) => {
+    let n = 0;
+    for (const id of rows) n += stmt.run(stamp, by, id).changes;
+    return n;
+  });
+  try {
+    return tx(list);
+  } catch {
+    return 0;
+  }
+}
+
+/** Un-end the rows that are demonstrably alive again. Called from the liveness
+ *  pass with the same `live` flag that produced the row the caller is about to
+ *  read, so the row in hand and the row in the table cannot disagree. */
+/** Date the sessions a `recreate` is about to take, and hand back what it took
+ *  (plan 65 1d).
+ *
+ *  Every tmux session on a PAD dies with its container, including live
+ *  conversations the human is looking at — and until this existed nothing said
+ *  so, in the tool description or the response. So the response names the field,
+ *  the rows are dated (`ended_by: 'recreate'`, the ONE death we can date
+ *  exactly), and the caller can read the cost of the change it just made in the
+ *  same call that made it.
+ *
+ *  Called BEFORE the recreate, because afterwards there is nothing left to ask.
+ *
+ *  A recreate that then FAILS leaves rows stamped as ended that are still alive
+ *  — and that heals itself: the liveness pass clears the stamps of every row it
+ *  finds live, so the next read is right. Stamping early is still the better
+ *  trade, because the opposite order (kill, then ask) has no rows left at all.
+ *
+ *  Only LIVE rows are stamped. A row that was already dead carries its own death
+ *  — `gone`, or `closed` — and re-dating it `recreate` would overwrite a real
+ *  event with a later, unrelated one. */
+async function endSessionsForPad(vmName, by = 'recreate') {
+  const projects = listProjects({ agent: vmName });
+  const rows = [];
+  for (const p of projects) {
+    for (const s of listSessions({ projectId: p.id })) rows.push({ ...s, projectName: p.name, agentName: p.agent_name });
+  }
+  if (!rows.length) return [];
+  const live = await withLiveSessionsByAgent(rows, (s) => s.agentName);
+  const dying = live.filter((s) => s.live === true);
+  if (!dying.length) return [];
+  endSessions(dying.map((s) => s.id), by);
+  return dying.map((s) => ({
+    id: s.id,
+    tmux_id: s.tmux_id,
+    label: s.label || '',
+    project: { id: s.project_id, name: s.projectName },
+    // The service rides the agent name so a caller can scope the report to what
+    // its own key may see — a recreate on a pad it does not own must not print
+    // somebody else's session ids. The MCP layer drops it again.
+    agentName: s.agentName,
+    // The screen is NOT captured here on purpose: it would cost one tmux exec
+    // per session inside an operation that is already long, and the stored tail
+    // plus its clock is the honest answer — `lastScreen: null` says "we never
+    // captured this one" rather than inventing a screen for a corpse.
+    lastScreen: s.last_screen || null,
+    lastScreenAt: s.last_screen_at || null,
+  }));
+}
+
+function clearEnded(liveIds) {
+  const list = (liveIds || []).filter(Boolean).map(String);
+  if (!list.length) return 0;
+  const db = getDb();
+  const stmt = db.prepare('UPDATE mission_sessions SET ended_at = NULL, ended_by = NULL WHERE id = ? AND ended_at IS NOT NULL');
+  const tx = db.transaction((rows) => {
+    let n = 0;
+    for (const id of rows) n += stmt.run(id).changes;
+    return n;
+  });
+  try {
+    return tx(list);
+  } catch {
+    return 0;
+  }
 }
 
 /** Single-quote a value for the shell inside the PAD: wrap in `'…'` and turn
@@ -441,7 +603,7 @@ async function agentHistory(projectId, { limit = 50, includeSubfolders = false }
   };
 }
 
-async function startSession(projectId, { label = '', origin = 'human', cols = 0, rows = 0, agentSessionId = '', createdBy = null } = {}) {
+async function startSession(projectId, { label = '', origin = 'human', cols = 0, rows = 0, agentSessionId = '', createdBy = null, idempotencyKey = '' } = {}) {
   const project = getProject(projectId);
   const driver = assertMissionAgent(project.agent_type);
   assertPadRunning(project.agent_name);
@@ -467,7 +629,36 @@ async function startSession(projectId, { label = '', origin = 'human', cols = 0,
   const launch = resumeId
     ? driver.tuiLaunch.resume({ sessionId: resumeId, cwd: project.folder })
     : driver.tuiLaunch.fresh({ cwd: project.folder });
-  const session = createSession(project.id, { label, origin, agentSessionId: resumeId, createdBy });
+  // Plan 65 1f — the retry token. A client-side timeout cannot be shortened from
+  // here, and a timed-out call has NO response to help the caller, so the only
+  // place the duplicate can be prevented is the retry itself: the caller sends
+  // the same key and gets its existing row back instead of a second tmux session
+  // burning a second conversation's tokens.
+  //
+  // The window this closes is not hypothetical and not small: the row and the
+  // tmux session exist well before the pane is up, so the slow part (the TUI
+  // coming up) is exactly what a client is most likely to time out on.
+  const key = String(idempotencyKey || '').trim() || null;
+  if (key) {
+    const prior = getSessionByIdempotencyKey(project.id, key);
+    if (prior) {
+      // Report it as the SAME session with the facts a caller needs to decide
+      // whether to keep waiting or to look at it — `resumed: false` is what
+      // separates "you already had this" from a fresh start.
+      return {
+        session: getSession(prior.id),
+        state: await padTmux.paneState(project.agent_name, prior.tmux_id),
+        deduped: true,
+      };
+    }
+  }
+  const { session, deduped } = insertSession(project.id, { label, origin, agentSessionId: resumeId, createdBy, idempotencyKey: key });
+  // The sibling committed between the check above and this insert. Its pane is
+  // already being brought up, so this call must not bring up a second one in the
+  // same tmux id — report the winner's row and the state as it stands.
+  if (deduped) {
+    return { session: getSession(session.id), state: await padTmux.paneState(project.agent_name, session.tmux_id), deduped: true };
+  }
   try {
     await padTmux.createSession(project.agent_name, session.tmux_id, { cwd: project.folder, cols, rows });
     await padTmux.sendCommand(project.agent_name, session.tmux_id, launch);
@@ -488,7 +679,7 @@ async function relaunchTui(sessionId) {
   const { session, project, driver, vmName } = sessionTarget(sessionId);
   const state = await padTmux.paneState(vmName, session.tmux_id);
   if (!state.live) {
-    throw new MissionError('mission_session_dead', 'This session is gone — restart it to get a fresh TUI', 409);
+    throw new MissionError('mission_session_dead', 'This session is gone — mission_session_restart brings it back (this tool needs a LIVE pane)', 409);
   }
   if (state.tuiAlive) {
     throw new MissionError('mission_tui_already_running', 'That session is already running its agent', 409);
@@ -541,6 +732,11 @@ async function restartSession(sessionId) {
     : driver.tuiLaunch.fresh({ cwd: project.folder });
   await padTmux.sendCommand(vmName, session.tmux_id, launch);
   touchSession(session.id);
+  // The resurrection clears the death (plan 65 1b). The liveness pass would do
+  // this on the next read, but the row handed back HERE is read immediately —
+  // and a row that says `endedAt` and `live: true` at the same time is a
+  // contradiction the caller cannot resolve.
+  clearEnded([session.id]);
   return { session: getSession(session.id), state: await padTmux.paneState(vmName, session.tmux_id) };
 }
 
@@ -583,7 +779,7 @@ function detectPermission(text) {
 function sendVerdict(session, perm) {
   const label = session.label || session.tmux_id;
   if (session.live === false) {
-    return { canSend: false, refusal: 'mission_session_dead: the tmux session is gone — restart it to get a fresh TUI' };
+    return { canSend: false, refusal: 'mission_session_dead: the tmux session is gone — bring it back with mission_session_restart (same row, same conversation)' };
   }
   if (session.tuiAlive === false) {
     return {
@@ -617,11 +813,11 @@ async function sendText(sessionId, text) {
   const body = String(text || '');
   if (!body.trim()) throw new MissionError('mission_empty_message', `Nothing to send${where}`);
   if (!(await padTmux.hasSession(vmName, session.tmux_id))) {
-    throw new MissionError('mission_session_dead', `This session is gone — restart it to get a fresh TUI${where}`, 409);
+    throw new MissionError('mission_session_dead', `This session is gone — mission_session_restart brings it back with the same conversation id${where}`, 409);
   }
   const pre = await padTmux.paneState(vmName, session.tmux_id);
   if (!pre.live) {
-    throw new MissionError('mission_session_dead', `This session is gone — restart it to get a fresh TUI${where}`, 409);
+    throw new MissionError('mission_session_dead', `This session is gone — mission_session_restart brings it back with the same conversation id${where}`, 409);
   }
   // ONE verdict, both surfaces. `pre` carries the live pane facts this gate has
   // already paid for, so folding them in costs no extra tmux call, and the
@@ -767,19 +963,48 @@ async function screen(sessionId, lines = 40) {
     await agentWorkingSessions(project.agent_name, project.folder)
   );
   if (advanced) row.last_output_at = advanced;
+  // The detail read PROBED the pane, so it is a liveness observation exactly
+  // like a listing — and it is the call a caller makes precisely to find out
+  // that a session died. Stamping only on the listing pass meant a caller who
+  // only ever read detail got `endedAt: absent` for a corpse, and the
+  // description said an absent `endedAt` means "never observed dead" — which the
+  // read had just observed. It also dates resurrection, so a live detail read
+  // cannot leave a stale death claim behind. Both directions are one call to the
+  // function the listings use, so the two paths cannot disagree.
+  syncEnded([row]);
   // The SAME `sendVerdict` the write path gates on, fed the same permission
   // detection — so `canSend` cannot promise a send that would then be refused.
   // Computed here because this is the one place a screen was already captured;
   // list mode has no capture, so it carries no such claim.
   const verdict = sendVerdict(row, perm);
-  return {
+  // Plan 65 1a — a dead session's chat, with its age. The surface could resume a
+  // conversation but never READ one: this returned `screen: ""` for a corpse, and
+  // an empty string is ambiguous (an agent that said nothing? a broken capture?),
+  // so the caller could not tell "no output" from "we cannot see it any more".
+  // The stored tail answers for the case we can answer and says so out loud:
+  // `screenFrom: 'live-pane'` vs `'last-captured'`, plus the clock that dates it.
+  // Absent (`screenFrom: 'none'`) when nothing was ever captured — never a
+  // silently empty string standing in for a screen.
+  const stored = session.last_screen;
+  const out = {
     session: { ...row, title: await sessionTitle(project, session) },
     state,
-    screen: captured.text,
+    screen: captured.live ? captured.text : (stored || ''),
     live: captured.live,
     ...verdict,
     ...(perm ? { blockedOn: 'permission', permission: perm } : {}),
   };
+  if (captured.live) {
+    out.screenFrom = 'live-pane';
+    out.lastScreenAt = advanced || session.last_screen_at || null;
+  } else if (stored) {
+    out.screenFrom = 'last-captured';
+    out.lastScreenAt = session.last_screen_at || null;
+    out.lastScreenTruncated = !!session.last_screen_truncated;
+  } else {
+    out.screenFrom = 'none';
+  }
+  return out;
 }
 
 /** The title the AGENT gives this conversation, distinct from the operator's
@@ -885,6 +1110,46 @@ function touchLiveRows(sessions) {
   } catch {}
 }
 
+/** The liveness pass is the ONLY place a death is noticed, so it is the only
+ *  place a row is stamped `ended_at: 'gone'` — and the only place a resurrected
+ *  one is un-stamped (plan 65 1b).
+ *
+ *  It rides the same `withLive*` calls that already produce the `live` flag on
+ *  each row, so there is no extra probe, and it is fed the very rows the caller
+ *  is about to be handed: a row can therefore never read `live: true` in the
+ *  response while `endedAt` sits on it in the table. Best effort by design — a
+ *  failure here loses a timestamp, never a listing. */
+function syncEnded(sessions) {
+  try {
+    const live = [];
+    const gone = [];
+    for (const s of sessions || []) {
+      if (!s || !s.id) continue;
+      if (s.live === true) live.push(s.id);
+      else if (s.ended_at === null || s.ended_at === undefined) gone.push(s.id);
+    }
+    if (live.length) {
+      clearEnded(live);
+      for (const s of sessions) if (s.live === true && s.id) { s.ended_at = null; s.ended_by = null; }
+    }
+    if (gone.length) {
+      const stamp = new Date().toISOString();
+      const db = getDb();
+      const stmt = db.prepare("UPDATE mission_sessions SET ended_at = ?, ended_by = 'gone' WHERE id = ? AND ended_at IS NULL");
+      const tx = db.transaction((list) => {
+        for (const id of list) stmt.run(stamp, id);
+      });
+      tx(gone);
+      for (const s of sessions) {
+        if (s.id && s.live !== true && (s.ended_at === null || s.ended_at === undefined)) {
+          s.ended_at = stamp;
+          s.ended_by = 'gone';
+        }
+      }
+    }
+  } catch {}
+}
+
 /** Stamp `live` (+ kind/cwd, plan 62 1b/1e) on every session of every project,
  *  at two tmux calls per PAD (`list-sessions` + `list-panes -a`) rather than
  *  two per session (`paneState`). A list page with 20 sessions across 4 PADs
@@ -903,6 +1168,7 @@ async function withLive(projects) {
     const { names, panes } = byPad.get(p.agent_name) || { names: new Set(), panes: new Map() };
     p.sessions = (p.sessions || []).map((s) => stampPaneKind({ ...s, live: names.has(s.tmux_id) }, panes));
     touchLiveRows(p.sessions);
+    syncEnded(p.sessions);
     p.liveCount = p.sessions.filter((s) => s.live).length;
   }
   return projects;
@@ -914,6 +1180,7 @@ async function withLiveSessions(sessions, agentName) {
   const { names, panes } = await liveAndPanes(agentName);
   const out = sessions.map((s) => stampPaneKind({ ...s, live: names.has(s.tmux_id) }, panes));
   touchLiveRows(out);
+  syncEnded(out);
   return out;
 }
 
@@ -939,6 +1206,7 @@ async function withLiveSessionsByAgent(sessions, agentOf) {
     return stampPaneKind({ ...s, live: entry.names.has(s.tmux_id) }, entry.panes);
   });
   touchLiveRows(out);
+  syncEnded(out);
   return out;
 }
 
@@ -1170,6 +1438,50 @@ async function closeSession(sessionId) {
   return deleteSession(session.id);
 }
 
+/** End a session's LIFE without erasing the record of it (plan 65 1e).
+ *
+ *  `closeSession` above is the page's Close button: kill the pane and DELETE the
+ *  row, because that is what "remove this from my list" means to a human. An
+ *  agent ending a session is a different act — "we are done with this
+ *  conversation" — and deleting the row would throw away the very thing plan
+ *  exists to answer (when did it end, what was it doing, what conversation was
+ *  it). So the pane dies, the row is stamped `ended_by: 'closed'`, and it stays.
+ *
+ *  The screen is captured FIRST, deliberately. A close is the one death we get to
+ *  witness, and skipping it would mean the closest thing to a real teardown in
+ *  the whole system is also the one death whose last words we throw away.
+ *
+ *  Not locked-session aware on purpose: closing is the human's escape hatch from
+ *  a solo-locked session, and refusing to close the one kind of session that most
+ *  needs closing would be a bug shaped like a rule. `locked` describes who may
+ *  TYPE, not who may end it. */
+async function endSession(sessionId) {
+  const { session, project, vmName } = sessionTarget(sessionId);
+  // Refuse a session that is ALREADY gone, and the check comes before the
+  // capture on purpose: the tool description promises `mission_session_dead`
+  // here, and an unconditional stamp would quietly re-date a session whose death
+  // was `gone` (or `recreate`) — overwriting a fact we can still read. "Already
+  // dead" is answered from the row's own `ended_at`, not from a probe, so the
+  // refusal costs no tmux call.
+  if (session.ended_at) {
+    throw new MissionError('mission_session_dead', `Session ${sessionId} already ended (endedBy: ${session.ended_by}) — there is nothing to close.`, 409);
+  }
+  const captured = await padTmux.captureScreen(vmName, session.tmux_id, 40);
+  // The row is undated but the pane is gone: the session died between passes.
+  // Refuse WITHOUT stamping — the next liveness pass dates it `gone`, which is
+  // the true cause. Stamping `closed` here would credit a deliberate end to a
+  // death nobody asked for, and the row is the only record of which it was.
+  if (!captured.live) {
+    throw new MissionError('mission_session_dead', `Session ${sessionId} has no live pane — it already ended (its row is dated by the next listing). There is nothing to close.`, 409);
+  }
+  noteOutput(session.id, captured.text);
+  if (await padTmux.hasSession(vmName, session.tmux_id)) {
+    await padTmux.killSession(vmName, session.tmux_id);
+  }
+  endSessions([session.id], 'closed');
+  return { session: getSession(session.id), project, screen: captured.text };
+}
+
 /** Every live session across every project, each row tagged with the project it
  *  belongs to. The Mission page's "All projects" scope: same rows as the
  *  per-project list, so a session started anywhere shows up in one place
@@ -1282,6 +1594,9 @@ module.exports = {
   deleteProject,
   createSession,
   getSession,
+  getSessionByIdempotencyKey,
+  endSessions,
+  endSessionsForPad,
   listSessions,
   listSessionsForAgent,
   listAllSessions,
@@ -1311,4 +1626,5 @@ module.exports = {
   withAgentBusy,
   withAgentBusyProjects,
   closeSession,
+  endSession,
 };

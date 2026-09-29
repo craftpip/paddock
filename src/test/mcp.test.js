@@ -1162,6 +1162,228 @@ describe('MCP Server - Mission tools (plan 55)', () => {
     const mine = mission.createProject({ name: 'mine', agent: 'pad-mm-oc', folder: '/www1/a' });
     assert.strictEqual(missionRequireProject(OWNER, 'mission_sessions', mine.id).id, mine.id);
   });
+
+  // ── Plan 65 ──────────────────────────────────────────────────────────────
+  // The lifecycle surface: a start that survives a timeout, a dead session you
+  // can still READ, a row that says how it died, and a recreate that accounts
+  // for what it killed. Each is a promise a description makes — so each test
+  // calls the tool rather than reading the source, and the response shape is
+  // the contract.
+  describe('plan 65: the session lifecycle an LLM can drive', () => {
+    it('the three lifecycle verbs exist, and ride the EXEC bucket', async () => {
+      const r = await client.listTools();
+      const names = r.tools.map((t) => t.name);
+      for (const t of ['mission_session_close', 'mission_session_relaunch', 'mission_session_restart']) {
+        assert.ok(names.includes(t), `${t} is registered`);
+      }
+      // A close KILLS a live conversation, so it must not ride the read bucket:
+      // a read-only key that could end the human's session is the exact failure
+      // the grant map exists to prevent.
+      const { toolAllowed } = require('../mcp');
+      for (const t of ['mission_session_close', 'mission_session_relaunch', 'mission_session_restart']) {
+        assert.strictEqual(toolAllowed(READER, t, 'pad-mm-oc'), false, `${t} is refused to a read-only key`);
+        assert.strictEqual(toolAllowed(OWNER_EXEC, t, 'pad-mm-oc'), true, `${t} is allowed to an exec key`);
+      }
+    });
+
+    it('mission_session_start takes an idempotency_key and reports the dedupe', async () => {
+      const p = mission.createProject({ name: 'beat', agent: 'pad-mm-oc', folder: '/www1/beat' });
+      const first = await call('mission_session_start', { project_id: p.id, idempotency_key: 'tok-1' }, OWNER);
+      assert.ok(!first.isError, first.text);
+      assert.strictEqual(first.data.deduped, undefined, 'a fresh start is not dressed up as a dedupe');
+      const again = await call('mission_session_start', { project_id: p.id, idempotency_key: 'tok-1' }, OWNER);
+      assert.ok(!again.isError, again.text);
+      assert.strictEqual(again.data.deduped, true, 'the retry is told it is a retry');
+      assert.strictEqual(again.data.session.id, first.data.session.id, 'and it is the SAME session');
+      assert.match(again.data.hint || '', /idempotency_key|same session/i, 'with a hint a caller can act on');
+    });
+
+    it('the schema NAMES the key, so a caller knows to send one', async () => {
+      // An optional-looking parameter nobody sends is no protection at all. The
+      // description has to say what it is FOR, not just that it exists.
+      const r = await client.listTools();
+      const start = r.tools.find((t) => t.name === 'mission_session_start');
+      const key = (start.inputSchema.properties || {}).idempotency_key;
+      assert.ok(key, 'the key is in the schema');
+      assert.match(key.description || '', /timeout|timed out|retri/i, 'and its description says why you would send it');
+    });
+
+    it('a DEAD session is readable: the stored screen, dated, labelled as stored', async () => {
+      const p = mission.createProject({ name: 'beat', agent: 'pad-mm-oc', folder: '/www1/beat' });
+      const s = mission.createSession(p.id, { tmuxId: 'msn-1111aaaa' });
+      await call('mission_sessions', { session_id: s.id }, OWNER); // a live read that stores the tail
+      screenText = '';
+      padTmux.captureScreen = async () => ({ text: '', live: false });
+      padTmux.paneState = async () => ({ live: false, tuiAlive: false, command: '', cwd: '', reason: 'no-session' });
+      padTmux.hasSession = async () => false;
+      padTmux.listSessions = async () => [];
+
+      const r = await call('mission_sessions', { session_id: s.id }, OWNER);
+      assert.ok(!r.isError, r.text);
+      assert.strictEqual(r.data.screenFrom, 'last-captured', 'the caller is TOLD this is not a live pane');
+      assert.ok(r.data.lastScreenAt, 'and when it was captured');
+      assert.match(r.data.screen, /the answer/, 'the last thing the agent said is still readable');
+      assert.strictEqual(r.data.hint && /restart/i.test(r.data.hint), true, 'and the hint points at the verb that fixes it');
+    });
+
+    it('the row says HOW it ended, and a second poll does not move the clock', async () => {
+      const p = mission.createProject({ name: 'beat', agent: 'pad-mm-oc', folder: '/www1/beat' });
+      const s = mission.createSession(p.id, { tmuxId: 'msn-1111aaaa' });
+      padTmux.captureScreen = async () => ({ text: '', live: false });
+      padTmux.paneState = async () => ({ live: false, tuiAlive: false, command: '', cwd: '', reason: 'no-session' });
+      padTmux.hasSession = async () => false;
+      padTmux.listSessions = async () => [];
+
+      const one = await call('mission_sessions', { session_id: s.id }, OWNER);
+      assert.strictEqual(one.data.session.endedBy, 'gone', 'observed dead is stamped');
+      assert.ok(one.data.session.endedAt, 'with the moment we first saw it');
+      const two = await call('mission_sessions', { session_id: s.id }, OWNER);
+      assert.strictEqual(two.data.session.endedAt, one.data.session.endedAt, 'a second poll is not a second death');
+    });
+
+    it('mission_session_close kills the pane, KEEPS the row, and reports the last screen', async () => {
+      const p = mission.createProject({ name: 'beat', agent: 'pad-mm-oc', folder: '/www1/beat' });
+      const s = mission.createSession(p.id, { tmuxId: 'msn-1111aaaa' });
+      const killed = [];
+      padTmux.killSession = async (vm, tid) => { killed.push(tid); };
+      const r = await call('mission_session_close', { session_id: s.id }, OWNER);
+      assert.ok(!r.isError, r.text);
+      assert.deepStrictEqual(killed, ['msn-1111aaaa'], 'the pane is killed');
+      assert.strictEqual(r.data.session.endedBy, 'closed', 'the cause is deliberate, and named');
+      assert.ok(r.data.resumable, 'the caller is told the row can come back');
+      assert.strictEqual(r.data.resumable.via, 'mission_session_restart (same row, same tmux id)');
+      assert.match(r.data.resumable.conversation, /same|new/, 'and whether the CONVERSATION comes back, which is a separate fact');
+      assert.match(r.data.screen, /the answer/, 'and gets the last thing it said, captured before the kill');
+      // The row SURVIVES — that is the difference from the page's Close button,
+      // and the distinction only means something if the row is still there.
+      const after = await call('mission_sessions', { session_id: s.id }, OWNER);
+      assert.ok(!after.isError, 'the row is still readable after a close');
+    });
+
+    it('a close on an already-dead session is REFUSED and does not re-date it', async () => {
+      const p = mission.createProject({ name: 'beat', agent: 'pad-mm-oc', folder: '/www1/beat' });
+      const s = mission.createSession(p.id, { tmuxId: 'msn-1111aaaa' });
+      padTmux.captureScreen = async () => ({ text: '', live: false });
+      padTmux.paneState = async () => ({ live: false, tuiAlive: false, command: '', cwd: '', reason: 'no-session' });
+      padTmux.hasSession = async () => false;
+      padTmux.listSessions = async () => [];
+      await call('mission_sessions', { session_id: s.id }, OWNER); // observes the death
+
+      const r = await call('mission_session_close', { session_id: s.id }, OWNER);
+      assert.ok(r.isError, 'refused, not silently successful');
+      assert.match(r.text, /already ended|nothing to close/i, 'with a sentence that says what to do instead');
+      assert.strictEqual(mission.getSession(s.id).ended_by, 'gone', 'and the REAL cause survives the attempt');
+    });
+
+    it('mission_session_restart brings a dead row back, and clears its death stamp', async () => {
+      const p = mission.createProject({ name: 'beat', agent: 'pad-mm-oc', folder: '/www1/beat' });
+      const s = mission.createSession(p.id, { tmuxId: 'msn-1111aaaa' });
+      padTmux.captureScreen = async () => ({ text: '', live: false });
+      padTmux.paneState = async () => ({ live: false, tuiAlive: false, command: '', cwd: '', reason: 'no-session' });
+      padTmux.hasSession = async () => false;
+      padTmux.listSessions = async () => [];
+      await call('mission_sessions', { session_id: s.id }, OWNER);
+      assert.strictEqual(mission.getSession(s.id).ended_by, 'gone', 'sanity: it is dated');
+
+      const made = [];
+      padTmux.createSession = async (vm, tid) => { made.push(tid); };
+      padTmux.hasSession = async () => true;
+      const r = await call('mission_session_restart', { session_id: s.id }, OWNER);
+      assert.ok(!r.isError, r.text);
+      assert.deepStrictEqual(made, ['msn-1111aaaa'], 'the SAME tmux id comes back — not a new session');
+      assert.strictEqual(mission.getSession(s.id).ended_by, null, 'a resurrected row does not claim it died');
+      assert.strictEqual(mission.getSession(s.id).ended_at, null);
+    });
+
+    it('mission_session_relaunch refuses a session whose PANE is gone, naming restart', async () => {
+      // Two repairs, two different failures. A caller that reaches for relaunch on
+      // a corpse must be told to restart instead — otherwise it retries the same
+      // wrong verb.
+      const p = mission.createProject({ name: 'beat', agent: 'pad-mm-oc', folder: '/www1/beat' });
+      const s = mission.createSession(p.id, { tmuxId: 'msn-1111aaaa' });
+      padTmux.paneState = async () => ({ live: false, tuiAlive: false, command: '', cwd: '', reason: 'no-session' });
+      const r = await call('mission_session_relaunch', { session_id: s.id }, OWNER);
+      assert.ok(r.isError);
+      assert.match(r.text, /mission_session_restart/, 'the message names the verb that would work');
+    });
+
+    it('the lifecycle verbs refuse a session belonging to somebody else', async () => {
+      // The grant is not the access check. A key with full exec rights on ITS OWN
+      // pads must not be able to close someone else's conversation, and the
+      // session lookup is the only place that can know.
+      const p = mission.createProject({ name: 'theirs', agent: 'pad-mm-cl', folder: '/www1/c' });
+      const s = mission.createSession(p.id, { tmuxId: 'msn-1111aaaa' });
+      for (const t of ['mission_session_close', 'mission_session_relaunch', 'mission_session_restart']) {
+        const r = await call(t, { session_id: s.id }, OWNER);
+        assert.ok(r.isError, `${t} is refused`);
+        assert.match(r.text, /forbidden|not found|permission/i, `${t} says why`);
+      }
+    });
+
+    it('a recreate REPORTS the sessions it kills, scoped to what the key may see', async () => {
+      const p = mission.createProject({ name: 'beat', agent: 'pad-mm-oc', folder: '/www1/beat' });
+      const s = mission.createSession(p.id, { tmuxId: 'msn-1111aaaa' });
+      const theirs = mission.createProject({ name: 'theirs', agent: 'pad-mm-cl', folder: '/www1/c' });
+      mission.createSession(theirs.id, { tmuxId: 'msn-2222bbbb' });
+
+      padTmux.listSessions = async () => [{ name: 'msn-1111aaaa' }, { name: 'msn-2222bbbb' }];
+      // The recreate itself is faked: what is under test is the REPORT, and a
+      // real one would shell out to docker on a seeded row that is not a
+      // container. It is faked to succeed, so the assertion is about the happy
+      // path the description describes.
+      const vm = require('../services/vm-manager');
+      const registry = require('../services/agent-registry');
+      const realApply = vm.applyAgentChanges;
+      const realGet = registry.getAgent;
+      const realDiscover = registry.discoverAgents;
+      // The resolver goes through `discoverAgents()` (the instances dir), and
+      // this suite seeds a DB row rather than a real pad — so the row is not a
+      // pad the gate can find. Both are stubbed, or the test would be asserting
+      // on a refusal it mistook for the behaviour under test.
+      const fakePad = { name: 'pad-mm-oc', agent_type: 'opencode', status: 'running' };
+      registry.getAgent = (n) => (n === 'pad-mm-oc' ? fakePad : realGet(n));
+      registry.discoverAgents = () => [fakePad];
+      vm.applyAgentChanges = async (name) => ({ ok: true, name });
+      let r;
+      try {
+        r = await call('recreate', { name: 'pad-mm-oc' }, OWNER);
+      } finally {
+        vm.applyAgentChanges = realApply;
+        registry.getAgent = realGet;
+        registry.discoverAgents = realDiscover;
+      }
+      assert.ok(!r.isError, r.text);
+      assert.ok(r.data.sessionsEnded, 'the response CARRIES the list its description promised');
+      assert.ok(Array.isArray(r.data.sessionsEnded));
+      // The pad being recreated is ours, so our session is reported...
+      const ids = r.data.sessionsEnded.map((k) => k.id);
+      assert.ok(ids.includes(s.id), 'our own killed session is named');
+      // ...and nothing about the OTHER user's pad leaks, in either the list or
+      // the count, because a recreate on a pad you can see must not become an
+      // existence oracle for everybody else's sessions.
+      const serialised = JSON.stringify(r.data);
+      assert.ok(!serialised.includes('msn-2222bbbb'), 'no foreign session id anywhere in the response');
+    });
+
+    it('the recreate description states that live sessions end — and it is true', async () => {
+      const r = await client.listTools();
+      const byName = Object.fromEntries(r.tools.map((t) => [t.name, t.description || '']));
+      assert.match(byName.recreate, /sessions/i, 'recreate names sessions in its description');
+      assert.match(byName.recreate, /sessionsEnded/, 'and the field that reports them');
+    });
+
+    it('every plan-65 session field the tools emit is named in a description somewhere', async () => {
+      // A field only this repo knows about is a field the LLM cannot use. The
+      // vocabulary a caller must be able to find: dedupe, cause, and the three
+      // answers a dead screen can have.
+      const r = await client.listTools();
+      const text = r.tools.map((t) => `${t.name} ${t.description || ''}`).join(' | ');
+      for (const word of ['deduped', 'endedBy', 'screenFrom', 'lastScreenAt']) {
+        assert.ok(text.includes(word), `${word} is documented in the surface`);
+      }
+    });
+  });
+
 });
 
 /** Plan 60 — secret hygiene. The two read tools that used to hand out live
@@ -1638,7 +1860,16 @@ describe('MCP Server - project lookup and provenance (plan 67)', () => {
     it('the store INSERT and both start paths carry the actor through', () => {
       const svc = fs.readFileSync(path.join(__dirname, '..', 'services', 'mission.js'), 'utf8');
       assert.match(svc, /INSERT INTO mission_sessions \([^)]*created_by/, 'the column is written');
-      assert.match(svc, /createSession\(project\.id, \{ label, origin, agentSessionId: resumeId, createdBy \}\)/, 'startSession threads it');
+      // The insert helper was split out of `createSession` (plan 65 1f, so a
+      // retry-token collision can be REPORTED rather than silently returned as a
+      // bare row), which renamed the call site. Pin the FACT — `createdBy`
+      // reaching the insert from `startSession` — not the helper's name, which
+      // is free to change without making the actor stop being recorded.
+      assert.match(
+        svc,
+        /(?:create|insert)Session\(\s*project\.id,\s*\{[^}]*createdBy[^}]*\}\s*\)/,
+        'startSession threads createdBy into the insert'
+      );
       const app = fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8');
       assert.match(app, /createdBy: req\.session && req\.session\.userId \? `user:\$\{req\.session\.userId\}` : null/, 'the UI stamps the human too');
     });
