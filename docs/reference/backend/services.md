@@ -157,16 +157,42 @@ agent's own history printed.
 For codex, the human's turn is read from `event_msg` → `user_message`, **not**
 from the `role: user` response items: those carry injected context and
 environment blocks, so the "last user message" from them is the machine talking
-to itself. A call with no output row yet is `running`, not `completed` — the
-quiet lie is the one that says a live tool call is done.
+to itself. A call with no result row behind it is `running`, not `completed` —
+the quiet lie is the one that says a live tool call is done. That applies to
+**claude as well as codex**: a claude transcript records the assistant's
+`tool_use` in one row and the `tool_result` in a *later* user message, so an
+unanswered `tool_use` is in flight, and `readClaude` used to stamp every one of
+them `completed`. Nothing caught it because `pad-test-claude` has no real store
+to read.
+
+**The cost is per driver, and it is stated at the caller for that reason.**
+opencode is one indexed query (~2 ms measured); codex and claude parse that one
+conversation's rollout file, so the cost grows with the transcript's length.
+"Never a scan" was true of the first and false of the other two — which rules in
+polling one live session at 5 s and rules out looping the tool over every id.
+
+**There is deliberately no `lines` / scrollback input.** A screen tail is a
+different question from a store read, so honouring it would put two sources with
+**different availability** in one tool: `lines` needs a live tmux pane and is gone
+with the container, which is the one property that makes this tool worth having,
+and the text carries no roles and no per-item timestamps. A caller that wants the
+screen has `mission_sessions` (screen tail, live-only) and `exec`.
 
 **Redaction happens where the read leaves the process** (`redactSecrets` over the
 whole payload at once, so no field carrying a value is missed). The boundary is
-deliberate and stated in the tool description: secret-*shaped* configuration — any
-`api_key`/`token`/`password`/`*-key` field, any `headers` map, and config/env
-lines carrying such a value — is scrubbed wherever it appears, including inside
-dumped config text; free **prose** is not pattern-matched, so a key pasted into a
-sentence comes back as written.
+deliberate, confirmed, and stated in the tool description: secret-*shaped*
+configuration — any `api_key`/`token`/`password`/`*-key` field, any `headers`
+map, and config/env lines carrying such a value — is scrubbed wherever it
+appears, including inside dumped config text; free **prose** is not
+pattern-matched, so a key pasted into a sentence comes back as written. The
+asymmetry is the point: a mangled sentence is a *wrong answer* that corrupts
+every future message mentioning anything key-shaped with no way for the caller
+to notice, while the unscrubbed case is bounded — the transcript belongs to the
+very key that may read it — and warned about where it is returned. It is
+**MCP-only in effect**: `config_get` opts in with `{redact:true}` at its single
+call site (the REST route round-trips `configRaw` back into the user's real
+config, so redacting there would write `[REDACTED]` over a working key), and
+`readActivity` has exactly one caller, the `plan_activity` tool.
 
 ## Path Probe (path-probe.js)
 
@@ -830,6 +856,12 @@ a folder-scoped listing reports `sessionUnattributed` rather than dropping those
 rows — a short list that looks complete is the failure the filter exists to
 prevent. And putting a copy of the plan list under each project folder would be a
 second source of truth for the same thing, kept in step by hand.
+
+`plan_list` takes `path` (one file) **or** `folder` (scope the list), never both:
+the one-file branch returns before the scope is applied, so accepting both would
+answer with the file and no sign the filter had run — indistinguishable from a
+match. The combination is refused as `plan_path_and_folder`, with the message
+naming the two calls that answer the conjunction.
 
 Plan 53 Phase 9 (`mission_notes` + a checklist table) is **superseded by this**:
 a plan *is* the checklist item, with the session it is worked in and its timings
