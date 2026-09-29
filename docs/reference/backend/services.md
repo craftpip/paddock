@@ -500,6 +500,16 @@ Two answers that must never be confused, and how they are kept apart:
   the two by what docker actually said — genuine absence (`No such object`,
   `No such container`) is `null`, and anything else is `{ error }`. A missing
   peer is still `stale`/`peer-stopped`; a peer we failed to read is `unknown`.
+
+  The split is on **`error`, not on "resolved or not"** — a *failed* reference
+  is never rounded into a verdict on the strength of the half that worked, in
+  either direction. The two references answer different questions (what this pad
+  is **attached to** vs what it was **configured for**), and `ok` vs
+  `staleBinding` differ *only* by whether the two ids match, so losing the
+  configured side loses the answer itself. The one exception is a bound peer
+  that resolves and is **not running**: the pad cannot start whatever the
+  configured peer is doing, so that stays an actionable `peer-stopped` without a
+  second opinion.
   A lookup that never *ran* is the same trap in a different costume, which is
   why `inspectPeer` has a default runner and why wiring a new consumer to the
   rule is verified live rather than by unit test alone.

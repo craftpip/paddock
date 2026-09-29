@@ -82,6 +82,22 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   banner for `checked: false` and quote `reason`, but offer **no** recreate
   button, because an unreadable probe has established nothing and a button is
   advice nobody can justify.
+  The corollary is the one that is easy to get wrong: **when one reference
+  reads and the other fails, do not answer from the half that worked.** The two
+  references answer different questions — what a pad is *attached to* vs what it
+  was *configured for* — and `ok` vs `staleBinding` differ ONLY by whether the
+  two ids match, so a failed *configured* read loses the answer itself. Both
+  mixed directions were shipped once and both were wrong: a failed `bound` read
+  fell through to "bound peer no longer exists` and said `staleBinding`, asserting a
+  deletion it never observed to justify recreating a healthy pad; a failed
+  `declared` read said `ok` and set `peerCurrentId` from the bound peer, which
+  made the documented `peerId !== peerCurrentId` test **compare the id with itself**
+  and report "no mismatch`. The single exception is a bound peer that resolves and
+  is NOT running — decisive alone, since the pad cannot start either way. And
+  the split is on `error`, NOT on "resolved or not": docker saying "No such object`
+  is a FACT about the peer, so a genuinely absent reference keeps its actionable
+  state, and a test pins that counterpart so a tidy-up cannot fold the two
+  together.
 - **Mission col 3 is pinned to `openSession` in the store, NOT to the row and NOT
   to `selectedProjectId`.** It is a snapshot taken at the moment the session was
   opened, and the project it resolves for `<Terminal>` comes from

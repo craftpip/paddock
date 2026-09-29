@@ -92,6 +92,22 @@ indistinguishable from a field that says "broken".
       the `staleBinding` branch turns **2 tests red across 2 suites**; disabling
       the stopped-target branch turns 1 red; also collapsing the docker-error
       split turns 3 red.
+- [x] **A post-review round closed the MIXED case** — one reference readable, the
+      other failed — which had answered from the half that worked. A failed
+      *bound* read claimed the peer "no longer exists" and returned
+      `staleBinding`, asserting a deletion it never observed; a failed
+      *configured* read returned `ok` and set `peerCurrentId` from the bound
+      peer, so the documented `peerId !== peerCurrentId` test compared the id
+      with itself. An unreadable reference now yields `unknown` in either
+      direction, with one hoisted exception: a bound peer that resolves and is
+      **not running** is decisive alone. The split stays on `error`, not on
+      "resolved or not", and a test pins the genuine-absence counterpart.
+      **Live:** the probe then caught a *real* new stale binding — `gluetun-nordvpn1`
+      had been recreated minutes earlier and `pad-opencode-user1` is still bound
+      to the old container id — which is the case the plan was written for.
+      Mutation controls: disabling the unknown-on-error gate turns 4 red;
+      disabling only the decisive exception turns 2 red. `net-peer` is now
+      **22/22**.
 - [x] **The committed file PARSES.** Plan 66's first commit shipped a
       `SettingsTab.jsx` missing the comma that ended the `message:` template
       literal in `handleRecreateNetwork`, so the committed file was unbuildable.
