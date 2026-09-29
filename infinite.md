@@ -48,7 +48,7 @@ one is a single reply away from done.
 
 ## Queue
 
-- [ ] plans/52-orchestrator.md
+- [~] plans/52-orchestrator.md — started 2026-09-29
 - [ ] plans/68-mission-auto-reopen-closed-session.md — closed Mission session auto-restarts instead of showing "This session is closed"
 - [ ] plans/68-mission-page-ideas.md — Mission UI vision (UI-only, gathering): drop scope toggle for selection-driven sessions, persist page state over refresh, dedup fresh sessions, VS Code-style split panes, Ctrl+click multi-select projects
 - [ ] plans/69-mission-orchestration.md — Orchestration via MCP (gathering): task lifecycle review → dev → test → bugs → commit with the loop inside the tools; nouns agreed (Driver/Orchestrator/PAD/Project/Session/Worker/Task/Human); session last-message + timing for done-ness
