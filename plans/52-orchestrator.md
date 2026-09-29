@@ -1,6 +1,6 @@
 # Plan 52 — Orchestrator (session-based: keys, grants, conferral, playbook, proof)
 
-## Status: Rewritten (2026-09-29) — **1/7 phases complete (A); B and C started.** A1 audited + fail-closed default; A2 verified — it surfaced that `exec` is a base grant, so the least-privilege key of D2 cannot be expressed (user decision, recorded in infinite.md); A3 `autoApprove` flipped to opt-in (R3 closed). Phase A gate: all suites green, webui restarted, tool surface verified live at 31 tools. **B1 done 5/7** (the two missing clauses name tools plan 53 Phase 9 has not built); **B2 blocked** on a user call — no onboarding artifact exists to rewrite and its form is plan 51 §4's undecided question, while `pad_help` already serves a better one. **C1's path is proven live twice** (two sessions, both answers verified from outside the session) and **surfaced C1-F1, Critical: a fresh session can never report `busy`**, measured mid-turn as `busy:false, busyKnown:true, canSend:true` while the pane read `esc interrupt`. Phases D–G not started. The queue is gone;
+## Status: Rewritten (2026-09-29) — **2/7 phases complete (A, E1); B and C started.** A1 audited + fail-closed default; A2 verified — it surfaced that `exec` is a base grant, so the least-privilege key of D2 cannot be expressed (user decision, recorded in infinite.md); A3 `autoApprove` flipped to opt-in (R3 closed). Phase A gate: all suites green, webui restarted, tool surface verified live at 31 tools. **B1 done 5/7** (the two missing clauses name tools plan 53 Phase 9 has not built); **B2 blocked** on a user call — no onboarding artifact exists to rewrite and its form is plan 51 §4's undecided question, while `pad_help` already serves a better one. **C1's path is proven live twice** (two sessions, both answers verified from outside the session) and **surfaced C1-F1, Critical: a fresh session can never report `busy`**, measured mid-turn as `busy:false, busyKnown:true, canSend:true` while the pane read `esc interrupt`. **E1 is complete and proven live** — the audit log's `actor` column had never been set by anything (all 702 rows read `system`), so it recorded *what* but never *who*; `recordActivity` now takes an actor, and seven Mission actions are attributed in the same `key:<id>` / `user:<id>` / `system` vocabulary the rows already use for `created_by`. Phases D, E2–E4, F and G not started. The queue is gone;
 this plan now orchestrates **sessions**, not tasks. User decision, verbatim:
 *"don't let the user start any task without my vision — remove task submit"*,
 followed by *"rewrite 52 around mission_* sessions"*. **Everything below is
@@ -330,9 +330,43 @@ The gate for everything: the agent can only do what its key says.
 
 ## Phase E — Guardrails (the surviving Criticals, pulled forward)
 
-- [ ] E1. **Audit log of agent actions** (R5, R13): who started a session, who
+- [x] E1. **Audit log of agent actions** (R5, R13): who started a session, who
       typed into it, when — keyed to the API key. Without it, law 2 is
       unenforceable in practice.
+      - `activity_events` already had the table, a writer and a reader, and its
+        `actor` column had **never been set by anything** — all 702 rows read
+        `system` (measured). So the log recorded *what* and could not answer
+        *who*, which is the only question an audit log exists for.
+      - `recordActivity` gained a 7th `actor` parameter defaulting to `system`,
+        so all ~20 existing callers are untouched.
+      - `mission.audit()` writes one row per action acting ON a conversation:
+        `send`, `session_start`, `session_relaunch`, `session_restart`,
+        `session_close` (row kept), `session_delete` (page Close), `project_create`.
+      - Actor threaded from both surfaces in ONE vocabulary —
+        `missionActor(user)` (`mcp.js`) / `missionActorFor(req)` (`app.js`),
+        matching a row's existing `created_by` spelling (`key:<id>` / `user:<id>`
+        / `system`).
+      - **A send's text is never stored** — only line count and char length. A
+        send is the human's own conversation and can carry a pasted secret; an
+        audit trail is not a second copy of it.
+      - A REFUSED send writes nothing, and a failing audit write never fails the
+        action that already happened (tested by dropping the table mid-call).
+      - Platform-initiated teardown (project-delete cascade) passes no actor, so
+        it records `system` rather than crediting a human with a decision they
+        never made.
+      - 8 new tests (mission 97 → 105). Two mutation controls: disabling
+        `audit()` → 6 red; forcing `actor` to `system` → exactly the 3
+        attribution tests red. Both ran in throwaway copies, never in `/app`.
+      - Live REST proof on `pad-opencode-proj`: `session_start`, `send` and
+        `session_delete` all landed as `actor: user:admin_…`; the deleted
+        session's id survives as `resource_ref` (its only remaining handle), and
+        rows appear in the existing agent activity feed with no new reader.
+      - **Defect found while testing:** the audit FK exposed that `mcp.test.js`
+        deleted a parent `agents` row while its new `activity_events` children
+        still pointed at it, failing all 50 of its own tests in `beforeEach`.
+        Production was never affected — `removeAgentFromDb` clears the log
+        first. Test cleanup now mirrors that order, and a control confirms the
+        one-line revert reproduces 50 red.
 - [ ] E2. **Cost/spend visibility** (R1): sessions burn tokens invisibly *to the
       model* (a TUI runs whether or not anyone is looking). A per-PAD session
       count + age list on the Mission page is the minimum; a cap/kill-switch is

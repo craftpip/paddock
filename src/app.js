@@ -2552,6 +2552,10 @@ app.delete('/api/mission/projects/:id', csrfCheck, (req, res) => {
     // already gone makes killSession a no-op by design.
     Promise.all(
       mission.listSessions({ projectId: project.id }).map((s) =>
+        // No actor passed: this is the PLATFORM tearing a project's sessions
+        // down as a side effect of deleting it, not a human closing each one.
+        // 'system' is the honest value, and it is a real distinction — a
+        // `user:` row here would put a name on a decision the user never made.
         mission.closeSession(s.id).catch(() => {})
       )
     ).then(() => {
@@ -2669,10 +2673,18 @@ app.get('/api/mission/sessions/:id', (req, res) => {
  *  where the write landed (project + session id) and the pane's screen after
  *  it, because a bare `ok: true` is a success for keystrokes that went nowhere
  *  (plan 62 1h/1i). */
+/** WHO is acting, for the activity_events audit row (plan 52 E1). Same spelling
+ *  as the MCP side's missionActor() and as a row's `created_by`, so all three
+ *  are queryable with one pattern. The web UI is always a user: there is no key
+ *  on this side of the wire, and auto-login still lands on a real user row. */
+function missionActorFor(req) {
+  return req.session && req.session.userId ? `user:${req.session.userId}` : 'system';
+}
+
 app.post('/api/mission/sessions/:id/send', csrfCheck, (req, res) => {
   const found = missionSession(req, res);
   if (!found) return;
-  mission.sendText(found.session.id, req.body.text).then(
+  mission.sendText(found.session.id, req.body.text, { actor: missionActorFor(req) }).then(
     (r) => res.json({ ok: true, sent: r.sent, project: r.project, session_id: r.session_id, session: r.session, screen: r.screen }),
     (e) => missionFail(res, e)
   );
@@ -2699,7 +2711,7 @@ app.post('/api/mission/sessions/:id/permission', csrfCheck, (req, res) => {
 app.post('/api/mission/sessions/:id/relaunch', csrfCheck, (req, res) => {
   const found = missionSession(req, res);
   if (!found) return;
-  mission.relaunchTui(found.session.id).then((r) => res.json(r), (e) => missionFail(res, e));
+  mission.relaunchTui(found.session.id, { actor: missionActorFor(req) }).then((r) => res.json(r), (e) => missionFail(res, e));
 });
 
 /** Restart a session whose tmux pane is GONE. Separate from relaunch, which
@@ -2709,7 +2721,7 @@ app.post('/api/mission/sessions/:id/relaunch', csrfCheck, (req, res) => {
 app.post('/api/mission/sessions/:id/restart', csrfCheck, (req, res) => {
   const found = missionSession(req, res);
   if (!found) return;
-  mission.restartSession(found.session.id).then((r) => res.json(r), (e) => missionFail(res, e));
+  mission.restartSession(found.session.id, { actor: missionActorFor(req) }).then((r) => res.json(r), (e) => missionFail(res, e));
 });
 
 app.patch('/api/mission/sessions/:id', csrfCheck, (req, res) => {
@@ -2725,7 +2737,7 @@ app.patch('/api/mission/sessions/:id', csrfCheck, (req, res) => {
 app.delete('/api/mission/sessions/:id', csrfCheck, (req, res) => {
   const found = missionSession(req, res);
   if (!found) return;
-  mission.closeSession(found.session.id).then(
+  mission.closeSession(found.session.id, { actor: missionActorFor(req) }).then(
     () => res.json({ ok: true }),
     (e) => missionFail(res, e)
   );

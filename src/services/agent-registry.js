@@ -350,12 +350,20 @@ function getAgentById(agentId) {
   return null;
 }
 
-function recordActivity(agentId, category, action, status, details, resourceRef) {
+/** Append one audit row. `actor` is the WHO, not the kind of thing: it is
+ *  `key:<id>` for an MCP key, `user:<id>` for the web UI, `system` when the
+ *  platform did it itself. It is the LAST parameter and defaults, because all
+ *  ~20 existing callers pass six positional args and none of them know who they
+ *  are — the column sat at its `system` default for every one of the 702 rows
+ *  in the table before anything Mission-shaped wrote to it. A log that records
+ *  only WHAT happened cannot answer "was that the human, or a key?", which is
+ *  the whole question an audit log exists to answer. */
+function recordActivity(agentId, category, action, status, details, resourceRef, actor) {
   const db = getDb();
   db.prepare(`
-    INSERT INTO activity_events (agent_id, category, action, status, details, resource_ref)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(agentId, category, action, status || 'ok', details || null, resourceRef || null);
+    INSERT INTO activity_events (agent_id, category, action, actor, status, details, resource_ref)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(agentId, category, action, actor || 'system', status || 'ok', details || null, resourceRef || null);
   db.prepare("UPDATE agents SET last_activity_at = datetime('now'), updated_at = datetime('now') WHERE name = ?").run(agentId);
 }
 

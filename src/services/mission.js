@@ -103,7 +103,9 @@ function createProject({ name, agent, folder, createdBy = null, defaultFolder = 
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(id, projectName, row.name, row.agent_type, dir, createdBy, now, now);
-  return getProject(id);
+  const project = getProject(id);
+  audit(project, 'project_create', { actor: createdBy, details: dir });
+  return project;
 }
 
 function getProject(id) {
@@ -202,6 +204,36 @@ function createSession(projectId, opts = {}) {
  *  the concurrent path a silent SECOND launch into the winner's pane — the exact
  *  duplicate the key exists to prevent, reached through the race rather than the
  *  retry. `createSession` keeps the row-only shape for every other caller. */
+/** One audit row per Mission action that acts ON a conversation (plan 52 E1).
+ *  `activity_events` already had a table, a writer and a reader, but its `actor`
+ *  column had never been set by anything — so all 702 rows said `system` and the
+ *  log could not answer the only question an audit log exists for: was that the
+ *  human, or a key? This is the record that makes law 2 ("only the orchestrator
+ *  holds the exec bucket") checkable after the fact rather than merely asserted.
+ *
+ *  The content of a `send` is deliberately NOT recorded: the text is the human's
+ *  conversation, it can hold secrets they pasted, and an audit trail is not a
+ *  second copy of it. What is recorded is that a typed line happened, who typed
+ *  it, and which session. A `send` also records its length, so "one line, 4
+ *  characters" is auditable without the text being readable. */
+function audit(project, action, { actor = null, session = null, details = '' } = {}) {
+  try {
+    registry.recordActivity(
+      project.agent_name,
+      'mission',
+      action,
+      'ok',
+      details || null,
+      session ? session.id : project.id,
+      actor || 'system'
+    );
+  } catch (e) {
+    // An audit row must never be the reason a conversation is not worked. The
+    // action already happened; failing the call here would report a refusal for
+    // something that was typed.
+  }
+}
+
 function insertSession(projectId, { label = '', origin = 'human', tmuxId = '', agentSessionId = '', createdBy = null, idempotencyKey = null } = {}) {
   const project = getProject(projectId);
   const who = origin === 'agent' ? 'agent' : 'human';
@@ -669,13 +701,14 @@ async function startSession(projectId, { label = '', origin = 'human', cols = 0,
     throw e instanceof MissionError ? e : new MissionError('mission_session_start_failed', e.message, 500);
   }
   const state = await padTmux.paneState(project.agent_name, session.tmux_id);
+  audit(project, 'session_start', { actor: createdBy, session, details: origin });
   return { session: getSession(session.id), state };
 }
 
 /** Re-launch the TUI in a session whose TUI exited (the pane dropped back to
  *  the shell). Refuses when a TUI is already running — retyping the command
  *  would start a second conversation in the same pane. */
-async function relaunchTui(sessionId) {
+async function relaunchTui(sessionId, { actor = null } = {}) {
   const { session, project, driver, vmName } = sessionTarget(sessionId);
   const state = await padTmux.paneState(vmName, session.tmux_id);
   if (!state.live) {
@@ -697,6 +730,7 @@ async function relaunchTui(sessionId) {
   // belongs here, in the machine path, and only when the pane is off-target.
   const cmd = state.cwd && state.cwd !== project.folder ? `cd ${shq(project.folder)} && ${launch}` : launch;
   await padTmux.sendCommand(vmName, session.tmux_id, cmd);
+  audit(project, 'session_relaunch', { actor, session });
   return { session: getSession(session.id), state: await padTmux.paneState(vmName, session.tmux_id) };
 }
 
@@ -708,7 +742,7 @@ async function relaunchTui(sessionId) {
  *  directory. Relaunch is for "the TUI exited"; this is for "the tmux session
  *  died", and the two are not interchangeable — relaunch refuses a dead
  *  session on purpose rather than resurrecting it in the wrong folder. */
-async function restartSession(sessionId) {
+async function restartSession(sessionId, { actor = null } = {}) {
   const { session, project, driver, vmName } = sessionTarget(sessionId);
   assertPadRunning(project.agent_name);
   const state = await padTmux.paneState(vmName, session.tmux_id);
@@ -737,6 +771,7 @@ async function restartSession(sessionId) {
   // and a row that says `endedAt` and `live: true` at the same time is a
   // contradiction the caller cannot resolve.
   clearEnded([session.id]);
+  audit(project, 'session_restart', { actor, session, details: session.agent_session_id ? 'resumed conversation' : 'new conversation (row has no agent session id)' });
   return { session: getSession(session.id), state: await padTmux.paneState(vmName, session.tmux_id) };
 }
 
@@ -807,7 +842,7 @@ function sendVerdict(session, perm) {
  *  Plan 62: refuses a shell pane (1b, `mission_not_an_agent`), refuses a
  *  permission dialog (1c, `mission_permission_pending`), and confirms the pane
  *  took the text instead of a bare ok (1h, `mission_tui_not_ready`). */
-async function sendText(sessionId, text) {
+async function sendText(sessionId, text, { actor = null } = {}) {
   const { session, project, vmName } = sessionTarget(sessionId);
   const where = ` [project:${project.name} (${project.id}) session:${session.id}]`;
   const body = String(text || '');
@@ -862,6 +897,11 @@ async function sendText(sessionId, text) {
   }
   touchSession(session.id);
   noteOutput(session.id, after.text);
+  // AFTER the write is confirmed, and never on a refusal: an audit trail records
+  // what was DONE, so a row here would claim a line was typed into a
+  // conversation that refused it. Same rule as a refused `close` stamping
+  // nothing — the evidence must not be writable by the failed request.
+  audit(project, 'send', { actor, session, details: `${sent.lines} line(s), ${body.length} chars` });
   const fresh = getSession(session.id);
   return {
     session: { ...fresh, title: await sessionTitle(project, session) },
@@ -1432,9 +1472,14 @@ async function withAgentBusyProjects(projects) {
 
 /** Stop a session for good: kill the tmux session first, then drop the row, so
  *  a delete never leaves a TUI running in a PAD. */
-async function closeSession(sessionId) {
-  const { session, vmName } = sessionTarget(sessionId);
+async function closeSession(sessionId, { actor = null } = {}) {
+  const { session, project, vmName } = sessionTarget(sessionId);
   await padTmux.killSession(vmName, session.tmux_id);
+  // Audited even though the row is about to be deleted: the DELETION is the
+  // thing that cannot be reconstructed afterwards, so it is the one action here
+  // that most needs a record. `resource_ref` keeps the session id, which is the
+  // only handle left once the row is gone.
+  audit(project, 'session_delete', { actor, session, details: 'row deleted (page Close)' });
   return deleteSession(session.id);
 }
 
@@ -1455,7 +1500,7 @@ async function closeSession(sessionId) {
  *  a solo-locked session, and refusing to close the one kind of session that most
  *  needs closing would be a bug shaped like a rule. `locked` describes who may
  *  TYPE, not who may end it. */
-async function endSession(sessionId) {
+async function endSession(sessionId, { actor = null } = {}) {
   const { session, project, vmName } = sessionTarget(sessionId);
   // Refuse a session that is ALREADY gone, and the check comes before the
   // capture on purpose: the tool description promises `mission_session_dead`
@@ -1479,6 +1524,7 @@ async function endSession(sessionId) {
     await padTmux.killSession(vmName, session.tmux_id);
   }
   endSessions([session.id], 'closed');
+  audit(project, 'session_close', { actor, session });
   return { session: getSession(session.id), project, screen: captured.text };
 }
 

@@ -317,6 +317,42 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   unnecessary: a test pinning an implementation detail outlives the reason it was
   written.
 
+- **A free variable in plain JS is as invisible as one in JSX: `node --check`
+  passes, the suite passes, and it is a `ReferenceError` the first time the
+  line runs.** Threading an audit actor through `mission.js` put the `audit()`
+  call into the function that *consumed* the param, but the param itself went
+  onto a **differently named sibling** (`closeSession` — the page's delete —
+  versus `endSession` — the agent's stamp-and-keep). Both are "close" and both
+  are exported. `node --check` was clean, all 105 mission tests were green, and
+  the first live close would have thrown. The cheap oracle is a **static scan,
+  not a parse**: for every `audit(` call, walk back to the enclosing function
+  and assert its signature declares the identifier the call passes. That caught
+  it in one pass, where `node --check` proves nothing.
+- **An audit log that records only WHAT cannot answer WHO, and a FK will tell
+  you so by failing a test you did not write.** `activity_events` had a table,
+  a writer and a reader for months, and its `actor` column had **never been
+  set by anything** — all 702 rows read `system` (measured with a `GROUP BY`,
+  which is the only way to know). So the log was decorative. Two rules: read
+  the *distribution* of a column before assuming it is in use (a DEFAULT is not
+  evidence of a caller), and **a foreign key is a contract about deletion
+  order** — the instant a child row starts being written, any `DELETE` of the
+  parent must clear the child first. That surfaced as `mcp.test.js` failing
+  **all 50** of its tests in `beforeEach` with `SQLITE_CONSTRAINT_FOREIGNKEY`,
+  which reads exactly like a product bug in `createProject` and is not: the
+  test deleted a parent row while its new children still pointed at it.
+  Production was safe (`removeAgentFromDb` clears the log first), so the fix
+  belonged in the test — but the control is what proves it: re-deleting that
+  one line reproduces 50 red.
+- **An audit trail is not a second copy of the data — record the SHAPE of a
+  write, never its content.** A `send` is the human's own conversation and can
+  carry a pasted API key; logging the text would make the audit log the least
+  protected copy of the secret on the box. `send` records line count and
+  character length, which is enough to answer "did one land, how big" without
+  storing what it said. Pinned negatively: the row must not contain the secret.
+  Two adjacent rules that came with it: a **refused** action writes nothing (a
+  log that credits a rejected write is evidence against itself), and a failing
+  audit write must not fail the action that already happened — tested by
+  dropping the table mid-call, since the action is done and cannot be undone.
 - **A store test that mutates a module-level singleton must put it back, or the
   next test inherits a bound copy.** The idempotency-race test replaces
   `db.prepare` to force a UNIQUE violation; restoring it as a *bound* function

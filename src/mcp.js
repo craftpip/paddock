@@ -665,6 +665,18 @@ function missionSelectProjects(projects, { projectId = '', name = '', folder = '
   );
 }
 
+/** WHO is acting, in the one spelling the audit log stores: `key:<id>` for an MCP
+ *  key, `user:<id>` for the web UI, `system` when there is no caller to name.
+ *  This is deliberately the SAME convention as a session's `created_by` and a
+ *  task's `created_by`, so "who started it" and "who typed into it" are two
+ *  fields of one vocabulary — an audit log that spells its actor differently
+ *  from the row it sits beside is a log nobody queries twice. */
+function missionActor(user) {
+  if (user && user.keyId) return `key:${user.keyId}`;
+  if (user && user.userId) return `user:${user.userId}`;
+  return 'system';
+}
+
 /** The same, for a session: a session is reachable only through its project, so
  *  the PAD name (and therefore the grant check) always comes from there. */
 function missionRequireSession(user, tool, sessionId) {
@@ -1917,7 +1929,7 @@ function registerTools(server) {
       // The key id is recorded on the row, so "did I start this?" and "was that
       // really an agent?" stay answerable after the fact instead of resting on
       // the caller's own memory (plan 67, 67.3).
-      const createdBy = user && user.keyId ? `key:${user.keyId}` : null;
+      const createdBy = user && user.keyId ? `key:${user.keyId}` : null; // same spelling as missionActor()
       const r = await missionCall(() =>
         mission.startSession(project.id, {
           label: label || '',
@@ -1961,7 +1973,7 @@ function registerTools(server) {
       const { session, project } = missionRequireSession(user, 'mission_send', session_id);
       // mission.sendText is the ONE writer path (human or agent), so this is
       // also the one place the solo lock is enforced.
-      const r = await missionCall(() => mission.sendText(session.id, text));
+      const r = await missionCall(() => mission.sendText(session.id, text, { actor: missionActor(user) }));
       return textResult({
         ok: true,
         sent: r.sent,
@@ -2035,7 +2047,7 @@ function registerTools(server) {
     async ({ session_id }) => {
       const user = currentUser();
       const { session, project } = missionRequireSession(user, 'mission_session_close', session_id);
-      const r = await missionCall(() => mission.endSession(session.id));
+      const r = await missionCall(() => mission.endSession(session.id, { actor: missionActor(user) }));
       return textResult({
         ok: true,
         session_id: r.session.id,
@@ -2073,7 +2085,7 @@ function registerTools(server) {
     async ({ session_id }) => {
       const user = currentUser();
       const { session, project } = missionRequireSession(user, 'mission_session_relaunch', session_id);
-      const r = await missionCall(() => mission.relaunchTui(session.id));
+      const r = await missionCall(() => mission.relaunchTui(session.id, { actor: missionActor(user) }));
       return textResult({
         ok: true,
         session_id: r.session.id,
@@ -2097,7 +2109,7 @@ function registerTools(server) {
     async ({ session_id }) => {
       const user = currentUser();
       const { session, project } = missionRequireSession(user, 'mission_session_restart', session_id);
-      const r = await missionCall(() => mission.restartSession(session.id));
+      const r = await missionCall(() => mission.restartSession(session.id, { actor: missionActor(user) }));
       return textResult({
         ok: true,
         session_id: r.session.id,

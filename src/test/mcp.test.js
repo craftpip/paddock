@@ -702,6 +702,14 @@ describe('MCP Server - Mission tools (plan 55)', () => {
     const ids = db.prepare("SELECT id FROM mission_projects WHERE agent_name LIKE 'pad-mm-%'").all().map((r) => r.id);
     for (const id of ids) db.prepare('DELETE FROM mission_sessions WHERE project_id = ?').run(id);
     db.prepare("DELETE FROM mission_projects WHERE agent_name LIKE 'pad-mm-%'").run();
+    // Before the E1 audit work this was a bare DELETE and could not fail. Now
+    // that a Mission call writes an `activity_events` row naming the PAD, the
+    // foreign key makes the ORDER load-bearing: delete the log first, exactly as
+    // `removeAgentFromDb` does on the real delete path. Without this the whole
+    // suite dies in its own beforeEach with SQLITE_CONSTRAINT_FOREIGNKEY, which
+    // reads as a product bug in `createProject` and is not one — the test was
+    // deleting a parent row while its children still pointed at it.
+    db.prepare("DELETE FROM activity_events WHERE agent_id LIKE 'pad-mm-%'").run();
     db.prepare("DELETE FROM agents WHERE name LIKE 'pad-mm-%'").run();
   }
 

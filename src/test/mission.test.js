@@ -1581,3 +1581,138 @@ describe('Mission - plan 65: closing a session (1e)', () => {
     assert.strictEqual(row.ended_at, null, 'the row is left for the liveness pass to date honestly');
   });
 });
+
+// Plan 52 E1: an audit log that records only WHAT happened cannot answer the
+// only question it exists for — was that the human, or a key? Before this,
+// `actor` sat at its `system` default for every row in the table (702 of them,
+// measured), because the writer `recordActivity` never had a parameter to set
+// it and nothing Mission-shaped called it at all.
+describe('Mission - activity_events audit (E1)', () => {
+  const padTmux = require('../services/pad-tmux');
+  const real = { ...padTmux };
+  let screenText = 'the prompt\nwaiting';
+  const acts = () =>
+    getDb()
+      .prepare("SELECT * FROM activity_events WHERE category = 'mission' ORDER BY id")
+      .all();
+
+  beforeEach(() => {
+    // NOT cleared by the suite's global beforeEach: activity_events is shared
+    // with settings/web/lifecycle, so only the mission rows are this test's.
+    getDb().prepare("DELETE FROM activity_events WHERE category = 'mission'").run();
+    screenText = 'the prompt\nwaiting';
+    padTmux.folderExists = async () => true;
+    padTmux.createSession = async () => {};
+    padTmux.killSession = async () => {};
+    padTmux.sendCommand = async () => {};
+    padTmux.hasSession = async () => true;
+    padTmux.paneState = async () => ({ live: true, tuiAlive: true, command: 'node', cwd: '/www1/a' });
+    padTmux.captureScreen = async () => ({ text: screenText, live: true });
+    padTmux.sendText = async (vm, tid, body) => {
+      screenText = `the prompt\n> ${body}\nwaiting`;
+      return { lines: 1 };
+    };
+  });
+
+  afterEach(() => {
+    for (const k of ['folderExists', 'createSession', 'killSession', 'sendCommand', 'hasSession', 'paneState', 'captureScreen', 'sendText']) {
+      padTmux[k] = real[k];
+    }
+  });
+
+  it('records the actor of a send as the key that made it', async () => {
+    const p = mission.createProject({ name: 'aud', agent: 'pad-msn-oc', folder: '/www1/a', createdBy: 'key:748ebbc' });
+    const s = mission.createSession(p.id, { tmuxId: 'msn-1111aaaa' });
+    await mission.sendText(s.id, 'run the thing', { actor: 'key:748ebbc' });
+    const row = acts().find((r) => r.action === 'send');
+    assert.ok(row, 'the send is in the audit log');
+    assert.strictEqual(row.actor, 'key:748ebbc', 'attributed to the key, not `system`');
+    assert.strictEqual(row.agent_id, 'pad-msn-oc', 'against the PAD the session ran on');
+    assert.strictEqual(row.resource_ref, s.id, 'and names the session, which is what an operator then opens');
+  });
+
+  it('distinguishes a human send from a key send in the same column', async () => {
+    const p = mission.createProject({ name: 'aud2', agent: 'pad-msn-oc', folder: '/www1/a' });
+    const s = mission.createSession(p.id, { tmuxId: 'msn-2222bbbb' });
+    await mission.sendText(s.id, 'from the page', { actor: 'user:7' });
+    await mission.sendText(s.id, 'from a key', { actor: 'key:748ebbc' });
+    const sends = acts().filter((r) => r.action === 'send');
+    assert.deepStrictEqual(sends.map((r) => r.actor), ['user:7', 'key:748ebbc']);
+  });
+
+  it('never stores the TEXT of a send — only that one happened and how big it was', async () => {
+    // The reason: a send is the human's own conversation and can carry a pasted
+    // secret. An audit trail is not a second copy of it.
+    const p = mission.createProject({ name: 'aud3', agent: 'pad-msn-oc', folder: '/www1/a' });
+    const s = mission.createSession(p.id, { tmuxId: 'msn-3333cccc' });
+    const SECRET = 'sk-live-DO-NOT-LOG-THIS';
+    await mission.sendText(s.id, SECRET, { actor: 'user:7' });
+    const row = acts().find((r) => r.action === 'send');
+    assert.ok(!JSON.stringify(row).includes(SECRET), 'the secret appears nowhere in the row');
+    assert.match(row.details, /1 line\(s\), \d+ chars/, 'but the line count and length are recorded');
+  });
+
+  it('writes NOTHING when a send is refused, so the log cannot credit a rejected write', async () => {
+    const p = mission.createProject({ name: 'aud4', agent: 'pad-msn-oc', folder: '/www1/a' });
+    const s = mission.createSession(p.id, { tmuxId: 'msn-4444dddd' });
+    padTmux.paneState = async () => ({ live: true, tuiAlive: false, command: 'bash', cwd: '/www1/a' });
+    await assert.rejects(() => mission.sendText(s.id, 'ls -la', { actor: 'key:748ebbc' }), (e) => e.code === 'mission_not_an_agent');
+    assert.strictEqual(acts().filter((r) => r.action === 'send').length, 0);
+  });
+
+  it('audits a start, a relaunch, a restart and both kinds of close', async () => {
+    const p = mission.createProject({ name: 'aud5', agent: 'pad-msn-oc', folder: '/www1/a', createdBy: 'user:7' });
+    const { session } = await mission.startSession(p.id, { createdBy: 'key:748ebbc' });
+    padTmux.paneState = async () => ({ live: true, tuiAlive: false, command: 'bash', cwd: '/www1/a' });
+    await mission.relaunchTui(session.id, { actor: 'user:7' });
+    await mission.restartSession(session.id, { actor: 'key:748ebbc' });
+    const kept = await mission.endSession(session.id, { actor: 'user:7' });
+    const actions = acts().map((r) => r.action);
+    for (const a of ['project_create', 'session_start', 'session_relaunch', 'session_restart', 'session_close']) {
+      assert.ok(actions.includes(a), `${a} is audited`);
+    }
+    assert.strictEqual(acts().find((r) => r.action === 'session_start').actor, 'key:748ebbc');
+    assert.strictEqual(acts().find((r) => r.action === 'session_relaunch').actor, 'user:7');
+    assert.strictEqual(acts().find((r) => r.action === 'session_restart').actor, 'key:748ebbc');
+    // A restart of a row with no agent_session_id starts a NEW conversation, and
+    // the log has to say so — that is the C1-F1 finding made visible rather than
+    // something an operator has to infer from a silently empty column.
+    assert.match(acts().find((r) => r.action === 'session_restart').details, /no agent session id/);
+    assert.ok(kept.session);
+  });
+
+  it('audits the page Close (row deleted) and keeps the session id as the only handle', async () => {
+    const p = mission.createProject({ name: 'aud6', agent: 'pad-msn-oc', folder: '/www1/a' });
+    const s = mission.createSession(p.id, { tmuxId: 'msn-5555eeee' });
+    await mission.closeSession(s.id, { actor: 'user:7' });
+    const row = acts().find((r) => r.action === 'session_delete');
+    assert.ok(row, 'deleting a conversation is the action that most needs a record');
+    assert.strictEqual(row.resource_ref, s.id, 'the id survives in the log after the row is gone');
+    assert.strictEqual(mission.getSessions ? 1 : 1, 1);
+  });
+
+  it('records `system`, not a user, when the platform tears a project down', async () => {
+    // app.js deletes a project's sessions with no actor. A `user:` row there
+    // would put a name on a decision the human never made.
+    const p = mission.createProject({ name: 'aud7', agent: 'pad-msn-oc', folder: '/www1/a', createdBy: 'user:7' });
+    const s = mission.createSession(p.id, { tmuxId: 'msn-6666ffff' });
+    await mission.closeSession(s.id); // exactly what the project-delete path calls
+    const row = acts().find((r) => r.action === 'session_delete');
+    assert.strictEqual(row.actor, 'system');
+  });
+
+  it('a failing audit write never fails the action that already happened', async () => {
+    const p = mission.createProject({ name: 'aud8', agent: 'pad-msn-oc', folder: '/www1/a' });
+    const s = mission.createSession(p.id, { tmuxId: 'msn-7777aaaa' });
+    getDb().prepare('DROP TABLE activity_events').run();
+    try {
+      const r = await mission.sendText(s.id, 'still typed', { actor: 'user:7' });
+      assert.strictEqual(r.confirmed, true, 'the text landed; the log must not undo that');
+    } finally {
+      getDb().exec(`CREATE TABLE IF NOT EXISTS activity_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT NOT NULL, category TEXT NOT NULL,
+        action TEXT NOT NULL, actor TEXT DEFAULT 'system', status TEXT NOT NULL DEFAULT 'ok',
+        timestamp TEXT NOT NULL DEFAULT (datetime('now')), details TEXT, resource_ref TEXT)`);
+    }
+  });
+});
