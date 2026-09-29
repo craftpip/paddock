@@ -37,11 +37,15 @@ function defaultRun(cmd, args, { timeout } = {}) {
 // must not use this module's states; it reports `checked: false` instead.
 
 /** `docker inspect` one container by NAME or ID, reduced to what the network
- *  rule needs. Never throws: an unresolvable reference and a failed daemon look
- *  alike here, and both mean "no peer of that reference" — which is why the
- *  caller that cannot inspect the PAD ITSELF must be kept separate.
+ *  rule needs. Pass `{ run }` to drive it from a test.
  *
- *  Pass `{ run }` to drive it from a test. */
+ *  Three answers, not two, and the third is the one that is easy to lose: a
+ *  reference that does not exist, a reference that resolved, and a lookup that
+ *  FAILED are three different facts. Returning `null` for a daemon error made an
+ *  unreachable docker read as a dead peer — the same class of bug as the
+ *  unrunnable probe that read as a healthy pad, pointing the other way. So an
+ *  error is reported as an error, and the rule (not this lookup) decides what a
+ *  caller should do about a reference it could not resolve. */
 async function inspectPeer(ref, { run = defaultRun } = {}) {
   if (!ref) return null;
   try {
@@ -51,8 +55,15 @@ async function inspectPeer(ref, { run = defaultRun } = {}) {
     const st = (state || '').trim().toLowerCase();
     if (!n || !st) return null;
     return { name: n, id: (id || '').trim(), state: st };
-  } catch {
-    return null;
+  } catch (e) {
+    // `docker inspect` exits non-zero both for "no such container" and for a
+    // dead daemon / permission error, and the first is a fact about the peer
+    // while the second is a fact about us. Only the first is a null; anything
+    // else is returned so a caller can report "could not look" instead of
+    // "not there".
+    const msg = `${(e && e.message) || e} ${(e && e.stderr) || ''}`.toLowerCase();
+    if (/no such (object|container|image)|is not a|not found/.test(msg)) return null;
+    return { error: (e && e.message) || String(e) };
   }
 }
 
@@ -77,22 +88,40 @@ function classifyNetworkPeer({ mode = '', bound = null, declaredRef = '', declar
   const boundRef = mode.slice('container:'.length).trim();
   base.peerId = boundRef;
 
-  const named = declared || null;
+  // A lookup that FAILED is not a peer that is absent. We may still have the
+  // other reference to fall back on, so only give up on the whole answer when
+  // every lookup we tried errored — and then say `checked: false`, because a
+  // pad we could not look at is not a healthy pad.
+  const lookedAt = [bound, declared].filter(Boolean);
+  if (lookedAt.length && lookedAt.every((p) => p.error)) {
+    return {
+      ...base,
+      state: 'unknown',
+      checked: false,
+      reason: `Could not read this pad's network peer: ${lookedAt[0].error}`,
+    };
+  }
+  // One reference resolved, the other could not be read: keep going on the one
+  // we have, since a resolvable peer is a fact we can act on.
+  const usable = (p) => (p && !p.error ? p : null);
+
+  const named = usable(declared);
+  const live = usable(bound);
 
   // 1. The ref we are bound to resolves. Then we know the peer by identity, and
   //    the only remaining question is whether it is the peer we MEANT.
-  if (bound) {
-    base.peerName = bound.name;
-    base.peerState = bound.state;
-    base.peerCurrentId = bound.id;
-    if (bound.state !== 'running') {
+  if (live) {
+    base.peerName = live.name;
+    base.peerState = live.state;
+    base.peerCurrentId = live.id;
+    if (live.state !== 'running') {
       return {
         ...base,
         state: 'peer-stopped',
-        reason: `The network peer '${bound.name}' is ${bound.state}, not running. Start it, then recreate this pad to rebind.`,
+        reason: `The network peer '${live.name}' is ${live.state}, not running. Start it, then recreate this pad to rebind.`,
       };
     }
-    if (named && named.id && bound.id && named.id !== bound.id) {
+    if (named && named.id && live.id && named.id !== live.id) {
       // Running, but it is NOT the configured peer. Recreating the peer would
       // change nothing; the binding is what has to move.
       //
@@ -101,6 +130,23 @@ function classifyNetworkPeer({ mode = '', bound = null, declaredRef = '', declar
       // thing a caller should read. Leaving peerCurrentId pointing at the
       // container we are wrongly bound to makes `peerId !== peerCurrentId` read
       // as EQUAL — i.e. the rule would report a mismatch it cannot show.
+      //
+      // …and which fix that is depends on the CONFIGURED peer's state, not the
+      // bound one's. A peer that is up needs nothing and a recreate is the whole
+      // fix (`staleBinding`); a peer that is DOWN must be started FIRST, or the
+      // recreate moves this pad onto a stopped peer and the pad still cannot
+      // start. The bound container running is not evidence that the target runs,
+      // so the states are chosen on the target and not on what we are attached to.
+      if (named.state !== 'running') {
+        return {
+          ...base,
+          state: 'peer-stopped',
+          peerName: named.name,
+          peerState: named.state,
+          peerCurrentId: named.id,
+          reason: `This pad is bound to network container '${short(boundRef)}' (${live.name}, running), but it is configured for the different peer '${named.name}', which is ${named.state}. Start '${named.name}' first, then recreate to rebind.`,
+        };
+      }
       return {
         ...base,
         state: 'staleBinding',
@@ -108,7 +154,7 @@ function classifyNetworkPeer({ mode = '', bound = null, declaredRef = '', declar
         peerName: named.name,
         peerState: named.state,
         peerCurrentId: named.id,
-        reason: `This pad is bound to network container '${short(boundRef)}' (${bound.name}, running), but it is configured for the different peer '${named.name}'. Recreate to rebind to '${named.name}'.`,
+        reason: `This pad is bound to network container '${short(boundRef)}' (${live.name}, running), but it is configured for the different peer '${named.name}', which is running and needs nothing. Recreate to rebind to '${named.name}'.`,
       };
     }
     return { ...base, state: 'ok' };
@@ -135,7 +181,17 @@ function classifyNetworkPeer({ mode = '', bound = null, declaredRef = '', declar
     };
   }
 
-  // 3. Nothing we can name. Say THAT, rather than implying the peer is unwell.
+  // 3. One lookup resolved nothing and the other could not be read — or there
+  //    was no fallback at all. Say THAT, rather than implying the peer is unwell.
+  const failed = lookedAt.find((p) => p.error);
+  if (failed) {
+    return {
+      ...base,
+      state: 'unknown',
+      checked: false,
+      reason: `This pad is bound to a network peer that could not be read (${failed.error}), so its state is unknown.`,
+    };
+  }
   return {
     ...base,
     state: 'stale',

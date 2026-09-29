@@ -101,13 +101,49 @@ describe('classifyNetworkPeer — one rule, four distinct problems', () => {
     }
   });
 
-  it('never confuses "I could not check" with "broken" — it has no state for it', () => {
+  it('never confuses "I could not check" with "broken" — an all-errors answer says so', () => {
     // The rule only ever rules on lookups it was HANDED, so an answer nobody
-    // could compute cannot come out of here. Callers that cannot look (the pad
-    // itself not inspectable) must report `checked: false` instead.
-    const v = classifyNetworkPeer({ mode: 'container:x', bound: null, declaredRef: 'p', declared: null });
-    assert.notStrictEqual(v.checked, false, 'every verdict here is checked');
-    assert.ok(!['unknown', 'unchecked', 'error'].includes(v.state), 'no invented states');
+    // could compute cannot come out of the verdict branches. But a lookup that
+    // FAILED is now a distinct value, so the rule has one honest exit for it:
+    // `checked: false`. Asserting the state is NOT one of the four actionable
+    // ones is the property — a caller must never be told to recreate or start a
+    // peer over a docker error.
+    const err = { error: 'Cannot connect to the Docker daemon' };
+    const both = classifyNetworkPeer({ mode: 'container:x', bound: err, declaredRef: 'p', declared: err });
+    assert.strictEqual(both.checked, false, 'an unreadable peer is unchecked, not healthy');
+    assert.ok(!['ok', 'stale', 'staleBinding', 'peer-stopped'].includes(both.state),
+      `an unreadable peer must not borrow an actionable state (got ${both.state})`);
+    assert.match(both.reason, /Could not read/i, 'and it says the lookup failed, naming why');
+  });
+
+  it('a wrong binding onto a peer that is NOT running is peer-stopped, not staleBinding', () => {
+    // The one branch that was wrong: the pad is attached to a running container
+    // that is not the peer it is configured for, so the naive reading is
+    // "staleBinding — recreate the pad". But the CONFIGURED peer is exited, so a
+    // recreate would move the pad onto a stopped peer and it still could not
+    // start. The state has to name the thing that needs starting first.
+    const v = classifyNetworkPeer({
+      mode: 'container:deadbeefdeadbeef',
+      bound: running('gluetun-old', 'deadbeefdeadbeef'),
+      declaredRef: 'gluetun-new',
+      declared: stopped('gluetun-new', 'aaaa1111'),
+    });
+    assert.strictEqual(v.state, 'peer-stopped', 'the target is down, so start it first');
+    assert.ok(!v.staleBinding, 'not a stale binding — the binding is not the blocker');
+    assert.match(v.reason, /Start 'gluetun-new' first/, 'and the reason orders the two fixes');
+  });
+
+  it('the same case with the target RUNNING is staleBinding — the peer needs nothing', () => {
+    const v = classifyNetworkPeer({
+      mode: 'container:deadbeefdeadbeef',
+      bound: running('gluetun-old', 'deadbeefdeadbeef'),
+      declaredRef: 'gluetun-new',
+      declared: running('gluetun-new', 'aaaa1111'),
+    });
+    assert.strictEqual(v.state, 'staleBinding');
+    assert.ok(v.staleBinding);
+    assert.match(v.reason, /needs nothing/, 'the peer is fine, so a recreate is the whole fix');
+    assert.ok(!/Start /.test(v.reason), 'and it must not tell the caller to start a running peer');
   });
 });
 
@@ -115,6 +151,45 @@ describe('inspectPeer — a reference that does not resolve', () => {
   it('returns null for a reference docker cannot find, and never throws', async () => {
     const run = async () => { throw new Error('Error: No such object: nope'); };
     assert.strictEqual(await inspectPeer('nope', { run }), null, 'a failed lookup is a value, not a crash');
+  });
+
+  it('reports a FAILED lookup as an error, not as an absent peer', async () => {
+    // `docker inspect` exits non-zero for "no such container" AND for an
+    // unreachable daemon. Those are opposite facts about different objects, and
+    // collapsing them points the caller at a peer that is fine while the real
+    // problem (docker) is invisible. So only the "no such" text is a null.
+    const run = async () => { throw new Error('Error response from daemon: Cannot connect to the Docker daemon at unix:///var/run/docker.sock'); };
+    const v = await inspectPeer('gluetun', { run });
+    assert.ok(v && v.error, 'an unreadable reference is reported as an error');
+    assert.match(v.error, /Cannot connect/, 'carrying the reason');
+  });
+
+  it('an errored peer does not become an actionable verdict about the pad', async () => {
+    // The end of the chain: if every lookup we tried failed, the rule cannot
+    // name a state it has no evidence for, so it declines to guess.
+    const run = async () => { throw new Error('Error response from daemon: Cannot connect to the Docker daemon'); };
+    const v = classifyNetworkPeer({
+      mode: 'container:abc',
+      bound: await inspectPeer('abc', { run }),
+      declaredRef: 'gluetun',
+      declared: await inspectPeer('gluetun', { run }),
+    });
+    assert.strictEqual(v.checked, false);
+  });
+
+  it('one resolvable peer is enough to act on when the other lookup failed', async () => {
+    // Not every failure means we know nothing: a working declared peer is a
+    // fact, and throwing it away because the bound id could not be read would
+    // under-report a pad we can already diagnose.
+    const fails = async () => { throw new Error('Error response from daemon: Cannot connect to the Docker daemon'); };
+    const v = classifyNetworkPeer({
+      mode: 'container:abc',
+      bound: await inspectPeer('abc', { run: fails }),
+      declaredRef: 'gluetun',
+      declared: running('gluetun', 'aaaa1111'),
+    });
+    assert.strictEqual(v.state, 'staleBinding', 'the configured peer is up, so the binding is the fix');
+    assert.strictEqual(v.checked, true, 'a real answer, so it is checked');
   });
 
   it('returns null for no reference at all (the default-network pad never asks)', async () => {

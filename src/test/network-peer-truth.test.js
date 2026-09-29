@@ -175,6 +175,54 @@ describe('network peer truth — the states the UI must react to (plan 66)', () 
     assert.match(src, /\{\(networkStale \|\| networkStaleBinding\) && \(/, 'the fix is reachable from the new state');
   });
 
+  it('an UNREADABLE answer raises the banner, without offering a fix', () => {
+    const src = fs.readFileSync(SRC, 'utf8');
+    assert.match(src, /networkUnchecked = networkHealth\.checked === false/,
+      '`checked: false` is recognized as its own thing, not as health');
+    assert.match(src, /networkBroken = networkStale \|\| networkStaleBinding \|\| networkPeerStopped \|\| networkUnchecked/,
+      'and counts as broken, so we never read silence as a healthy pad');
+    // The recreate button is keyed OFF the two diagnosed states, so an
+    // unreadable answer cannot reach it. An unreadable probe has established
+    // NOTHING, and a button that says "recreate" is advice nobody can justify.
+    assert.doesNotMatch(src, /\(networkStale \|\| networkStaleBinding \|\| networkUnchecked\) && \(/,
+      'the recreate button must not widen to the unchecked state');
+    // The body must quote the REASON: an unexplained warning is a shrug.
+    assert.match(src, /networkHealth\.reason/, 'the banner explains why it could not check');
+  });
+
+  it('the file PARSES — a regex pin cannot see a syntax error', () => {
+    // Plan 66 shipped a SettingsTab.jsx with the comma that ends the `message:`
+    // template literal in handleRecreateNetwork missing, so the committed file
+    // did not parse at all. Nothing caught it: every other test in this file is
+    // a source-text regex, `node --check` does not accept JSX, and the browser
+    // serves the PREBUILT src/public bundle, which was built from the (valid)
+    // worktree. A green suite proved only that the file contained some strings.
+    //
+    // esbuild parses without emitting, so nothing is written to src/public —
+    // `npm run build` is not an option here, it wipes that directory. It lives
+    // in the CLIENT's node_modules, not the server's, so it is resolved by path
+    // rather than by a bare require that would throw at load time.
+    const { createRequire } = require('node:module');
+    const clientRequire = createRequire(
+      path.join(__dirname, '..', 'client', 'package.json')
+    );
+    const esbuild = clientRequire('esbuild');
+    try {
+      esbuild.buildSync({
+        entryPoints: [SRC],
+        loader: { '.jsx': 'jsx' },
+        bundle: false,
+        write: false,
+        logLevel: 'silent',
+      });
+    } catch (e) {
+      const first = (e.errors || [])[0];
+      assert.fail(
+        `SettingsTab.jsx does not parse${first ? ` at ${first.location.line}:${first.location.column} — ${first.text}` : ''}`
+      );
+    }
+  });
+
   it('the banner does not tell the user to start a peer that is already running', () => {
     const settings = fs.readFileSync(SRC, 'utf8');
     assert.ok(/is up and needs nothing/.test(settings), 'the stale-binding copy says the PEER is fine');

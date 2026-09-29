@@ -409,7 +409,7 @@ export default function SettingsTab({ agent }) {
       title: 'Recreate container to fix network?',
       message: `${networkStaleBinding
         ? `${networkPeerLabel} is already running — this pad is only bound to an older, deleted peer container, so it can't start until it rebinds.`
-        : `This agent routes through ${networkPeerLabel}, which has been recreated or stopped. The container can't start until it re-joins the current peer.`}\n\nRecreating will stop and recreate ${agent.name} so it rebinds to the current network peer. No settings change — the compose file already points at ${settings?.network || 'the peer'} by name.`
+        : `This agent routes through ${networkPeerLabel}, which has been recreated or stopped. The container can't start until it re-joins the current peer.`}\n\nRecreating will stop and recreate ${agent.name} so it rebinds to the current network peer. No settings change — the compose file already points at ${settings?.network || 'the peer'} by name.`,
       confirmText: 'Recreate',
       cancelText: 'Cancel',
     })
@@ -459,7 +459,13 @@ export default function SettingsTab({ agent }) {
   const networkStale = networkHealth.state === 'stale'
   const networkStaleBinding = networkHealth.state === 'staleBinding'
   const networkPeerStopped = networkHealth.state === 'peer-stopped'
-  const networkBroken = networkStale || networkStaleBinding || networkPeerStopped
+  // `checked: false` means we could not read the answer at all. It is NOT a
+  // healthy pad, so it must not be silent either — the same rule as the
+  // backend's, where an unreadable answer is reported rather than smoothed into
+  // a good one. No recreate button though: we do not know what is wrong, so
+  // there is nothing to advise.
+  const networkUnchecked = networkHealth.checked === false
+  const networkBroken = networkStale || networkStaleBinding || networkPeerStopped || networkUnchecked
   const networkPeerLabel = networkHealth.peerName || networkHealth.peerId || currentNetwork || 'the network peer'
   const networkOptions = (containers.some((c) => c.name === currentNetwork) || !currentNetwork
     ? containers
@@ -762,12 +768,18 @@ export default function SettingsTab({ agent }) {
       {networkBroken && (
         <section className="bg-warning-soft border border-warning-line/70 rounded-xl p-5">
           <h3 className="text-sm font-medium text-warning">
-            {networkStaleBinding
+            {networkUnchecked
+              ? 'Network health could not be checked'
+              : networkStaleBinding
               ? `Network peer ${networkPeerLabel} is running — this pad is bound to the wrong one`
               : networkStale ? 'Network peer is stale — container can\u2019t start' : 'Network peer is stopped'}
           </h3>
           <p className="text-xs text-warning/90 mt-1 max-w-lg">
-            {networkStaleBinding
+            {networkUnchecked
+              ? (networkHealth.reason
+                ? `Paddock could not read this pad's network peer, so it cannot tell you whether the peer is healthy: ${networkHealth.reason}`
+                : "Paddock could not read this pad's network peer, so it cannot tell you whether the peer is healthy.")
+              : networkStaleBinding
               ? `${networkPeerLabel} is up and needs nothing. This container is still bound to an older peer container that no longer exists, so starting fails with "No such container". Recreate to rebind to ${networkPeerLabel}.`
               : networkStale
               ? `This agent routes through ${networkPeerLabel}, which has been recreated since this container was created. Docker still points at the old (now-deleted) container, so starting fails with "No such container". This is not a Paddock issue — the peer moved.`
