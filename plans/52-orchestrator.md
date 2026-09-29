@@ -1,6 +1,6 @@
 # Plan 52 — Orchestrator (session-based: keys, grants, conferral, playbook, proof)
 
-## Status: Rewritten (2026-09-27) — **1/7 phases complete, Phase A done.** A1 audited + fail-closed default; A2 verified — it surfaced that `exec` is a base grant, so the least-privilege key of D2 cannot be expressed (user decision, recorded in infinite.md); A3 `autoApprove` flipped to opt-in (R3 closed). Phase A gate: all suites green, webui restarted, tool surface verified live at 31 tools. Phases B–G not started. The queue is gone;
+## Status: Rewritten (2026-09-29) — **1/7 phases complete (A); B and C started.** A1 audited + fail-closed default; A2 verified — it surfaced that `exec` is a base grant, so the least-privilege key of D2 cannot be expressed (user decision, recorded in infinite.md); A3 `autoApprove` flipped to opt-in (R3 closed). Phase A gate: all suites green, webui restarted, tool surface verified live at 31 tools. **B1 done 5/7** (the two missing clauses name tools plan 53 Phase 9 has not built); **B2 blocked** on a user call — no onboarding artifact exists to rewrite and its form is plan 51 §4's undecided question, while `pad_help` already serves a better one. **C1's path is proven live twice** (two sessions, both answers verified from outside the session) and **surfaced C1-F1, Critical: a fresh session can never report `busy`**, measured mid-turn as `busy:false, busyKnown:true, canSend:true` while the pane read `esc interrupt`. Phases D–G not started. The queue is gone;
 this plan now orchestrates **sessions**, not tasks. User decision, verbatim:
 *"don't let the user start any task without my vision — remove task submit"*,
 followed by *"rewrite 52 around mission_* sessions"*. **Everything below is
@@ -235,8 +235,84 @@ The gate for everything: the agent can only do what its key says.
 
 ## Phase C — Prove it: the LLM drives a real session
 
-- [ ] C1. End-to-end over MCP on a real project, following 53 §1a: inspect →
+- [~] C1. End-to-end over MCP on a real project, following 53 §1a: inspect →
       create project → open session → work → read back → journal. Narrated.
+
+      **Status: the PATH is proven end to end, live, twice. The journal tail is
+      blocked (53 Phase 9), and proving the path surfaced a Critical defect
+      (C1-F1 below) that must be decided before C2 counts.**
+
+      **Run 1 — `msn_6056d53965f3c316` "C1 end-to-end proof", project `paddock`.**
+      Reuse check first (B1's new rule): `mission_projects` → 13 sessions,
+      `liveCount 0`; the 6 most recent were all `dead` and all the user's own
+      unrelated conversations, so **nothing fit and the rule correctly declined
+      to fire** — which is the result a reuse rule must be able to produce.
+      Create-project was a genuine no-op: the project already existed. Start →
+      `live: true`, `tuiAlive: true`, `inExpectedFolder: true`, and
+      `createdBy: "key:key_748ebbc430e90484"` provenance stamped with no help.
+      Send → text landed; read-back → `screenFrom: "live-pane"`, `canSend: true`.
+      Answer was **18 `*.test.js` files**, and `ls -1 src/test/*.test.js | wc -l`
+      outside the session returned 18 with the identical 18 names — so the
+      read-back is a real answer, not just proof that text was typed. Closed
+      with `mission_session_close` → `endedBy: "closed"`, row survived.
+
+      **Run 2 — `msn_2a0e32253a88258f` "C1 busy proof"** (exists only to measure
+      C1-F1). Answer **1331**, and `wc -l < AGENTS.md` outside returned 1331.
+      Both sessions were told read-only and the worktree was unchanged after
+      both (still the same 72 pre-existing WIP files).
+
+      ### C1-F1 · Critical · **a fresh session can NEVER report `busy`**
+
+      `agent_session_id` is **write-once from the caller's input**: the only
+      write in the tree is the INSERT at `mission.js:214` from `startSession`'s
+      `agentSessionId` argument, and there is no `UPDATE` anywhere. A freshly
+      started session has no such argument — the page's "+ New session" calls
+      `start()` with **no arguments** (`SessionList.jsx:454`) and
+      `mission_session_start` only passes one if the caller supplies it — so the
+      column is `NULL` **forever**, for human and agent starts alike. Then
+      `stampTruth` computes
+      `busy = !!(s.agent_session_id && probe.ids.has(s.agent_session_id))`, which
+      is `!!(null && …)` = **`false` unconditionally**, while `busyKnown` is set
+      from the *folder probe's* knowledge — so the row reports
+      **`busy: false, busyKnown: true`**, i.e. "genuinely idle, the probe
+      answered", at every moment of every fresh session.
+
+      **Measured, not inferred.** Mid-turn on run 2, the pane showed
+      `⬝⬝⬝⬝⬝ esc interrupt` — opencode actively working — while the same
+      response carried `busy: false, busyKnown: true, canSend: true`. A caller
+      following the guide's own rule (*"check `busy` first and only treat a
+      session as quiet when `busyKnown` is true"*) is therefore **told it is
+      safe to type** into a session that is mid-turn, and `mission_send`'s gate
+      does not check `busy`, so the write goes through. The "don't talk over the
+      human" property is inert on exactly the sessions an orchestrator makes.
+
+      This is why the user's own rows all carry `ses_…` ids: they were **resumed
+      from History** (the only caller that ever supplies one,
+      `SessionList.jsx:400`). The defect was masked by the very habit B1 now
+      recommends. Three consequences: (1) `busy` is inert for every fresh
+      session, which is most of them; (2) `sessionTitle` returns `''`
+      (`mission.js:1016`), so fresh rows never get a title; (3) `relaunch` /
+      `restart` fall to `tuiLaunch.fresh()` and **orphan the conversation** —
+      the code comment at `mission.js:727` says exactly that this must not
+      happen — and the close response says so out loud: *"conversation: new
+      (this row never recorded an agent session id)"*. The resumed-twin
+      collapse at `mission.js:1389` filters on the same column, so it can never
+      fire for a fresh row.
+
+      **Two fixes, and they answer different questions — your call.**
+      (a) **Stop the lie (cheap, fail-closed, one line):** return
+      `busyKnown: false` when `agent_session_id` is null, so an unidentifiable
+      conversation is **unknown, never idle** — exactly what plan 62 already
+      does for the cwd-mismatch case (`mission.js:1064`) and what AGENTS.md
+      demands of a failed probe. It does not make `busy` *work*; it makes the
+      answer honest. (b) **Make it work (real fix, needs a design decision):**
+      learn the conversation id for a fresh session — e.g. resolve the newest
+      session in the folder created after the row's `created_at` from the
+      agent's store — which also restores `title` and true resume, at the cost
+      of being ambiguous when two sessions start in one folder at once.
+      **(a) recommended now, (b) as the real fix**; the resume story (E4, R15)
+      cannot be proven until (b) exists, because a fresh session has no
+      conversation to resume.
 - [ ] C2. Every gap becomes an item; nothing advances until C1 is green **twice**
       — two projects, ideally two different models (the model-independence proof
       from [51§2b]).
@@ -297,6 +373,23 @@ owner phase builds.
       anyone is watching; no ceiling/alert/kill-switch.
 - [ ] R2 · Critical · Block C/E — injection path: repo text → agent output →
       orchestrator context → action. No provenance or output gates.
+- [ ] **R7 · Critical · Block C/E (found by C1, 2026-09-29) — `busy` is
+      structurally `false` on every fresh session**, so the orchestrator is told
+      a working session is idle. `agent_session_id` is write-once at INSERT
+      (`mission.js:214`) and a fresh start never supplies one (page
+      `SessionList.jsx:454` calls `start()` with no args), so `stampTruth`'s
+      `!!(s.agent_session_id && probe.ids.has(…))` can never be true, while
+      `busyKnown` still reports the probe's `true`. Measured mid-turn:
+      `busy:false, busyKnown:true, canSend:true` against a pane reading
+      `esc interrupt`. Consequence: the "never talk over a live conversation"
+      property is inert on exactly the sessions an agent creates, and the
+      guide's own `busyKnown` rule endorses the interrupt. Also costs
+      `sessionTitle` (always `''`) and real resume (`relaunch`/`restart` fall to
+      `tuiLaunch.fresh()` and orphan the conversation, which `mission.js:727`
+      explicitly says must not happen). Full evidence + the two fixes in §C1-F1.
+      Cheap honest fix (a): stamp `busyKnown: false` when the id is null.
+      Real fix (b): resolve the id for a fresh session. Blocks E4/R15, which
+      cannot prove resume cost while fresh sessions have no conversation.
 - [x] R3 · Critical · Block A — **RESOLVED (2026-09-29, A3): `autoApprove` is
       now opt-in**, in both caller defaults and both description fields. The
       drivers were always fail-closed; the permissiveness was `submitTask`\x27s

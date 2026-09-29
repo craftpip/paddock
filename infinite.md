@@ -78,6 +78,30 @@ one is a single reply away from done.
   or **(c)** generate the snippet *from* the guide so one source feeds both.
   **Recommend (a), or (c) if you need text you can paste somewhere else.**
   Nothing is blocked on it except B2 itself.
+- **`busy` is structurally `false` on every fresh Mission session — fix the lie
+  or fix the mechanism? (plan 52 C1-F1 / R7, found live 2026-09-29)** — a
+  session started fresh (page "+ New session", or `mission_session_start`
+  without `agent_session_id`) leaves `agent_session_id` `NULL` **forever**:
+  the only write is the INSERT at `mission.js:214` and nothing back-fills it.
+  So `stampTruth`'s `busy = !!(s.agent_session_id && probe.ids.has(…))` is
+  `!!(null && …)` = `false` **unconditionally**, while `busyKnown` reports the
+  folder probe's `true`. **Measured mid-turn**: the pane read
+  `esc interrupt` (opencode working) and the same response said
+  `busy:false, busyKnown:true, canSend:true`. The guide's own rule — *"only
+  treat a session as quiet when `busyKnown` is true"* — then tells the caller
+  it is safe to type, and `mission_send` does not check `busy`. It has been
+  masked because your rows were all **resumed from History**, the only caller
+  that ever supplies the id. Two answers to different questions: **(a) stop the
+  lie** — one line, return `busyKnown: false` when the id is null, so an
+  unidentifiable conversation is *unknown, never idle* (what plan 62 already
+  does for the cwd mismatch); it does not make `busy` work. **(b) make it
+  work** — resolve the conversation id for a fresh session (newest session in
+  the folder after the row's `created_at`), which also restores `title` and
+  true resume, but is ambiguous when two sessions start in one folder at once.
+  **Recommend (a) now and (b) as the real fix.** Note (b) gates **E4/R15**:
+  resume cost cannot be proven while fresh sessions have no conversation to
+  resume. Also costs `sessionTitle` (`''` forever) and orphans the conversation
+  on relaunch/restart. Full evidence in `plans/52-orchestrator.md` §C1-F1.
 - **Rotate the 2 exposed MCP tokens** — plan 60 stopped the leak but cannot
   un-leak the credentials; operator action, §5. Tracked on its queue line below.
 
