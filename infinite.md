@@ -59,6 +59,25 @@ one is a single reply away from done.
   grant it), or keep it as the base and accept that a scoped key can drive
   sessions. A test pins today's matrix either way, so it cannot change by
   accident. Plan 52 § A2; flipping it turns 6 tests red.
+- **What form should the LLM onboarding artifact take? (plan 52 B2)** — B2 says
+  "onboarding artifact (system-prompt snippet / skill) **rewritten** for the
+  session model", and neither half holds: **no artifact exists to rewrite**
+  (`src/views/onboard.ejs` is a dead EJS view; the only live `onboard` is
+  `POST /api/agents/:name/onboard`, an agent-setup route), and the **form** is
+  still plan 51 §4's *"Open decisions (user calls these)"* — "system prompt
+  snippet? skill file? slash commands?" 51 is not in the queue, so that was
+  never decided. Meanwhile **an onboarding artifact already exists and is the
+  better one**: `pad_help` serves `GENERAL_GUIDE` over MCP, it is the same
+  module plan 52 B1 just rewrote for the session model, it is **versioned with
+  the code so it cannot drift**, and any LLM can fetch it as its first call. A
+  separate hand-written snippet would be a **second copy** of the same
+  instructions with no sync story — the drift the guide's design already avoids.
+  Pick: **(a)** `help` IS the artifact (then B2 becomes an
+  onboarding-completeness audit of the guide — no new file, no drift);
+  **(b)** a separate static snippet/skill, which needs a home and a sync owner;
+  or **(c)** generate the snippet *from* the guide so one source feeds both.
+  **Recommend (a), or (c) if you need text you can paste somewhere else.**
+  Nothing is blocked on it except B2 itself.
 - **Rotate the 2 exposed MCP tokens** — plan 60 stopped the leak but cannot
   un-leak the credentials; operator action, §5. Tracked on its queue line below.
 

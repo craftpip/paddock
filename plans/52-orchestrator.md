@@ -212,6 +212,27 @@ The gate for everything: the agent can only do what its key says.
 - [ ] B2. Onboarding artifact (system-prompt snippet / skill, [51§4]) rewritten
       for the session model. No backend.
 
+      **BLOCKED — a user call, raised in `infinite.md`.** Two findings, both
+      from reading rather than assuming:
+      (1) **There is nothing to "rewrite".** No onboarding artifact exists:
+      `src/views/onboard.ejs` is a dead EJS view (the only live `onboard` is
+      `POST /api/agents/:name/onboard`, an agent-setup route), and no
+      skill/prompt file is in the tree. So B2 is a **first** write, not a
+      rewrite, and its **form** is still undecided — plan 51 §4 lists
+      "My-LLM onboarding: system prompt snippet? skill file? slash commands?"
+      under *"Open decisions (**user calls these**)"*. 51 is not in the queue, so
+      that decision was never made.
+      (2) **An onboarding artifact already exists and is better than a file.**
+      `pad_help` serves `GENERAL_GUIDE` over MCP, it is the same module B1 just
+      rewrote, it is **versioned with the code** so it cannot drift, and it is
+      already session-shaped. A hand-maintained snippet would be a *second copy*
+      of the same instructions with no sync story — the exact drift trap the
+      guide is versioned to avoid. Your call: (a) treat `help` as THE artifact
+      (then B2 is an onboarding-completeness audit of the guide, no new file),
+      (b) write a separate static snippet/skill and say where it lives and how
+      it is kept in sync, or (c) generate the snippet *from* the guide so there
+      is one source. (a) or (c) recommended; (b) needs a home and a sync owner.
+
 ## Phase C — Prove it: the LLM drives a real session
 
 - [ ] C1. End-to-end over MCP on a real project, following 53 §1a: inspect →
