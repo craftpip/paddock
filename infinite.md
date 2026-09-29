@@ -126,8 +126,8 @@ one is a single reply away from done.
 
 ## Queue
 
-- [~] plans/52-orchestrator.md — started 2026-09-29
-- [ ] plans/68-mission-auto-reopen-closed-session.md — closed Mission session auto-restarts instead of showing "This session is closed"
+- [ ] plans/52-orchestrator.md — partial: Phase A + E1 done, C1's id fixed (R7). **Blocked: user calls** — R8 (`busy` semantics), `exec` grant, B2 onboarding; phases D–G gated on those or on C1 green-twice
+- [~] plans/68-mission-auto-reopen-closed-session.md — started 2026-09-29
 - [ ] plans/68-mission-page-ideas.md — Mission UI vision (UI-only, gathering): drop scope toggle for selection-driven sessions, persist page state over refresh, dedup fresh sessions, VS Code-style split panes, Ctrl+click multi-select projects
 - [ ] plans/69-mission-orchestration.md — Orchestration via MCP (gathering): task lifecycle review → dev → test → bugs → commit with the loop inside the tools; nouns agreed (Driver/Orchestrator/PAD/Project/Session/Worker/Task/Human); session last-message + timing for done-ness
 - [ ] plans/60-mcp-secret-hygiene.md — build done + verified (mcp 79/79, vm-manager 108/108), `## Status:` reads Complete, but **not yet absorbed** (file still present) and one open item remains — **blocked: rotate the 2 exposed MCP tokens (operator action, plan §5)**, which no agent can perform. Parked at the BOTTOM on purpose: it is not done, but leaving it at the top would head-block the loop on an action only the user can take.
