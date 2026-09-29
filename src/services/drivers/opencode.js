@@ -281,6 +281,56 @@ const OPENCODE = {
     return '';
   },
 
+  /** Create an EMPTY conversation in a folder and return its id, so a Mission
+   *  session can be handed one it KNOWS about before its TUI ever starts.
+   *
+   *  This exists because `opencode` mints a conversation id at TUI start and
+   *  never tells anybody. A fresh start therefore left the mission row with
+   *  `agent_session_id = NULL` FOREVER, and every later read had nothing to
+   *  intersect the agent's live-work map with — so it reported `busy: false,
+   *  busyKnown: true` ("I looked, it is idle") for a pane that was visibly
+   *  mid-turn, lost the session title, and could not resume on a relaunch.
+   *
+   *  Creating it ourselves and launching with `-s <id>` makes the id a FACT at
+   *  start time rather than a deduction made afterwards from timestamps, which
+   *  cannot tell two panes apart when one folder holds several sessions (and
+   *  the user's own web-UI chat sits in that same candidate set).
+   *
+   *  Returns '' rather than throwing: a start must still be able to proceed
+   *  without the id, exactly as it did before — the row just loses its busy
+   *  stamp. The password is read from INSIDE the container so it never reaches
+   *  a host command line. */
+  async createConversation(name, folder, containerPort) {
+    const port = parseInt(containerPort, 10);
+    if (!name || !folder || !port) return '';
+    // Percent-encoded in JS, and single-quoted here, so a folder with a space
+    // or an `&` cannot smuggle itself into the query string.
+    const dir = encodeURIComponent(folder);
+    const url = `"http://127.0.0.1:${port}/session?directory=${dir}"`;
+    try {
+      const r = await runCmd('docker', [
+        'exec',
+        name,
+        'sh',
+        '-lc',
+        [
+          `u=${url}`,
+          `out=$(curl -s -m 8 -X POST "$u" -H 'Content-Type: application/json' -d '{}' 2>/dev/null)`,
+          'case "$out" in',
+          `  '{'*) printf '%s' "$out" ;;`,
+          '  *) if [ -n "$OPENCODE_SERVER_PASSWORD" ]; then',
+          `       curl -s -m 8 -u "opencode:$OPENCODE_SERVER_PASSWORD" -X POST "$u" -H 'Content-Type: application/json' -d '{}' 2>/dev/null`,
+          '     fi ;;',
+          'esac',
+        ].join('\n'),
+      ], { timeout: 15000, check: false });
+      const id = String(r.stdout || '').match(/"id"\s*:\s*"(ses_[^"]+)"/);
+      return id ? id[1] : '';
+    } catch {
+      return '';
+    }
+  },
+
   /** The title the AGENT gives one of its own conversations (plan 62 1i).
    *  Keyed by the session id, so it is the title of THAT conversation and not
    *  "whatever was updated last" — the terminal's title is the latter, because

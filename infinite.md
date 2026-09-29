@@ -59,6 +59,25 @@ one is a single reply away from done.
   grant it), or keep it as the base and accept that a scoped key can drive
   sessions. A test pins today's matrix either way, so it cannot change by
   accident. Plan 52 § A2; flipping it turns 6 tests red.
+- **What should `busy` mean, now that the busy probe is answering about the
+  wrong process? (plan 52 R8, found 2026-09-29)** — `busy` is inert for **every**
+  opencode session, not just fresh ones, and the id fix did not change that. The
+  probe reads `GET /session/status` from the published `opencode web` process
+  (pid 16, port 7890), but a Mission session's TUI is a **separate** `opencode`
+  process (pid 6458) that holds no sockets and never publishes its live turn
+  there. Measured: 42 straight seconds of a pane reading `esc interrupt` with
+  our id absent from the map, while your own web-UI session was reported busy
+  the whole time. The agent's own **store** does see the turn (already the
+  `plan_activity` reader; tracked `bash/error → read/completed` with live
+  timestamps across 15 polls). Two honest semantics, and they are not
+  equivalent: (a) **newest tool part's own `state.status === 'running'`** —
+  precise for tool work, blind to the agent streaming prose; (b) **`lastActivityAt`
+  within N seconds** — covers prose too, but N is a judgement call and a finished
+  turn looks "busy" for N seconds. Either also moves liveness from **one probe
+  per (PAD, folder)** to **one store read per session** (17 on `pad-opencode-proj`,
+  ~2 ms each) — cheap, but it inverts a rule AGENTS.md states deliberately.
+  Your call: (a), (b), both, or leave `busy` off until R7's follow-up. Nothing is
+  blocked on it except the "never talk over a live conversation" property.
 - **What form should the LLM onboarding artifact take? (plan 52 B2)** — B2 says
   "onboarding artifact (system-prompt snippet / skill) **rewritten** for the
   session model", and neither half holds: **no artifact exists to rewrite**

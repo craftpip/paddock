@@ -98,6 +98,58 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   is a FACT about the peer, so a genuinely absent reference keeps its actionable
   state, and a test pins that counterpart so a tidy-up cannot fold the two
   together.
+- **A field an agent never hands you is not a field you can look up later —
+  make the agent hand it to you, or make the answer UNKNOWN.** `opencode` mints a
+  conversation id when its TUI starts and never reports it, so a fresh Mission
+  row kept `agent_session_id = NULL` forever and every read answered
+  `busy:false, busyKnown:true` — "I looked, it is idle" — for a pane visibly
+  mid-turn. Two lessons, and the second cost another round. (1) **The fix is to
+  create the conversation yourself, not to deduce it afterwards**: `POST
+  /session?directory=<folder>` returns the id, so mint it BEFORE the pane exists
+  and launch `opencode -s <id>` into it. I first built the "resolve it later from
+  timestamps" version the plan proposed, and it is not merely fiddly — it
+  **cannot distinguish two panes in one folder** (several routinely share a PAD,
+  and the user's own web-UI chat is in the same candidate set), so its
+  "exactly one survivor" rule refuses precisely the multi-session case it was
+  meant to serve. Narrowing harder would trade a shrug for a **wrong**
+  conversation. Minting removes the window instead of resolving it. (2) **A
+  "known" flag copied from the probe's own knowledge is not knowledge about
+  THIS row**: `busyKnown` took the probe's `known` while the row's id was null,
+  so the conversation was never intersected with anything. `known` is now
+  `probe.known && !!s.agent_session_id` on all three branches. The pre-existing
+  test asserted `busy: false` for an id-less row and nothing about `busyKnown`,
+  which is exactly why the lie survived a green suite: **nothing in the response
+  contradicts `busy: false` on its own** — assert the field that makes the claim
+  checkable, not the one that is already false.
+- **A live-work probe can be answering about a DIFFERENT PROCESS than the one you
+  are describing, and a shared database is not shared liveness.** `busy` reads
+  `GET /session/status` from the PAD's published `opencode web` (pid 16, :7890) —
+  but a Mission session's TUI is a *separate* `opencode` process (pid 6458) that
+  holds **no sockets** and never publishes its turn there. Measured: 42
+  consecutive seconds of `esc interrupt` on the pane with our id absent from the
+  map, while the user's own web-UI session was reported busy throughout. The two
+  processes **do** share the sqlite store (a `GET /session/{id}` returns our
+  conversation in full), which is exactly what makes the bug survive review: every
+  read of the same *id* succeeds, so the id looks like it is wired up. **Prove a
+  liveness probe by watching it go TRUE for the specific thing you are measuring**,
+  not by confirming the endpoint answers and the id resolves. And when a fix makes
+  a probe "work" without ever producing a `true`, suspect a second root cause
+  rather than declaring victory — here the id fix made the lookup succeed and
+  find nothing, which reads identically to a fix.
+- **`USER_MODE=user` puts the pad's tmux in `/tmp/tmux-1000`, so a plain root
+  `docker exec … tmux ls` reads a DIFFERENT, EMPTY server.** The Mission
+  evidence-gathering that produced the 42-second measurement above was first run
+  through root and found "no tmux session, no TUI process" on a pad with a pane
+  visibly mid-turn — which looked like three separate defects (no session, no
+  process, empty screen) and was one: the probe read the wrong socket. Always go
+  through `padTmux` (`termUserArgs` adds `-u 1000:1000 -e HOME=/root`), and never
+  hand-roll a `docker exec … tmux` for evidence. Two smaller traps from the same
+  session: creating a root `tmux new-session` in a user-mode pad **leaves a second
+  server behind** that then makes the webui's own captures come back empty, so
+  clean it up (`tmux kill-server`) before believing any result; and the detail
+  endpoint returns the screen at the **top level** (`screen`), not on `session`,
+  so `session.screen` reading empty means "I looked in the wrong place", not
+  "there is no screen".
 - **Mission col 3 is pinned to `openSession` in the store, NOT to the row and NOT
   to `selectedProjectId`.** It is a snapshot taken at the moment the session was
   opened, and the project it resolves for `<Terminal>` comes from
@@ -702,6 +754,15 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   the other projects' rows. The map is a live-work registry, not a presence list:
   it empties when the turn ends, and there is no client/connection endpoint, so
   an idle tab open in the web UI is NOT detectable.
+  **CRITICAL SCOPE LIMIT (measured 2026-09-29): this only ever reports
+  conversations THAT WEB PROCESS IS DRIVING.** A Mission pane is a separate
+  `opencode` TUI process holding no sockets, so its turn never appears here at
+  all — 42 straight seconds of a visible `esc interrupt` with our id absent, while
+  the user's own web-UI session was reported busy the whole time. So the wording
+  above ("the only server-side way to see a conversation from ANY client") is
+  **false for tmux-driven sessions** and the probe is a **complement** to the pane
+  state, never a substitute for it. See "a live-work probe can be answering
+  about a DIFFERENT PROCESS" above.
 - **A "dead" row is not a dead conversation.** A mission session whose tmux pane
   died while the user is chatting with that same conversation in the opencode web
   UI is open and working. The two questions are separated by **`busy`**, not by a

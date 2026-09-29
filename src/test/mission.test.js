@@ -755,6 +755,121 @@ describe('Mission - finding a session by its tmux id', () => {
   });
 });
 
+// Plan 52 C1-F1. `opencode` mints a conversation id when its TUI starts and never
+// reports it, so a fresh start used to leave the row with no id FOREVER and
+// every later read answered "I looked, it is idle" for a pane that was visibly
+// mid-turn. The fix mints the conversation BEFORE the pane exists, so the id is
+// a fact at start time rather than a guess made afterwards from timestamps.
+describe('Mission - a fresh start knows its own conversation (plan 52 C1-F1)', () => {
+  const padTmux = require('../services/pad-tmux');
+  const drivers = require('../services/drivers');
+  const driver = drivers.getDriver('opencode');
+  const real = { ...padTmux };
+  const realCreate = driver.createConversation;
+  const realGetAgent = require('../services/agent-registry').getAgent;
+  let sent = [];
+  let created = [];
+
+  beforeEach(() => {
+    sent = [];
+    created = [];
+    padTmux.folderExists = async () => true;
+    padTmux.createSession = async () => {};
+    padTmux.killSession = async () => {};
+    padTmux.paneState = async () => ({ live: true, tuiAlive: true, cwd: '/www1/craftpip.com' });
+    padTmux.sendCommand = async (vm, tid, cmd) => { sent.push(cmd); };
+    driver.createConversation = async (vm, folder, port) => {
+      created.push({ vm, folder, port });
+      return 'ses_minted';
+    };
+    // The port is read from the PAD's own published web block, so the fake PAD
+    // has to answer one — and with the REAL port, to pin that it is this PAD's
+    // port being used rather than a driver default.
+    require('../services/agent-registry').getAgent = () => ({ web: { containerPort: 7890 } });
+  });
+
+  afterEach(() => {
+    for (const k of ['folderExists', 'createSession', 'killSession', 'paneState', 'sendCommand']) padTmux[k] = real[k];
+    driver.createConversation = realCreate;
+    require('../services/agent-registry').getAgent = realGetAgent;
+  });
+
+  it('mints the conversation first, then launches the TUI INTO it', async () => {
+    const p = mission.createProject({ name: 'cp', agent: 'pad-msn-oc', folder: '/www1/craftpip.com' });
+    const { session } = await mission.startSession(p.id, {});
+    // The row carries the id from its FIRST read — the property the whole
+    // defect was the absence of.
+    assert.strictEqual(session.agent_session_id, 'ses_minted');
+    assert.deepEqual(created, [{ vm: 'pad-msn-oc', folder: '/www1/craftpip.com', port: 7890 }],
+      'the conversation is created in the PROJECT folder, on this PAD\'s own port');
+    // And the TUI is resumed into it rather than left to mint its own — two
+    // conversations for one pane is the failure this ordering prevents.
+    assert.deepEqual(sent, ['opencode -s ses_minted']);
+  });
+
+  it('a relaunch after the TUI dies comes back to the SAME conversation', async () => {
+    const p = mission.createProject({ name: 'cp', agent: 'pad-msn-oc', folder: '/www1/craftpip.com' });
+    const { session } = await mission.startSession(p.id, {});
+    sent = [];
+    padTmux.paneState = async () => ({ live: true, tuiAlive: false, cwd: '/www1/craftpip.com' });
+    await mission.relaunchTui(session.id);
+    assert.deepEqual(sent, ['opencode -s ses_minted'],
+      'before the fix this relaunched as a brand-new empty conversation, orphaning the history');
+  });
+
+  it('a caller-supplied id wins — we never mint a second conversation for it', async () => {
+    const p = mission.createProject({ name: 'cp', agent: 'pad-msn-oc', folder: '/www1/craftpip.com' });
+    const { session } = await mission.startSession(p.id, { agentSessionId: 'ses_abc' });
+    assert.strictEqual(session.agent_session_id, 'ses_abc');
+    assert.deepEqual(created, [], 'the caller already named the conversation');
+    assert.deepEqual(sent, ['opencode -s ses_abc']);
+  });
+
+  it('a retry does not mint a second conversation', async () => {
+    // The dedup check has to run BEFORE the mint. After it, a timed-out client
+    // that retries with the same key would get its own row back but ALSO leave
+    // an orphaned empty conversation in the agent's store on every attempt.
+    const p = mission.createProject({ name: 'cp', agent: 'pad-msn-oc', folder: '/www1/craftpip.com' });
+    const first = await mission.startSession(p.id, { idempotencyKey: 'caller-token-1' });
+    const retry = await mission.startSession(p.id, { idempotencyKey: 'caller-token-1' });
+    assert.strictEqual(retry.deduped, true);
+    assert.strictEqual(retry.session.id, first.session.id);
+    assert.strictEqual(created.length, 1, 'exactly one conversation for the whole retry sequence');
+  });
+
+  it('a start still succeeds when the agent cannot mint one', async () => {
+    // Best effort by design: the row just loses its busy stamp, which is the
+    // old behaviour. Refusing to start would trade a cosmetic loss for a dead
+    // button, and the agent is perfectly able to run without our knowing its id.
+    driver.createConversation = async () => '';
+    const p = mission.createProject({ name: 'cp', agent: 'pad-msn-oc', folder: '/www1/craftpip.com' });
+    const { session } = await mission.startSession(p.id, {});
+    assert.strictEqual(session.agent_session_id, null);
+    assert.deepEqual(sent, ['opencode'], 'launches fresh, as it did before');
+    // And the honesty rule then covers the row: no id means UNKNOWN, not idle.
+    const row = mission.stampTruth(
+      { ...session, live: true, cwd: '/www1/craftpip.com' },
+      { ids: new Set(), known: true }
+    );
+    assert.strictEqual(row.busyKnown, false);
+  });
+
+  it('a driver that cannot mint one is never asked to', async () => {
+    // codex/claude expose no create-session API, so the capability check is
+    // what keeps a personal agent from being handed a call it does not have.
+    const claude = drivers.getDriver('claude');
+    const realClaude = claude.createConversation;
+    claude.createConversation = undefined;
+    try {
+      const p = mission.createProject({ name: 'cp', agent: 'pad-msn-cx', folder: '/www1/craftpip.com' });
+      await mission.startSession(p.id, {});
+      assert.deepEqual(created, [], 'no mint attempted, and no crash from the missing method');
+    } finally {
+      claude.createConversation = realClaude;
+    }
+  });
+});
+
 describe('Mission - openCount is a count, not a maybe', () => {
   it('reports 0 for a project that has no sessions at all', async () => {
     // The early `return projects` this replaced skipped the counting as well as
@@ -827,6 +942,32 @@ describe('Mission - liveness must not lie (plan 62)', () => {
   it('a row with no agent conversation is never busy, whatever the probe holds', () => {
     const row = stamp({ id: 'msn_f', live: true, agent_session_id: null, cwd: '/p' }, busySet('ses_u'));
     assert.strictEqual(row.busy, false, 'no id to match means no claim to make');
+    // Plan 52 C1-F1. This is the assertion that was MISSING, and its absence is
+    // why the defect survived a green suite: the row above proves we refuse to
+    // claim busy, but it said nothing about what we claim to KNOW. With no id
+    // the probe was never intersected with anything, so `busyKnown` reporting
+    // the probe's own `known: true` turned "I could not look at this
+    // conversation" into "I looked, it is idle" — a licence to type into a pane
+    // that was visibly mid-turn. Nothing contradicts `busy: false` on its own,
+    // which is exactly why the lie was invisible.
+    assert.strictEqual(row.busyKnown, false, 'no id means the conversation was never looked at');
+  });
+
+  it('an id-less DEAD row is unknown too — the corpse was never observed busy', () => {
+    // The dead branch has its own `busyKnown`, and it is the same defect with
+    // an extra step: a corpse with no id reported `busyKnown: true`, so a caller
+    // polling a dead row would read a positive statement about a conversation
+    // nobody ever checked.
+    const row = stamp({ id: 'msn_g', live: false, agent_session_id: null }, busySet('ses_t'));
+    assert.strictEqual(row.state, 'dead');
+    assert.strictEqual(row.busyKnown, false, 'a corpse with no id is unknown, not idle');
+    assert.strictEqual(row.wasBusy, undefined, 'and carries no busy forensics to suggest otherwise');
+  });
+
+  it('a SHELL pane with no id is unknown, not idle', () => {
+    const row = stamp({ id: 'msn_h', live: true, tuiAlive: false, kind: 'shell', agent_session_id: null }, busySet('ses_s'));
+    assert.strictEqual(row.open, false);
+    assert.strictEqual(row.busyKnown, false, 'same rule on the shell branch');
   });
 });
 

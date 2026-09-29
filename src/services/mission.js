@@ -658,9 +658,6 @@ async function startSession(projectId, { label = '', origin = 'human', cols = 0,
   // after the TUI dies comes back to the SAME conversation instead of silently
   // dropping the user into an empty one.
   const resumeId = String(agentSessionId || '').trim();
-  const launch = resumeId
-    ? driver.tuiLaunch.resume({ sessionId: resumeId, cwd: project.folder })
-    : driver.tuiLaunch.fresh({ cwd: project.folder });
   // Plan 65 1f — the retry token. A client-side timeout cannot be shortened from
   // here, and a timed-out call has NO response to help the caller, so the only
   // place the duplicate can be prevented is the retry itself: the caller sends
@@ -684,7 +681,36 @@ async function startSession(projectId, { label = '', origin = 'human', cols = 0,
       };
     }
   }
-  const { session, deduped } = insertSession(project.id, { label, origin, agentSessionId: resumeId, createdBy, idempotencyKey: key });
+  // Plan 52 C1-F1 — mint the conversation BEFORE the pane exists, so the row
+  // carries its id from the first read.
+  //
+  // `opencode` invents a conversation id when its TUI starts and never reports
+  // it, so a fresh start used to leave `agent_session_id` NULL forever. Nothing
+  // downstream could then intersect the agent's live-work map, so every later
+  // read of that row answered `busy: false, busyKnown: true` — a confident
+  // "I looked, it is idle" for a pane that was visibly mid-turn — and the title
+  // and relaunch-resume were lost with it.
+  //
+  // Ordering matters and is the point: the conversation is created only AFTER
+  // the dedup check, so a retry never mints a second one, and it is created
+  // BEFORE the TUI launches, so the TUI is launched INTO it (`-s <id>`) rather
+  // than being asked afterwards which of several new conversations in this
+  // folder it meant. Best effort by design — a failure here leaves the old
+  // behaviour (a start with no id) rather than failing the start itself.
+  let startId = resumeId;
+  if (!startId && typeof driver.createConversation === 'function') {
+    let port = 0;
+    try {
+      port = parseInt(registry.getAgent(project.agent_name)?.web?.containerPort, 10) || 0;
+    } catch {
+      /* no published port — fall back to a start without an id */
+    }
+    startId = (await driver.createConversation(project.agent_name, project.folder, port)) || '';
+  }
+  const launch = startId
+    ? driver.tuiLaunch.resume({ sessionId: startId, cwd: project.folder })
+    : driver.tuiLaunch.fresh({ cwd: project.folder });
+  const { session, deduped } = insertSession(project.id, { label, origin, agentSessionId: startId, createdBy, idempotencyKey: key });
   // The sibling committed between the check above and this insert. Its pane is
   // already being brought up, so this call must not bring up a second one in the
   // same tmux id — report the winner's row and the state as it stands.
@@ -1087,25 +1113,34 @@ async function statesFor(vmsAndSessions) {
  *  without lying on `busy`. `state: "dead"` makes the corpse explicit. */
 function stampTruth(s, probe) {
   const live = s.live === true;
+  // A row with no `agent_session_id` CANNOT be intersected with the agent's
+  // live-work map, so we did not look at this conversation at all. Reporting
+  // `probe.known` here is the plan 52 C1-F1 defect: "the probe worked" is not
+  // "this session is idle" when there is no id to intersect with it, so the row
+  // read as a confident false while the pane was visibly mid-turn. A fresh
+  // start now mints its conversation up front (see startSession), so a NULL id
+  // means the agent type could not tell us — and UNKNOWN is the only honest
+  // answer. Same rule as the cwd mismatch below, for the same reason.
+  const known = probe.known && !!s.agent_session_id;
   if (!live) {
     const wasBusy = !!(s.agent_session_id && probe.ids.has(s.agent_session_id));
-    return { ...s, busy: false, busyKnown: probe.known, open: false, state: 'dead', ...(wasBusy ? { wasBusy: true } : {}) };
+    return { ...s, busy: false, busyKnown: known, open: false, state: 'dead', ...(wasBusy ? { wasBusy: true } : {}) };
   }
   // Live: a shell pane is reachable as a shell but `mission_send` refuses it,
   // so it is not `open` as an agent session. Unknown kind (no pane map, e.g. a
   // mocked PAD in tests) keeps the old `open = live` behaviour.
   if (s.tuiAlive === false) {
-    return { ...s, busy: false, busyKnown: probe.known, open: false };
+    return { ...s, busy: false, busyKnown: known, open: false };
   }
   // Pane cwd is ground truth for the folder-scoped probe: when the pane runs
   // elsewhere, the probe scoped to the project folder cannot answer, so stamp
   // UNKNOWN, never idle (plan 62 1e).
   const folder = s.folder;
-  if (probe.known && folder && s.cwd && s.cwd !== folder) {
+  if (known && folder && s.cwd && s.cwd !== folder) {
     return { ...s, busy: false, busyKnown: false, open: s.tuiAlive !== false };
   }
   const busy = !!(s.agent_session_id && probe.ids.has(s.agent_session_id));
-  return { ...s, busy, busyKnown: probe.known, open: s.tuiAlive !== false };
+  return { ...s, busy, busyKnown: known, open: s.tuiAlive !== false };
 }
 
 /** Live + pane map for one PAD in two execs (still O(PADs), never O(sessions)).

@@ -1,6 +1,6 @@
 # Plan 52 — Orchestrator (session-based: keys, grants, conferral, playbook, proof)
 
-## Status: Rewritten (2026-09-29) — **2/7 phases complete (A, E1); B and C started.** A1 audited + fail-closed default; A2 verified — it surfaced that `exec` is a base grant, so the least-privilege key of D2 cannot be expressed (user decision, recorded in infinite.md); A3 `autoApprove` flipped to opt-in (R3 closed). Phase A gate: all suites green, webui restarted, tool surface verified live at 31 tools. **B1 done 5/7** (the two missing clauses name tools plan 53 Phase 9 has not built); **B2 blocked** on a user call — no onboarding artifact exists to rewrite and its form is plan 51 §4's undecided question, while `pad_help` already serves a better one. **C1's path is proven live twice** (two sessions, both answers verified from outside the session) and **surfaced C1-F1, Critical: a fresh session can never report `busy`**, measured mid-turn as `busy:false, busyKnown:true, canSend:true` while the pane read `esc interrupt`. **E1 is complete and proven live** — the audit log's `actor` column had never been set by anything (all 702 rows read `system`), so it recorded *what* but never *who*; `recordActivity` now takes an actor, and seven Mission actions are attributed in the same `key:<id>` / `user:<id>` / `system` vocabulary the rows already use for `created_by`. Phases D, E2–E4, F and G not started. The queue is gone;
+## Status: Rewritten (2026-09-29) — **2/7 phases complete (A, E1); B and C started.** A1 audited + fail-closed default; A2 verified — it surfaced that `exec` is a base grant, so the least-privilege key of D2 cannot be expressed (user decision, recorded in infinite.md); A3 `autoApprove` flipped to opt-in (R3 closed). Phase A gate: all suites green, webui restarted, tool surface verified live at 31 tools. **B1 done 5/7** (the two missing clauses name tools plan 53 Phase 9 has not built); **B2 blocked** on a user call — no onboarding artifact exists to rewrite and its form is plan 51 §4's undecided question, while `pad_help` already serves a better one. **C1's path is proven live twice** (two sessions, both answers verified from outside the session) and **surfaced C1-F1, Critical: a fresh session can never report `busy`**, measured mid-turn as `busy:false, busyKnown:true, canSend:true` while the pane read `esc interrupt`. **R7's id half is now fixed and proven live** — a fresh start mints its own conversation with `POST /session?directory=…` and launches the TUI into it with `-s <id>`, so the row carries the id from its first response (verified in `ps`), which restores `title` and real resume; `stampTruth` also fails closed on all three branches so an id-less row is UNKNOWN, never idle (mission 105 → 113, two mutation controls). **But `busy` is still inert, and R7 was only half the defect: R8 (new, Critical) is that the busy probe is answered by the `opencode web` process, which never sees a TUI pane's live turn** — 42 consecutive seconds of a visible `esc interrupt` with our id absent from `/session/status`, while the user's own web-UI session was reported busy the whole time. The agent's own store does see the turn, so the fix exists, but choosing between "newest tool part is `running`" and "activity within N seconds" changes what `busy` means product-wide and moves the liveness cost from per-(PAD, folder) to per-session — **user's call, recorded as `## Needs your call` in infinite.md.** **E1 is complete and proven live** — the audit log's `actor` column had never been set by anything (all 702 rows read `system`), so it recorded *what* but never *who*; `recordActivity` now takes an actor, and seven Mission actions are attributed in the same `key:<id>` / `user:<id>` / `system` vocabulary the rows already use for `created_by`. Phases D, E2–E4, F and G not started. The queue is gone;
 this plan now orchestrates **sessions**, not tasks. User decision, verbatim:
 *"don't let the user start any task without my vision — remove task submit"*,
 followed by *"rewrite 52 around mission_* sessions"*. **Everything below is
@@ -313,6 +313,47 @@ The gate for everything: the agent can only do what its key says.
       **(a) recommended now, (b) as the real fix**; the resume story (E4, R15)
       cannot be proven until (b) exists, because a fresh session has no
       conversation to resume.
+
+      #### RESOLVED as to the id (2026-09-29) — and (b) is better done
+      **up front than guessed afterwards.** `driver.createConversation(name,
+      folder, containerPort)` now mints an empty conversation with opencode's
+      own `POST /session?directory=…` **before** the pane is created, and the
+      TUI is launched into it with `-s <id>`. The id is therefore a **fact at
+      start time** rather than a deduction made later from timestamps — and the
+      ambiguity the plan worried about is not narrowed, it **does not exist**:
+      there is no window in which two fresh conversations could be confused,
+      because we named the one we wanted. `createConversation` returns `''` on
+      any failure, so a start that cannot mint still proceeds exactly as before
+      (and then reports `busyKnown: false`, per (a)).
+
+      **Proven live, not inferred.** A fresh REST start returned
+      `agent_session_id: "ses_f1197271bffeuAGec4RCpGL4CE"` on its **first**
+      response, and `ps` in the PAD shows the pane running
+      `opencode -s ses_f1197271bffeuAGec4RCpGL4CE` — the TUI is genuinely
+      resumed into the conversation we named, so `title` resolves from the
+      store, and relaunch/restart come back to the same conversation. Both
+      proof sessions were closed afterwards; the PAD's tmux was left with only
+      its pre-existing `main` session.
+
+      8 new tests (mission 105 → 113), covering: the mint happening before the
+      launch and the launch being `-s <id>`; the folder and the PAD's **own**
+      port being the ones used; a relaunch returning to the same conversation; a
+      caller-supplied id winning so no second conversation is minted; **a
+      deduped retry minting exactly one conversation** (the mint sits *after*
+      the dedup check, or a timed-out client leaves an orphan per attempt); a
+      start surviving a failed mint; a driver without the capability never being
+      called. Two mutation controls in a throwaway copy: `if (false && …)`
+      around the mint → 3 red; `const known = probe.known` (the fail-closed
+      rule reverted) → 4 red. `mcp` 139/139 and the 7 other Mission-adjacent
+      suites stay green.
+
+      (a) is in the same change: `stampTruth` computes
+      `known = probe.known && !!s.agent_session_id`, so a row with no id reports
+      `busyKnown: false` on **all three** of its branches (live, dead, and
+      shell) rather than only the cwd-mismatch one. The pre-existing test
+      asserted `busy: false` for an id-less row and nothing about `busyKnown` —
+      which is precisely why the lie survived a green suite: nothing in the
+      response contradicted `busy: false` on its own.
 - [ ] C2. Every gap becomes an item; nothing advances until C1 is green **twice**
       — two projects, ideally two different models (the model-independence proof
       from [51§2b]).
@@ -424,6 +465,62 @@ owner phase builds.
       Cheap honest fix (a): stamp `busyKnown: false` when the id is null.
       Real fix (b): resolve the id for a fresh session. Blocks E4/R15, which
       cannot prove resume cost while fresh sessions have no conversation.
+      **The id half is now DONE** (see §C1-F1 *RESOLVED as to the id*): the
+      conversation is minted up front and the TUI launched into it, so
+      `title` and real resume are back. **`busy` itself is still inert — see
+      R8, which is a different root cause and is not fixed by having the id.**
+- [ ] **R8 · Critical · Block C/E (found while fixing R7, 2026-09-29) — `busy`
+      is inert for EVERY opencode session, because the busy probe is served by a
+      different opencode process than the one running the TUI.**
+
+      `agentWorkingSessions` asks the PAD's published web server
+      (`opencode web --hostname 0.0.0.0 --port 7890`, pid 16) for
+      `GET /session/status?directory=<folder>`. A mission session's TUI is a
+      **separate** `opencode` process (pid 6458, `opencode -s ses_…`) that
+      holds **no sockets at all** — it is a client, not a server, and it does
+      not publish its live-work state to the web server. The two share the
+      sqlite store (a `GET /session/{id}` against 7890 returns our conversation
+      in full, so the store is shared) but **not** the live status.
+
+      **Measured, not inferred.** With a turn in flight — the pane reading
+      `⬝⬝⬝⬝⬝ esc interrupt` — `GET /session/status?directory=/www2/paddock`
+      returned `{"ses_f13b1be56ffe3fPniszns5u9Ui":{"type":"busy"}}` for **42
+      consecutive seconds**: the user's own *web-UI* session, never ours. Our
+      id was absent at every poll, and `busy` stayed `false` throughout a turn
+      that demonstrably ran. The endpoint is real and scoped correctly (AGENTS.md
+      records it answering immediately for a folder-scoped turn) — it is simply
+      answering about sessions **that server** is driving.
+
+      **Why R7's fix does not fix this.** R7 removed the reason our id could not
+      be looked up at all; now the lookup happens and finds nothing, so the row
+      reports `busy:false, busyKnown:true` again — the *same* confident lie, one
+      layer down. Fixing R7 without R8 would have left a defect that reads as
+      fixed, which is the trap AGENTS.md warns about for a second source of
+      truth.
+
+      **A signal that does work, measured:** the agent's own store sees the turn.
+      `agent-store.readActivity(pad, ses_…)` — already the `plan_activity`
+      reader, already reachable from the webui container at
+      `/workspace/instances/<pad>/opencode/data/opencode/opencode.db` — tracked
+      it live across 15 polls: the newest tool part changed
+      `bash/error → read/completed` while `lastActivityAt` stayed within 1–37s
+      of now, i.e. it moved with the turn. Two candidate semantics, and they
+      are **not** equivalent to today's: (i) newest tool part's own
+      `state.status === 'running'` (precise for tool work, blind to prose
+      streaming), or (ii) recency of `lastActivityAt` against a threshold
+      (covers prose, but the threshold is a guess and no answer is
+      self-evidently right). **This needs the user's call** — it changes what
+      `busy` *means* across the page, `withAgentBusy` and the MCP surface, and
+      it changes the documented cost model from **one probe per (PAD, folder)**
+      to **one store read per session** (17 sessions on `pad-opencode-proj`;
+      ~2 ms each, so cheap in absolute terms, but AGENTS.md's "never per row"
+      liveness rule is a deliberate design constraint, not an accident).
+
+      Also note this **invalidates one earlier measurement**: the first round of
+      C1-F1 probing read tmux through a plain root `docker exec`, and this pad
+      is `USER_MODE=user`, so its sessions live in `/tmp/tmux-1000` — that round
+      was reading a *different, empty* tmux server and must not be cited as
+      evidence. The pad's tmux is fine; the probe was wrong.
 - [x] R3 · Critical · Block A — **RESOLVED (2026-09-29, A3): `autoApprove` is
       now opt-in**, in both caller defaults and both description fields. The
       drivers were always fail-closed; the permissiveness was `submitTask`\x27s
