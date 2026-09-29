@@ -48,6 +48,40 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   handler runs, exactly like the cross-component free variable above. Vite/esbuild
   will not catch it, so **after adding a hook/provider/modal to a file, load the
   page** — do not infer "it works" from the build.
+- **A suite of source-text REGEXES cannot see that a file stopped parsing — and
+  the committed file is not the file the browser ran.** Plan 66 committed a
+  `SettingsTab.jsx` missing the comma that ended the `message:` template literal
+  in `handleRecreateNetwork`, so the file on disk was **unbuildable**. Four things
+  each looked like coverage and none of them were: the tests were all
+  `assert.match(src, /…/)` on source text, `node --check` **rejects JSX** so it
+  is not even available as a fallback, and the browser check passed because the
+  page serves the **prebuilt** `src/public` bundle, which had been built from the
+  *worktree* — the one copy that was still valid. That last one is the general
+  trap: with `src/` bind-mounted and the bundle prebuilt, **"it renders" can be
+  true of code you did not commit.** The oracle is a **parse** — run esbuild with
+  `write: false` (never `npm run build`, it wipes `src/public`) and resolve it via
+  `createRequire(client/package.json)` because it lives in the *client's*
+  node_modules. Its control is the defect itself: re-drop the comma, watch it fail
+  at `413:6` with "Expected } but found confirmText", restore, watch it pass. A
+  test that asserts on strings proves the file contains those strings; proving it
+  **compiles** is a different claim and needs a different tool.
+- **An unreadable answer and a negative answer are different ANSWERS, and the
+  cheapest place to confuse them is the one that already had a null.** `stale`
+  means "no peer"; `checked: false` / `state: 'unknown'` means "I could not
+  look". `inspectPeer` returned `null` for **every** inspect failure, so a
+  **docker daemon that was down** — the most likely operational failure there
+  is — was reported as an absent peer, i.e. an operational failure dressed as a
+  *diagnosis*, which sends the caller to recreate a pad that needed nothing.
+  Split on what docker **said** (`No such object`/`No such container` is absence;
+  anything else is `{ error }`), and give the non-actionable outcome its **own
+  state** rather than borrowing one of the four, because the other four each name
+  an object and a fix and this one names neither. Related and same commit: when a
+  pad is bound to a wrong id **and** its configured peer is stopped, the
+  **stopped peer wins** — `staleBinding` would point the caller at this pad when
+  the thing that needs action is somewhere else. And the UI half: raise the
+  banner for `checked: false` and quote `reason`, but offer **no** recreate
+  button, because an unreadable probe has established nothing and a button is
+  advice nobody can justify.
 - **Mission col 3 is pinned to `openSession` in the store, NOT to the row and NOT
   to `selectedProjectId`.** It is a snapshot taken at the moment the session was
   opened, and the project it resolves for `<Terminal>` comes from

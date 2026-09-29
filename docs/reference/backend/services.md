@@ -423,9 +423,15 @@ A **compose file that cannot be read is not a fact about the container.** Every 
 after the container block derives its *expectation* from it, so with no readable
 declaration there is nothing to compare against: the check records the missing
 declaration and returns, rather than carrying on (which dereferenced `null` and
-reported a `TypeError` in place of the container facts — running/health/image —
-already gathered). Reproduced against `HEAD` on `paddock`; the hint names which
-checks were skipped.
+reported a `TypeError` in place of the report). Reproduced against `HEAD` on
+`paddock`; the hint names which checks were skipped.
+
+What the early return still reports is the **declaration-independent** part —
+container exists, container status, docker `/healthz`. What it drops is every
+check that *compares* the declaration against the container: restart policy,
+**image**, network mode (so the peer verdict is absent too), bind mounts, env
+keys, published ports. `image` is a declared-vs-actual comparison, so with no
+compose file it has nothing to compare and is correctly omitted.
 
 The network check **is** the shared peer verdict plus this service's own
 presentation — see § [Network peer truth](#network-peer-truth). `staleBinding` is a
@@ -459,7 +465,7 @@ has to distinguish that from a peer that is merely stopped, because they need
   health check had just called running. `list_agents` carries no health, so there
   is no third consumer.
 
-**States** — four distinct problems, because only one needs the peer touched:
+**States** — four *actionable* problems, because only one needs the peer touched:
 
 | state | means | the fix |
 | --- | --- | --- |
@@ -467,6 +473,12 @@ has to distinguish that from a peer that is merely stopped, because they need
 | `staleBinding` | the configured peer is **running and needs nothing**; only this pad's binding is dead (or points at a different peer) | recreate **this pad** to rebind |
 | `peer-stopped` | the named peer exists but is not running | start **the peer** first |
 | `stale` | no peer we can name exists at all | create it, or pick another |
+| `unknown` | **neither reference yielded a usable fact** — we could not read, so we do not know | none to advise; re-read |
+
+`unknown` is deliberately **not** one of the four: the other four each name an
+object and a fix, and this one names neither. It is returned with
+`checked: false` so a caller can tell "no" from "did not ask", and it is the
+only state that is not actionable.
 
 Fields: `state`, `networkMode`, `peerId` (the id this pad is bound to),
 `peerName`, `peerState`, `peerCurrentId` (the configured peer's id now),
@@ -479,11 +491,18 @@ Two answers that must never be confused, and how they are kept apart:
   reason }`. `readSettings` used to catch the throw and leave its
   `{ state: 'ok' }` default in place, so an unreadable answer read as the one
   healthy state there is. `checked: false` is **not** a healthy pad.
-- **A peer reference that does not resolve** is `stale`/`peer-stopped` — a fact
-  about the peer. It is never "we could not look", because a lookup that never
-  *ran* looks identical to an absent peer: that is why `inspectPeer` has a default
-  runner, and why wiring the health service to the rule was verified live rather
-  than by unit test alone.
+- **A peer reference that could not be READ** is `unknown`/`checked: false`, and
+  that used to be a lie. `inspectPeer` treated *any* inspect failure as "no such
+  object", so a Docker daemon that was down, or a socket we could not reach, was
+  reported as an **absent peer** — the same conflation one layer down, and the
+  worst possible direction: an operational failure dressed as a diagnosis, which
+  sends the caller to recreate something that needed nothing. It now separates
+  the two by what docker actually said — genuine absence (`No such object`,
+  `No such container`) is `null`, and anything else is `{ error }`. A missing
+  peer is still `stale`/`peer-stopped`; a peer we failed to read is `unknown`.
+  A lookup that never *ran* is the same trap in a different costume, which is
+  why `inspectPeer` has a default runner and why wiring a new consumer to the
+  rule is verified live rather than by unit test alone.
 
 **Measured on the live fleet (2026-09-29):** 3 of 5 peer-networked pads were bound
 to deleted peer ids while their declared peer was **running** — reported
@@ -880,9 +899,14 @@ Rules:
     broken, and see § [Network peer truth](#network-peer-truth) for the states.
     The short version: `staleBinding` means the peer is running and **only this
     pad** must be recreated; `peer-stopped` means **the peer** must be started
-    first. `checked: false` is not a healthy pad, and `reason` is present on
-    every non-`ok` state. The `health` tool reports the same verdict on its
-    `network` check (`peerName`/`peerState`), so the two can be compared.
+    first. `checked: false` is not a healthy pad — it is either an unreadable
+    probe (`state: 'none'`) or `state: 'unknown'`, and in the `unknown` case there
+    is **nothing to advise**, so do not fall back to a recreate on your own. And
+    when the configured peer is stopped, `peer-stopped` wins even if this pad is
+    also bound to a wrong id: the stopped peer is the thing that needs action.
+    `reason` is present on every non-`ok` state. The `health` tool reports the
+    same verdict on its `network` check (`peerName`/`peerState`), so the two can
+    be compared.
 - Destructive tools require a guard: `delete_agent` needs `confirm: true`
   (and `create_agent` too — it adds fleet members).
 - The `mission_*` tools (plan 55, extended by plan 65) are the agent-visible half

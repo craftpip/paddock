@@ -1,6 +1,6 @@
 # Plan 66 — Network peer truth: `networkHealth` says "stale" and "running" in the same breath
 
-## Status: Complete (2026-09-29) — 4/4 build items done, 3/3 verify items done. Absorbed into `docs/reference/backend/services.md` (§ Network peer truth) + AGENTS.md. Source: `friction/2026-09-28-pm-portfolio-intake.md` (2 guessing entries) + the `availableNetworks` half of `2026-09-27-craftpip-status.md` (the cap/searchability half lives in plan 61 §1c).
+## Status: Complete (2026-09-29) — 4/4 build items done, 3/3 verify items done, plus a post-commit audit (`unknown`/`checked:false`, the missing-comma parse defect, and a corrected image claim). Absorbed into `docs/reference/backend/services.md` (§ Network peer truth) + AGENTS.md. Source: `friction/2026-09-28-pm-portfolio-intake.md` (2 guessing entries) + the `availableNetworks` half of `2026-09-27-craftpip-status.md` (the cap/searchability half lives in plan 61 §1c).
 
 A peer-networked PAD is the one case where the answer to "is this pad reachable?"
 depends on something outside the pad. Today the surface reports a verdict it cannot
@@ -85,9 +85,21 @@ indistinguishable from a field that says "broken".
 ## 3. Verify
 
 - [x] `timeout 60 docker exec paddock node --test test/container-health.test.js` green
-      — **9/9**, plus `net-peer` 14/14, `network-peer-truth` 13/13, `vm-manager`
-      111/111, `mcp` 134/134. Mutation controls: collapsing the `staleBinding`
-      branch turns **2 tests red across 2 suites**, restoring turns them green.
+      — **9/9**, plus `net-peer` 19/19, `network-peer-truth` 15/15, `vm-manager`
+      93/93, `mcp` 134/134, each run individually **against the exact staged
+      tree**. (vm-manager is 93 in the commit, not the 111 the worktree reports:
+      18 of those belong to unrelated plan-59 work.) Mutation controls: collapsing
+      the `staleBinding` branch turns **2 tests red across 2 suites**; disabling
+      the stopped-target branch turns 1 red; also collapsing the docker-error
+      split turns 3 red.
+- [x] **The committed file PARSES.** Plan 66's first commit shipped a
+      `SettingsTab.jsx` missing the comma that ended the `message:` template
+      literal in `handleRecreateNetwork`, so the committed file was unbuildable.
+      Nothing caught it: every truth test is a source-text regex, `node --check`
+      rejects JSX, and the browser check passed against the **prebuilt** bundle
+      built from the (valid) worktree. A parse test now runs esbuild with
+      `write: false`; its control is the defect — re-drop the comma and it fails
+      at `413:6`, restore and it passes.
 - [x] Live: `settings_get` on a peer-networked pad returns a named peer and a `state`
       that agrees with `peerState`; on a default-networked pad it returns
       `state: "ok"` (or equivalent) rather than a silent `stale`.
@@ -107,12 +119,23 @@ indistinguishable from a field that says "broken".
 ## 4. Found while verifying, not asked for
 
 - **`health` on a pad with no readable compose file threw** — `compose.restart` on
-  a `null`, i.e. a `TypeError` reported to the caller in place of the container
-  facts (running / health / image) it had just gathered. `paddock` hits it. It
-  pre-dates this plan (reproduced against `HEAD`), but it is the same defect —
-  a lookup that failed read as a fact — so the check now records the missing
-  declaration and returns, and says which checks were skipped. Source-pinned
-  (the function calls docker and cannot be exercised without it).
+  a `null`, i.e. a `TypeError` reported to the caller in place of the report it
+  had already gathered. `paddock` hits it. It pre-dates this plan (reproduced
+  against `HEAD`), but it is the same defect — a lookup that failed read as a
+  fact — so the check now records the missing declaration and returns, naming
+  which checks were skipped. Source-pinned (the function calls docker and cannot
+  be exercised without it).
+
+  What survives the early return is exactly the **declaration-independent**
+  facts — container exists, container status, docker `/healthz`. What is skipped
+  is every check that *compares* the declaration against the container: restart
+  policy, **image**, network mode, bind mounts, env keys, published ports. So the
+  honest claim is "the container facts that need no compose file", **not** "the
+  running/health/image facts" — `image` is a comparison (`declared` vs `actual`)
+  and with no compose there is nothing to compare it to. Note the **network**
+  check is in the skipped set too, which is correct: it classifies through the
+  compose's `network_mode`, so a pad with no readable compose has no declared
+  peer to check. The returned hint says as much rather than implying coverage.
 - **A lookup that never RAN is indistinguishable from an absent peer.** Wiring
   the health service to the shared rule initially called `inspectPeer(ref)` with
   no runner, and the old guard returned `null` for that — so all 5 pads read
