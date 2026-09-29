@@ -1,6 +1,6 @@
 # Plan 52 — Orchestrator (session-based: keys, grants, conferral, playbook, proof)
 
-## Status: Rewritten (2026-09-27) — **0/7 phases built.** The queue is gone;
+## Status: Rewritten (2026-09-27) — **1/7 phases built.** Phase A: A1 done (grant model audited + fail-closed default + completeness tests), A2/A3 still open. The queue is gone;
 this plan now orchestrates **sessions**, not tasks. User decision, verbatim:
 *"don't let the user start any task without my vision — remove task submit"*,
 followed by *"rewrite 52 around mission_* sessions"*. **Everything below is
@@ -121,10 +121,27 @@ beyond what rides existing surfaces:
 
 The gate for everything: the agent can only do what its key says.
 
-- [ ] A1. Grant model audit + complete: the bucket set (`read`/`create`/`exec`/
-      admin), `TOOL_GRANT_FOR` completeness (verify every registered tool has an
-      entry — `task_steer` was missing from the map when this was written, which
-      is how a grant silently defaults), per-PAD scoping, revocation.
+- [x] A1. Grant model audit + complete (**done 2026-09-29**). The audit found the
+      map **complete** — 31/31 tools on the default surface, 40/40 with
+      `PADDOCK_TASK_QUEUE=1`, no orphan buckets, and every bucket name one a key
+      can actually hold — so the gap this item predicted had been closed by hand.
+      What was still wrong is the **default**: `if (!grant) return
+      targetAllowed(...)` made an unclassified tool **allowed** for every
+      fine-grained key, so the next tool registered without a map entry would ship
+      ungated exactly as `task_steer` did, and a diff of that tool's
+      registration would never show it. It now fails **closed**. Two tests: one
+      pins the default on a name that is by construction in neither set, the other
+      enumerates the real registration **by registering against a fake server**
+      rather than parsing names out of the source — the source contains 9
+      `task_*` tools behind an env gate that are not on the surface at all, so a
+      source count says 40 when the surface is 31. Also pinned there: the three
+      task READERS stay in the read bucket (giving them a map entry would hand a
+      read-only key the ability to run work) and the six mutators are `exec`.
+      Per-PAD scoping (`target:agent:*`) and revocation were already enforced by
+      `requireTool` and are covered by existing tests. Mutation controls:
+      restoring the fail-open default turns **1** test red; dropping
+      `task_cancel`'s map entry turns **2** red. mcp 136/136, task-mcp 28/28,
+      plan-mcp 42/42, mission 97/97, auth 3/3.
 - [ ] A2. Mission grants: `mission_projects`/`mission_sessions` → `READ_TOOLS`;
       `mission_project_create` → `create`; `mission_session_start`/`mission_send`
       → `exec`. Implemented in 53 Phase 7, **verified here** with the

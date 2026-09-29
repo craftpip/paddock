@@ -987,6 +987,20 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   not help: you are copying the corrupted file back onto itself. Disable a guard
   in a **throwaway copy** (`/tmp/...`), never in `/app`. Same reason `docker cp`
   is not how you get an edit into a running webui — the bind mount already did it.
+- **A mutation control that ran in the WRONG DIRECTORY still prints a convincing
+  number, because the control reads as "the test went red".** Copying the tree to
+  `/tmp` with `2>/dev/null` and then `cd`-ing into it hides the only thing that
+  matters: if the copy failed, the `sed`s and the test run against the REAL file
+  in `/app`, the counts are genuine, and the guard is silently left disabled in
+  the worktree. An `sh -c` chain does not stop on a failed `cd` unless you
+  `set -e`, so the whole block runs in the default working directory and nothing
+  reports the mistake. Two checks caught it here: the diff afterwards showed the
+  change I had made *plus* a mutation I had meant to revert, and the insertion
+  count was **one higher than the change** — a `sed`-deleted line leaves a
+  blank-line hole, which is the tell. So: confirm a mutation landed where it was
+  supposed to (`grep` the mutated line in the COPY, not the original), and read
+  the post-control diff before committing — a control is only evidence once you
+  know it was measured where you think.
 - **A green run in the WORKTREE says nothing about what you are committing —
   materialize the index and test THAT.** The worktree carries other people's
   in-flight work, so a suite can be green on code that was never staged while the

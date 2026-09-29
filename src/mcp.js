@@ -208,7 +208,16 @@ function toolAllowed(user, tool, agentName) {
     return targetAllowed(user, agentName);
   }
   const grant = TOOL_GRANT_FOR[tool];
-  if (!grant) return targetAllowed(user, agentName);
+  // Fail CLOSED on a tool that is in neither the read bucket nor the map. It
+  // used to `return targetAllowed(...)` here, which made forgetting a map
+  // entry silently ALLOW the tool for every fine-grained key — that is how
+  // `task_steer` shipped ungated, and nothing in a diff of the new tool's
+  // registration would have shown it. Denying is the safe direction for a
+  // mistake of this shape: it refuses exactly one tool until someone
+  // classifies it, where allowing quietly widens a key's power. An
+  // unclassified tool is a bug in TOOL_GRANT_FOR, not a reason to trust the
+  // caller.
+  if (!grant) return false;
   return g.tools.has(grant) && targetAllowed(user, agentName);
 }
 

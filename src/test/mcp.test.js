@@ -279,6 +279,111 @@ describe('MCP Server - API key grants (plan 35b)', () => {
     assert.strictEqual(targetAllowed(user(['default']), 'pad-other'), true);
   });
 
+  it('an unclassified tool is REFUSED, not allowed (plan 52 A1)', () => {
+    // The default for a tool in neither READ_TOOLS nor TOOL_GRANT_FOR used to
+    // be `targetAllowed(...)`, which meant forgetting a map entry silently
+    // ALLOWED the tool for every fine-grained key — the `task_steer` bug this
+    // plan was written about. A completeness test alone cannot catch that,
+    // because the map is complete today and so the test would pass under
+    // either default. This pins the DEFAULT, on a name that is by
+    // construction in neither set.
+    const base = user(['target:agent:pad-test-agents']);
+    assert.strictEqual(toolAllowed(base, 'some_tool_nobody_classified', 'pad-test-agents'), false);
+    // ...and a key holding EVERY opt-in bucket must not get it either: this is
+    // about classification, not about the key being under-privileged.
+    const every = user(['tools:lifecycle', 'tools:recreate', 'tools:create', 'tools:delete', 'tools:reset']);
+    assert.strictEqual(toolAllowed(every, 'some_tool_nobody_classified', 'pad-x'), false);
+    // Full-scope keys are unaffected: they returned before the map is read, and
+    // must keep working, or the fail-closed default would be a lockout rather
+    // than a gate.
+    assert.strictEqual(toolAllowed(user(['default']), 'some_tool_nobody_classified', 'pad-x'), true);
+  });
+
+  it('every registered tool is classified into a grant (plan 52 A1)', () => {
+    // Enumerated by REGISTERING against a fake server rather than by parsing
+    // mcp.js for name strings: a regex can silently miss a registration that
+    // is spelled differently, and a test that passes on a partial list is the
+    // "paper outrunning proof" failure (R17).
+    //
+    // BOTH configurations matter, and the difference is 9 tools: the task
+    // family is behind `PADDOCK_TASK_QUEUE=1` (plan 52 §3 retired it, the
+    // switch brings it back). So the default surface is 31 tools and the full
+    // one is 40 — which is exactly why counting registrations in the SOURCE
+    // is misleading: the call sites are all there whether or not the gate is
+    // on. Flipping one env var must not be able to introduce an unclassified
+    // tool, so both are checked.
+    const grab = () => {
+      const a = [];
+      registerTools({ registerTool: (name) => a.push(name) });
+      return a;
+    };
+    const off = grab();
+    process.env.PADDOCK_TASK_QUEUE = '1';
+    let on;
+    try { on = grab(); } finally { delete process.env.PADDOCK_TASK_QUEUE; }
+    assert.ok(off.length >= 30, `expected the default surface, got ${off.length}`);
+    assert.strictEqual(on.length, off.length + 9, 'the task gate should hide exactly the 9 task tools');
+    assert.deepStrictEqual(
+      on.filter((t) => !off.includes(t)).sort(),
+      ['task_cancel', 'task_complete', 'task_get_next', 'task_list', 'task_priority', 'task_result', 'task_retry', 'task_status', 'task_submit'],
+      'the gate should hide the whole task_* family and nothing else',
+    );
+
+    const src = fs.readFileSync(path.join(__dirname, '..', 'mcp.js'), 'utf8');
+    const rd = src.slice(src.indexOf('const READ_TOOLS'), src.indexOf('const TOOL_GRANT_FOR'));
+    const gr = src.slice(src.indexOf('const TOOL_GRANT_FOR'), src.indexOf('function keyGrants'));
+    const read = new Set([...rd.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]));
+    const map = new Map([...gr.matchAll(/^\s{2}([a-z_]+):\s*'([a-z]+)'/gm)].map((m) => [m[1], m[2]]));
+    const baseGrants = new Set(['exec', 'workspace_write']); // the documented base verbs
+    const execRouted = new Set([...map].filter(([, b]) => b === 'exec').map(([t]) => t));
+
+    // The invariant: a tool that is NEITHER read, NOR a base verb, NOR
+    // exec-routed, NOR in the map is unclassified — so it would be REFUSED for
+    // every fine-grained key (the fail-closed default). That is the failure
+    // this test exists to surface: the tool exists, is advertised in the tool
+    // list, and cannot be called by anyone but a full-scope key.
+    const unclassified = on.filter(
+      (t) => !read.has(t) && !baseGrants.has(t) && !execRouted.has(t) && !map.has(t),
+    );
+    assert.deepStrictEqual(unclassified, [],
+      `registered but unclassified — these would be refused for every fine-grained key: ${unclassified.join(', ')}`);
+
+    // The task tools are the most consequential verbs on the surface (they run
+    // work inside a PAD), and the gate is a one-env-var change — so pin HOW
+    // each is classified, not merely that it is classified. The three readers
+    // are read-bucket tools and must NOT be exec: a read key can see task
+    // results, and if these ever routed to exec the read bucket would quietly
+    // gain the ability to run work. The other six are mutations and must be
+    // exec. Note the split is a fact about the tools, so it is asserted
+    // against both sets rather than assuming the map has all nine — three
+    // legitimately live in READ_TOOLS and have no map entry.
+    const taskReaders = ['task_list', 'task_result', 'task_status'];
+    const taskMutators = ['task_cancel', 'task_complete', 'task_get_next', 'task_priority', 'task_retry', 'task_submit'];
+    for (const t of taskReaders) {
+      assert.ok(read.has(t), `${t} is a task reader and should be in READ_TOOLS`);
+      assert.ok(!map.has(t), `${t} is a read tool; giving it a map entry would grant it to a non-read key`);
+    }
+    for (const t of taskMutators) {
+      assert.ok(map.get(t) === 'exec', `${t} mutates the queue and must ride exec, got '${map.get(t)}'`);
+    }
+    // `reset` is deliberately NOT a registered tool — it is a second gate on
+    // `recreate`'s reset:true parameter, which is why an "every map entry must
+    // be a tool" check would false-positive on it.
+
+    // Every bucket the map names must be one a key can actually hold, or the
+    // tool becomes permanently unreachable (a typo like 'exce' never matches).
+    // `exec` is the documented base grant, the rest come from api-keys.
+    for (const [t, b] of map) {
+      if (b === 'exec') continue;
+      assert.ok(apiKeys.TOOL_GRANTS.includes(b), `${t} routes to bucket '${b}', which no key can hold`);
+    }
+    // ...and the mirror: a bucket nothing routes to is one a user can grant and
+    // never see do anything, which is a support question with no good answer.
+    const used = new Set(map.values());
+    const orphans = apiKeys.TOOL_GRANTS.filter((b) => !used.has(b));
+    assert.deepStrictEqual(orphans, [], `grants nothing maps to: ${orphans.join(', ')}`);
+  });
+
   it('base fine-grained keys get read + workspace + exec, not mutations', () => {
     const base = user(['target:agent:pad-test-agents']);
     assert.strictEqual(toolAllowed(base, 'list_agents', 'pad-test-agents'), true);
