@@ -324,6 +324,25 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   (and so did every later suite), which is exactly why it is worth writing the
   restore carefully rather than trusting the green run.
 
+- **An ORDERING assert on `indexOf` is unfalsifiable without an explicit
+  absence check, because the absent case returns -1 and -1 sorts first.**
+  Plan 52's B1 pinned "recipe 13 tells the caller to reuse a session BEFORE
+  starting one" with
+  `recipe.indexOf('mission_sessions {project_id}') < recipe.indexOf('mission_session_start')`.
+  That passed on the *unmutated* code and also passed with the reuse sentence
+  **deleted** — deleting the left operand turns it into `-1`, and `-1 < 17` is
+  true, so the mutation control read green. The same shape hides in
+  `lastIndexOf`, `slice` bounds and any `<`/`>` on a search result. Assert the
+  **presence** of both operands first (`!== -1`), then the order. The lesson
+  generalises: `indexOf`-based ordering tests measure the *absence* of nothing,
+  and the cheapest oracle for "does this assert bite" is deleting the very
+  string it orders by. Related, same run: a mutation control that injects text
+  into a JS **template literal** must not contain backticks — they terminate
+  the literal, the file stops parsing, and the suite reports "1 test, 0 pass,
+  1 fail", which reads as "the guard fired" when the guard was never reached.
+  `require()` the mutated file inside the control and abort if it throws, so a
+  broken mutant cannot masquerade as a caught one.
+
 - **A permission DEFAULT is set in the CALLER, so fixing the callee fixes
   nothing, and `x !== false` is not a safe default — it reads an OMITTED
   `undefined` as true.** `autoApprove` was `true` in `submitTask`'s

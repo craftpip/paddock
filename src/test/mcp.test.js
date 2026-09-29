@@ -1751,6 +1751,45 @@ describe('MCP secret hygiene (plan 60)', () => {
     assert.match(g, /liveness, not progress/i, "it separates the liveness counts from progress");
   });
 
+  it('the guide tells the LLM to REUSE a session before opening one (plan 52 B1)', () => {
+    // Plan 52's amended law 3 is "resume/continue before opening a new one,
+    // never re-send a prompt into a session that already has the answer" — and
+    // the guide, which is the LLM's actual manual, said nothing about it. The
+    // only cost rule it carried was about jobs and containers. So the single
+    // most expensive mistake available (opening a session that re-pays for
+    // context another session already has) was undocumented. A session burns
+    // tokens whether or not anyone is watching, so this is money, not tidiness.
+    const { getGuide } = require('../services/llm-guide');
+    const g = getGuide();
+    assert.match(g, /reuse a session before you open one/i, 'the rule is stated as a caller rule');
+    assert.match(g, /mission_sessions \{project_id\}/, 'it says HOW to look for a reusable one');
+    // The escalation order matters: relaunch is the cheap middle step between
+    // "reuse the live one" and "start a second conversation", and a session
+    // whose pane is alive but whose TUI exited is exactly the case where
+    // starting fresh is the worst answer.
+    assert.match(g, /mission_session_relaunch/, 'names the relaunch path');
+    assert.match(g, /shell/, 'names the kind that relaunch recovers');
+    // The workflow recipe walked straight to mission_session_start, which is the
+    // same omission in the place a caller is most likely to follow step by step.
+    // Both indexes are checked for -1 explicitly: `indexOf` returns -1 when the
+    // text is absent, and `-1 < anything` is true, so a bare ordering assert
+    // passes the moment the string it is ordering DISAPPEARS — which is exactly
+    // what removing the reuse check does. That is an assertion that cannot
+    // fail, and a mutation control was what caught it.
+    const recipe = g.slice(g.indexOf('13. **Work in a Mission session'));
+    const reuseAt = recipe.indexOf('mission_sessions {project_id}');
+    const startAt = recipe.indexOf('mission_session_start');
+    assert.ok(startAt !== -1, 'recipe 13 still names the start step');
+    assert.ok(reuseAt !== -1, 'recipe 13 still tells the caller to look for a reusable session first');
+    assert.ok(reuseAt < startAt, 'recipe 13 checks for a reusable session BEFORE starting one');
+    // ...and it must not send anyone after a tool that does not exist. The
+    // per-project notes + ordered checklist are plan 53 Phase 9 and are NOT
+    // built, so a pointer here would teach the LLM to hallucinate a capability.
+    for (const ghost of ['mission_checklist', 'mission_notes', 'mission_journal', 'checklist_item']) {
+      assert.ok(!g.includes(ghost), `guide must not point at the unbuilt ${ghost}`);
+    }
+  });
+
   it('the tool descriptions state the guarantee the code now keeps', () => {
     // A promise the guide makes and the tools do not keep is the finding itself.
     const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION }, { capabilities: { tools: {} } });

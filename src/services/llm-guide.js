@@ -91,6 +91,17 @@ may see.
 - **Verification habit:** after any mutation, re-run the matching read tool
   (\`settings_get\`, \`get_agent\`, \`health\`, or an \`exec\`-driven \`openclaw mcp list\` /
   \`models status\`) and confirm the state before reporting success.
+- **Spend nothing invisible: reuse a session before you open one.** Before
+  \`mission_session_start\`, read \`mission_sessions {project_id}\` and ask whether one
+  already fits. A live session with the work in progress, or one that is a
+  \`shell\` kind (pane alive, TUI exited) that \`mission_session_relaunch\` can bring
+  back, is a conversation that already has your context in it — starting fresh
+  means paying to re-establish what the other session already knows. Prefer, in
+  order: the live session that already fits → relaunch the shell one → only then
+  start a new one. Do NOT re-send a prompt into a session that already has the
+  answer: check \`plan_activity\` (or the screen tail) for whether the last turn
+  finished first. Opening a session also **burns tokens whether or not anyone is
+  watching**, so a session you open and abandon is money spent for nothing.
 - **Mission sessions are shared, not yours.** Read \`mission_sessions\` before typing into
   a session you did not start: you are writing into the human's live conversation. A
   session with \`locked: true\` is their deliberate "driving alone" switch — \`mission_send\`
@@ -182,13 +193,16 @@ dropped). Take the \`folder\` from \`mission_projects\`.
      by \`project_id\` / \`agent\`) → \`mission_sessions {session_id}\` for the screen tail of
      that TUI. This is how you know where to help without being told. Check \`busy\` on the
      way past: a session mid-turn is not one to interrupt.
-13. **Work in a Mission session (the only way to do work here):** \`mission_session_start
-     {project_id, idempotency_key}\` → the TUI comes up in the project folder and the page
-     shows it → \`mission_sessions {session_id}\` to read the answer → \`mission_send
-     {session_id, text}\` to type your next line. \`mission_project_create\` first if the PAD
-     has no project for the folder you need. \`idempotency_key\` is not optional in
-     spirit: start with one, and if this call times out send the SAME key again — a timed-out
-     call returns nothing, so a blind retry is what opens a second session.
+13. **Work in a Mission session (the only way to do work here):** first
+      \`mission_sessions {project_id}\` — if a session already fits, or one is a
+      \`shell\` you can \`mission_session_relaunch\`, use that one and skip the next step.
+      Otherwise \`mission_session_start {project_id, idempotency_key}\` → the TUI comes up
+      in the project folder and the page shows it → \`mission_sessions {session_id}\` to read
+      the answer → \`mission_send {session_id, text}\` to type your next line. \`mission_project_create\` first
+      if the PAD has no project for the folder you need. \`idempotency_key\` is not optional in
+      spirit: start with one, and if this call times out send the SAME key again — a timed-out
+      call returns nothing, so a blind retry is what opens a second session.
+
 13b. **A session that died:** \`mission_session_restart {session_id}\` puts the pane and the
      same conversation back (\`mission_session_relaunch\` when the pane is alive but the TUI
      exited). Before restarting, read the last thing it said: \`mission_sessions {session_id}\`

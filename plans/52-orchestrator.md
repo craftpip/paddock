@@ -188,14 +188,27 @@ The gate for everything: the agent can only do what its key says.
 
 ## Phase B — Playbook: the LLM's operating manual
 
-- [ ] B1. `llm-guide.js` becomes the session manual: the four-step flow (agent →
+- [~] B1. `llm-guide.js` becomes the session manual: the four-step flow (agent →
       project → session → work); **work the checklist in order, one item at a
-      time, in a visible session, ticking each off** (53 Phase 8) — that is how
+      time, in a visible session, ticking each off** (53 **Phase 9** — *not*
+      Phase 8, which was the MCP surface, shipped as plan 55) — that is how
       "do A then B then C" is executed, and the checklist (not a runner) is what
       survives a closed chat; use an existing session when one fits, else open
       one; read `mission_sessions` before typing into anything you didn't start;
       respect solo locks; memory discipline (read notes + checklist on arrival,
       write on decide); never start work the user can't see.
+
+      **Status: 5 of 7 clauses DONE; 2 BLOCKED on 53 Phase 9 (not built).**
+      Done and committed: the four-step flow (recipe 12/13), *reuse an existing
+      session before opening one* (new caller rule + recipe 13 reorder), read
+      `mission_sessions` before typing, respect solo locks, and never start work
+      the user cannot see. The two remaining clauses — the ordered checklist and
+      the notes on arrival / decisions — both name a **tool that does not
+      exist**: there are no `mission_checklist` / `mission_notes` tables, and 53's
+      Phase 9 is where they are meant to land. Writing those clauses now would
+      teach an LLM to call a tool the server never registers, so a test now
+      asserts the guide contains **no** pointer to an unbuilt checklist tool.
+      B1 closes when 53 Phase 9 lands and the two clauses are added.
 - [ ] B2. Onboarding artifact (system-prompt snippet / skill, [51§4]) rewritten
       for the session model. No backend.
 
