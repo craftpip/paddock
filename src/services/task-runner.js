@@ -394,7 +394,7 @@ async function resolveTaskWorkspace(pad) {
   return workspaceDir;
 }
 
-async function submitTask({ name, prompt, model, agent, priority = 0, timeout, autoApprove = true, enqueue = false, user } = {}) {
+async function submitTask({ name, prompt, model, agent, priority = 0, timeout, autoApprove = false, enqueue = false, user } = {}) {
   if (!prompt || !String(prompt).trim()) throw new Error('task prompt is required');
   const isPool = !name || !String(name).trim();
 

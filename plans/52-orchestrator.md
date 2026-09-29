@@ -1,6 +1,6 @@
 # Plan 52 — Orchestrator (session-based: keys, grants, conferral, playbook, proof)
 
-## Status: Rewritten (2026-09-27) — **1/7 phases built.** Phase A: A1 done (grant model audited + fail-closed default + completeness tests), A2/A3 still open. The queue is gone;
+## Status: Rewritten (2026-09-27) — **1/7 phases complete, Phase A done.** A1 audited + fail-closed default; A2 verified — it surfaced that `exec` is a base grant, so the least-privilege key of D2 cannot be expressed (user decision, recorded in infinite.md); A3 `autoApprove` flipped to opt-in (R3 closed). Phase A gate: all suites green, webui restarted, tool surface verified live at 31 tools. Phases B–G not started. The queue is gone;
 this plan now orchestrates **sessions**, not tasks. User decision, verbatim:
 *"don't let the user start any task without my vision — remove task submit"*,
 followed by *"rewrite 52 around mission_* sessions"*. **Everything below is
@@ -142,14 +142,46 @@ The gate for everything: the agent can only do what its key says.
       restoring the fail-open default turns **1** test red; dropping
       `task_cancel`'s map entry turns **2** red. mcp 136/136, task-mcp 28/28,
       plan-mcp 42/42, mission 97/97, auth 3/3.
-- [ ] A2. Mission grants: `mission_projects`/`mission_sessions` → `READ_TOOLS`;
-      `mission_project_create` → `create`; `mission_session_start`/`mission_send`
-      → `exec`. Implemented in 53 Phase 7, **verified here** with the
-      fail-closed proof (a key without `exec` gets `Not permitted by API key
-      tool grant: mission_send`).
-- [ ] A3. `autoApprove` default revisited (R3): today it is maximally
-      permissive; with `exec` now able to open TUIs, decide and document the
-      default.
+- [x] A2. Mission grants **verified (2026-09-29) — and the requested proof turned out
+      to be impossible.** The item asks for a fail-closed proof that "a key
+      without `exec` gets `Not permitted by API key tool grant: mission_send`".
+      Writing it showed there is no such key: **`exec` is a BASE grant, not an
+      opt-in bucket** (`toolAllowed` returns early for `READ_TOOLS`, `exec`,
+      `workspace_write`, and anything the map routes to `exec`), so every
+      fine-grained key holds it. The only keys without `exec` are `read` keys,
+      which have nothing else either. The mission grants themselves are correct
+      (`mission_projects`/`mission_sessions` read, `mission_project_create`
+      `create`, the rest `exec`) and per-PAD scoping holds; **what is wrong is
+      that the least-privilege key D2 describes cannot be expressed.** Measured
+      matrix: a key scoped to **nothing but `target:owned`** — no `tools:` grant
+      at all — can `mission_send`, `mission_session_start` and `exec`, i.e. type
+      into the human's live conversations and spawn token-burning TUIs. That
+      contradicts law 2, §5 direct mode and D2, all of which assume `exec` is
+      something a key holds or does not. **Not changed here**: making `exec`
+      opt-in is a breaking change to what a key means and is the user's call
+      (no live key is affected — all 9 are `control`/`default`, which return
+      before the map is read). Pinned by a test that asserts today's matrix, so
+      the change cannot happen by accident. Decision in `infinite.md` § Needs
+      your call. Control: making `exec` opt-in turns **6** tests red.
+- [x] A3. `autoApprove` default decided and documented (2026-09-29) — **flipped
+      from `true` to `false`** (R3 closed). The drivers were *already*
+      fail-closed (`--auto` / `--sandbox danger-full-access` only when
+      `autoApprove` is truthy); the permissiveness lived entirely in the two
+      **caller** defaults, `autoApprove = true` in `submitTask`'s destructuring
+      and `args.autoApprove !== false` in the MCP handler — the latter is the
+      shape that reads an **omitted** `undefined` as true, so a caller who said
+      nothing got `danger-full-access` from the handler before the runner's own
+      default was ever consulted. Both are now opt-in. This is the safe
+      direction and it is **free**: the whole headless path is behind
+      `PADDOCK_TASK_QUEUE=1` and off, which is also why the item's stated
+      premise ("`exec` now able to open TUIs") no longer holds — `autoApprove`
+      never touched the Mission TUI path. Documented in both places the default
+      was stated (the `zod` description *and* the tool description — the plan-60
+      lesson that a fact carried in two fields must be fixed in both). Two
+      tests, one per layer, because a control proved the MCP half was pinned by
+      nothing: restoring the runner default turns 1 red, restoring the handler
+      default turns 1 red **and leaves the other suite green**, which is what
+      makes the two non-redundant.
 - [ ] Gate: full `mission_*` + `pad_*` surface callable over live MCP with the
       intended keys; all test files green individually; `docker restart paddock`
       clean.
@@ -231,8 +263,13 @@ owner phase builds.
       anyone is watching; no ceiling/alert/kill-switch.
 - [ ] R2 · Critical · Block C/E — injection path: repo text → agent output →
       orchestrator context → action. No provenance or output gates.
-- [ ] R3 · Critical · Block A — `autoApprove=true` default, now able to open
-      TUIs.
+- [x] R3 · Critical · Block A — **RESOLVED (2026-09-29, A3): `autoApprove` is
+      now opt-in**, in both caller defaults and both description fields. The
+      drivers were always fail-closed; the permissiveness was `submitTask`\x27s
+      `autoApprove = true` and the handler\x27s `args.autoApprove !== false`, the
+      latter treating an OMITTED argument as true. Law 6 is why: the headless
+      path runs where the user cannot see it. Free to fix — the path is behind
+      `PADDOCK_TASK_QUEUE=1` and off.
 - [ ] R4 · Critical · scope — docker socket = host escape for any holding PAD.
 - [ ] R5 · Critical · Block E — orchestrator key: no rotation, no revocation
       drill, no audit log of its actions.

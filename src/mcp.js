@@ -1435,7 +1435,7 @@ function registerTools(server) {
     'task_submit',
     {
       title: 'Submit a task to an opencode PAD (or the shared pool)',
-      description: 'Push: runs `opencode run` inside the named opencode PAD in the background and returns a task_id immediately — poll with task_status, fetch with task_result, stop with task_cancel. The task runs in THAT PAD\'s effective workspace (its custom mount when it has one, never a driver default the PAD does not have) and auto-approves permissions that are not explicitly denied (pass autoApprove:false to refuse that). Pull: omit `name` to file the task in the shared pool at `priority`; combine `name` with enqueue:true to address a task to one PAD without starting it yet. A worker PAD then claims it with task_get_next. Never pick an agent with an @mention in the prompt — headless runs silently fall through to the primary agent; use `agent` instead. TIMEOUT: capped at 1 hour (default 10 minutes); on expiry the task is marked `error` with `timedOut: true` and the process is killed, which is how you tell a timeout from a crash without reading stderr. For genuinely long work, file a short task that re-files itself and exits.',
+      description: 'Push: runs `opencode run` inside the named opencode PAD in the background and returns a task_id immediately — poll with task_status, fetch with task_result, stop with task_cancel. The task runs in THAT PAD\'s effective workspace (its custom mount when it has one, never a driver default the PAD does not have) and runs sandboxed by default, stopping on anything needing a decision (pass autoApprove:true to auto-approve instead). Pull: omit `name` to file the task in the shared pool at `priority`; combine `name` with enqueue:true to address a task to one PAD without starting it yet. A worker PAD then claims it with task_get_next. Never pick an agent with an @mention in the prompt — headless runs silently fall through to the primary agent; use `agent` instead. TIMEOUT: capped at 1 hour (default 10 minutes); on expiry the task is marked `error` with `timedOut: true` and the process is killed, which is how you tell a timeout from a crash without reading stderr. For genuinely long work, file a short task that re-files itself and exits.',
       inputSchema: {
         name: z.string().optional().describe('PAD to run the task on (opencode only). Omit to add it to the unassigned pool. This is the PAD the task RUNS IN — the opposite of task_get_next\'s `worker`, which is the PAD doing the claiming.'),
         prompt: z.string().describe('Task instructions for the agent'),
@@ -1444,7 +1444,7 @@ function registerTools(server) {
         enqueue: z.boolean().optional().describe('File addressed to `name` without starting it — it stays pending for task_get_next'),
         priority: z.number().int().optional().describe('Queue rank for pool tasks — lower numbers are served first (default 0)'),
         timeout: z.number().int().min(1000).max(3600000).optional().describe('Kill the task after this many ms (default 600000, max 3600000)'),
-        autoApprove: z.boolean().optional().describe('Auto-approve permissions not explicitly denied (default true) — same trust level as exec'),
+        autoApprove: z.boolean().optional().describe('Opt in to auto-approving permissions not explicitly denied — i.e. opencode `--auto`, codex `--sandbox danger-full-access` (no sandbox at all). DEFAULT false, so a task runs sandboxed and stops on anything needing a decision; plan 52 R3/A3 flipped this from true because the headless task path runs where the user cannot see it, which law 6 forbids. Pass true only when you have decided the prompt is safe unattended.'),
       },
     },
     async (args) => {
@@ -1468,7 +1468,7 @@ function registerTools(server) {
         enqueue: args.enqueue === true,
         priority: args.priority,
         timeout: args.timeout,
-        autoApprove: args.autoApprove !== false,
+        autoApprove: args.autoApprove === true,
         user,
       }));
       const task = taskRunner.getTask(id);

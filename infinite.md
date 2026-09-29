@@ -43,6 +43,22 @@ one is a single reply away from done.
   (`PADDOCK_TASK_QUEUE=1` re-enables them), so a `project_id` on a submit no caller
   can reach is speculative. Your call: add it, or leave the queue as a PAD-level
   concept. Nothing depends on the answer and nothing is blocked by it.
+- **Should `exec` be an opt-in grant, or a base one? (plan 52 A2)** — today
+  `exec` is `toolAllowed`'s BASE grant, so every fine-grained key holds it and
+  **there is no key that can read and create without also being able to type
+  into the human's live conversations and spawn token-burning TUIs**. A key
+  scoped to nothing but `target:owned` — no `tools:` grant at all — can
+  `mission_send`, `mission_session_start` and `exec`. That contradicts plan 52 law 2
+  ("only the orchestrator PAD holds the exec bucket"), §5 direct mode ("a key with
+  the read/create/exec buckets") and D2 ("read-only by default, exec only when
+  the user grants it") — all three assume exec is a thing a key holds or does
+  not. **Nothing live is affected**: all 9 API keys are `control`/`default`, which
+  return before the map is read, so this changes what a *future* key means and
+  nothing else. Your call: make `exec` an opt-in bucket (add `tools:exec` to
+  `TOOL_GRANTS`; a new fine-grained key then gets no session control until you
+  grant it), or keep it as the base and accept that a scoped key can drive
+  sessions. A test pins today's matrix either way, so it cannot change by
+  accident. Plan 52 § A2; flipping it turns 6 tests red.
 - **Rotate the 2 exposed MCP tokens** — plan 60 stopped the leak but cannot
   un-leak the credentials; operator action, §5. Tracked on its queue line below.
 

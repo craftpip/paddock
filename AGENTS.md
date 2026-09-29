@@ -324,6 +324,27 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   (and so did every later suite), which is exactly why it is worth writing the
   restore carefully rather than trusting the green run.
 
+- **A permission DEFAULT is set in the CALLER, so fixing the callee fixes
+  nothing, and `x !== false` is not a safe default — it reads an OMITTED
+  `undefined` as true.** `autoApprove` was `true` in `submitTask`'s
+  destructuring *and* `args.autoApprove !== false` in the MCP handler, while both
+  drivers were already fail-closed (`--auto` / `--sandbox danger-full-access`
+  only when the flag is truthy) and a test already proved it. So the "safe"
+  behaviour existed and was unreachable: a caller who said nothing got
+  `danger-full-access` — no sandbox at all — from the *handler*, before the
+  runner's own default was ever consulted. Two lessons, and the second is the
+  one that bites. (1) **When a default is permissive, grep for it in every
+  layer that can supply it**, because the layer that invents the value is the
+  one that wins. (2) **Fixing one of two defaults leaves the bug alive**, and
+  here the other half was pinned by *nothing*: a mutation restoring
+  `!== false` left every suite green. So a test per layer, and the control that
+  proves the point is the one asserting the *other* suite stays green — that is
+  what shows two tests are non-redundant rather than duplicative. A fact stated
+  in two fields needs fixing in both: the `zod` description *and* the tool
+  description each carried the old default. Finally, the cheapest correct
+  default was only available because the feature was **off** — re-check whether
+  a permissive default is load-bearing before treating its change as breaking.
+
 - **A stale row survives a write that just happened in the same function.**
   `screen()` read its session, then updated the row, then returned the row it had
   read — so the response reported `last_output_at: null` for the very call that

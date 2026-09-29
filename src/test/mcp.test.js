@@ -223,6 +223,44 @@ describe('MCP Server - Mission grants (plan 55)', () => {
     }
   });
 
+  it('PINS the exec base grant — every fine-grained key can drive sessions (plan 52 A2)', () => {
+    // A2 asked for a fail-closed proof that "a key without `exec` gets Not
+    // permitted by API key tool grant: mission_send". Writing that test is
+    // what showed the proof CANNOT be given, because there is no such key:
+    // `exec` is a BASE grant (see toolAllowed), not an opt-in bucket, so every
+    // fine-grained key holds it. Only a `read` key lacks it, and a read key
+    // has nothing else either.
+    //
+    // This matters because it contradicts three separate places in the plan:
+    // law 2 ("only the orchestrator PAD ... holds the `exec` bucket that can
+    // open and type into sessions"), §5 direct mode ("a key with the
+    // read/create/exec buckets"), and D2 ("read-only by default, `exec` only
+    // when the user grants it"). Today the worst case is a key scoped to
+    // NOTHING but its own fleet: `target:owned` alone, no tools: grants at
+    // all, and it can still type into the human's live conversations and spawn
+    // token-burning TUIs.
+    //
+    // Pinned deliberately rather than changed: making `exec` opt-in is a
+    // BREAKING change to what a fine-grained key means, and it is the user's
+    // call. Recorded in plans/52 § A2 and in infinite.md's "Needs your call".
+    const execFor = (scopes) => ['mission_send', 'mission_session_start', 'exec']
+      .map((t) => toolAllowed(user(scopes), t, 'pad-x'));
+    assert.deepStrictEqual(execFor(['target:owned']), [true, true, true],
+      'a key with no tools: grants can drive sessions — if this starts failing, exec became opt-in');
+    assert.deepStrictEqual(execFor(['tools:create']), [true, true, true]);
+    assert.deepStrictEqual(execFor(['tools:lifecycle']), [true, true, true],
+      'lifecycle says nothing about sessions, yet it can send and start');
+    // The one thing that IS separable today: read keys cannot drive sessions,
+    // and a fine-grained key cannot create without `tools:create`.
+    assert.deepStrictEqual(execFor(['read']), [false, false, false]);
+    assert.strictEqual(toolAllowed(user(['target:owned']), 'mission_project_create', 'pad-x'), false);
+    assert.strictEqual(toolAllowed(user(['tools:create']), 'mission_project_create', 'pad-x'), true);
+    // workspace_write is base too, so a key with no tools: grants can write
+    // files into any PAD it owns. Same family of surprise as exec; pinned so a
+    // change to either is deliberate.
+    assert.strictEqual(toolAllowed(user(['target:owned']), 'workspace_write', 'pad-x'), true);
+  });
+
   it('target grants confine the Mission tools to their PAD', () => {
     const scoped = user(['target:agent:pad-x']);
     assert.strictEqual(toolAllowed(scoped, 'mission_sessions', 'pad-y'), false);
@@ -446,6 +484,53 @@ describe('MCP Server - task queue grants (plan 47)', () => {
   const user = (scopes) => ({ userId: 'u1', role: 'user', scopes });
   const READ = ['task_status', 'task_result', 'task_list'];
   const EXEC = ['task_submit', 'task_get_next', 'task_complete', 'task_retry', 'task_priority', 'task_cancel'];
+
+  it('MCP task_submit does not turn an omitted autoApprove into a TRUE (plan 52 A3)', async () => {
+    // This is the OTHER half of the A3 default, and a mutation control proved
+    // nothing catches it: restoring `args.autoApprove !== false` here leaves
+    // every suite green. The runner default is pinned in tasks.test.js, but
+    // this layer's job is to TRANSLATE args, and the shape `x !== false`
+    // silently reads an omitted/undefined x as true — so a caller who said
+    // nothing got the permissive value from the handler, before the runner's
+    // own default was ever consulted. Pinned by calling the real handler with
+    // the task gate ON and recording what reached taskRunner.
+    const real = require('../services/task-runner');
+    const saved = { submitTask: real.submitTask, getTask: real.getTask };
+    const seen = [];
+    try {
+      real.submitTask = async (a) => { seen.push(a); return 'task-1'; };
+      real.getTask = () => ({ id: 'task-1', status: 'running', agent_name: null });
+
+      const handlers = {};
+      const prevGate = process.env.PADDOCK_TASK_QUEUE;
+      process.env.PADDOCK_TASK_QUEUE = '1';
+      try {
+        registerTools({ registerTool: (name, cfg, handler) => { handlers[name] = handler; } });
+      } finally {
+        if (prevGate === undefined) delete process.env.PADDOCK_TASK_QUEUE;
+        else process.env.PADDOCK_TASK_QUEUE = prevGate;
+      }
+      assert.ok(handlers.task_submit, 'task_submit is registered with the gate on');
+
+      const submit = (args) => mcpContext.run(
+        { user: { userId: 'u1', role: 'admin', scopes: ['default'] } },
+        () => handlers.task_submit({ prompt: 'work', ...args }),
+      );
+      await submit({});
+      await submit({ autoApprove: undefined });
+      await submit({ autoApprove: false });
+      await submit({ autoApprove: true });
+      assert.deepStrictEqual(seen.map((a) => a.autoApprove), [false, false, false, true],
+        'omitted/undefined/false all mean sandboxed; only true opts in');
+    } finally {
+      // Restore as PLAIN values, and only after the awaits: assigning back
+      // inside a `finally` that runs before a returned promise settles would
+      // restore the real runner mid-call, and a bound copy would leave the
+      // module closed over its own receiver for every later suite.
+      real.submitTask = saved.submitTask;
+      real.getTask = saved.getTask;
+    }
+  });
 
   it('read scope sees task results but cannot mutate the queue', () => {
     const read = user(['read', 'target:agent:pad-x']);

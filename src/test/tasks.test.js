@@ -206,6 +206,40 @@ describe('Task queue - push execution', () => {
     assert.strictEqual(tasks.getTask(id).agent_name, 'pad-task-a');
   });
 
+  it('DEFAULTS to sandboxed — a task does not auto-approve unless asked (plan 52 A3/R3)', async () => {
+    // The drivers were ALWAYS fail-closed here (`--auto` / `danger-full-access`
+    // only when `autoApprove` is truthy) and the existing test above proved
+    // that. The permissiveness lived entirely in the two CALLER defaults —
+    // `autoApprove = true` in submitTask's destructuring and
+    // `args.autoApprove !== false` in the MCP handler — so a caller who said
+    // nothing got the permissive one anyway, and a caller who passed
+    // `undefined` got it too. This asserts the DEFAULT through the real submit
+    // path by capturing the actual `sh -lc` script, because a test on
+    // buildCommand alone would have passed before the fix.
+    const scriptFor = async (opts) => {
+      const h = harness();
+      tasks._setForTests({ spawn: h.spawn });
+      await tasks.submitTask({ name: 'pad-task-a', prompt: 'do a thing', ...opts });
+      return h.calls[0].args[5];
+    };
+
+    const bare = await scriptFor({});
+    assert.ok(!bare.includes('--auto'), `no --auto by default: ${bare}`);
+    assert.ok(!bare.includes('danger-full-access'), `no unsandboxed codex by default: ${bare}`);
+
+    // And an explicit false is the same as saying nothing — the shape that
+    // broke it, `x !== false` with x undefined, is what must not come back.
+    const explicitFalse = await scriptFor({ autoApprove: false });
+    assert.ok(!explicitFalse.includes('--auto'), 'explicit false stays sandboxed');
+
+    // Opt-in still works, for both drivers that have the concept.
+    assert.ok((await scriptFor({ autoApprove: true })).includes('--auto'), 'opencode --auto on opt-in');
+    const codexHarness = harness();
+    tasks._setForTests({ spawn: codexHarness.spawn });
+    await tasks.submitTask({ name: 'pad-task-codex', prompt: 'x', autoApprove: true });
+    assert.ok(codexHarness.calls[0].args[5].includes('danger-full-access'), 'codex unsandboxed only on opt-in');
+  });
+
   it('is running with a pid while in flight', async () => {
     const h = harness();
     tasks._setForTests({ spawn: h.spawn });
