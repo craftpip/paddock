@@ -88,39 +88,63 @@ function classifyNetworkPeer({ mode = '', bound = null, declaredRef = '', declar
   const boundRef = mode.slice('container:'.length).trim();
   base.peerId = boundRef;
 
-  // A lookup that FAILED is not a peer that is absent. We may still have the
-  // other reference to fall back on, so only give up on the whole answer when
-  // every lookup we tried errored — and then say `checked: false`, because a
-  // pad we could not look at is not a healthy pad.
-  const lookedAt = [bound, declared].filter(Boolean);
-  if (lookedAt.length && lookedAt.every((p) => p.error)) {
+  // A lookup that FAILED is not a peer that is absent, and the two references
+  // answer DIFFERENT questions: the bound one says what we are ATTACHED to, the
+  // declared one says what we were CONFIGURED for. Losing either half leaves a
+  // question this rule exists to answer — `ok` and `staleBinding` differ ONLY by
+  // whether the two ids match, so with the declared side unread we cannot tell
+  // a correct binding from a wrong one.
+  //
+  // So an unreadable reference is never rounded into a confident verdict. It
+  // used to be: a failed BOUND read fell through to "bound peer no longer
+  // exists" and answered `staleBinding`, which asserts a deletion it never
+  // observed and tells the caller to recreate a pad that may be perfectly
+  // healthy. Failing that, an unreadable DECLARED side answered `ok` and set
+  // peerCurrentId from the bound peer — which makes the documented
+  // `peerId !== peerCurrentId` test compare the id with ITSELF and read as
+  // "no mismatch" for a binding that was never verified.
+  const usable = (p) => (p && !p.error ? p : null);
+  const named = usable(declared);
+  const live = usable(bound);
+  const failed = [bound, declared].find((p) => p && p.error);
+
+  // The ONE case a failed lookup cannot spoil: the bound peer resolves and is
+  // not running. The pad cannot start whatever the configured peer is doing, so
+  // the verdict is decisive on its own and needs no second opinion.
+  if (live && live.state !== 'running') {
+    return {
+      ...base,
+      peerName: live.name,
+      peerState: live.state,
+      peerCurrentId: live.id,
+      state: 'peer-stopped',
+      reason: `The network peer '${live.name}' is ${live.state}, not running. Start it, then recreate this pad to rebind.`,
+    };
+  }
+
+  if (failed) {
     return {
       ...base,
       state: 'unknown',
       checked: false,
-      reason: `Could not read this pad's network peer: ${lookedAt[0].error}`,
+      reason: `Could not read this pad's network peer: ${failed.error}. `
+        + (live
+          // The bound peer was readable and running, so the only open question
+          // is whether it is the one we were configured for.
+          ? `We can see it is running ('${live.name}'), but not whether that is the configured peer, so we cannot tell a correct binding from a wrong one.`
+          : 'Its binding could not be checked either, so nothing about this pad\'s peer is established.'),
     };
   }
-  // One reference resolved, the other could not be read: keep going on the one
-  // we have, since a resolvable peer is a fact we can act on.
-  const usable = (p) => (p && !p.error ? p : null);
 
-  const named = usable(declared);
-  const live = usable(bound);
-
-  // 1. The ref we are bound to resolves. Then we know the peer by identity, and
-  //    the only remaining question is whether it is the peer we MEANT.
+  // 1. The ref we are bound to resolves AND is running (the not-running case is
+  //    decided above, because it survives an unreadable configured side). Then
+  //    we know the peer by identity, and the only remaining question is whether
+  //    it is the peer we MEANT. Both sides are readable here — an unreadable
+  //    declared side already returned above.
   if (live) {
     base.peerName = live.name;
     base.peerState = live.state;
     base.peerCurrentId = live.id;
-    if (live.state !== 'running') {
-      return {
-        ...base,
-        state: 'peer-stopped',
-        reason: `The network peer '${live.name}' is ${live.state}, not running. Start it, then recreate this pad to rebind.`,
-      };
-    }
     if (named && named.id && live.id && named.id !== live.id) {
       // Running, but it is NOT the configured peer. Recreating the peer would
       // change nothing; the binding is what has to move.
@@ -181,17 +205,9 @@ function classifyNetworkPeer({ mode = '', bound = null, declaredRef = '', declar
     };
   }
 
-  // 3. One lookup resolved nothing and the other could not be read — or there
-  //    was no fallback at all. Say THAT, rather than implying the peer is unwell.
-  const failed = lookedAt.find((p) => p.error);
-  if (failed) {
-    return {
-      ...base,
-      state: 'unknown',
-      checked: false,
-      reason: `This pad is bound to a network peer that could not be read (${failed.error}), so its state is unknown.`,
-    };
-  }
+  // 3. Neither reference errored and neither resolved: the peer is genuinely
+  //    ABSENT, which is a fact, not a shrug. (The unreadable case returned
+  //    earlier — reaching here means every lookup that ran came back empty.)
   return {
     ...base,
     state: 'stale',

@@ -177,10 +177,12 @@ describe('inspectPeer — a reference that does not resolve', () => {
     assert.strictEqual(v.checked, false);
   });
 
-  it('one resolvable peer is enough to act on when the other lookup failed', async () => {
-    // Not every failure means we know nothing: a working declared peer is a
-    // fact, and throwing it away because the bound id could not be read would
-    // under-report a pad we can already diagnose.
+  it('a failed BOUND lookup is never rounded into a confident verdict', async () => {
+    // This used to answer `staleBinding` here, with the reason asserting the
+    // bound container "no longer exists" — a deletion it never observed, used to
+    // justify recreating a pad that may be perfectly healthy. The configured
+    // peer being up says nothing about the binding: if the bound peer is
+    // running and IS the configured one, this pad is fine.
     const fails = async () => { throw new Error('Error response from daemon: Cannot connect to the Docker daemon'); };
     const v = classifyNetworkPeer({
       mode: 'container:abc',
@@ -188,8 +190,57 @@ describe('inspectPeer — a reference that does not resolve', () => {
       declaredRef: 'gluetun',
       declared: running('gluetun', 'aaaa1111'),
     });
-    assert.strictEqual(v.state, 'staleBinding', 'the configured peer is up, so the binding is the fix');
-    assert.strictEqual(v.checked, true, 'a real answer, so it is checked');
+    assert.strictEqual(v.state, 'unknown', 'nothing about the binding was established');
+    assert.strictEqual(v.checked, false, 'so it is reported as unchecked, not as a real answer');
+    assert.doesNotMatch(v.reason, /no longer exists/, 'the reason must not claim a deletion it did not see');
+  });
+
+  it('a failed CONFIGURED lookup is not `ok` — that is the question it answers', async () => {
+    // `ok` and `staleBinding` differ ONLY by whether the two ids match. With the
+    // declared side unread, a correct binding and a wrong one look identical, so
+    // `ok` here is a guess. It also used to set peerCurrentId from the BOUND
+    // peer, which made the documented `peerId !== peerCurrentId` test compare
+    // the id with itself and read as "no mismatch".
+    const fails = async () => { throw new Error('Error response from daemon: Cannot connect to the Docker daemon'); };
+    const v = classifyNetworkPeer({
+      mode: 'container:aaaa1111',
+      bound: running('gluetun', 'aaaa1111'),
+      declaredRef: 'other-peer',
+      declared: await inspectPeer('other-peer', { run: fails }),
+    });
+    assert.strictEqual(v.state, 'unknown', 'we cannot tell a correct binding from a wrong one');
+    assert.strictEqual(v.checked, false);
+    assert.notStrictEqual(v.peerId, v.peerCurrentId,
+      'the two ids must not be the same value, or `peerId !== peerCurrentId` reads as a match');
+  });
+
+  it('a stopped bound peer is still decisive when the configured lookup failed', async () => {
+    // The one case an unreadable reference cannot spoil: whatever the
+    // configured peer is doing, this pad cannot start. So a real, actionable
+    // answer is available without the second opinion.
+    const fails = async () => { throw new Error('Error response from daemon: Cannot connect to the Docker daemon'); };
+    const v = classifyNetworkPeer({
+      mode: 'container:bbbb2222',
+      bound: { name: 'gluetun', id: 'bbbb2222', state: 'exited' },
+      declaredRef: 'other-peer',
+      declared: await inspectPeer('other-peer', { run: fails }),
+    });
+    assert.strictEqual(v.state, 'peer-stopped', 'a stopped bound peer settles it on its own');
+    assert.strictEqual(v.checked, true);
+  });
+
+  it('a genuinely ABSENT bound peer is still diagnosed (a fact, not a shrug)', async () => {
+    // The counterpart to the case above, and the reason the split is on `error`
+    // rather than on "resolved or not": docker saying "No such object" IS a
+    // fact about the peer, so these must keep their actionable states.
+    const v = classifyNetworkPeer({
+      mode: 'container:abc',
+      bound: null,
+      declaredRef: 'gluetun',
+      declared: running('gluetun', 'aaaa1111'),
+    });
+    assert.strictEqual(v.state, 'staleBinding', 'absent is not unreadable — recreate still is the fix');
+    assert.strictEqual(v.checked, true);
   });
 
   it('returns null for no reference at all (the default-network pad never asks)', async () => {
