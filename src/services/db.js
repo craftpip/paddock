@@ -136,7 +136,16 @@ function migrate(db) {
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       started_at TEXT,
       finished_at TEXT,
-      last_output_at TEXT
+      last_output_at TEXT,
+      -- Plan 63: facts about HOW the task was filed and how it ended. The
+      -- agent-facing vocabulary (route / outcome / timedOut) is DERIVED from
+      -- these, never stored as its own column — two names for one value is the
+      -- defect this plan exists to remove.
+      enqueue INTEGER DEFAULT 0,
+      timeout_ms INTEGER,
+      timed_out INTEGER DEFAULT 0,
+      attempt INTEGER DEFAULT 1,
+      superseded_by TEXT
     );
 
     CREATE INDEX IF NOT EXISTS idx_tasks_agent ON tasks(agent_name);
@@ -199,6 +208,24 @@ function migrate(db) {
   const taskCols = db.prepare("PRAGMA table_info(tasks)").all().map(c => c.name);
   if (!taskCols.includes('last_output_at')) {
     db.exec("ALTER TABLE tasks ADD COLUMN last_output_at TEXT");
+  }
+
+  // Plan 63 1f/1e/1i — the facts the queue's vocabulary is derived from.
+  // `enqueue` says the task was FILED for a worker to claim rather than pushed
+  // (route); `timed_out` separates the 10-minute kill from a user cancel, which
+  // both used to land on status `cancelled` and so read identically; `attempt` +
+  // `superseded_by` make a retry chain visible instead of leaving repeated
+  // failures as independent rows. Existing rows keep the defaults: a task filed
+  // before this existed was pushed unless a worker claimed it, and a
+  // `cancelled` row that predates the column was cancelled, not timed out.
+  for (const [col, decl] of [
+    ['enqueue', 'INTEGER DEFAULT 0'],
+    ['timeout_ms', 'INTEGER'],
+    ['timed_out', 'INTEGER DEFAULT 0'],
+    ['attempt', 'INTEGER DEFAULT 1'],
+    ['superseded_by', 'TEXT'],
+  ]) {
+    if (!taskCols.includes(col)) db.exec(`ALTER TABLE tasks ADD COLUMN ${col} ${decl}`);
   }
 
   // Which key (or which signed-in user) opened a Mission session (plan 67,

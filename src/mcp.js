@@ -136,6 +136,10 @@ const TOOL_GRANT_FOR = {
   task_submit: 'exec',
   task_get_next: 'exec',
   task_complete: 'exec',
+  // Re-filing a task starts real work, so a retry rides `exec` with the submit
+  // and claim tools — never the read bucket, however harmless "submit the same
+  // prompt again" sounds.
+  task_retry: 'exec',
   task_priority: 'exec',
   task_cancel: 'exec',
   // Mission writers (plan 55). A project is a row, so it rides the same `create`
@@ -383,6 +387,60 @@ function taskError(fn) {
   } catch (e) {
     throw new McpError(ErrorCode.InvalidRequest, e.message);
   }
+}
+
+/** The task-surface equivalent, for the one call that is async: `submitTask`
+ *  verifies the PAD's workspace inside the container before it files the task
+ *  (plan 63 1k), so its failures are promises. Wrapping it in the sync
+ *  `taskError` would hand the caller a bare Promise as if it were a task id. */
+async function taskErrorAsync(fn) {
+  try {
+    return await fn();
+  } catch (e) {
+    throw new McpError(ErrorCode.InvalidRequest, e.message);
+  }
+}
+
+const TASK_PROMPT_CLIP = 200;
+
+/** One projection for every task tool (plan 63). `route` / `outcome` /
+ * `timedOut` are DERIVED in the service and returned by all of them, because a
+ * field one tool emits and another drops is a caller inferring the difference
+ * from something else — the parity bug the Mission tools had. `claimedBy` is
+ * deliberately NOT added alongside `claimed_by`: the row already says who
+ * claimed it, and a second spelling of the same value is the ambiguity this
+ * plan exists to remove. */
+function taskRow(t, { full = false } = {}) {
+  if (!t) return null;
+  const prompt = String(t.prompt || '');
+  const clipped = prompt.length > TASK_PROMPT_CLIP;
+  const row = {
+    id: t.id,
+    status: t.status,
+    outcome: taskRunner.taskOutcome(t),
+    timedOut: !!t.timed_out,
+    route: taskRunner.taskRoute(t),
+    agent_name: t.agent_name,
+    claimed_by: t.claimed_by,
+    priority: t.priority,
+    prompt: full ? prompt : (clipped ? prompt.slice(0, TASK_PROMPT_CLIP) + '…[truncated]' : prompt),
+    prompt_truncated: full ? false : clipped,
+    exit_code: t.exit_code,
+    attempt: Number(t.attempt) || 1,
+    superseded_by: t.superseded_by,
+    created_by: t.created_by,
+    created_at: t.created_at,
+    finished_at: t.finished_at,
+  };
+  if (full) {
+    row.model = t.model;
+    row.agent = t.agent_type;
+    row.result_summary = t.result_summary;
+    row.started_at = t.started_at;
+    row.last_output_at = t.last_output_at;
+    row.timeout_ms = t.timeout_ms;
+  }
+  return row;
 }
 
 // ─── Mission (plan 55) ─────────────────────────────────────────────
@@ -1305,15 +1363,15 @@ function registerTools(server) {
     'task_submit',
     {
       title: 'Submit a task to an opencode PAD (or the shared pool)',
-      description: 'Push: runs `opencode run` inside the named opencode PAD in the background and returns a task_id immediately — poll with task_status, fetch with task_result, stop with task_cancel. The task runs in that PAD\'s own workspace and auto-approves permissions that are not explicitly denied (pass autoApprove:false to refuse that). Pull: omit `name` to file the task in the shared pool at `priority`; combine `name` with enqueue:true to address a task to one PAD without starting it yet. A worker PAD then claims it with task_get_next. Never pick an agent with an @mention in the prompt — headless runs silently fall through to the primary agent; use `agent` instead.',
+      description: 'Push: runs `opencode run` inside the named opencode PAD in the background and returns a task_id immediately — poll with task_status, fetch with task_result, stop with task_cancel. The task runs in THAT PAD\'s effective workspace (its custom mount when it has one, never a driver default the PAD does not have) and auto-approves permissions that are not explicitly denied (pass autoApprove:false to refuse that). Pull: omit `name` to file the task in the shared pool at `priority`; combine `name` with enqueue:true to address a task to one PAD without starting it yet. A worker PAD then claims it with task_get_next. Never pick an agent with an @mention in the prompt — headless runs silently fall through to the primary agent; use `agent` instead. TIMEOUT: capped at 1 hour (default 10 minutes); on expiry the task is marked `error` with `timedOut: true` and the process is killed, which is how you tell a timeout from a crash without reading stderr. For genuinely long work, file a short task that re-files itself and exits.',
       inputSchema: {
-        name: z.string().optional().describe('PAD to run the task on (opencode only). Omit to add it to the unassigned pool.'),
+        name: z.string().optional().describe('PAD to run the task on (opencode only). Omit to add it to the unassigned pool. This is the PAD the task RUNS IN — the opposite of task_get_next\'s `worker`, which is the PAD doing the claiming.'),
         prompt: z.string().describe('Task instructions for the agent'),
         model: z.string().optional().describe('provider/model override, e.g. anthropic/claude-sonnet-4-5'),
         agent: z.string().optional().describe('OpenCode agent to run as (--agent). Use this, never an @mention.'),
         enqueue: z.boolean().optional().describe('File addressed to `name` without starting it — it stays pending for task_get_next'),
         priority: z.number().int().optional().describe('Queue rank for pool tasks — lower numbers are served first (default 0)'),
-        timeout: z.number().int().min(1000).max(3600000).optional().describe('Kill the task after this many ms (default 600000)'),
+        timeout: z.number().int().min(1000).max(3600000).optional().describe('Kill the task after this many ms (default 600000, max 3600000)'),
         autoApprove: z.boolean().optional().describe('Auto-approve permissions not explicitly denied (default true) — same trust level as exec'),
       },
     },
@@ -1330,7 +1388,7 @@ function registerTools(server) {
       } else if (user && !toolAllowed(user, 'task_submit', '')) {
         throw new McpError(ErrorCode.InvalidRequest, 'Not permitted by API key tool grant: task_submit');
       }
-      const id = taskError(() => taskRunner.submitTask({
+      const id = await taskErrorAsync(() => taskRunner.submitTask({
         name: target ? target.name : undefined,
         prompt: args.prompt,
         model: args.model,
@@ -1341,7 +1399,31 @@ function registerTools(server) {
         autoApprove: args.autoApprove !== false,
         user,
       }));
-      return textResult({ ok: true, task_id: id, mode: pad ? 'push' : 'pool', task: taskRunner.getTask(id) });
+      const task = taskRunner.getTask(id);
+      // A pool task does not start itself (plan 63 1d). `ok: true` used to read
+      // as "a worker will pick this up" with no way to check, so the filing
+      // response now carries the queue it landed in. `recentClaimers` is the
+      // honest version of "will anyone run this": empty means no PAD has claimed
+      // work in the window, and nothing will start this until one does.
+      //
+      // `mode` is read off the row's OWN `route` rather than recomputed from
+      // whether a name was passed. Those are not the same question: an addressed
+      // `enqueue: true` submit has a name and does not start, and a top-level
+      // `mode: "push"` there would be a second, contradicting answer to the one
+      // `task.route` already gives correctly.
+      const route = taskRunner.taskRoute(task);
+      const out = { ok: true, task_id: id, mode: route, task: taskRow(task) };
+      if (!pad) {
+        out.queue = {
+          ...taskRunner.queueState(),
+          position: taskRunner.queuePosition(id),
+          for: 'any worker (task_get_next)',
+        };
+        out.note = 'Filed to the shared pool. Nothing runs until a worker PAD calls task_get_next — a pool task is inert on its own.';
+      } else if (route === 'enqueued') {
+        out.note = `Filed to ${target.name} for a worker to claim with task_get_next — enqueue was set, so it did not start on the PAD.`;
+      }
+      return textResult(out);
     }
   );
 
@@ -1349,15 +1431,28 @@ function registerTools(server) {
     'task_get_next',
     {
       title: 'Claim the next queued task for a PAD',
-      description: 'Pull: atomically claim the highest-priority pending task for this PAD — either addressed to it or sitting in the shared pool — and return it. The worker then does the work itself and reports with task_complete. Returns { task: null, queueEmpty: true } when there is nothing to do. This mutates state (the task becomes `running`), so read-only keys cannot use it.',
+      description: 'Pull: atomically claim the next pending task for this worker — either addressed to it or sitting in the shared pool, lowest `priority` first, ties oldest-first — and return it. The worker then does the work itself and reports with task_complete (passing the same `worker` name). Returns { task: null, queueEmpty: true } when there is nothing to do. This MUTATES state (the task becomes `running`), so it is not a way to look at the queue: use task_list, which reports `nextUp` without claiming anything. A read-only key cannot use this tool.',
       inputSchema: {
-        name: z.string().describe('PAD claiming the work'),
+        // Optional in the schema on purpose: if `worker` were required, the SDK's
+        // own validation would reject a caller who passed `name` with "expected
+        // string, received undefined at worker" — true, and it teaches nothing.
+        // The handler below refuses with the sentence that says what the two
+        // spellings MEAN, which is the whole point of the rename.
+        worker: z.string().optional().describe('The PAD claiming the work — the worker doing the task itself. Required. (NOT `name`: on task_submit, `name` is the PAD a task runs IN.)'),
+        name: z.string().optional().describe('REMOVED — this tool takes `worker`. Passing `name` here is an error, not an alias.'),
       },
     },
-    async ({ name }) => {
-      const agent = await requirePad('task_get_next', name);
+    async ({ worker, name }) => {
+      if (name !== undefined) {
+        throw new McpError(ErrorCode.InvalidRequest,
+          'task_get_next takes `worker` (the PAD doing the claiming), not `name` — on task_submit, `name` is the PAD a task runs IN. Retry with {worker: "<pad>"}.');
+      }
+      if (!worker) {
+        throw new McpError(ErrorCode.InvalidRequest, 'task_get_next requires `worker` — the PAD that will do the work.');
+      }
+      const agent = await requirePad('task_get_next', worker);
       const task = taskError(() => taskRunner.claimNextTask(agent.name));
-      return textResult(task ? { task } : { task: null, queueEmpty: true });
+      return textResult(task ? { task: taskRow(task) } : { task: null, queueEmpty: true });
     }
   );
 
@@ -1365,18 +1460,48 @@ function registerTools(server) {
     'task_complete',
     {
       title: 'Report a claimed task finished',
-      description: 'Pull: close out a task this worker claimed. `done` stores your summary as the task result; `failed` records the failure. Only a `pending` or `running` task can be completed.',
+      description: 'Pull: close out a task THIS worker claimed. `done` stores your summary as the task result; `failed` records the failure. Only a `running` task can be completed, and only by the PAD named in `worker` — a task nobody claimed is refused too, so "done" always means a worker actually did the work. Use task_retry to re-file a task that failed.',
       inputSchema: {
         task_id: z.string().describe('Task id from task_get_next or task_submit'),
+        worker: z.string().describe('The PAD that claimed this task (must match its `claimed_by`)'),
         status: z.enum(['done', 'failed']).optional().describe('done (default) or failed'),
         summary: z.string().optional().describe('What was done, or why it failed'),
       },
     },
-    async ({ task_id, status, summary }) => {
+    async ({ task_id, worker, status, summary }) => {
       const task = taskRunner.getTask(task_id);
       requireTaskGrant(currentUser(), 'task_complete', task);
-      const done = taskError(() => taskRunner.completeTask(task_id, { status: status || 'done', summary: summary || '' }));
-      return textResult({ task: done });
+      if (!worker) {
+        throw new McpError(ErrorCode.InvalidRequest,
+          'task_complete requires `worker` — the PAD that claimed this task. Reporting a completion without naming the claimer would let any worker close out anybody else\'s work.');
+      }
+      // Resolve the worker through the same name resolver as every other tool, so
+      // the pad that claimed under one spelling is recognised under the other
+      // two and the check cannot be dodged by re-spelling.
+      const agent = await requirePad('task_complete', worker);
+      const done = taskError(() => taskRunner.completeTask(task_id, {
+        status: status || 'done',
+        summary: summary || '',
+        worker: agent ? agent.name : null,
+      }));
+      return textResult({ task: taskRow(done) });
+    }
+  );
+
+  registerToolBound(
+    'task_retry',
+    {
+      title: 'Re-file a finished task',
+      description: 'Re-file the prompt of a task that has finished as a new task, keeping its target PAD, priority and timeout. The old row is left as it ended and gains `supersededBy`, and the new row carries an incremented `attempt` — so a task that failed three times reads as one chain of three attempts rather than three unrelated rows. The replacement is always a CLAIMABLE task (`route: "enqueued"`), even when the original was a push: a retry is a re-file, not a run, so it never silently starts work. Claim it with task_get_next. Only a finished task can be retried; a pending or running one is refused.',
+      inputSchema: {
+        task_id: z.string().describe('Task id that finished (error, cancelled or done)'),
+      },
+    },
+    async ({ task_id }) => {
+      const task = taskRunner.getTask(task_id);
+      requireTaskGrant(currentUser(), 'task_retry', task);
+      const { task: fresh, superseded } = taskError(() => taskRunner.retryTask(task_id));
+      return textResult({ ok: true, task_id: fresh.id, task: taskRow(fresh), superseded: taskRow(superseded) });
     }
   );
 
@@ -1393,7 +1518,7 @@ function registerTools(server) {
     async ({ task_id, rank }) => {
       const task = taskRunner.getTask(task_id);
       requireTaskGrant(currentUser(), 'task_priority', task);
-      return textResult({ task: taskError(() => taskRunner.setPriority(task_id, rank)) });
+      return textResult({ task: taskRow(taskError(() => taskRunner.setPriority(task_id, rank))) });
     }
   );
 
@@ -1401,7 +1526,7 @@ function registerTools(server) {
     'task_status',
     {
       title: 'Task status',
-      description: 'Read a task\'s state: pending | running | done | error | cancelled, with exit code, claimer, priority, timing, and an optional tail of its output.',
+      description: 'Read a task\'s state: pending | running | done | error | cancelled, with the claimer, priority, timing, an optional tail of its output, and the three fields that settle how it went: `outcome` (ok / failed / unknown — unknown covers anything unfinished or cancelled), `timedOut` (it hit its timeout rather than crashing), and `exit_code` (only ever set for a task that ran a real process; a pull worker reports its own result and has no exit code, which is why `outcome` exists). `last_output_at` is a heartbeat: it moves only while new bytes are arriving, so a task that is alive but stuck reads as stale. `created_by` says who filed it (`key:<id>` over MCP, `user:<id>` from the web UI, `mcp` when unknown).',
       inputSchema: {
         task_id: z.string().describe('Task id'),
         tail: z.number().int().min(1).max(20000).optional().describe('Return the last N characters of captured stdout'),
@@ -1410,21 +1535,8 @@ function registerTools(server) {
     async ({ task_id, tail }) => {
       const task = taskRunner.getTask(task_id);
       requireTaskGrant(currentUser(), 'task_status', task);
-      const out = {
-        id: task.id,
-        status: task.status,
-        agent_name: task.agent_name,
-        claimed_by: task.claimed_by,
-        priority: task.priority,
-        model: task.model,
-        agent: task.agent_type,
-        exit_code: task.exit_code,
-        result_summary: task.result_summary,
-        created_at: task.created_at,
-        started_at: task.started_at,
-        finished_at: task.finished_at,
-      };
-      if (tail) out.stdout_tail = String(task.stdout || '').slice(-tail);
+      const out = taskRow(task, { full: true });
+      if (tail) out.stdout_tail = taskRunner.stripAnsi(task.stdout).slice(-tail);
       return textResult(out);
     }
   );
@@ -1433,7 +1545,7 @@ function registerTools(server) {
     'task_result',
     {
       title: 'Task result',
-      description: 'Full result of a task: the extracted assistant text, exit code, and the raw captured stdout/stderr (byte-capped).',
+      description: 'Full result of a task: the extracted assistant text, exit code, outcome, and the captured stdout/stderr (byte-capped, ANSI colour codes stripped — the agent colours its own logs and the escapes are noise in a result).',
       inputSchema: {
         task_id: z.string().describe('Task id'),
       },
@@ -1444,10 +1556,12 @@ function registerTools(server) {
       return textResult({
         id: task.id,
         status: task.status,
+        outcome: taskRunner.taskOutcome(task),
+        timedOut: !!task.timed_out,
         exit_code: task.exit_code,
         result: task.result_summary,
-        stdout: task.stdout,
-        stderr: task.stderr,
+        stdout: taskRunner.stripAnsi(task.stdout),
+        stderr: taskRunner.stripAnsi(task.stderr),
         finished_at: task.finished_at,
       });
     }
@@ -1457,35 +1571,50 @@ function registerTools(server) {
     'task_list',
     {
       title: 'List tasks',
-      description: 'List recent tasks, newest first — optionally only those addressed to or claimed by one PAD. Rows are scoped to what your key may see; unclaimed pool tasks are shared.',
+      description: 'List tasks in SERVICE order: pending tasks first, lowest `priority` first (that is the order task_get_next serves them), then finished tasks newest-first. `nextUp` names the task task_get_next would hand out next WITHOUT claiming it, so this stays a read — the queue is answerable without mutating anything. Filter with `name` (one PAD: tasks addressed to it or claimed by it) and `status`; `total` counts every matching row and `truncated` says whether the limit hid any, so an empty list and an exhausted queue are not the same answer. Each row carries `route` (push = the PAD runs it itself, enqueued = filed to that PAD for a worker to claim, pull = a worker does it itself) and `outcome`. Rows are scoped to what your key may see; unclaimed pool tasks are shared.',
       inputSchema: {
-        name: z.string().optional().describe('Only tasks for this PAD (addressed to or claimed by it)'),
+        name: z.string().optional().describe('Only tasks for this PAD (addressed to or claimed by it). This is the PAD to filter BY, not the worker claiming — task_get_next uses `worker` for that.'),
+        status: z.enum(['pending', 'running', 'done', 'error', 'cancelled']).optional().describe('Only tasks in this state. `status: "pending"` with `total` answers "is the queue complete?" in one read.'),
         limit: z.number().int().min(1).max(200).optional().describe('How many to return (default 50)'),
       },
     },
-    async ({ name, limit }) => {
+    async ({ name, status, limit }) => {
       const user = currentUser();
-      if (name) requireTool(user, 'task_list', name);
-      const rows = taskRunner.listTasks({ pad: name, limit });
-      const visible = name
-        ? rows
-        : rows.filter((t) => {
-          const pad = t.claimed_by || t.agent_name || '';
-          return !pad || (canAccess(user, pad) && targetAllowed(user, pad));
+      let pad = null;
+      if (name) {
+        requireTool(user, 'task_list', name);
+        pad = (await requireAgent(name)).name;
+      }
+      // Count over the rows the caller may SEE, after the filter and before the
+      // slice. `countTasks` is unscoped, so using it here made `total` and
+      // `truncated` two answers to a question about a different set than the one
+      // in `tasks`: a key that could not see four rows was told the list was
+      // truncated, and a short visible list read as "that is everything" when the
+      // real total was larger. Same trap as the network-filter cap in
+      // settings_get — a filter that runs after the cap is not a filter.
+      const CEILING = 1000;
+      const all = taskRunner.listTasks({ pad, status, limit: CEILING });
+      const visible = pad
+        ? all
+        : all.filter((t) => {
+          const owner = t.claimed_by || t.agent_name || '';
+          return !owner || (canAccess(user, owner) && targetAllowed(user, owner));
         });
-      return textResult({
-        tasks: visible.map((t) => ({
-          id: t.id,
-          status: t.status,
-          agent_name: t.agent_name,
-          claimed_by: t.claimed_by,
-          priority: t.priority,
-          prompt: String(t.prompt || '').slice(0, 200),
-          exit_code: t.exit_code,
-          created_at: t.created_at,
-          finished_at: t.finished_at,
-        })),
-      });
+      // nextUp is computed by the same selector the claim uses, so the preview
+      // cannot name a task the claim would then skip.
+      const up = taskRunner.nextUpTask(pad);
+      const out = {
+        tasks: visible.slice(0, limit).map((t) => taskRow(t)),
+        total: visible.length,
+        truncated: visible.length > limit,
+        nextUp: up ? { task_id: up.id, priority: up.priority, for: pad || 'any worker (task_get_next)' } : null,
+        order: 'pending first by priority asc, then finished newest-first',
+      };
+      if (all.length >= CEILING) {
+        out.fetch_capped = CEILING;
+        out.note = `Read stopped at ${CEILING} matching rows, so \`total\` is a floor, not a count. Narrow with \`name\` or \`status\`.`;
+      }
+      return textResult(out);
     }
   );
 
@@ -1493,7 +1622,7 @@ function registerTools(server) {
     'task_cancel',
     {
       title: 'Cancel a task',
-      description: 'Stop a pending or running task: signals the process (SIGTERM, then SIGKILL after a grace period) and marks the task `cancelled`. Requires confirm: true.',
+      description: 'Stop a pending or running task: signals the process (SIGTERM, then SIGKILL after a grace period) and marks the task `cancelled`. Requires confirm: true. A cancel is distinguishable from a timeout — `timedOut` is false here — so the two causes never read the same.',
       inputSchema: {
         task_id: z.string().describe('Task id'),
         confirm: z.boolean().describe('Must be true to cancel'),
@@ -1505,7 +1634,7 @@ function registerTools(server) {
       if (confirm !== true) {
         throw new McpError(ErrorCode.InvalidRequest, 'Refusing to cancel without confirm: true.');
       }
-      return textResult({ task: taskError(() => taskRunner.cancelTask(task_id)) });
+      return textResult({ task: taskRow(taskError(() => taskRunner.cancelTask(task_id))) });
     }
   );
 

@@ -129,7 +129,7 @@ describe('MCP Server - Handshake', () => {
   it('task queue tools are hidden from the surface (service kept)', async () => {
     const result = await client.listTools();
     const names = result.tools.map((t) => t.name);
-    for (const tool of ['task_submit', 'task_get_next', 'task_complete', 'task_priority', 'task_status', 'task_result', 'task_list', 'task_cancel']) {
+    for (const tool of ['task_submit', 'task_get_next', 'task_complete', 'task_retry', 'task_priority', 'task_status', 'task_result', 'task_list', 'task_cancel']) {
       assert.ok(!names.includes(tool), `${tool} is hidden`);
     }
   });
@@ -324,7 +324,7 @@ describe('MCP Server - API key grants (plan 35b)', () => {
 describe('MCP Server - task queue grants (plan 47)', () => {
   const user = (scopes) => ({ userId: 'u1', role: 'user', scopes });
   const READ = ['task_status', 'task_result', 'task_list'];
-  const EXEC = ['task_submit', 'task_get_next', 'task_complete', 'task_priority', 'task_cancel'];
+  const EXEC = ['task_submit', 'task_get_next', 'task_complete', 'task_retry', 'task_priority', 'task_cancel'];
 
   it('read scope sees task results but cannot mutate the queue', () => {
     const read = user(['read', 'target:agent:pad-x']);

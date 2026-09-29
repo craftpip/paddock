@@ -235,6 +235,60 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   (or re-read), and "did the clock move?" is a far easier test to write against a
   response than a diff of the implementation.
 
+- **A parameter that names two different things is a trap that no type system
+  catches, and the fix is a rename plus a REFUSAL, never an alias.**
+  `task_submit {name}` was the PAD a task *runs in*; `task_get_next {name}` was
+  the *worker claiming* it. One name, two meanings, and the second was read as
+  the first. Renaming the claim side to `worker` and letting `name` through as an
+  alias would have kept the ambiguity alive under a new spelling — so a `name`
+  there is a hard error with a sentence explaining the difference. **And leave the
+  renamed parameter OPTIONAL in the JSON schema**: required, the SDK answers
+  `expected string, received undefined at worker`, which is true and teaches
+  nothing, pre-empting the only error worth printing. Same rule as the resolver
+  above — the gate must run *before* the grant, and the message a caller gets must
+  be the one that says what to do next.
+- **A status filter, a `total` and a cap only answer a question about ONE set —
+  and a filter that runs after a cap is not a filter.** `task_list` counted
+  `total`/`truncated` from an **unscoped** query and compared it to the length of
+  the rows *this key may see*, so the two numbers described different sets: a
+  short list read as "that is everything", and a key that could not see four rows
+  was told the answer was truncated. Count after the access filter, before the
+  slice, and if the fetch itself is capped say so (`fetch_capped`) rather than
+  letting `total` become a silent maybe. This is the same shape as the
+  `availableNetworks` cap in `settings_get`.
+- **A summary field derived from two facts is a SECOND answer to a question the
+  row already answers, and it will contradict it.** `task_submit` returned
+  `mode: pad ? 'push' : 'pool'` at the top while the row inside the same response
+  carried the correct derived `route` — so an addressed `enqueue: true` submit
+  said `push` in one field and `enqueued` in the other. Read the summary off the
+  row's own derived value, never recompute it from the arguments.
+- **Copying a column into a re-file produces a row that LIES, and the label is
+  the only evidence.** `retryTask` copied the original's `enqueue` flag, so a
+  retried *push* kept `enqueue = 0` with no child process attached — and
+  `task_route`, deriving `push` from that same flag, reported a PAD was running
+  work nothing was running. A retry is a **re-file, not a run**: the replacement is
+  always claimable. The general form: when a derived field is computed from
+  stored facts, every way of writing a row must leave facts that make the derived
+  answer TRUE — never write a fact for its side effect on a label.
+- **`claimed_by` does not need a `claimedBy`, and a test must say so.** Adding a
+  second spelling of one field is how a queue ends up with two sources of truth
+  for who is working on what. Store facts, derive the agent-facing vocabulary
+  (`route` / `outcome` / `timedOut`), and pin the negative in the schema test
+  (`assert.ok(!cols.includes('claimedBy'))`) or the next person will add it as a
+  "harmless convenience".
+- **A migration suite needs a control that asserts the MIGRATION ran, and the
+  only honest one asserts the columns are ABSENT when it did not.** Every
+  assertion in a migration suite also passes on a database that already has the
+  columns, so a green run proves only "the column exists somewhere". `db.js` adds
+  the five plan-63 task columns in a **loop**, which is the riskier shape — it
+  looks incapable of failing halfway — and a missing column here is worse than a
+  crash: `task_route` reads `undefined`, which is falsy, which silently means
+  "this was pushed" and "this did not time out" for every task ever filed. The
+  control boots the stripped fixture with `ALTER TABLE … ADD COLUMN` suppressed
+  and asserts absence; remove the loop and the five real tests go red while the
+  control stays green. **Re-measure by removing the code and watching tests fail** —
+  done here: 3 red, then 11 green on restore.
+
 ## Project Map
 
 - **`docker-compose.yml`** defines the `webui` service (container `paddock`,

@@ -408,6 +408,86 @@ heartbeat on a 1s interval. The flush is wrapped in a try/catch on purpose: it
 runs from a timer, and an exception in a timer callback is an uncaught exception
 that kills the webui.
 
+### The queue's vocabulary (plan 63)
+
+**A name the surface hands out must mean one thing.** `task_submit {name}` is
+the PAD a task *runs in*; `task_get_next {name}` was the *worker claiming* the
+task. One parameter, two meanings, and the second read as the first. The claim
+side is now `worker`, and passing `name` to `task_get_next` is a refusal rather
+than an alias — with `worker` left **optional in the JSON schema** on purpose, so
+the SDK's `expected string, received undefined at worker` does not pre-empt the
+sentence that explains the difference.
+
+**Facts are stored, vocabulary is derived.** `tasks` gained `enqueue`,
+`timeout_ms`, `timed_out`, `attempt` and `superseded_by`. Nothing else: `route`,
+`outcome` and `timedOut` are computed per row, and `claimed_by` keeps its one
+snake_case spelling rather than gaining a `claimedBy` twin. A second column for
+one value is the defect this replaced.
+
+| Derived field | Answers | From |
+|---|---|---|
+| `route: push \| enqueued \| pull` | who runs this, and is it already running | `enqueue` + `claimed_by` |
+| `outcome: ok \| error \| unknown` | did it work | `status` + `exit_code` |
+| `timedOut` | a kill or a user cancel | `timed_out` |
+
+`outcome: "unknown"` is a real third value and is never reported as failure — a
+queued task has no verdict yet, and collapsing that into "failed" is how a caller
+learns to distrust the field. A **pull** task has no process and therefore no
+`exit_code`; `outcome` carries the verdict instead of fabricating `0`.
+
+**One read answers "is the queue complete?".** `task_list` is in **service
+order** (pending by `priority` ascending — the order `task_get_next` serves them
+— then finished newest-first), and `nextUp` names the task the claim *would*
+return, computed by the same selector, so the preview cannot disagree with the
+claim. Neither mutates: reading the queue does not consume it. `status` +
+`total` is the completion check, and `total`/`truncated` are counted over the rows
+**this key may see, after the access filter and before the slice** — an unscoped
+count described a different set than the one in `tasks`, so a short list read as
+"that is everything" while a key that could not see four rows was told the answer
+was truncated.
+
+**A filed task does not start itself.** A pool `task_submit` used to answer
+`ok: true` and nothing else, which reads as "a worker will pick this up" with no
+way to check. It now carries `queue` (length, position, and `recentClaimers` over
+30 minutes — empty means no PAD has claimed work in the window, which is the
+honest form of "will anyone run this") and a note saying the task is inert until
+a worker claims it. There is no worker-presence registry, so no polling count is
+invented. The top-level `mode` is read off the row's own `route` rather than
+recomputed from whether a name was passed — the two were different questions and
+an addressed `enqueue: true` submit said `push` at the top and `enqueued` inside
+the same response.
+
+**A retry is a re-file, not a run.** `task_retry` re-files the prompt with an
+incremented `attempt` and links the old row through `superseded_by`, so three
+failures read as one chain rather than three unrelated rows. The replacement is
+**always** a claimable `enqueued` task, even when the original was a push: copying
+the original's `enqueue` flag left a retried push with no child process while
+`task_route` still called it `push` — the label claiming a PAD was running
+something nothing was running. It rides the `exec` grant, because re-filing starts
+real work.
+
+**Only the claimer may close a task.** `task_complete` **requires** `worker` and
+resolves it through the shared name resolver, so a worker cannot close out
+somebody else's work by re-spelling the pad. The service refuses an unclaimed
+task as `task_not_claimed` — reported *before* the pending-state check, because
+"never claimed" is what the caller must fix and "not in a claimable state
+(pending)" is a true sentence that tells them nothing. A claimer that is present
+but not `running` is `task_not_running`.
+
+**A task's cwd is checked, not assumed.** `submitTask` is async and resolves the
+PAD's effective workspace (`workspace_dir` when set, else the driver default),
+verifies it exists **inside the container**, and refuses with
+`task_workspace_missing` naming the mount it meant — before inserting anything.
+The same rule as `tmux new-session -c`, which silently starts in the parent.
+
+Also on rows: `created_by` (who filed it), `last_output_at`, ANSI stripped from
+`task_result`'s `stdout`/`stderr` at the **boundary** (the database keeps the raw
+bytes — stripping is a presentation choice), and a `…[truncated]` marker plus
+`prompt_truncated` on a clipped prompt in listings. A timeout is now `status:
+"error"` + `timed_out: 1` with a summary naming the limit (default 10 minutes,
+max 1 hour, documented in the tool description) instead of landing on `cancelled`,
+where it read identically to a user's cancel.
+
 ## API Keys (api-keys.js)
 
 Per-user bearer keys for the paddock MCP server (`/mcp`). Replaces the
@@ -474,7 +554,7 @@ handlers (no duplication between REST and MCP).
 | `job_log` | Read a job's streamed log lines | `jobLog.logLines` |
 | `help` | The "how to use Paddock through MCP" guide (§§1–4, plan 35a) | `llm-guide.js` |
 | `agent_commands` | Set B — non-interactive command catalog for an agent type | `llm-guide.js` → `drivers` `llmCommands` |
-| `task_submit` … `task_cancel` (8 tools) | HIDDEN from the MCP surface (user decision 2026-09-29; re-enable with `PADDOCK_TASK_QUEUE=1`) — service kept | `services/task-runner.js` |
+| `task_submit` … `task_cancel` (9 tools, incl. `task_retry`) | HIDDEN from the MCP surface (user decision 2026-09-29; re-enable with `PADDOCK_TASK_QUEUE=1`) — service kept, vocabulary per §Task Runner | `services/task-runner.js` |
 | `mission_projects` | The Mission projects (PAD + folder) the key may see, with session/live/open counts, the PAD's status, and per-session `busy`; narrow it with `project_id` / `name` / `folder`, and ask for nested sessions with `include_sessions` | `mission.listProjects` + `withLive` + `withAgentBusyProjects` |
 | `mission_sessions` | Sessions list (filter by `project_id` / `agent`), or one session's metadata + pane state + screen tail; every row carries `busy` / `busyKnown` / `open` / `kind`, and detail mode also returns `canSend` (+ `sendRefusal`) | `mission.listSessions` / `listAllSessions` / `screen` + `withAgentBusy` |
 | `mission_project_create` | Create a project row (folder probed inside the PAD) | `mission.projectFolders` + `mission.createProject` |

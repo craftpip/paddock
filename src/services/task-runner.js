@@ -34,6 +34,11 @@ let spawnFn = realSpawn;
 let lookupAgent = defaultLookupAgent;
 let containerIsRunning = defaultIsRunning;
 let containerExecFn = defaultContainerExec;
+// The in-PAD `test -d` behind the 1k workspace gate. A seam rather than a
+// direct require of pad-tmux: task-runner is a service that must not drag the
+// docker/tmux layer into every test that touches bookkeeping, and the seam is
+// how the tests make a folder exist or not.
+let folderExistsFn = require('./pad-tmux').folderExists;
 
 function defaultLookupAgent(name) {
   return registry.getAgent(name);
@@ -71,6 +76,47 @@ function taskCapability(type) {
 
 function shq(s) {
   return "'" + String(s).replace(/'/g, "'\\''") + "'";
+}
+
+/** A machine code the caller can branch on. The SDK's error path only prints
+ *  `message`, so the code is part of the message (the Mission tools' rule). */
+function taskFail(code, msg) {
+  return new Error(`${code}: ${msg}`);
+}
+
+const SGR_RE = /\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b[@-Z\\-_]/g;
+
+/** Strip SGR escape sequences from captured process output. `opencode run
+ *  --format json` colours its own logs, so a raw tail handed to an LLM arrives
+ *  as escape soup wrapped around the one line the caller wanted. Only SGR (plus
+ *  OSC strings and the two-char Fe escapes) — a bare ESC left in place would
+ *  still reach the reader. */
+function stripAnsi(s) {
+  if (s == null) return '';
+  return String(s).replace(SGR_RE, '');
+}
+
+/** How the work will actually happen (plan 63 1a). One field, because "who runs
+ *  this and is it already running?" is a single question — a claimed task is a
+ *  worker doing it itself no matter which PAD it was addressed to, and a
+ *  running push task is the PAD's own `opencode run`. Derived, never stored. */
+function taskRoute(row) {
+  if (!row) return null;
+  if (row.claimed_by) return 'pull';
+  if (!row.agent_name) return 'pull';
+  if (Number(row.enqueue) === 1) return 'enqueued';
+  return 'push';
+}
+
+/** Did it work? (plan 63 1i). `unknown` is not a failure — a task that has not
+ *  finished, or was cancelled, has no verdict, and saying so is the difference
+ *  between "failed" and "still going". `timedOut` is the separate axis: a
+ *  timeout is an `error` with a cause, not a crash you have to infer. */
+function taskOutcome(row) {
+  if (!row) return 'unknown';
+  if (row.status === 'done') return 'ok';
+  if (row.status === 'error') return 'failed';
+  return 'unknown';
 }
 
 function capOutput(s, limit = MAX_OUTPUT_BYTES) {
@@ -119,15 +165,118 @@ function getTask(id) {
   return getDb().prepare('SELECT * FROM tasks WHERE id = ?').get(id);
 }
 
-function listTasks({ pad, limit = 50 } = {}) {
+/** The task a worker would be handed next, WITHOUT claiming it (plan 63 1b/1c).
+ *  Deliberately the same WHERE + ORDER BY as `claimNextTask`, so a list can
+ *  name the next task and the claim can never disagree about which one that is
+ *  — a preview that is computed separately is a preview of a different queue.
+ *  `pad` null = "any worker", which means pool tasks only: a task addressed to
+ *  one PAD is not claimable by an arbitrary worker, and naming it as the next
+ *  up would hand out a task the reader cannot take. */
+function nextUpTask(pad) {
+  const db = getDb();
+  const row = pad
+    ? db.prepare(
+        `SELECT * FROM tasks
+         WHERE status = 'pending' AND (agent_name IS NULL OR agent_name = ?)
+         ORDER BY priority ASC, rowid ASC LIMIT 1`
+      ).get(pad)
+    : db.prepare(
+        `SELECT * FROM tasks
+         WHERE status = 'pending' AND agent_name IS NULL
+         ORDER BY priority ASC, rowid ASC LIMIT 1`
+      ).get();
+  return row || null;
+}
+
+/** Pending tasks first in SERVICE order, then history newest-first (plan 63
+ *  1b). The old single `rowid DESC` was the exact reverse of the order the
+ *  queue is served in, so a caller read the listing as the work order and got it
+ *  backwards. The two halves cannot be one sort: history has no service order,
+ *  and pretending newest-first is a queue is what caused the bug. */
+function listTasks({ pad, status, limit = 50 } = {}) {
   const max = Math.max(1, Math.min(Number(limit) || 50, 200));
   const db = getDb();
+  const where = [];
+  const args = [];
   if (pad) {
-    return db.prepare(
-      "SELECT * FROM tasks WHERE agent_name = ? OR claimed_by = ? ORDER BY rowid DESC LIMIT ?"
-    ).all(pad, pad, max);
+    where.push('(agent_name = ? OR claimed_by = ?)');
+    args.push(pad, pad);
   }
-  return db.prepare('SELECT * FROM tasks ORDER BY rowid DESC LIMIT ?').all(max);
+  if (status) {
+    where.push('status = ?');
+    args.push(String(status));
+  }
+  const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  return db.prepare(
+    `SELECT * FROM tasks ${clause}
+     ORDER BY CASE WHEN status = 'pending' THEN 0 ELSE 1 END ASC,
+              CASE WHEN status = 'pending' THEN priority END ASC,
+              CASE WHEN status = 'pending' THEN rowid END ASC,
+              rowid DESC
+     LIMIT ?`
+  ).all(...args, max);
+}
+
+/** How many rows match a list's filters, ignoring `limit` (plan 63 1c). Without
+ *  it a capped list and an exhausted queue look identical — the same defect as a
+ *  filtered list that falls back to the unfiltered one. */
+function countTasks({ pad, status } = {}) {
+  const db = getDb();
+  const where = [];
+  const args = [];
+  if (pad) {
+    where.push('(agent_name = ? OR claimed_by = ?)');
+    args.push(pad, pad);
+  }
+  if (status) {
+    where.push('status = ?');
+    args.push(String(status));
+  }
+  const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  return db.prepare(`SELECT COUNT(*) AS c FROM tasks ${clause}`).get(...args).c;
+}
+
+/** Queue state returned with a filed pool task (plan 63 1d). A pool task does
+ *  not start itself: nothing runs until a worker calls `task_get_next`, and
+ *  there may be no worker at all. The webui has no presence registry for a
+ *  worker *polling* (the same gap that makes opencode `busyKnown: false` mean
+ *  unknown), so this does not invent a number for it — it reports the pads that
+ *  have actually CLAIMED work in the window, which is the real signal, and is
+ *  empty in exactly the case the caller needs to hear about. */
+const RECENT_CLAIMER_WINDOW_MIN = 30;
+
+function queueState() {
+  const db = getDb();
+  const pending = db.prepare(
+    "SELECT COUNT(*) AS c FROM tasks WHERE status = 'pending' AND agent_name IS NULL"
+  ).get().c;
+  const claimers = db.prepare(
+    `SELECT DISTINCT claimed_by AS pad FROM tasks
+     WHERE claimed_by IS NOT NULL
+       AND started_at IS NOT NULL
+       AND started_at >= datetime('now', ?)
+     ORDER BY pad`
+  ).all(`-${RECENT_CLAIMER_WINDOW_MIN} minutes`).map((r) => r.pad);
+  return {
+    queueLength: pending,
+    recentClaimers: claimers,
+    recentClaimerWindowMin: RECENT_CLAIMER_WINDOW_MIN,
+  };
+}
+
+/** Where a just-filed task sits in the pool: 1 = next up. */
+function queuePosition(id) {
+  const db = getDb();
+  const row = db.prepare(
+    "SELECT priority, rowid FROM tasks WHERE id = ? AND status = 'pending' AND agent_name IS NULL"
+  ).get(id);
+  if (!row) return null;
+  const ahead = db.prepare(
+    `SELECT COUNT(*) AS c FROM tasks
+     WHERE status = 'pending' AND agent_name IS NULL
+       AND (priority < ? OR (priority = ? AND rowid < ?))`
+  ).get(row.priority, row.priority, row.rowid).c;
+  return ahead + 1;
 }
 
 function reconcileOrphanedTasks() {
@@ -205,14 +354,47 @@ function attachProcess(id, child, timeoutMs, runtimeRef, cap) {
   if (state.flushTimer.unref) state.flushTimer.unref();
 
   if (timeoutMs > 0) {
-    state.timer = setTimeout(() => killTask(id), timeoutMs);
+    state.timer = setTimeout(() => timeoutTask(id, timeoutMs), timeoutMs);
     if (state.timer.unref) state.timer.unref();
   }
 
   running.set(id, { child, state, runtimeRef });
 }
 
-function submitTask({ name, prompt, model, agent, priority = 0, timeout, autoApprove = true, enqueue = false, user } = {}) {
+/** The cwd a task should run in, resolved the way the agent list does (plan 63
+ *  1k). `driver.workspaceDir` is the TYPE default, which is wrong for every PAD
+ *  carrying a custom workspace mount (plan 24) — the observed failure was a task
+ *  launched into `/root/.opencode/workspace`, a directory that pad does not have.
+ *  `pad.workspace_dir` is the effective one: the mount's container path when a
+ *  mount is configured, the driver default otherwise.
+ *
+ *  Async because the second half is a `docker exec test -d` INSIDE the pad. That
+ *  probe lives next to the value it checks and the value it returns is the one
+ *  `submitTask` then uses, so the two cannot disagree about where the task ran —
+ *  the failure mode where a probe reports one directory and the command runs in
+ *  another, which is worse than reporting no cwd at all. A missing folder fails
+ *  the submit with a code naming the mount that was meant, exactly like
+ *  `mission_folder_missing`, rather than leaving opencode to fail generically
+ *  one layer down. */
+async function resolveTaskWorkspace(pad) {
+  const driver = getDriver(pad && pad.agent_type);
+  const workspaceDir = (pad && pad.workspace_dir) || (driver && driver.workspaceDir) || '';
+  if (!workspaceDir) {
+    throw taskFail('task_workspace_missing',
+      `${pad && pad.name} has no workspace directory configured`);
+  }
+  const ref = pad.runtime_ref || pad.name;
+  if (typeof folderExistsFn !== 'function') return workspaceDir;
+  const ok = await folderExistsFn(ref, workspaceDir);
+  if (!ok) {
+    throw taskFail('task_workspace_missing',
+      `${pad.name}: ${workspaceDir} does not exist inside ${ref}`
+      + (pad.workspace_mount ? ` (workspace mount ${pad.workspace_mount.host} → ${pad.workspace_mount.container})` : ' (driver default)'));
+  }
+  return workspaceDir;
+}
+
+async function submitTask({ name, prompt, model, agent, priority = 0, timeout, autoApprove = true, enqueue = false, user } = {}) {
   if (!prompt || !String(prompt).trim()) throw new Error('task prompt is required');
   const isPool = !name || !String(name).trim();
 
@@ -231,12 +413,16 @@ function submitTask({ name, prompt, model, agent, priority = 0, timeout, autoApp
       throw new Error(`Container is not running: ${pad.name}`);
     }
     runtimeRef = pad.runtime_ref;
-    workspaceDir = driver.workspaceDir;
+    // The gate and the value are one call, so a task can never be spawned into a
+    // directory nobody verified.
+    workspaceDir = await resolveTaskWorkspace(pad);
   }
 
+  const limit = Math.min(Number(timeout) || DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
   const id = crypto.randomUUID();
   getDb().prepare(
-    "INSERT INTO tasks (id, agent_name, prompt, model, agent_type, status, priority, created_by, created_at) VALUES (?,?,?,?,?,'pending',?,?,datetime('now'))"
+    `INSERT INTO tasks (id, agent_name, prompt, model, agent_type, status, priority, created_by, enqueue, timeout_ms, created_at)
+     VALUES (?,?,?,?,?,'pending',?,?,?,?,datetime('now'))`
   ).run(
     id,
     isPool ? null : String(name).trim(),
@@ -244,11 +430,12 @@ function submitTask({ name, prompt, model, agent, priority = 0, timeout, autoApp
     model || null,
     agent || null,
     Math.max(0, Math.floor(Number(priority) || 0)),
-    (user && user.userId) || 'mcp'
+    (user && user.userId) || 'mcp',
+    isPool ? 0 : (enqueue ? 1 : 0),
+    limit
   );
 
   if (!isPool && !enqueue) {
-    const limit = Math.min(Number(timeout) || DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
     const script = buildExecCommand(cap, prompt, { workspaceDir, model, agent, autoApprove }, id);
     const child = spawnFn(
       'docker',
@@ -276,17 +463,91 @@ function claimNextTask(pad) {
   return claimed ? getTask(claimed.id) : null;
 }
 
-function completeTask(id, { status = 'done', summary = '' } = {}) {
+function completeTask(id, { status = 'done', summary = '', worker } = {}) {
   const task = getTask(id);
   if (!task) throw new Error(`Task not found: ${id}`);
+  // Terminal states are refused before anything else — re-closing a finished
+  // task is the case with an unambiguous answer.
   if (task.status !== 'running' && task.status !== 'pending') {
     throw new Error(`Task ${id} is not in a claimable state (${task.status})`);
+  }
+  // Only the worker that claimed it may close it out (plan 63 1h). Without the
+  // check any worker holding a task id could mark somebody else's work done, and
+  // `claimed_by` on the row would be a record of an event that was never
+  // authorised. A task nobody claimed is refused rather than adopted: "complete"
+  // means "the worker I am finished this", and a pool task still sitting pending
+  // has had no worker at all.
+  //
+  // This runs BEFORE the pending-state check below, deliberately: a task with no
+  // claimer is refused as unclaimed rather than as "not claimable", because the
+  // first is the thing the caller has to fix and the second is an accident of
+  // ordering. "not in a claimable state (pending)" on a task nobody claimed is a
+  // true sentence that tells the caller nothing.
+  if (!task.claimed_by) {
+    throw taskFail('task_not_claimed',
+      `Task ${id} was never claimed (claimed_by is empty) — nothing has worked on it to report`);
+  }
+  // A claim sets `claimed_by` and the status in one write, so a pending row with
+  // a claimer cannot arise through the real flow — and if it ever did, "complete"
+  // is still the wrong verb for it. The MCP layer additionally REQUIRES `worker`;
+  // the parameter stays optional here so internal callers are not forced to name
+  // themselves, but the claimer check below runs either way.
+  if (task.status !== 'running') {
+    throw taskFail('task_not_running',
+      `Task ${id} is ${task.status} but was claimed by ${task.claimed_by} — only a running task can be completed`);
+  }
+  if (worker && String(worker) !== task.claimed_by) {
+    throw taskFail('task_not_yours',
+      `Task ${id} was claimed by ${task.claimed_by}, not ${worker}`);
   }
   const next = (status === 'failed' || status === 'error') ? 'error' : 'done';
   getDb().prepare(
     "UPDATE tasks SET status = ?, result_summary = ?, finished_at = datetime('now') WHERE id = ?"
   ).run(next, String(summary == null ? '' : summary), id);
   return getTask(id);
+}
+
+/** Re-file a finished task's prompt as a new task (plan 63 1e). The old row is
+ *  left exactly as it ended and gains `supersededBy` + the new row's `attempt`,
+ *  so a task that failed three times reads as one chain with three attempts
+ *  rather than three unrelated rows — the silent-duplicate shape this replaces.
+ *  The filing mode is carried over, so retrying an enqueued or pool task does
+ *  not quietly start a fresh spawn on somebody's PAD. */
+function retryTask(id) {
+  const old = getTask(id);
+  if (!old) throw new Error(`Task not found: ${id}`);
+  if (old.status === 'pending' || old.status === 'running') {
+    throw taskFail('task_still_active',
+      `Task ${id} is ${old.status} — retry applies to a task that has finished`);
+  }
+  const db = getDb();
+  const newId = crypto.randomUUID();
+  const attempt = (Number(old.attempt) || 1) + 1;
+  // The replacement is ALWAYS filed as a claimable queue entry, whatever the
+  // original was. A retry is a re-file, not a run: starting work the caller did
+  // not ask to start is the thing this whole surface exists to stop. Copying the
+  // original's `enqueue` flag instead left a retried PUSH task carrying
+  // enqueue=0 with no child process attached — `task_route` derived `push` from
+  // the same flag, so the row claimed a PAD was running it and nothing was. A
+  // push that failed now becomes an `enqueued` task its own PAD can claim, which
+  // is both true and useful (it is how a caller retries a task whose PAD has
+  // since been restarted).
+  db.prepare(
+    `INSERT INTO tasks (id, agent_name, prompt, model, agent_type, status, priority, created_by, enqueue, timeout_ms, attempt, created_at)
+     VALUES (?,?,?,?,?,'pending',?,?,1,?,?,datetime('now'))`
+  ).run(
+    newId,
+    old.agent_name,
+    old.prompt,
+    old.model,
+    old.agent_type,
+    Number(old.priority) || 0,
+    old.created_by || 'mcp',
+    old.timeout_ms,
+    attempt
+  );
+  db.prepare('UPDATE tasks SET superseded_by = ? WHERE id = ?').run(newId, id);
+  return { task: getTask(newId), superseded: getTask(id) };
 }
 
 function setPriority(id, rank) {
@@ -298,6 +559,30 @@ function setPriority(id, rank) {
   getDb().prepare('UPDATE tasks SET priority = ? WHERE id = ?')
     .run(Math.max(0, Math.floor(Number(rank) || 0)), id);
   return getTask(id);
+}
+
+/** A task that overran its timeout is an `error` with a named cause, not a
+ *  `cancelled` row (plan 63 1f). Both used to end on status `cancelled`, so a
+ *  task the runner killed at 10 minutes was indistinguishable from one the user
+ *  stopped — and the caller's only way to tell them apart was to read stderr for
+ *  a timeout the summary never mentioned. `timed_out` makes the axis queryable,
+ *  and the summary says how long it was given. */
+function timeoutTask(id, timeoutMs) {
+  getDb().prepare(
+    `UPDATE tasks SET status = 'error', timed_out = 1, finished_at = datetime('now'), result_summary = ?
+     WHERE id = ? AND status IN ('pending','running')`
+  ).run(`timed out after ${timeoutMs}ms`, id);
+  const entry = running.get(id);
+  if (!entry) return;
+  if (entry.state.timer) clearTimeout(entry.state.timer);
+  if (entry.state.sigkillTimer) clearTimeout(entry.state.sigkillTimer);
+  if (entry.child && entry.child.killed === false) entry.child.kill('SIGTERM');
+  if (entry.runtimeRef) killContainerProcess(entry.runtimeRef, id, 'TERM');
+  entry.state.sigkillTimer = setTimeout(() => {
+    if (entry.child && entry.child.killed === false) entry.child.kill('SIGKILL');
+    if (entry.runtimeRef) killContainerProcess(entry.runtimeRef, id, 'KILL');
+  }, SIGKILL_AFTER_MS);
+  if (entry.state.sigkillTimer.unref) entry.state.sigkillTimer.unref();
 }
 
 function killTask(id) {
@@ -327,17 +612,19 @@ function cancelTask(id) {
   return getTask(id);
 }
 
-function _setForTests({ spawn, getAgent, isRunning, containerExec, resetRunning, resetSeams } = {}) {
+function _setForTests({ spawn, getAgent, isRunning, containerExec, folderExists, resetRunning, resetSeams } = {}) {
   if (resetSeams) {
     spawnFn = realSpawn;
     lookupAgent = defaultLookupAgent;
     containerIsRunning = defaultIsRunning;
     containerExecFn = defaultContainerExec;
+    folderExistsFn = require('./pad-tmux').folderExists;
   }
   if (spawn) spawnFn = spawn;
   if (getAgent) lookupAgent = getAgent;
   if (isRunning) containerIsRunning = isRunning;
   if (containerExec) containerExecFn = containerExec;
+  if (folderExists) folderExistsFn = folderExists;
   if (resetRunning) {
     for (const entry of running.values()) {
       if (entry.state.timer) clearTimeout(entry.state.timer);
@@ -353,11 +640,21 @@ module.exports = {
   submitTask,
   claimNextTask,
   completeTask,
+  retryTask,
   setPriority,
   getTask,
   listTasks,
+  countTasks,
+  nextUpTask,
+  queueState,
+  queuePosition,
   cancelTask,
   reconcileOrphanedTasks,
+  resolveTaskWorkspace,
+  taskRoute,
+  taskOutcome,
+  stripAnsi,
+  taskFail,
   buildCommand: buildExecCommand,
   buildKillScript,
   capOutput,

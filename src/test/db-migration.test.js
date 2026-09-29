@@ -70,6 +70,13 @@ describe('Database - migrations onto a populated pre-67 database', () => {
     dropColumn(oldPath, 'mission_sessions', 'last_output_at');
     dropColumn(oldPath, 'mission_sessions', 'last_output_hash');
     dropColumn(oldPath, 'tasks', 'last_output_at');
+    // Plan 63: five more task columns, added in ONE loop. A loop is the riskier
+    // shape — it looks like it cannot fail halfway — so the fixture drops all
+    // five and the suite below checks all five came back, plus the values the
+    // pre-existing row must have been given.
+    for (const c of ['enqueue', 'timeout_ms', 'timed_out', 'attempt', 'superseded_by']) {
+      dropColumn(oldPath, 'tasks', c);
+    }
 
     // 3. boot for real
     process.env.PAD_DB_PATH = oldPath;
@@ -106,6 +113,42 @@ describe('Database - migrations onto a populated pre-67 database', () => {
     // The column whose absence once threw SQLITE_ERROR out of a timer callback
     // and took the whole webui down.
     assert.ok(cols('tasks').includes('last_output_at'));
+  });
+
+  it('adds all five plan-63 task columns to a tasks table that predates them', () => {
+    // All five or the vocabulary lies in a way no error reports: `task_route`
+    // reads `enqueue` and `taskOutcome`/`timedOut` read `timed_out`, so a
+    // missing column does not crash — it is `undefined`, which is falsy, which
+    // silently means "this was pushed" and "this did not time out" for every
+    // task ever filed. A half-applied loop is the same defect as a missing one.
+    for (const c of ['enqueue', 'timeout_ms', 'timed_out', 'attempt', 'superseded_by']) {
+      assert.ok(cols('tasks').includes(c), `tasks.${c} was added by the migration`);
+    }
+  });
+
+  it('gives a pre-63 task the defaults that are TRUE of it', () => {
+    // Not arbitrary zeroes. `enqueue = 0` says "pushed", which is right for a
+    // task that was never claimable; `attempt = 1` is right because the row is
+    // the first attempt; and `timed_out = 0` is what keeps a task cancelled
+    // before this column existed from reading as a 10-minute timeout kill —
+    // the two used to be the same status and the same answer.
+    const row = db.prepare('SELECT * FROM tasks WHERE id = ?').get('task_1');
+    assert.strictEqual(row.enqueue, 0);
+    assert.strictEqual(row.attempt, 1);
+    assert.strictEqual(row.timed_out, 0);
+    assert.strictEqual(row.timeout_ms, null, 'no timeout was ever set on it');
+    assert.strictEqual(row.superseded_by, null, 'and it has never been retried');
+  });
+
+  it('re-running the migrations is a no-op', () => {
+    // Every restart re-runs this, so a migration that throws on its second
+    // application breaks every boot after the upgrade rather than one.
+    db.close();
+    delete require.cache[dbModule()];
+    assert.doesNotThrow(() => { db = require('../services/db').getDb(); });
+    for (const c of ['enqueue', 'timeout_ms', 'timed_out', 'attempt', 'superseded_by']) {
+      assert.ok(cols('tasks').includes(c), `tasks.${c} survives the second boot`);
+    }
   });
 
   it('keeps every pre-existing row', () => {
@@ -146,6 +189,70 @@ describe('Database - migrations onto a populated pre-67 database', () => {
       db.prepare("SELECT created_by FROM mission_sessions WHERE id='msn_3'").get().created_by,
       'key:key_abc',
       'a value written after the first migration survives the next boot'
+    );
+  });
+});
+
+// ─── The control ────────────────────────────────────────────────────────
+//
+// Every assertion above passes on a database that ALREADY has the columns —
+// which is what a green run of this suite proves on its own, because a fresh
+// `CREATE TABLE IF NOT EXISTS` builds them too. "the column exists somewhere"
+// is not the claim; "the ALTER added it to a table that lacked it" is, and only
+// a run with the migration removed can tell those two apart.
+//
+// So: the same stripped fixture, booted with the task ALTERs suppressed, and the
+// assertion is that the columns are ABSENT. If the loop in db.js is deleted or
+// narrowed, this test still passes (it is asserting absence) and the five tests
+// above go red — which is the point. It is a control, not a duplicate.
+describe('Database - control: the task migrations are what add the columns', () => {
+  const cdir = fs.mkdtempSync(path.join(os.tmpdir(), 'pad-mig-ctl-'));
+  const cpath = path.join(cdir, 'old.db');
+  const cseed = path.join(cdir, 'seed.db');
+  let db;
+
+  before(() => {
+    // Its own seed, not the fixture above: that one is deleted by the first
+    // suite's `after`, so borrowing it would make this control's lifetime depend
+    // on the order two unrelated describes happen to run in.
+    process.env.PAD_DB_PATH = cseed;
+    delete require.cache[dbModule()];
+    const seed = require('../services/db').getDb();
+    seed.prepare("INSERT INTO tasks (id, prompt, status) VALUES ('task_1','do the thing','pending')").run();
+    seed.close();
+    fs.copyFileSync(cseed, cpath);
+    for (const c of ['enqueue', 'timeout_ms', 'timed_out', 'attempt', 'superseded_by']) {
+      dropColumn(cpath, 'tasks', c);
+    }
+    const realExec = Database.prototype.exec;
+    Database.prototype.exec = function patched(sql) {
+      if (/ALTER TABLE tasks ADD COLUMN/i.test(sql)) return this;
+      return realExec.call(this, sql);
+    };
+    try {
+      process.env.PAD_DB_PATH = cpath;
+      delete require.cache[dbModule()];
+      db = require('../services/db').getDb();
+    } finally {
+      Database.prototype.exec = realExec;
+    }
+  });
+
+  after(() => {
+    db.close();
+    delete require.cache[dbModule()];
+    delete process.env.PAD_DB_PATH;
+    fs.rmSync(cdir, { recursive: true, force: true });
+  });
+
+  it('leaves the columns missing when the ALTERs do not run', () => {
+    const cols = db.prepare('PRAGMA table_info(tasks)').all().map((c) => c.name);
+    for (const c of ['enqueue', 'timeout_ms', 'timed_out', 'attempt', 'superseded_by']) {
+      assert.ok(!cols.includes(c), `tasks.${c} is absent — so its presence elsewhere really is the migration's doing`);
+    }
+    assert.strictEqual(
+      db.prepare('SELECT COUNT(*) c FROM tasks').get().c, 1,
+      'and the rest of the table is intact, so the absence is the ALTERs and not a broken fixture'
     );
   });
 });
