@@ -143,7 +143,7 @@ here.
 | PAD | one agent instance; dir `instances/&lt;name&gt;/`, container `pad-*` |
 | paddock | the webui container (image `paddock-webui`, Express on 6789) |
 | agent / bot | the program a PAD runs (openclaw, opencode, picoclaw, hermes, codex, claude) |
-| driver | per-type adapter in `src/services/drivers/`; `getDriver()` falls back to openclaw |
+| driver | per-type adapter in `src/services/drivers/`; `getDriver()` throws on an unknown type, `getDriverOr()` covers only a type that is absent |
 | socat door | `&lt;name&gt;-door` container that carries host ports for peer-networked agents |
 | peer | a container an agent routes through via `network_mode: container:` |
 | Vault | encrypted key-value store (`src/services/vault.js`, AES-256-GCM) |

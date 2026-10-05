@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFile, execFileSync } = require('child_process');
 const { runCmdStream } = require('./cmd');
-const { getDriver, drivers } = require('./drivers');
+const { getDriver, getDriverOr, hasDriver } = require('./drivers');
 const { imageFor, legacySharedImage, buildDir, buildEnvPath, readBuildEnv, setBuildEnv, argsFromDockerfile, readCustomBuild, writeCustomBuild } = require('./instance-image');
 const { ensureOwned, normalizeTree, isSelfManagedAgentData, USER_UID, USER_GID } = require('./ownership');
 const devcontainer = require('./devcontainer');
@@ -658,6 +658,7 @@ async function getNetworkHealth(name, { declaredPeer = '', run = runCmd } = {}) 
 function readWorkspaceMount(name, agent) {
   const meta = readMeta(path.join(INSTANCES_DIR, name)) || {};
   if (!meta.WORKSPACE_HOST || !meta.WORKSPACE_DIR) return null;
+  getDriver(agent);
   try {
     return validateWorkspaceMount(name, agent, meta.WORKSPACE_HOST, meta.WORKSPACE_DIR);
   } catch {
@@ -2552,7 +2553,7 @@ async function validateAgentCreate(name, opts = {}) {
   } = opts;
 
   if (!VM_NAME_RE.test(name)) throw new Error('Invalid agent name');
-  if (!drivers[agent]) throw new Error(`Unknown agent type '${agent}'`);
+  if (!hasDriver(agent)) throw new Error(`Unknown agent type '${agent}'`);
   if (userMode === 'user' && agent === 'hermes') {
     throw new Error('Hermes already runs its daemon as its own user (/opt/data, uid 10000) — the Container user option does not apply');
   }
@@ -3222,7 +3223,9 @@ async function listNetworkPeers({ limit = 10, currentPeer = '' } = {}) {
 async function readSettings(name) {
   const meta = readMeta(path.join(INSTANCES_DIR, name));
   const agentType = meta.AGENT || 'openclaw';
-  const driver = getDriver(agentType);
+  // Lenient ONLY for a pad with no AGENT line (no type to look up); a line
+  // naming an unknown type throws rather than answering openclaw's fields.
+  const driver = getDriverOr(meta.AGENT);
   const image = imageFor(name);
   let version = meta.OPENCLAW_VERSION || '';
   try {
@@ -3285,7 +3288,9 @@ function readDrafts(name) {
 async function readWebState(name) {
   const meta = readMeta(path.join(INSTANCES_DIR, name));
   const agentType = meta.AGENT || 'openclaw';
-  const driver = getDriver(agentType);
+  // Lenient ONLY for a pad with no AGENT line (no type to look up); a line
+  // naming an unknown type throws rather than answering openclaw's fields.
+  const driver = getDriverOr(meta.AGENT);
   const extraPorts = readExtraPorts(name);
   const sshPort = meta.PORT || '';
   const sshContainerPort = readSshCport(name);
@@ -3443,7 +3448,9 @@ async function prepareAgentChanges(name, opts = {}) {
   const meta = readMeta(instDir);
   if (!meta.AGENT && !meta.ROOT_PASSWORD) throw new Error(`Agent not found: ${name}`);
   const agentType = meta.AGENT || 'openclaw';
-  const driver = getDriver(agentType);
+  // Lenient ONLY for a pad with no AGENT line (no type to look up); a line
+  // naming an unknown type throws rather than answering openclaw's fields.
+  const driver = getDriverOr(meta.AGENT);
   const wasRunning = await isContainerRunning(name);
   const containers = await psStateMap();
 

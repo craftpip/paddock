@@ -1,6 +1,6 @@
 # Backend Services
 
-> Last updated: 2026-09-29
+> Last updated: 2026-10-06
 
 ## PAD Discovery (agent-registry.js)
 
@@ -373,10 +373,57 @@ live in [drivers.md](drivers.md); this section documents the registry and the
 interface.
 
 **Functions:**
-- `getDriver(type)` — returns the driver for a type, **falls back to the
-  openclaw driver** when a type has none (never crashes callers)
+- `getDriver(type)` — returns the driver for a type, **throws** for a type that
+  is not in the registry. The message names the type asked for and the valid
+  set: `unknown_agent_type: 'opencodee' — known: openclaw, opencode, …`
+- `getDriverOr(type, fallback = 'openclaw')` — the deliberate leniency, for a
+  pad whose `meta.env` carries **no** `AGENT` line (3 live pads are in that
+  state) and for pre-create paths that have not chosen a type yet. It falls back
+  for `undefined` / `null` / `''` only, and still **throws** for a type that is
+  present but unknown — see below for why those are different questions.
+- `hasDriver(type)` — boolean, for **validating** a type that came from a URL or
+  a request body *before* resolving it. `drivers.hasOwnProperty` semantics, so
+  `hasDriver('toString')` is false rather than a function.
 - `listDrivers()` — `[{ type, label, setupSteps }]` for the CreateAgent select
 - `drivers` — the raw registry object
+
+**Why the fallback had to go, and why only half of it did.** `getDriver` used to
+be `drivers[type] || openclaw`, so an unknown, misspelled or empty type
+answered with a **complete, confident openclaw answer** — its `dataDir`,
+`workspaceDir`, `configFile`, `tuiCommand` and command groups. Measured live
+against `/api/agent-types/:type/commands`, which takes the type straight from
+the URL: `opencodee` returned **HTTP 200** with `type: "openclaw"`, openclaw's 4
+commands and openclaw's MCP connect block. Nothing threw, nothing was logged, and
+the response even named the substitution, so the wrong answer was
+indistinguishable from success and surfaced later as a confidently incorrect
+path rather than as a 404 at the point of the typo. That route now validates
+with `hasDriver` and answers **404** with the valid set.
+
+`agents.agent_type` is `TEXT NOT NULL DEFAULT 'openclaw'` with **no CHECK
+constraint** and `meta.env`'s `AGENT` line is hand-editable, so an unrecognised
+value genuinely reaches this function — a typo'd migration, a driver removed in
+a later version, a hand-edited row. So the registry is the invariant's only
+enforcement point; there is deliberately no DB CHECK (the valid set is a *code*
+registry, and a constraint would need a migration and a rebuild path for every
+new driver).
+
+**Why `getDriverOr` does not forgive an unknown type.** The obvious shape —
+fall back for *any* unrecognised type — would keep the substitution alive behind
+a safer-looking name. The distinction is between **no type to look up** (an
+absent `AGENT` line; there is no fact, so the fallback answers) and **a type we
+read and could not resolve** (a fact, and answering it with another agent's
+driver is the exact failure being fixed). The second throws.
+
+Two call sites are lenient for a second, different reason, and the reason is
+recorded at each: `agent-registry.buildAgent` runs in a loop over **every** pad
+dir inside `discoverAgents` with no try/catch, so a strict throw there would
+blank the whole `/api/agents` listing over one corrupt pad — a single subject can
+be made loud, a fleet listing cannot without a per-pad error row. And the
+`meta.AGENT` readers in `app.js` / `vm-manager` (`update-info`, the web routes,
+`readSettings`, `readWebState`, `prepareAgentChanges`) use `getDriverOr` so a pad
+without an `AGENT` line still works. Fleet audit before the split (2026-10-06):
+every `agent_type` in the `agents` table is a known type and every `AGENT` line
+matches it — 0 unknown, 0 disagreements — so no live pad's answer changed.
 
 **Driver fields:**
 | Field | Purpose |

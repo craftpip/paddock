@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { getDb } = require('./db');
-const { getDriver } = require('./drivers');
+const { getDriverOr } = require('./drivers');
 const { workspaceMountInfo, containerViewOf, readWebService, readWebAuth, isManagedDoorContainer } = require('./vm-manager');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
@@ -141,7 +141,13 @@ function buildAgent(vmName, dockerState) {
   const agentDir = findAgentDir(vmDir, agentType);
   const workspaceRoot = path.join(agentDir, 'workspace');
   const configRoot = agentDir;
-  const driver = getDriver(agentType);
+  const driver = getDriverOr(agentType);
+  // Lenient here, and deliberately: buildAgent is called in a loop over EVERY
+  // pad dir by discoverAgents, outside any try/catch, so one pad whose AGENT
+  // line names an unknown type would blank the whole fleet listing — the
+  // dashboard and every client that reads it. getDriverOr still throws for a
+  // type that is present but unresolvable; what it forgives is an ABSENT one,
+  // which is a real state on this fleet (3 pads carry no AGENT line at all).
   // Custom workspace bind (plan 24): meta may carry WORKSPACE_HOST/WORKSPACE_DIR
   // pointing the agent's workspace at an independent host source + container
   // path. `workspace_mount` carries the normalized info for the frontend

@@ -1081,7 +1081,11 @@ async function screen(sessionId, lines = 40) {
 async function sessionTitle(project, session) {
   if (!session.agent_session_id) return '';
   const d = drivers.getDriver(project.agent_type);
-  if (!d || typeof d.sessionTitle !== 'function') return '';
+  // `!d` was dead: it was written against the old `getDriver` fallback, which
+  // made a falsy return impossible. getDriver THROWS for an unknown type, so a
+  // project whose agent_type does not resolve now says so instead of quietly
+  // answering with openclaw's title lookup. Only the capability check is left.
+  if (typeof d.sessionTitle !== 'function') return '';
   try {
     return await d.sessionTitle(project.agent_name, session.agent_session_id);
   } catch {

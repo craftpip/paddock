@@ -2,13 +2,13 @@
 
 Every agent type in Paddock — openclaw, opencode, picoclaw, hermes, codex,
 claude — is an equal citizen backed by one driver module in
-`src/services/drivers/`. The registry itself (`index.js`, `getDriver()`,
-`listDrivers()`) and the driver interface fields are documented in
+`src/services/drivers/`. The registry itself (`index.js', `getDriver()`,
+`getDriverOr()`, `hasDriver()`, `listDrivers()`) and the driver interface fields are documented in
 [backend/services.md](services.md); this page is the **per-driver reference**:
 the concrete field values, command groups, and operational gotchas for each
 type, discovered and verified in real containers.
 
-> Last updated: 2026-08-15
+> Last updated: 2026-10-06
 
 ## Quick reference
 
@@ -57,8 +57,13 @@ the others are derived from their CLI's own help output (see the driver files).
 
 ## Openclaw (reference driver)
 
-The driver the framework was built around; `getDriver()` falls back to it for
-any unknown type, so its values are the defaults everything else overrides.
+The driver the framework was built around. It is the **fallback of last
+resort** for a pad with no `AGENT` line at all — that leniency is
+`getDriverOr(type, fallback = 'openclaw')` and nothing else, because "no type
+recorded" and "a type I cannot resolve" are different questions. An unrecognised
+type does NOT reach openclaw's values; `getDriver` throws
+`unknown_agent_type: '<t>' — known: …`. See
+[services.md](services.md) § Driver Registry for the full case.
 
 - `type` / `label` — `openclaw` / `OpenClaw`
 - `baseImage` — `ghcr.io/openclaw/openclaw:latest` (has a
@@ -155,9 +160,10 @@ Gotchas:
 - `start.sh` was a RUN-heredoc (0-byte risk) → converted to a real file +
   COPY. It runs `picoclaw gateway -E` (bind 0.0.0.0:18790) when `config.json`
   exists, else setup-mode `tail -f /dev/null`.
-- Adding a driver file requires a **webui restart** — Node caches `require()`,
-  so a running process silently falls back to the openclaw driver (and builds
-  the wrong image).
+- Adding a driver file requires a **webui restart** — Node caches `require()`.
+  Before plan 76 that meant a running process silently fell back to the openclaw
+  driver and built the wrong image; now the type resolves against a registry the
+  running process is holding, so a restart is what registers the new type at all.
 
 ## Hermes
 
@@ -279,8 +285,8 @@ Gotchas:
 
 ## See Also
 
-- [backend/services.md](services.md) — the registry (`getDriver`, fallback,
-  `listDrivers`) and the driver interface fields
+- [backend/services.md](services.md) — the registry (`getDriver` / `getDriverOr` /
+  `hasDriver`, the fallback rules) and the driver interface fields
 - [tabs/web.md](../tabs/web.md) — the `webApp` descriptor and web publish flow
 - [overview/business-logic.md](../overview/business-logic.md) — config, workspace,
   and model extraction derive paths from `driver.configFile` / `workspaceDir`

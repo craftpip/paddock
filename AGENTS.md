@@ -1116,17 +1116,53 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   only `withLiveSessions*` returns no `busy`. The LLM then cannot tell "the
   human is typing right now" from "here but idle" and talks over a live
   conversation — the one failure the Mission page exists to prevent.
-- **Never resolve an agent's TYPE yourself — `getDriver` FALLS BACK TO
-  OPENCLAW**, so a lookup that yields `undefined` (a mistyped name, a row that
-  moved, a `|| {}` default) silently becomes an *openclaw* answer instead of a
-  not-found. `mission_project_create` did exactly this: it read
-  `SELECT agent_type FROM agents WHERE name = ?` itself, so a typo produced
-  `mission_unsupported_agent: openclaw does not support Mission workspaces` for
-  a PAD that never existed. Let `mission.agentRow` (via `projectFolders`,
-  `createProject`, `startSession`) do the resolution — it throws
-  `mission_agent_not_found` with a 404. And note the **grant gate runs first**:
-  `requireTool` fails closed on an unknown agent, so a handler must never rely
-  on the store to report a bad name.
+- **Never resolve an agent's TYPE yourself, and know WHICH resolver you are
+  calling — since plan 76 there are three, and picking by feel is the bug.**
+  `getDriver(type)` is strict: an unrecognised type **throws**
+  `unknown_agent_type: '<t>' — known: …`. `getDriverOr(type, fallback)` falls
+  back for an **absent** type only (`undefined` / `null` / `''` — a real pad
+  with no `AGENT` line) and still throws for a type that is present but
+  unknown, because "nothing to look up" and "I read a type I cannot resolve"
+  are different questions and only the second was ever wrong. `hasDriver(type)`
+  validates a type that came from a URL or a request body **before** you
+  resolve it.
+  - **Why the strict half is the whole point:** the old `drivers[type] ||
+    openclaw` answered a misspelled type with a complete, confident *openclaw*
+    answer — image, dataDir, workspaceDir, configFile, commands — and named the
+    substitution in the payload. Measured live before the fix:
+    `/api/agent-types/opencodee/commands` returned **200** with `type:
+    "openclaw"`, openclaw's 4 commands and openclaw's MCP block. Nothing threw
+    and nothing was logged, so the wrong answer was **indistinguishable from
+    success** and surfaced much later as a confidently wrong path instead of a
+    404 at the typo. That route now answers **404**.
+  - **Why there is no DB CHECK to lean on:** `agents.agent_type` is `TEXT NOT
+    NULL DEFAULT 'openclaw'` with no constraint, and `meta.env`'s `AGENT` line
+    is hand-editable, so a typo'd migration or a removed driver really does
+    reach the registry. The valid set lives in **code**, so the registry is the
+    only place this can be enforced.
+  - **Still never hand-roll a `SELECT agent_type`** to resolve a type:
+    `mission_project_create` did that once and a typo produced
+    `mission_unsupported_agent: openclaw does not support Mission workspaces`
+    for a PAD that never existed. Let `mission.agentRow` (via `projectFolders`,
+    `createProject`, `startSession`) do it — it throws
+    `mission_agent_not_found` with a 404. The **grant gate still runs first**:
+    `requireTool` fails closed on an unknown agent, so a handler must never rely
+    on the store to report a bad name.
+  - **The two sites that stay lenient, and the reason each one is a real
+    exception:** `agent-registry.buildAgent` loops over every pad dir in
+    `discoverAgents` with no try/catch, so a strict throw there blanks the whole
+    `/api/agents` listing over one corrupt pad — loud is right for one subject,
+    wrong for a fleet listing without per-pad error rows; and the `meta.AGENT`
+    readers in `app.js`/`vm-manager` (`update-info`, the web routes,
+    `readSettings`, `readWebState`, `prepareAgentChanges`) use `getDriverOr` so a
+    pad with no `AGENT` line still works. Before choosing leniency anywhere, ask
+    **whose** failure the throw becomes — and check the row's answer against a
+    *different* pad's: three live pads reporting three different versions is the
+    positive control that the leniency resolved each pad's own driver.
+  - **A `catch` around the resolver hides the throw, so do not wrap one.** The
+    `readWorkspaceMount` `try {} catch {}` swallowed the strict throw and dropped
+    the mount with no error; the resolution now happens **outside** it, and only
+    the genuinely-optional stored pair stays inside.
 - **A pad's `SUBNET` reservation and its live `_default` network are two
   different claims, and only a pad with a service on the project `default`
   network should hold either.** A peer-networked pad's service is
@@ -1374,8 +1410,10 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
 
 - `src/services/drivers/` — one module per agent type, registered in
   `index.js`. `getDriver(type)` is the single source of truth (image, version,
-  `configFile`, `dataDir`, `workspaceDir`, commands); **falls back to the
-  openclaw driver** (never crashes).
+  `configFile`, `dataDir`, `workspaceDir`, commands) and **throws** on an
+  unknown type; `getDriverOr(type, fallback)` is the deliberate leniency for an
+  absent type; `hasDriver(type)` validates before you resolve. See the rule
+  above for which to call.
 - Config formats: openclaw/picoclaw/opencode `json`, hermes `yaml`, codex
   `toml`. Non-`json` formats are served/written verbatim, no secret redaction.
 

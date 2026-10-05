@@ -62,16 +62,22 @@ const running = new Map();
  *  capability. Each of these reaches this function on a live path, so each one
  *  has to resolve — a capability object is what the submit path has in hand by
  *  the time it builds the exec script, and looking that up as a driver type
- *  always misses. */
+ *  always misses.
+ *
+ *  The `(x || {})` that used to trail both `getDriver` calls is gone: the
+ *  fallback meant `getDriver` could never return falsy, so it guarded nothing.
+ *  It also hid the real shape of this function — `getDriver` THROWS for a type
+ *  that is not a driver, which is what a `{agent_type: 'opencodee'}` pad-like
+ *  object should now get instead of openclaw's capability. */
 function taskCapability(type) {
   if (!type) return null;
   const fromCap = (c) => (c && c.supported ? c : null);
   if (typeof type.buildCommand === 'function') return fromCap(type); // resolved capability
   if (typeof type === 'object') {
     if (type.task) return fromCap(type.task);                       // driver object
-    return fromCap((getDriver(type.agent_type) || {}).task);        // pad-like
+    return fromCap(getDriver(type.agent_type).task);                // pad-like
   }
-  return fromCap((getDriver(type) || {}).task);                      // type string
+  return fromCap(getDriver(type).task);                              // type string
 }
 
 function shq(s) {
@@ -377,11 +383,19 @@ function attachProcess(id, child, timeoutMs, runtimeRef, cap) {
  *  `mission_folder_missing`, rather than leaving opencode to fail generically
  *  one layer down. */
 async function resolveTaskWorkspace(pad) {
-  const driver = getDriver(pad && pad.agent_type);
-  const workspaceDir = (pad && pad.workspace_dir) || (driver && driver.workspaceDir) || '';
+  // A missing pad has to be refused HERE. It used to read
+  // `getDriver(pad && pad.agent_type)` → openclaw → a non-empty workspaceDir, so
+  // the `!workspaceDir` guard below passed and the next line TypeError'd on
+  // `undefined.runtime_ref` — a crash in the submit path with a TypeError
+  // instead of a refusal naming the pad that was not found.
+  if (!pad) {
+    throw taskFail('task_pad_not_found', 'No agent pad was resolved for this task, so its workspace is unknown');
+  }
+  const driver = getDriver(pad.agent_type);
+  const workspaceDir = pad.workspace_dir || driver.workspaceDir || '';
   if (!workspaceDir) {
     throw taskFail('task_workspace_missing',
-      `${pad && pad.name} has no workspace directory configured`);
+      `${pad.name} has no workspace directory configured`);
   }
   const ref = pad.runtime_ref || pad.name;
   if (typeof folderExistsFn !== 'function') return workspaceDir;

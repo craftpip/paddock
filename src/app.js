@@ -1063,7 +1063,11 @@ app.get('/api/agents/:name/update-info', async (req, res) => {
   try {
     const meta = readMeta(name);
     if (!meta.AGENT && !meta.ROOT_PASSWORD) return res.status(404).json({ error: 'Agent not found' });
-    const driver = drivers.getDriver(meta.AGENT || 'openclaw');
+    // Lenient by design: a pad whose meta.env has no AGENT line has NO type
+    // to look up, and three live pads are in that state. getDriverOr falls
+    // back only for that case — an AGENT line naming a type that is not a
+    // driver still throws, instead of being answered with openclaw's fields.
+    const driver = drivers.getDriverOr(meta.AGENT);
     const current = (await driver.currentVersion(name)) || meta.OPENCLAW_VERSION || '';
     const available = await driver.availableVersion();
     const updateAvailable = !!(current && available && current !== available);
@@ -1185,8 +1189,7 @@ app.get('/api/agents/:name/web', async (req, res) => {
   try {
     const meta = readMeta(name);
     if (!meta.AGENT && !meta.ROOT_PASSWORD) return res.status(404).json({ error: 'Agent not found' });
-    const agentType = meta.AGENT || 'openclaw';
-    const driver = drivers.getDriver(agentType);
+    const driver = drivers.getDriverOr(meta.AGENT); // see the note in update-info
     // Extra Docker ports (plan 28) are independent of the built-in web app and
     // always reported — even for agent types with no web app to publish.
     const extraPorts = vm.readExtraPorts(name);
@@ -1275,8 +1278,7 @@ app.post('/api/agents/:name/web', async (req, res) => {
   try {
     const meta = readMeta(name);
     if (!meta.AGENT && !meta.ROOT_PASSWORD) return res.status(404).json({ error: 'Agent not found' });
-    const agentType = meta.AGENT || 'openclaw';
-    const driver = drivers.getDriver(agentType);
+    const driver = drivers.getDriverOr(meta.AGENT); // see the note in update-info
     if (!driver.webApp) return res.status(400).json({ error: 'This agent type has no web app to publish' });
 
     const turningOn = !!active;
@@ -1415,7 +1417,7 @@ app.post('/api/agents/:name/recreate', async (req, res) => {
         await vm.applyAgentChanges(name, { pull, reset, force: true }, { onLog: log, onStep: step });
         if (pull) {
           try {
-            const v = await drivers.getDriver(meta.AGENT || 'openclaw').currentVersion(name);
+            const v = await drivers.getDriverOr(meta.AGENT).currentVersion(name);
             if (v) vm.setMetaFlag(name, 'OPENCLAW_VERSION', v);
           } catch {}
         }
@@ -1478,7 +1480,7 @@ app.post('/api/agents/:name/update', async (req, res) => {
       registry.discoverAgents();
       try {
         const meta = readMeta(name);
-        const v = await drivers.getDriver(meta.AGENT || 'openclaw').currentVersion(name);
+        const v = await drivers.getDriverOr(meta.AGENT).currentVersion(name);
         if (v) vm.setMetaFlag(name, 'OPENCLAW_VERSION', v);
       } catch {}
       jobLog.line(job, 'system', 'Done — container recreated');
@@ -1759,6 +1761,18 @@ app.get('/api/agent-types', (req, res) => {
  *  that launches the agent's interactive TUI (openclaw / opencode / …). Also
  *  serves the Paddock MCP connect/disconnect block (plan 35b). */
 app.get('/api/agent-types/:type/commands', (req, res) => {
+  // Validate BEFORE resolving, and answer 404. This route takes the type
+  // straight from the URL, and while getDriver used to fall back to openclaw a
+  // typo here answered 200 with another agent's commands, MCP connect block and
+  // tui command — measured live: `/api/agent-types/opencodee/commands` reported
+  // `type: "openclaw"` and 4 commands. A not-found and a wrong-but-complete
+  // answer look nothing alike to a caller, so this must be a refusal.
+  if (!drivers.hasDriver(req.params.type)) {
+    return res.status(404).json({
+      error: `Unknown agent type '${req.params.type}'`,
+      known: drivers.listDrivers().map((d) => d.type),
+    });
+  }
   const driver = drivers.getDriver(req.params.type);
   const paddockMcpUrl = getPaddockMcpUrl();
   res.json({
