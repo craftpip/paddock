@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../../lib/api'
+import { hostSourceIssue } from '../../lib/workspace-guards'
 import { useAgents } from '../../stores/agents'
 import { useConfirm } from '../../lib/confirm'
 import { useToast } from '../../lib/toast'
@@ -500,12 +501,12 @@ export default function SettingsTab({ agent }) {
   function wsHostIssue(h) {
     const v = (h || '').trim()
     if (!v) return ''
+    // The host-SOURCE rule is shared (plan 72) — this tab used to keep a
+    // private copy that refused /home/… and /root/… outright, so a source the
+    // create form accepted was refused here. The container-DIRECTION rule
+    // (wsDirIssue below) is a different question and stays local.
     if (v.startsWith('/')) {
-      if (v === '/') return 'Cannot be the host root'
-      const sys = ['/etc', '/proc', '/sys', '/dev', '/boot', '/bin', '/sbin', '/usr', '/lib', '/home', '/root', '/opt', '/tmp', '/var/run']
-      for (const s of sys) {
-        if (v === s || v.startsWith(s + '/')) return `System directory (${s}) cannot be a workspace source`
-      }
+      return hostSourceIssue(v)?.message || ''
     } else if (!v.startsWith('instances/')) {
       return 'Must be an absolute path or start with instances/'
     }
@@ -575,17 +576,15 @@ export default function SettingsTab({ agent }) {
 
   // ── Additional volumes (plan 28) ──────────────────────────
 
-  const VOL_SYSTEM = ['/etc', '/proc', '/sys', '/dev', '/boot', '/bin', '/sbin', '/usr', '/lib', '/home', '/root', '/opt', '/tmp', '/var/run']
   const VOL_PROTECTED = ['/etc', '/proc', '/sys', '/dev', '/var/run', '/usr', '/bin', '/sbin', '/lib', '/boot', '/tmp']
 
   function volHostIssue(h) {
     const v = (h || '').trim()
     if (!v) return 'Host source is required'
+    // Shared host-SOURCE rule (plan 72); VOL_PROTECTED above is the container
+    // DESTINATION rule and deliberately a different list.
     if (v.startsWith('/')) {
-      if (v === '/') return 'Cannot be the host root'
-      for (const s of VOL_SYSTEM) {
-        if (v === s || v.startsWith(s + '/')) return `System directory (${s}) cannot be a host source`
-      }
+      return hostSourceIssue(v, { noun: 'host source' })?.message || ''
     } else if (!v.startsWith('instances/')) {
       return 'Must be an absolute path or start with instances/'
     }

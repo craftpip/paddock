@@ -11,9 +11,11 @@ const { execFile } = require('child_process');
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const HOST_WORKSPACE = process.env.HOST_WORKSPACE_ROOT || WORKSPACE;
 
-// Host dirs (and descendants) that must never be offered as a project /
-// workspace source.
-const SYSTEM_DIRS = ['/etc', '/proc', '/sys', '/dev', '/boot', '/bin', '/sbin', '/usr', '/lib', '/home', '/root', '/opt', '/tmp', '/var/run'];
+// Host dirs that must never be offered as a project / workspace source, and the
+// home / scratch dirs whose BARE root is refused but whose subdirectories are
+// fine — both in ./workspace-guards (plan 72), shared with vm-manager so the
+// probe cannot advertise a path the create path would refuse.
+const { hostSourceIssue } = require('./workspace-guards');
 
 // Paddock's own folders — visible in the container but never a user project.
 // Only the exact mount points are blocked; their children (e.g. /workspace/…)
@@ -40,7 +42,7 @@ function hostPathOf(containerPath) {
 
 function isForbidden(p) {
   const norm = path.normalize(p);
-  if (SYSTEM_DIRS.some((s) => norm === s || norm.startsWith(s + '/'))) return true;
+  if (hostSourceIssue(norm)) return true;
   return norm === '/app' || norm === '/workspace';
 }
 
@@ -74,7 +76,10 @@ function runCmd(cmd, args, options = {}) {
 function isDangerousSource(src) {
   const s = path.normalize(String(src));
   if (s === '/var/run/docker.sock' || s.startsWith('/var/run/docker.sock/')) return true;
-  return SYSTEM_DIRS.some((d) => s === d || s.startsWith(d + path.sep));
+  // A subdirectory of a home/scratch dir is inheritable (plan 72): refusing
+  // `/root/proj/node_modules` protects nothing, and the compose file that named
+  // it is the operator's own. The BARE root is still dropped.
+  return hostSourceIssue(s) !== null;
 }
 
 /** Discover the volumes a workspace folder's project exposes — compose file
@@ -240,12 +245,26 @@ function probe(hostPath) {
   if (exists) {
     try { fs.accessSync(cpath, fs.constants.W_OK); writable = true; } catch {}
   }
+  // `reason` is what the form shows, so the message is authored once on the
+  // server (where the policy lives) instead of being re-derived from a second
+  // copy of the list in the client. Plan 72.
+  const issue = hostSourceIssue(norm) || hostSourceIssue(cpath);
   return {
     path: norm,
     exists,
     isDir: exists,
     writable,
     forbidden: isForbidden(norm) || isForbidden(cpath),
+    // True when the source lives OUTSIDE the project root, which changes two
+    // things the form has to say honestly: the host file browser stays
+    // container-only, and the webui never chowns the folder (see the
+    // `webuiVisible` gate in vm-manager's writeInstanceCompose), so ownership
+    // there belongs to whoever runs the agent — not to PUID:PGID.
+    outsideProject: !String(norm).startsWith(HOST_WORKSPACE + path.sep) && norm !== HOST_WORKSPACE,
+    issue: issue ? { code: issue.code, message: issue.message } : null,
+    reason: issue ? issue.message : isForbidden(norm) || isForbidden(cpath)
+      ? 'This is a Paddock folder, not a user project'
+      : null,
     compose: compose ? hostPathOf(compose) : null,
   };
 }

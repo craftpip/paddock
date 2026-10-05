@@ -291,8 +291,80 @@ daemon". This is a one-time manual step in `docker-compose.yml` (e.g.
 `- /www2:/www2:ro`) + a webui recreate; no registry or env var is involved —
 the mount itself is the source of truth. A `:ro` mount is readable for probing
 but the webui cannot create new folders inside it. The path must not collide
-with paddock's own mounts (`/app`, `/workspace`) or system dirs
-(`GUARD_SYSTEM_DIRS`).
+with paddock's own mounts (`/app`, `/workspace`) or the hard-block list below.
+
+### Which host paths may be a workspace source (plan 72)
+
+One policy, one module: `services/workspace-guards.js`. It is consulted by both
+validate paths in `vm-manager.js` (create and settings-apply), by
+`path-probe.js` (the probe, its autocomplete filter and volume discovery), and —
+as a proven-equal copy — by the two client surfaces that ask the same question:
+`CreateAgent.jsx` and the workspace / additional-volumes editor in
+`pages/agent/SettingsTab.jsx`.
+
+The Settings tab matters as much as the create form: it kept its own copy of the
+old list, which refused `/home/…` and `/root/…` outright, so a source the create
+form accepted was refused the moment you went to change it. Both now call the
+shared rule. Its **container destination** checks (`wsDirIssue`, `VOL_PROTECTED`
+in that file, `CONTAINER_PROTECTED` in `vm-manager.js`) are deliberately left
+alone — "may this host path be mounted" and "may the agent mount over this path
+inside its container" are two different questions with two different answers.
+
+The rule is **two lists, because they are two different decisions**:
+
+| List | Paths | Rule | Why |
+|---|---|---|---|
+| hard-block | `/etc`, `/proc`, `/sys`, `/dev`, `/boot`, `/bin`, `/sbin`, `/usr`, `/lib`, `/var/run` | refused exact **or under** | holds no user projects |
+| user-data | `/home`, `/root`, `/opt`, `/tmp`, `/mnt`, `/srv`, `/data` | **bare root** refused, any subdirectory accepted | home and scratch space |
+| — | `/` | refused regardless of either guard | "pick a subdirectory" is not actionable here |
+
+So `/root/my-project` and `/home/alice/proj` are accepted and `/root` is not. The
+split exists because refusing the *subpath* protected nothing — the sensitive
+content in a home directory is one level down either way — while refusing the
+bare root still blocks handing an agent somebody's entire home folder.
+
+`/www1` is deliberately in **neither** list. It is a projects root rather than a
+home, it is allowed today including bare, and listing it would silently narrow a
+working setup (craftpip) to protect against a foot-gun nobody asked about.
+
+Two switches, both **ON by default**, set in `.env`:
+
+- `GUARD_SYSTEM_DIRS=0` re-opens the hard-block list. This is the pre-plan
+  all-or-nothing hatch and it still re-opens `/etc` and `/proc` with it.
+- `GUARD_USER_DIRS=0` relaxes **only** the bare-root half.
+
+They are independent, and that is the point: `GUARD_SYSTEM_DIRS=0` is not a way
+in to `/root`. `path-probe.js` reads the same two switches, so the form cannot
+advertise a path the server would refuse.
+
+The client copy in `client/src/lib/workspace-guards.js` cannot import the server
+module (`require`, plus the env switches), so it stays a copy — and
+`test/workspace-guards.test.js` dynamically imports the real client module and
+asserts it returns the **same verdict and the same message** as the server for
+every path that means something. The suite also fails if any other client file
+grows a private copy of the lists (it looks for a `'/home'` literal outside the
+mirror), which is the check that keeps the copies from multiplying again. The
+probe response carries `issue.code` / `reason`, and the forms prefer that over
+their own sentence, so the authoritative wording is the one the server
+authored.
+
+### Ownership of an accepted outside-project source
+
+An accepted source outside the project root is **not** chowned by the webui: the
+`ensureOwned` call in `writeInstanceCompose` is gated on `webuiVisible`. Files in
+such a folder end up owned by whoever runs the agent — root in root mode, the PAD
+user in user mode. Deleting the agent does **not** delete the folder: `removeVm`
+removes a workspace source only when it is under `HOST_WORKSPACE` and is not the
+agent's data dir.
+
+Accepting `/root/proj` is a separate question from paddock being able to *see*
+`/root/proj`, and the two are independent: the create succeeds either way,
+because the Docker daemon mounts the host path, but the probe, autocomplete,
+inherited-volume discovery and the host file browser all read through the webui
+container. Until the operator bind-mounts that path one-to-one (see Visibility
+above), the form says "Folder not found in paddock — mount the project folder
+one-to-one" and the browser stays container-scoped. That message is the honest
+answer, not a failure: `/www1/craftpip` has behaved this way all along.
 
 ### Discovery order (compose first, container supplement)
 

@@ -10,6 +10,7 @@ import Badge from '../components/ui/Badge'
 import Switch from '../components/ui/Switch'
 import { TONES } from '../components/ui/tone'
 import { cx } from '../lib/cx'
+import { hostSourceIssue } from '../lib/workspace-guards'
 
 const STEP_COMMANDS = {
   build: (name) => `docker compose -f instances/${name}/docker-compose.yml build`,
@@ -397,15 +398,8 @@ export default function CreateAgent() {
   function wsHostIssue(h) {
     const v = (h || '').trim()
     if (!v) return ''
-    if (v.startsWith('/')) {
-      if (v === '/') return 'Cannot be the host root'
-      const sys = ['/etc', '/proc', '/sys', '/dev', '/boot', '/bin', '/sbin', '/usr', '/lib', '/home', '/root', '/opt', '/tmp', '/var/run']
-      for (const s of sys) {
-        if (v === s || v.startsWith(s + '/')) return `System directory (${s}) cannot be a workspace source`
-      }
-    } else if (!v.startsWith('instances/')) {
-      return 'Must be an absolute path or start with instances/'
-    }
+    if (v.startsWith('/')) return hostSourceIssue(v)?.message || ''
+    if (!v.startsWith('instances/')) return 'Must be an absolute path or start with instances/'
     return ''
   }
 
@@ -422,17 +416,14 @@ export default function CreateAgent() {
   }
 
   // ─── Plan 28: extra volumes / ports validation helpers ─────
-  const SYSTEM_DIRS = ['/etc', '/proc', '/sys', '/dev', '/boot', '/bin', '/sbin', '/usr', '/lib', '/home', '/root', '/opt', '/tmp', '/var/run']
   const PROTECTED_DIRS = ['/etc', '/proc', '/sys', '/dev', '/var/run', '/usr', '/bin', '/sbin', '/lib', '/boot', '/tmp']
 
   function volHostIssue(h) {
     const v = (h || '').trim()
     if (!v) return 'Host source is required'
     if (v.startsWith('/')) {
-      if (v === '/') return 'Cannot be the host root'
-      for (const s of SYSTEM_DIRS) {
-        if (v === s || v.startsWith(s + '/')) return `System directory (${s}) cannot be a host source`
-      }
+      const issue = hostSourceIssue(v, { noun: 'host source' })
+      if (issue) return issue.message
     } else if (!v.startsWith('instances/')) {
       return 'Must be an absolute path or start with instances/'
     }
@@ -489,6 +480,14 @@ export default function CreateAgent() {
   const wsHostEff = wsHost.trim()
   const wsBrowsable = agentDataHost && wsHostEff.startsWith(agentDataHost + '/')
   const wsHostErr = wsHostIssue(wsHost)
+  /* One message per problem, not two. The local check answers instantly while
+     the probe is still in flight, so both were rendering for the same path —
+     the inline sentence AND "System directory — cannot be a workspace source."
+     under it. The probe is the authoritative one (it read the policy where it
+     lives), so its `reason` replaces ours when it arrives. */
+  const wsHostProblem = (wsProbe?.issue?.message)
+    || (wsProbe?.forbidden ? wsProbe.reason : '')
+    || wsHostErr
   const wsDirErr = wsDirIssue(wsDir)
   const wsActive = !!wsHostEff
 
@@ -750,15 +749,27 @@ export default function CreateAgent() {
                 <p className="text-xs text-ink-dim mt-1.5">
                   This folder is where your agent's files live on this PC — open it directly from your file manager.
                 </p>
-                {wsHostErr && <p className="text-xs text-danger mt-1">{wsHostErr}</p>}
-                {wsProbe && wsProbe.forbidden && (
-                  <p className="text-xs text-danger mt-1">System directory — cannot be a workspace source.</p>
-                )}
+                {wsHostProblem && <p className="text-xs text-danger mt-1">{wsHostProblem}</p>}
                 {wsProbe && !wsProbe.forbidden && !wsProbe.exists && (
                   <p className="text-xs text-warning mt-1">Folder not found in paddock — mount the project folder one-to-one (same path in host and container) to use it.</p>
                 )}
                 {wsProbe && !wsProbe.forbidden && wsProbe.exists && !wsProbe.compose && (
                   <p className="text-xs text-success mt-1">Path resolves.</p>
+                )}
+                {wsProbe && !wsProbe.forbidden && wsProbe.exists && wsProbe.outsideProject && (
+                  /* Plan 72. Two facts that are easy to state wrongly, so they
+                     are stated from what the code does: the webui does NOT
+                     chown an outside-project source (that `ensureOwned` call is
+                     gated on `webuiVisible`), so ownership there belongs to
+                     whoever runs the agent; and `removeVm` only deletes a source
+                     under the project root, so deleting this agent leaves the
+                     folder alone. */
+                  <p className="text-xs text-ink-dim mt-1">
+                    Outside the Paddock folder, so this project&rsquo;s file browser and autocomplete stay
+                    container-only until the folder is mounted one-to-one. Files here are owned by whoever runs
+                    the agent (root, or the PAD user in user mode) &mdash; deleting the agent does <strong>not</strong>{' '}
+                    delete this folder.
+                  </p>
                 )}
                 {discovered && (
                   <div className={cx('mt-2 rounded-card border px-3 py-2 text-xs', TONES.success.panel)}>

@@ -7,6 +7,10 @@ const { imageFor, legacySharedImage, buildDir, buildEnvPath, readBuildEnv, setBu
 const { ensureOwned, normalizeTree, isSelfManagedAgentData, USER_UID, USER_GID } = require('./ownership');
 const devcontainer = require('./devcontainer');
 const { inspectPeer, classifyNetworkPeer } = require('./net-peer');
+// plan 72: the host-path policy (hard-block vs bare-home-root) and the guard
+// switches live here, so this file's two validate paths, the probe and the form
+// all answer from one list.
+const { guard, hostSourceIssue } = require('./workspace-guards');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const HOST_WORKSPACE = process.env.HOST_WORKSPACE_ROOT || WORKSPACE;
@@ -142,22 +146,14 @@ function instanceComposePath(name) {
 
 // ─── Custom workspace mount (plan 24) ────────────────────────
 
-// Host dirs that must never be bound as a workspace source.
-const HOST_SYSTEM_DIRS = ['/etc', '/proc', '/sys', '/dev', '/boot', '/bin', '/sbin', '/usr', '/lib', '/home', '/root', '/opt', '/tmp', '/var/run'];
+// Host dirs that must never be bound as a workspace source, and the home /
+// scratch dirs whose BARE root is refused but whose subdirectories are fine,
+// both live in ./workspace-guards (plan 72) so the create path, the
+// settings-apply path, the probe and the form cannot disagree about them.
 // Container paths (and descendants) that must never be bound as a workspace
 // destination. NOTE: /root and /opt are intentionally NOT here — every
 // supported driver keeps its data dir below one of them.
 const CONTAINER_PROTECTED = ['/etc', '/proc', '/sys', '/dev', '/var/run', '/usr', '/bin', '/sbin', '/lib', '/boot', '/tmp'];
-
-/** Whether a workspace-mount safety guard is active. Every guard is ON by
- *  default; set `GUARD_<NAME>` to `0`/`false`/`no`/`off` to disable that
- *  single check (e.g. `GUARD_PROJECT_ROOT=0` to allow mounting the project
- *  root as a workspace source). Set in `.env` — the webui loads it via
- *  `env_file`, then `docker compose up -d --force-recreate paddock`. */
-function guard(name) {
-  const v = String(process.env[`GUARD_${name}`] || '').trim().toLowerCase();
-  return !['0', 'false', 'no', 'off', 'disabled', 'disable'].includes(v);
-}
 
 /** Recompute the visibility flags for a stored workspace mount. hostBrowsable
  *  means the source lives inside this agent's data directory on the host
@@ -270,11 +266,8 @@ function validateWorkspaceMount(name, agent, workspaceHost, workspaceDir) {
     host = path.normalize(path.join(HOST_WORKSPACE, hostRaw));
   }
 
-  for (const sd of HOST_SYSTEM_DIRS) {
-    if (guard('SYSTEM_DIRS') && (host === sd || host.startsWith(sd + path.sep))) {
-      throw new Error(`The workspace source cannot be a system directory (${sd})`);
-    }
-  }
+  const srcIssue = hostSourceIssue(host);
+  if (srcIssue) throw new Error(srcIssue.message);
   if (guard('PROJECT_ROOT') && host === HOST_WORKSPACE) {
     throw new Error('The project root cannot be the workspace source');
   }
@@ -1179,11 +1172,8 @@ function validateExtraVolume(name, agent, hostPath, container, readonly, type, e
     host = path.normalize(path.join(HOST_WORKSPACE, hostRaw));
   }
 
-  for (const sd of HOST_SYSTEM_DIRS) {
-    if (guard('SYSTEM_DIRS') && (host === sd || host.startsWith(sd + path.sep))) {
-      throw new Error(`The host source cannot be a system directory (${sd})`);
-    }
-  }
+  const volIssue = hostSourceIssue(host, { noun: 'host source' });
+  if (volIssue) throw new Error(volIssue.message);
   if (guard('PROJECT_ROOT') && host === HOST_WORKSPACE) {
     throw new Error('The project root cannot be an extra volume host source');
   }
