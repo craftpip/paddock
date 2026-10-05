@@ -2,6 +2,9 @@ import { useEffect, useState, useRef, useCallback } from 'react'
 import { api } from '../../lib/api'
 import { usePrompt } from '../../lib/prompt'
 import { useToast } from '../../lib/toast'
+import Button from '../../components/ui/Button'
+import { Input } from '../../components/ui/Input'
+import { cx } from '../../lib/cx'
 /**
  * Commands — the "home" mode of an agent page.
  *
@@ -11,6 +14,13 @@ import { useToast } from '../../lib/toast'
  * (servers, skills, backups) shows as compact chips in the same flow.
  * Commands run in the docked terminal below. The `run`/`termRef`
  * plumbing lives in AgentDetail.
+ *
+ * Every action button here PASTES an `openclaw ...` (or the driver equivalent)
+ * command into the docked terminal via `run` — that is the whole contract and
+ * it is unchanged. The one exception is VaultDropdown, which fetches a
+ * decrypted value from a server API and writes it into the terminal; that
+ * pattern is deliberate (secrets must never travel through a terminal paste) —
+ * do not "fix" it into a `run` call.
  */
 
 const COLORS = {
@@ -31,14 +41,18 @@ function matches(q, ...fields) {
 
 function Pill({ label, onClick, cmd, desc, color, disabled }) {
   return (
-    <button
+    <Button
+      variant="ghost"
+      size="sm"
       onClick={onClick}
       disabled={disabled}
       title={cmd || desc}
-      className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap border shrink-0 disabled:opacity-40 disabled:cursor-not-allowed ${color}`}
+      // The per-category fill is the only thing that varies; `border` is here
+      // because the ghost variant carries no border of its own.
+      className={cx('border shrink-0 disabled:opacity-40', color)}
     >
       {label}
-    </button>
+    </Button>
   )
 }
 
@@ -238,13 +252,17 @@ function SkillsFlow({ agent, query, run, prompt, connected }) {
       ))}
       {showInstall && (
         <form onSubmit={doInstall} className="inline-flex items-center gap-2">
-          <input type="text" value={installRef} onChange={(e) => setInstallRef(e.target.value)}
-                 placeholder="@owner/slug or owner/repo@ref"
-                 className="w-56 px-2.5 py-1.5 rounded-lg text-xs bg-sunken border border-line text-ink focus:border-accent-line focus:outline-none placeholder-ink-dim" />
-          <button type="submit" disabled={installing}
-                  className="px-2.5 py-1.5 rounded-lg text-xs bg-accent hover:bg-accent-hover disabled:bg-raised text-accent-ink transition-colors">
+          <Input
+            type="text"
+            size="sm"
+            value={installRef}
+            onChange={(e) => setInstallRef(e.target.value)}
+            placeholder="@owner/slug or owner/repo@ref"
+            className="w-56"
+          />
+          <Button type="submit" variant="primary" size="sm" disabled={installing}>
             {installing ? '…' : 'Install'}
-          </button>
+          </Button>
         </form>
       )}
     </>
@@ -453,13 +471,19 @@ function VaultDropdown({ termRef, connected }) {
 
   return (
     <div ref={wrapRef} className="relative shrink-0 ml-auto">
-      <button
+      <Button
         ref={btnRef}
+        variant="ghost"
+        size="md"
         onClick={toggle}
         disabled={!connected}
         title={connected ? 'Vault — paste a saved secret into the terminal' : 'Vault — waiting for the terminal to connect'}
-        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors whitespace-nowrap border shrink-0 disabled:opacity-40 disabled:cursor-not-allowed
-          ${open ? 'border-warning-line/70 bg-warning-soft text-warning' : 'border-warning-line/40 text-warning bg-warning-soft hover:bg-warning-soft hover:text-warning'}`}
+        className={cx(
+          'border shrink-0 disabled:opacity-40',
+          open
+            ? 'border-warning-line/70 bg-warning-soft text-warning'
+            : 'border-warning-line/40 text-warning bg-warning-soft hover:bg-warning-soft hover:text-warning'
+        )}
       >
         <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
@@ -470,18 +494,18 @@ function VaultDropdown({ termRef, connected }) {
         <svg className="w-3 h-3 text-warning/70" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <path d="M6 9l6 6 6-6" />
         </svg>
-      </button>
+      </Button>
 
       {open && anchor && (
         <div
-          className="fixed z-50 w-80 rounded-lg border border-line bg-sunken shadow-xl overflow-hidden"
+          className="fixed z-50 w-80 rounded-card border border-line bg-sunken shadow-modal overflow-hidden"
           style={{ top: anchor.bottom + 6, right: Math.max(8, window.innerWidth - anchor.right) }}
         >
           <div className="flex items-center justify-between px-3 py-2 border-b border-line-faint">
             <span className="text-xs font-medium text-ink-muted">Vault</span>
-            <button onClick={load} title="Refresh vault list" className="text-ink-dim hover:text-ink text-xs px-1">
+            <Button variant="ghost" size="sm" icon onClick={load} title="Refresh vault list">
               ↻
-            </button>
+            </Button>
           </div>
 
           <div className="px-2 py-1.5 border-b border-line-faint">
@@ -490,19 +514,26 @@ function VaultDropdown({ termRef, connected }) {
                 <circle cx="11" cy="11" r="8" />
                 <path d="m21 21-4.3-4.3" />
               </svg>
-              <input
+              <Input
                 ref={filterRef}
                 type="text"
+                size="sm"
                 value={filter}
                 onChange={(e) => setFilter(e.target.value)}
                 placeholder="Filter vault…"
-                className="w-full pl-6 pr-6 py-1 rounded text-[11px] bg-sunken border border-line text-ink focus:border-warning-line focus:outline-none placeholder-ink-dim"
+                className="pl-6 pr-8"
               />
               {filter && (
-                <button onClick={() => setFilter('')} title="Clear filter"
-                        className="absolute right-1.5 top-1/2 -translate-y-1/2 text-ink-dim hover:text-ink text-xs px-0.5">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  icon
+                  onClick={() => setFilter('')}
+                  title="Clear filter"
+                  className="absolute right-0 top-1/2 -translate-y-1/2"
+                >
                   ×
-                </button>
+                </Button>
               )}
             </div>
           </div>
@@ -520,24 +551,39 @@ function VaultDropdown({ termRef, connected }) {
 
           {pinMode && (
             <form onSubmit={submitPin} className="flex items-center gap-1.5 border-b border-line-faint p-2">
-              <input
+              <Input
                 type="password"
+                size="sm"
+                mono
                 inputMode="numeric"
                 value={pastePin}
                 onChange={(e) => { setPastePin(e.target.value.replace(/\D/g, '').slice(0, 6)); setPinErr('') }}
                 placeholder="••••••"
                 autoFocus
                 autoComplete="current-password"
-                className="flex-1 min-w-0 px-2 py-1 rounded text-[11px] bg-sunken border border-line text-ink focus:border-warning-line focus:outline-none placeholder-ink-dim text-center tracking-[0.25em] font-mono"
+                className="flex-1 text-center tracking-[0.25em]"
               />
-              <button type="submit" disabled={pinBusy}
-                      className="px-2 py-1 rounded text-[11px] bg-warning hover:bg-warning disabled:bg-raised text-warning-ink transition-colors whitespace-nowrap">
+              {/* Solid warning fill: TONES.warning.solid has no Button variant, so
+                  the solid treatment rides on top of `primary`. */}
+              <Button
+                type="submit"
+                variant="primary"
+                size="sm"
+                disabled={pinBusy}
+                className="bg-warning text-warning-ink hover:bg-warning"
+              >
                 {pinBusy ? '…' : (pinMode.type === 'paste' ? 'Unlock & paste' : 'Unlock & add')}
-              </button>
-              <button type="button" onClick={() => { setPinMode(null); setPastePin(''); setPinErr('') }} disabled={pinBusy}
-                      className="px-1.5 py-1 rounded text-[11px] text-ink-faint hover:text-ink hover:bg-raised transition-colors whitespace-nowrap">
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => { setPinMode(null); setPastePin(''); setPinErr('') }}
+                disabled={pinBusy}
+                className="text-ink-faint hover:text-ink"
+              >
                 ✕
-              </button>
+              </Button>
               {pinErr && <span className="text-[10px] text-danger">{pinErr}</span>}
             </form>
           )}
@@ -552,12 +598,15 @@ function VaultDropdown({ termRef, connected }) {
               </div>
             )}
             {filtered.map((item) => (
-              <button
+              <Button
                 key={item.id}
+                variant="ghost"
+                size="sm"
+                block
                 onClick={() => pasteItem(item)}
                 disabled={!!pastingId || !connected}
-                className="w-full text-left px-3 py-1.5 flex items-center gap-2 text-xs hover:bg-panel hover:text-accent-text transition-colors group disabled:opacity-40"
                 title={locked ? 'Enter your PIN to paste this value' : 'Fetch value and paste into terminal'}
+                className="group justify-start whitespace-normal px-3 py-1.5 text-left text-xs hover:bg-panel hover:text-accent-text disabled:opacity-40"
               >
                 <svg className="w-3 h-3 text-warning/70 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" />
@@ -569,23 +618,23 @@ function VaultDropdown({ termRef, connected }) {
                   )}
                 </span>
                 {pastingId === item.id && <span className="ml-auto text-[10px] text-accent-text">fetching…</span>}
-              </button>
+              </Button>
             ))}
           </div>
 
           <form onSubmit={addItem} className="flex flex-col gap-1.5 border-t border-line-faint p-2">
             <span className="text-[10px] font-semibold text-ink-dim uppercase tracking-wider px-1">Add vault item</span>
             <div className="flex gap-1.5">
-              <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="name"
-                     className="flex-1 min-w-0 px-2 py-1 rounded text-[11px] bg-sunken border border-line text-ink focus:border-warning-line focus:outline-none placeholder-ink-dim" />
-              <input type="password" value={value} onChange={(e) => setValue(e.target.value)} placeholder="value"
+              <Input type="text" size="sm" value={name} onChange={(e) => setName(e.target.value)} placeholder="name"
+                     className="flex-1" />
+              <Input type="password" size="sm" mono value={value} onChange={(e) => setValue(e.target.value)} placeholder="value"
                      autoComplete="new-password"
-                     className="flex-1 min-w-0 px-2 py-1 rounded text-[11px] bg-sunken border border-line text-ink focus:border-warning-line focus:outline-none placeholder-ink-dim font-mono" />
+                     className="flex-1" />
             </div>
-            <button type="submit" disabled={saving || !name.trim() || !value.trim()}
-                    className="px-2 py-1 rounded text-[11px] bg-warning hover:bg-warning disabled:bg-raised disabled:text-ink-dim text-warning-ink transition-colors">
+            <Button type="submit" variant="primary" size="sm" disabled={saving || !name.trim() || !value.trim()}
+                    className="bg-warning text-warning-ink hover:bg-warning">
               {saving ? 'Adding…' : '+ Add'}
-            </button>
+            </Button>
           </form>
         </div>
       )}
@@ -630,29 +679,36 @@ export default function CommandsPane({ agent, termRef, run, connected }) {
     <div className="space-y-4">
       {/* Search */}
       <div className="flex items-center gap-2">
-        <button
+        <Button
+          variant="primary"
+          size="md"
           onClick={runTool}
           disabled={!connected}
           title={connected ? `Run ${tuiCommand} interactively in the terminal` : 'Waiting for the terminal to connect'}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-accent hover:bg-accent-hover text-accent-ink rounded-lg text-sm font-medium transition-colors whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
+          className="shrink-0 disabled:opacity-40"
         >
           <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <polygon points="5 3 19 12 5 21 5 3" />
           </svg>
           Run TUI
-        </button>
-        <input type="text" value={query}
-               onChange={(e) => { setQuery(e.target.value); if (e.target.value) { setShowCommands(true); localStorage.setItem(SHOW_COMMANDS_KEY, '1') } }}
-               placeholder="Filter commands…"
-               className="flex-1 max-w-md px-3 py-1.5 bg-sunken border border-line rounded-lg text-sm text-ink focus:border-accent-line focus:outline-none placeholder-ink-dim" />
-        <button
+        </Button>
+        <Input
+          type="text"
+          value={query}
+          onChange={(e) => { setQuery(e.target.value); if (e.target.value) { setShowCommands(true); localStorage.setItem(SHOW_COMMANDS_KEY, '1') } }}
+          placeholder="Filter commands…"
+          className="flex-1 max-w-md"
+        />
+        <Button
+          variant="secondary"
+          size="md"
           onClick={() => setShowCommands((v) => {
             const next = !v
             localStorage.setItem(SHOW_COMMANDS_KEY, next ? '1' : '0')
             return next
           })}
           title={showCommands ? 'Hide command buttons' : 'Show command buttons'}
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors whitespace-nowrap border shrink-0 ${showCommands ? 'border-line bg-panel/60 text-ink-muted hover:bg-raised hover:text-ink' : 'border-line bg-panel text-ink-faint hover:bg-raised hover:text-ink'}`}
+          className={cx('shrink-0', showCommands ? 'bg-panel/60 text-ink-muted' : 'bg-panel text-ink-faint')}
         >
           <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             {showCommands ? (
@@ -663,7 +719,7 @@ export default function CommandsPane({ agent, termRef, run, connected }) {
             {showCommands && <path d="m2 2 20 20" />}
           </svg>
           {showCommands ? 'Hide' : 'Show'}
-        </button>
+        </Button>
         <VaultDropdown termRef={termRef} connected={connected} />
       </div>
 

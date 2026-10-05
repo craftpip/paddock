@@ -621,6 +621,59 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   control stays green. **Re-measure by removing the code and watching tests fail** —
   done here: 3 red, then 11 green on restore.
 
+- **A guard asserted as a FINAL state cannot fail if the bug is a TRANSIENT one, so
+  state the invariant as a predicate over the whole SEQUENCE — and prove it by
+  reversing the ORDER, not by deleting the code.** Plan 68's flash was 376ms of col
+  3 showing "This session is closed" *between* two correct states, so "the guard is
+  eventually cleared" passes on the broken build (both orders clear it). The test
+  subscribes to the store, records `(reopenFor, sessionState.live)` on every `set`,
+  and asserts **once the reopen has started, the guard never reads null while
+  `sessionState` is still the dead read**. Two refinements the first draft needed,
+  both learned by watching a CORRECT build go red:
+  - **Scope the predicate to where the bad state can actually occur.** Before the
+    reopen starts there genuinely IS a `(guard null, dead read)` state — the
+    detection read landing — and it is harmless because the next set is in the
+    same synchronous block, so React batches them into one paint. An unscoped
+    version fails on correct code, and the tempting response to that red is to
+    weaken the assert, which is how a guard dies. **A red test on correct code is a
+    bug in the assert: read it before touching the code.**
+  - **Assert what was PROMISED, not what is incidental.** "Exactly one outcome read
+    after the restart" was wrong — there are two, because `refreshActive()` inside
+    the reopen already re-reads the open session (`fetchAll` → `fetchSessionState`).
+    Pinning the count would assert a detail the store never claimed, and the next
+    legitimate read would break it.
+- **A test that passes because the fixture never got the code running is worse
+  than no test, and the tell is a flag that never flips.** Plan 68's "the poll path
+  never restarts a dead session" passed with `openSession: null`, because every
+  `fetchSessionState` call took the *"the user left on another row"* early return —
+  so the negative held vacuously. **Give the negative test a POSITIVE twin on the
+  same fixture**: re-arm the identical dead pane with the flag ON and assert a
+  restart *did* happen. If the twin cannot go green, the fixture is inert and the
+  negative proves nothing. Adjacent: `selectSession` returns `void`, not the
+  promise (a click handler ignores it), so a test cannot `await` the reopen it just
+  triggered — drain microtasks instead. *"The API under test doesn't return its
+  promise"* is a fact to design around, not an obstacle.
+- **A mutation control must run in a COPY, and you must read the ORIGINAL back
+  afterwards.** `src/` is bind-mounted, so a `docker exec … node -e` rewriting
+  `/app` rewrites the **worktree**. Plan 68's control reverses the reopen ordering —
+  the exact defect — so running it in place would have disabled the guard in the
+  committed source. Recipe: `cp -r` the client to `/tmp`, mutate **there**, copy it
+  in as `/mut`, run with `node_modules` symlinked from `/app/client`, then `rm -rf
+  /mut` and **grep the original** to confirm the good order survived. Two cheap
+  checks make the control trustworthy: assert the mutant is in the COPY *and* the
+  correct order still in the source, and confirm the expected test goes red
+  **while the rest stay green** — a control that reds everything proves only that
+  something broke.
+- **A test must be able to reach code written for a BUNDLER, or it will be
+  "unittestable" for a reason that has nothing to do with the code.** The Mission
+  store is ESM and imports `../lib/api` extensionless — Vite resolves that, Node
+  does not — so `node --test` died on the store's own import, not on the store. Fix
+  it at the RESOLVER (`test/helpers/client-store-resolve.mjs`, a `module.register`
+  hook filling in `.js`/`.jsx` for extensionless relative specifiers **inside the
+  client package only**, so it can never rewrite a bare specifier or a real
+  `node_modules` lookup). Do **not** edit the store's import to suit a test
+  harness — that is a bundler-shaped change to production source.
+
 ## Project Map
 
 - **`docker-compose.yml`** defines the `webui` service (container `paddock`,
@@ -636,6 +689,11 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   Old EJS routes/`routes/agents.js` are dead code.
 - **`instances/<pad>/`** — per-PAD dir: `<agent>/` bind-mounted data dir,
   `docker-compose.yml`, **`meta.env`** (critical state), `logs/`.
+- **`src/test/mission-reopen.test.js`** + **`src/test/helpers/client-store-resolve.mjs`** —
+  plan 68's auto-reopen guards, and the ESM resolve hook that lets `node --test`
+  reach the client store at all. The ordering assert is a **sequence** predicate
+  (see the guard/transient lesson above), and a negative here is only meaningful
+  with a positive twin on the same fixture.
 - **`src/client/src/components/OverlayScroll.jsx`** — the floating scrollbar the
   Mission listings use. A native bar always reserves layout space, so in a 260px
   column it eats a tenth of the listing, and `scrollbar-gutter: stable` only
@@ -794,6 +852,15 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   no tmux session at all → **restart** (`POST .../restart`, recreates with
   `-c <project.folder>`, same tmux id, same `agent_session_id`, and refuses with
   `mission_folder_missing` rather than starting in the wrong directory).
+  **Since plan 68 the row-click path does this restart for you**, and that is a
+  deliberate spend, not an oversight: opening a session whose pane is gone now
+  relaunches the agent TUI in that conversation (`opencode -s <agent_session_id>`,
+  same tmux id) instead of showing a closed notice with a button. So "clicking a
+  row can start spending tokens without asking" — the opt-in is the **user's
+  open action**, gated by `autoReopen`, which only `selectSession` /
+  `startSession` pass. The **poll path never does**: a pane that dies while you
+  are watching it still gets the non-destructive notice and the button, because
+  relaunching an agent process unasked is the human's call (plan 53 §6).
 - **A "Loading…" line in a list that already has data is a bug, not a
   placeholder.** Every 15s poll and every action flips `sessionsLoading` /
   `historyLoading`, so an unconditional placeholder pushes the listing down a
@@ -875,7 +942,11 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   deleting junk, the user's real session on that same agent shows col 3's
   explicit `The tmux session is gone` state (with its own *Restart the TUI*
   button). Don't click that restart for them — it launches an agent process in
-  their conversation; report it and let them choose.
+  their conversation; report it and let them choose. (Plan 68 changed one half of
+  this: if the user *clicks the row themselves*, the reopen happens without the
+  button, per the entry above. The junk-cleanup sting still holds — the point is
+  that **you** must not trigger a TUI launch on their behalf, not that the app
+  ever needs a button.)
 - **`matchMedia` is untestable in a headless tab, `window.innerWidth` on a
   `resize` listener is.** `Browser.setWindowBounds` does not change the layout
   viewport (already noted below), so a responsive feature keyed on a

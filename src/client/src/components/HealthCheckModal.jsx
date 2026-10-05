@@ -1,4 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
+import { cx } from '../lib/cx'
+import Modal from './ui/Modal'
+import Button from './ui/Button'
+import Badge from './ui/Badge'
+import { TONES } from './ui/tone'
 
 const STATUS_ICON = {
   ok: { sym: '✓', cls: 'text-success' },
@@ -76,12 +81,7 @@ export default function HealthCheckModal({ name, title, onDone, onClose }) {
         ? summary.error ? 'error' : summary.warn ? 'warn' : 'ok'
         : 'ok'
 
-  const badgeCls =
-    overall === 'ok'
-      ? 'bg-success-soft text-success'
-      : overall === 'warn'
-        ? 'bg-warning-soft text-warning'
-        : 'bg-danger-soft text-danger'
+  const badgeTone = overall === 'ok' ? 'success' : overall === 'warn' ? 'warning' : 'danger'
   const badgeText =
     phase === 'running'
       ? 'Running…'
@@ -94,59 +94,50 @@ export default function HealthCheckModal({ name, title, onDone, onClose }) {
             : 'Problems found'
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-overlay backdrop-blur-sm">
-      <div
-        role="dialog"
-        aria-modal="true"
-        className="bg-panel border border-line rounded-xl shadow-2xl w-full max-w-2xl mx-4 overflow-hidden"
-      >
-        <div className="flex items-center justify-between px-5 pt-4 pb-2">
-          <h3 className="text-base font-semibold text-ink">{title || 'Health Check'}</h3>
-          <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${badgeCls}`}>{badgeText}</span>
-        </div>
-
-        <div className="px-5">
-          <ul className="mt-2 space-y-2.5 max-h-96 overflow-y-auto pr-1">
-            {checks.map((c, i) => {
-              const ic = STATUS_ICON[c.status] || STATUS_ICON.running
-              const showDetail = c.status !== 'ok' && (c.expected || c.actual)
-              return (
-                <li key={`${c.key}-${i}`} className="flex items-center gap-2.5">
-                  <span className={`text-sm leading-none font-bold shrink-0 ${ic.cls}`}>{ic.sym}</span>
-                  <div className="min-w-0">
-                    <p className="text-xs text-ink-muted">{c.label}</p>
-                    {showDetail && (
-                      <p className="text-xs font-mono text-ink-faint mt-0.5 break-all">
-                        expected: {c.expected} · found: {c.actual}
-                      </p>
-                    )}
-                    {c.hint && <p className="text-xs text-ink-dim mt-0.5">{c.hint}</p>}
-                  </div>
-                </li>
-              )
-            })}
-            {phase === 'running' && checks.length === 0 && (
-              <li className="text-xs text-ink-dim py-3">Running checkup…</li>
-            )}
-          </ul>
-
-          {phase === 'failed' && error && (
-            <p className="mt-3 bg-danger-soft border border-danger-line rounded-lg p-3 text-xs text-danger whitespace-pre-wrap">{error}</p>
-          )}
-        </div>
-
-        <div className="flex items-center justify-end gap-3 px-5 py-4">
+    <Modal
+      open
+      onClose={onClose}
+      title={title || 'Health Check'}
+      width="max-w-2xl"
+      headerExtra={<Badge tone={badgeTone}>{badgeText}</Badge>}
+      footer={
+        <>
           <p className="mr-auto text-xs text-ink-dim">
             {counts.ok} ✓ · {counts.warn} ~ · {counts.error} ✗
           </p>
-          <button
-            onClick={onClose}
-            className="px-4 py-2 text-sm font-medium text-ink bg-raised hover:bg-raised-hover rounded-lg transition-colors"
-          >
+          <Button variant="secondary" size="lg" onClick={onClose}>
             {phase === 'running' ? 'Close' : 'Done'}
-          </button>
-        </div>
-      </div>
-    </div>
+          </Button>
+        </>
+      }
+    >
+      <ul className="mt-2 space-y-2.5 max-h-96 overflow-y-auto pr-1">
+        {checks.map((c, i) => {
+          const ic = STATUS_ICON[c.status] || STATUS_ICON.running
+          const showDetail = c.status !== 'ok' && (c.expected || c.actual)
+          return (
+            <li key={`${c.key}-${i}`} className="flex items-center gap-2.5">
+              <span className={cx('text-sm leading-none font-bold shrink-0', ic.cls)}>{ic.sym}</span>
+              <div className="min-w-0">
+                <p className="text-xs text-ink-muted">{c.label}</p>
+                {showDetail && (
+                  <p className="text-xs font-mono text-ink-dim mt-0.5 break-all">
+                    expected: {c.expected} · found: {c.actual}
+                  </p>
+                )}
+                {c.hint && <p className="text-xs text-ink-dim mt-0.5">{c.hint}</p>}
+              </div>
+            </li>
+          )
+        })}
+        {phase === 'running' && checks.length === 0 && (
+          <li className="text-xs text-ink-dim py-3">Running checkup…</li>
+        )}
+      </ul>
+
+      {phase === 'failed' && error && (
+        <p className={cx('mt-3 rounded-card border p-3 text-xs whitespace-pre-wrap', TONES.danger.panel)}>{error}</p>
+      )}
+    </Modal>
   )
 }

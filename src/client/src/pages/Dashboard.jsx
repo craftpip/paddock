@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { useAgents } from '../stores/agents'
 import AgentCard from '../components/AgentCard'
 import { api } from '../lib/api'
+import { Input } from '../components/ui/Input'
 
 export default function Dashboard() {
   const agents = useAgents((s) => s.agents)
@@ -98,24 +99,24 @@ export default function Dashboard() {
           </p>
         </div>
         <div className="flex items-center gap-3">
-          <input
+          <Input
             type="text"
             id="global-search"
             placeholder="Search agents..."
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            className="px-3 py-2 bg-sunken border border-line rounded-lg text-sm text-ink w-48 focus:border-accent-line focus:outline-none focus:ring-1 focus:ring-accent-line"
+            className="w-48"
           />
           <a
             href="/agents/create"
-            className="px-4 py-2 bg-accent hover:bg-accent-hover text-accent-ink rounded-lg text-sm font-medium transition-colors whitespace-nowrap"
+            className="px-4 py-2 bg-accent hover:bg-accent-hover text-accent-ink rounded-control text-sm font-medium transition-colors whitespace-nowrap"
           >
             + New Agent
           </a>
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-4 mb-6 px-4 py-3 border border-line-faint rounded-xl bg-canvas/50">
+      <div className="flex flex-wrap items-center gap-4 mb-6 px-4 py-3 border border-line-faint rounded-card bg-canvas/50">
         <span className="text-xs text-ink-dim font-medium">Fleet Resources</span>
         <span className="w-px h-4 bg-raised" />
         <span className="flex items-center gap-2">
@@ -150,13 +151,13 @@ export default function Dashboard() {
       {agents.length === 0 && (
         <div className="text-center py-20 text-ink-dim">
           <svg className="w-12 h-12 mx-auto mb-4 text-ink-dim" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+            <path strokeLinecap="round" strokeLinejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a 2 2 0 0 0 2 -2V5a 2 2 0 0 0 -2 -2H5a 2 2 0 0 0 -2 2v10a 2 2 0 0 0 2 2z" />
           </svg>
           <p className="text-lg mb-2">No agents yet</p>
           <p className="text-sm mb-4">Create your first agent to get started.</p>
           <a
             href="/agents/create"
-            className="inline-block px-4 py-2 bg-accent hover:bg-accent-hover text-accent-ink rounded-lg text-sm transition-colors"
+            className="inline-block px-4 py-2 bg-accent hover:bg-accent-hover text-accent-ink rounded-control text-sm transition-colors"
           >
             + New Agent
           </a>

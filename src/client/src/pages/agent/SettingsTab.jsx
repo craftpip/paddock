@@ -7,6 +7,15 @@ import { useToast } from '../../lib/toast'
 import CommandModal from '../../components/CommandModal'
 import HealthCheckModal from '../../components/HealthCheckModal'
 import ContainerInfoModal from '../../components/ContainerInfoModal'
+import Button from '../../components/ui/Button'
+import Switch from '../../components/ui/Switch'
+import { Input, Textarea, Select, Checkbox } from '../../components/ui/Input'
+import Field from '../../components/ui/Field'
+import Card from '../../components/ui/Card'
+import Badge from '../../components/ui/Badge'
+import Modal from '../../components/ui/Modal'
+import { TONES } from '../../components/ui/tone'
+import { cx } from '../../lib/cx'
 
 // Minimal line diff for the Dev Container card preview (plan 41 item 20) —
 // no diff library in the bundle. LCS-based, capped at 500 lines per side.
@@ -57,7 +66,7 @@ function DiffPreview({ from, to }) {
     return <p className="text-xs text-success mt-1">In sync — the file already matches the pad's settings.</p>
   }
   return (
-    <div className="rounded-lg border border-line-faint bg-sunken overflow-hidden">
+    <div className="rounded-card border border-line-faint bg-sunken overflow-hidden">
       <div className="max-h-64 overflow-y-auto">
         <pre className="text-[11px] leading-5 font-mono py-1.5 px-2">
           {rows.map((r, idx) =>
@@ -766,7 +775,7 @@ export default function SettingsTab({ agent }) {
 
       {/* 0. Stale network peer warning */}
       {networkBroken && (
-        <section className="bg-warning-soft border border-warning-line/70 rounded-xl p-5">
+        <section className={cx('rounded-card border p-5', TONES.warning.panel)}>
           <h3 className="text-sm font-medium text-warning">
             {networkUnchecked
               ? 'Network health could not be checked'
@@ -786,29 +795,32 @@ export default function SettingsTab({ agent }) {
               : `This agent routes through ${networkPeerLabel}, which exists but is currently stopped. The agent can't start until the peer is running. Start ${networkPeerLabel} first, then recreate this agent.`}
           </p>
           {(networkStale || networkStaleBinding) && (
-            <button
+            <Button
+              variant="primary"
+              size="sm"
               onClick={handleRecreateNetwork}
               disabled={saving}
-              className="mt-3 px-3 py-1.5 bg-warning hover:bg-warning disabled:opacity-50 text-warning-ink rounded-lg text-xs font-medium transition-colors"
+              className="mt-3 bg-warning text-warning-ink hover:bg-warning"
             >
               Recreate to fix
-            </button>
+            </Button>
           )}
         </section>
       )}
 
       {/* 1. Container Info */}
-      <section className="bg-panel/60 border border-line rounded-xl p-5">
+      <Card plain className="bg-panel/60 border-line p-5">
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-sm font-medium text-ink-muted">Container Info</h3>
-          <button
+          <Button
+            variant="secondary"
+            size="sm"
             onClick={() => setContainerInfoModal({ key: `cinfo-${Date.now()}` })}
             disabled={saving}
             title="Inspect the live container (network, mounts, ports, raw docker inspect)"
-            className="px-3 py-1.5 bg-raised hover:bg-raised-hover disabled:opacity-50 text-ink rounded-lg text-xs font-medium transition-colors whitespace-nowrap"
           >
             Inspect details
-          </button>
+          </Button>
         </div>
         <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm sm:grid-cols-3">
           {[
@@ -825,10 +837,10 @@ export default function SettingsTab({ agent }) {
             </div>
           ))}
         </dl>
-      </section>
+      </Card>
 
       {/* 2. Recreate Container (update / recreate / full reset) */}
-      <section className="bg-panel/60 border border-line rounded-xl p-5">
+      <Card plain className="bg-panel/60 border-line p-5">
         <div className="flex items-start justify-between gap-4">
           <div>
             <h3 className="text-sm font-medium text-ink-muted">Recreate Container</h3>
@@ -836,18 +848,14 @@ export default function SettingsTab({ agent }) {
               Recreates the container. Use it to update the image to the latest, to simply recreate the container, or to reset the entire user folder (config, sessions, data) so it starts completely fresh — your bind-mounted workspace folder is preserved.
             </p>
           </div>
-          <button
-            onClick={openRecreate}
-            disabled={saving}
-            className="px-3 py-1.5 bg-accent hover:bg-accent-hover disabled:opacity-50 text-accent-ink rounded-lg text-xs font-medium transition-colors whitespace-nowrap"
-          >
+          <Button variant="primary" size="sm" onClick={openRecreate} disabled={saving}>
             Recreate Container
-          </button>
+          </Button>
         </div>
-      </section>
+      </Card>
 
       {/* 3. Container Health Checkup */}
-      <section className="bg-panel/60 border border-line rounded-xl p-5">
+      <Card plain className="bg-panel/60 border-line p-5">
         <div className="flex items-start justify-between gap-4">
           <div>
             <h3 className="text-sm font-medium text-ink-muted">Container Health Checkup</h3>
@@ -860,37 +868,35 @@ export default function SettingsTab({ agent }) {
             {healthLoading ? (
               <span className="text-xs text-ink-dim">Checking…</span>
             ) : healthStatus ? (
-              <button
+              <Button
+                variant="ghost"
+                size="sm"
                 onClick={openHealthCheck}
                 title="Open full checkup report"
-                className={`text-xs font-medium px-2.5 py-1 rounded-full transition-colors ${
+                className={
                   healthStatus === 'ok'
-                    ? 'bg-success-soft text-success hover:bg-success-soft'
+                    ? cx(TONES.success.soft, 'hover:bg-success-soft')
                     : healthStatus === 'warn'
-                      ? 'bg-warning-soft text-warning hover:bg-warning-soft'
-                      : 'bg-danger-soft text-danger hover:bg-danger-soft'
-                }`}
+                      ? cx(TONES.warning.soft, 'hover:bg-warning-soft')
+                      : cx(TONES.danger.soft, 'hover:bg-danger-soft')
+                }
               >
                 {healthStatus === 'ok'
                   ? '✓ Healthy'
                   : healthStatus === 'warn'
                     ? `~ ${healthCounts?.warn || 0} issue${healthCounts?.warn === 1 ? '' : 's'}`
                     : `✗ ${healthCounts?.error || 0} problem${healthCounts?.error === 1 ? '' : 's'}`}
-              </button>
+              </Button>
             ) : null}
-            <button
-              onClick={runHealthCheck}
-              disabled={saving}
-              className="px-3 py-1.5 bg-accent hover:bg-accent-hover disabled:opacity-50 text-accent-ink rounded-lg text-xs font-medium transition-colors whitespace-nowrap"
-            >
+            <Button variant="primary" size="sm" onClick={runHealthCheck} disabled={saving}>
               Run Health Check
-            </button>
+            </Button>
           </div>
         </div>
-      </section>
+      </Card>
 
       {/* 4. Allow docker in the container */}
-      <section className="bg-panel/60 border border-line rounded-xl p-5">
+      <Card plain className="bg-panel/60 border-line p-5">
         <div className="flex items-start justify-between gap-4">
           <div>
             <h3 className="text-sm font-medium text-ink-muted">Allow docker in the container</h3>
@@ -898,79 +904,81 @@ export default function SettingsTab({ agent }) {
               Lets this agent run <code className="text-ink-faint">docker</code> commands (docker CLI + host socket). Rebuilds the image if it has no docker CLI.
             </p>
           </div>
-          <button
-            role="switch"
-            aria-checked={toggleDocker}
-            onClick={handleToggleDocker}
+          <Switch
+            checked={toggleDocker}
+            onChange={handleToggleDocker}
             disabled={saving}
-            className={`relative w-10 h-6 rounded-full transition-colors shrink-0 disabled:opacity-50 ${toggleDocker ? 'bg-accent' : 'bg-raised'}`}
-          >
-            <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${toggleDocker ? 'translate-x-4' : ''}`} />
-          </button>
+            label="Allow docker in the container"
+          />
         </div>
         {toggleDocker && (
-          <p className="mt-3 text-xs text-warning/90 bg-warning-soft border border-warning-line/60 rounded-lg px-3 py-2">
+          <p className={cx('mt-3 rounded-card border px-3 py-2 text-xs', TONES.warning.panel)}>
             ⚠ The docker socket is host-root equivalent. This agent can control the entire host.
           </p>
         )}
-      </section>
+      </Card>
 
       {/* 4b. Container user — root vs the pad user */}
       {agent.agent_type !== 'hermes' && (
-        <section className="bg-panel/60 border border-line rounded-xl p-5">
+        <Card plain className="bg-panel/60 border-line p-5">
           <h3 className="text-sm font-medium text-ink-muted">Container user</h3>
           <p className="text-xs text-ink-dim mt-1 max-w-md">
             The agent daemon and terminal run as the pad user ({'PUID'}:{'PGID'}), so every file they write is
             user-owned on the host. SSH stays the root admin door.
           </p>
-          <div className="mt-3 inline-flex rounded-lg border border-line-faint bg-sunken p-0.5">
-            <button type="button"
-                    onClick={() => handleUserModeChange('root')}
-                    disabled={saving}
-                    className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors disabled:opacity-50 ${(settings?.userMode || 'root') === 'root' ? 'bg-accent text-white' : 'text-ink-dim hover:text-ink'}`}>
+          <div className="mt-3 inline-flex rounded-control border border-line-faint bg-sunken p-0.5">
+            <Button
+              variant={(settings?.userMode || 'root') === 'root' ? 'primary' : 'ghost'}
+              size="sm"
+              onClick={() => handleUserModeChange('root')}
+              disabled={saving}
+            >
               Root
-            </button>
-            <button type="button"
-                    onClick={() => handleUserModeChange('user')}
-                    disabled={saving}
-                    className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors disabled:opacity-50 ${settings?.userMode === 'user' ? 'bg-accent text-white' : 'text-ink-dim hover:text-ink'}`}>
+            </Button>
+            <Button
+              variant={settings?.userMode === 'user' ? 'primary' : 'ghost'}
+              size="sm"
+              onClick={() => handleUserModeChange('user')}
+              disabled={saving}
+            >
               Local user
-            </button>
+            </Button>
           </div>
           {settings?.userMode === 'user' && (
-            <p className="mt-3 text-xs text-warning/90 bg-warning-soft border border-warning-line/60 rounded-lg px-3 py-2">
+            <p className={cx('mt-3 rounded-card border px-3 py-2 text-xs', TONES.warning.panel)}>
               Changing to root or to another setting below will stop and recreate the container.
             </p>
           )}
-        </section>
+        </Card>
       )}
 
       {/* 5. Network */}
-      <section className="bg-panel/60 border border-line rounded-xl p-5">
+      <Card plain className="bg-panel/60 border-line p-5">
         <h3 className="text-sm font-medium text-ink-muted">Network</h3>
         <p className="text-xs text-ink-dim mt-1 max-w-md">
           Route this agent's traffic through another running container by joining its network namespace (e.g. gluetun for VPN).
         </p>
-        <select
-          value={currentNetwork}
-          onChange={(e) => handleNetworkChange(e.target.value)}
-          disabled={saving}
-          className="mt-3 w-full sm:w-96 bg-sunken border border-line rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line disabled:opacity-50"
-        >
-          <option value="">Default (no override)</option>
-          {networkOptions.map((c) => (
-            <option key={c.name} value={c.name}>
-              {c.name}{c.state !== 'running' ? '  (stopped)' : ''}
-            </option>
-          ))}
-        </select>
+        <div className="mt-3 sm:w-96">
+          <Select
+            value={currentNetwork}
+            onChange={(e) => handleNetworkChange(e.target.value)}
+            disabled={saving}
+          >
+            <option value="">Default (no override)</option>
+            {networkOptions.map((c) => (
+              <option key={c.name} value={c.name}>
+                {c.name}{c.state !== 'running' ? '  (stopped)' : ''}
+              </option>
+            ))}
+          </Select>
+        </div>
         <p className="mt-3 text-xs text-ink-dim">
           ⚠ Joining a container's network means the agent shares its network stack. If the target stops, the agent loses its network.
         </p>
-      </section>
+      </Card>
 
       {/* 5b. Additional volumes */}
-      <section className="bg-panel/60 border border-line rounded-xl p-5">
+      <Card plain className="bg-panel/60 border-line p-5">
         <div className="flex items-center justify-between">
           <div>
             <h3 className="text-sm font-medium text-ink-muted">Additional volumes</h3>
@@ -985,7 +993,7 @@ export default function SettingsTab({ agent }) {
             <p className="text-xs text-ink-dim">No additional volumes.</p>
           )}
           {volDraft.length > 0 && (
-            <div className="rounded-lg overflow-hidden border border-line-faint">
+            <div className="rounded-card overflow-hidden border border-line-faint">
               <div className="bg-sunken text-ink-faint uppercase tracking-wider text-[11px] px-2 py-2 flex items-center gap-2 font-medium">
                 <span className="w-32 shrink-0">Type</span>
                 <span className="flex-1 min-w-0">Host source / Volume name</span>
@@ -996,74 +1004,69 @@ export default function SettingsTab({ agent }) {
               {volDraft.map((v, i) => (
                 <div key={i} className="border-t border-line-faint flex items-start gap-2 px-2 py-1.5">
                   <div className="w-32 shrink-0">
-                    <select value={v.type || 'bind'}
-                            onChange={(e) => setVol(i, { type: e.target.value })}
-                            className="w-full h-7 bg-raised border border-line-faint rounded-lg px-1.5 text-xs text-ink focus:outline-none focus:border-accent-line">
+                    <Select size="sm" className="bg-raised" value={v.type || 'bind'}
+                            onChange={(e) => setVol(i, { type: e.target.value })}>
                       <option value="bind">Bind mount</option>
                       <option value="volume">Named volume</option>
-                    </select>
+                    </Select>
                   </div>
                   <div className="flex-1 min-w-0">
-                    <input type="text" value={v.host}
+                    <Input size="sm" mono className="bg-raised" type="text" value={v.host}
                            onChange={(e) => setVol(i, { host: e.target.value })}
                            title={v.type === 'volume' ? (v.external ? `Attaches the existing volume ${v.external}` : 'Creates a fresh volume') : undefined}
-                           placeholder={v.type === 'volume' ? 'e.g. mempalace-dbdata' : 'e.g. /mnt/shared'}
-                           className="w-full h-7 min-w-0 bg-raised border border-line-faint rounded-lg px-2 text-xs font-mono text-ink focus:outline-none focus:border-accent-line placeholder-ink-dim" />
+                           placeholder={v.type === 'volume' ? 'e.g. mempalace-dbdata' : 'e.g. /mnt/shared'} />
                     {volErrors[i].host && <p className="text-xs text-danger mt-0.5">{volErrors[i].host}</p>}
                   </div>
                   <div className="flex-1 min-w-0">
-                    <input type="text" value={v.container}
+                    <Input size="sm" mono className="bg-raised" type="text" value={v.container}
                            onChange={(e) => setVol(i, { container: e.target.value })}
-                           placeholder="e.g. /data"
-                           className="w-full h-7 min-w-0 bg-raised border border-line-faint rounded-lg px-2 text-xs font-mono text-ink focus:outline-none focus:border-accent-line placeholder-ink-dim" />
+                           placeholder="e.g. /data" />
                     {volErrors[i].dir && <p className="text-xs text-danger mt-0.5">{volErrors[i].dir}</p>}
                   </div>
                   <div className="w-7 shrink-0 h-7 flex items-center justify-center" title="Read-only mount">
-                    <input type="checkbox" checked={!!v.readonly}
-                           onChange={(e) => setVol(i, { readonly: e.target.checked })}
-                           title="Read-only mount"
-                           className="w-3.5 h-3.5 accent-accent" />
+                    <Checkbox size="sm" checked={!!v.readonly}
+                              onChange={(e) => setVol(i, { readonly: e.target.checked })}
+                              title="Read-only mount" />
                   </div>
                   <div className="w-7 shrink-0">
-                    <button type="button"
+                    <Button variant="dangerGhost" size="sm" icon
                             onClick={() => { setVolDraft(prev => prev.filter((_, idx) => idx !== i)); setVolDirty(true) }}
-                            className="w-7 h-7 grid place-items-center rounded-md text-ink-dim hover:text-danger hover:bg-raised transition-colors"
-                            title="Remove volume">✕</button>
+                            title="Remove volume">✕</Button>
                   </div>
                 </div>
               ))}
             </div>
           )}
 
-          <button type="button"
+          <Button variant="secondary" size="sm"
                   onClick={() => { setVolDraft(prev => [...prev, { type: 'bind', host: '', container: '', readonly: false }]); setVolDirty(true) }}
-                  disabled={saving}
-                  className="px-3 py-1.5 bg-raised hover:bg-raised-hover disabled:opacity-50 text-ink rounded-lg text-xs font-medium transition-colors">
+                  disabled={saving}>
             + Add volume
-          </button>
+          </Button>
 
           {volHasErrors && (
             <p className="text-xs text-danger">Fix the invalid volume fields before saving.</p>
           )}
 
           <div className="flex items-center gap-3">
-            <button
+            <Button
+              variant="primary"
+              size="sm"
               onClick={handleVolumesSave}
               disabled={saving || !volDirty || volHasErrors}
-              className="px-3 py-1.5 bg-accent hover:bg-accent-hover disabled:opacity-50 text-accent-ink rounded-lg text-xs font-medium transition-colors"
             >
               Apply volumes & recreate
-            </button>
+            </Button>
             {volDirty && !saving && (
               <span className="text-xs text-ink-dim">Unsaved volume changes</span>
             )}
           </div>
         </div>
-      </section>
+      </Card>
 
       {/* 5d. Custom workspace */}
       {!wsHidden && (
-        <section className="bg-panel/60 border border-line rounded-xl p-5">
+        <Card plain className="bg-panel/60 border-line p-5">
           <div className="flex items-start justify-between gap-4">
             <div>
               <h3 className="text-sm font-medium text-ink-muted">Custom workspace folder</h3>
@@ -1071,38 +1074,25 @@ export default function SettingsTab({ agent }) {
                 Mounts an independent host folder at a container workspace path. Changing it recreates the container; files are never moved or deleted.
               </p>
             </div>
-            <button
-              role="switch"
-              aria-checked={wsEnabled}
-              onClick={() => setWsEnabled(!wsEnabled)}
+            <Switch
+              checked={wsEnabled}
+              onChange={setWsEnabled}
               disabled={saving}
-              className={`relative w-10 h-6 rounded-full transition-colors shrink-0 disabled:opacity-50 ${wsEnabled ? 'bg-accent' : 'bg-raised'}`}
-            >
-              <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${wsEnabled ? 'translate-x-4' : ''}`} />
-            </button>
+              label="Custom workspace folder"
+            />
           </div>
 
           {wsEnabled && (
             <div className="mt-4 space-y-4">
-              <div>
-                <label className="block text-xs font-medium text-ink-faint mb-1.5 uppercase tracking-wider">
-                  Host workspace source
-                </label>
-                <input type="text" value={wsHost} onChange={(e) => setWsHost(e.target.value)}
-                       placeholder={defaultWsHost}
-                       className="w-full bg-sunken border border-line rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line font-mono" />
-                {wsHostIssue(wsHost) && (
-                  <p className="text-xs text-danger mt-1">{wsHostIssue(wsHost)}</p>
-                )}
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-ink-faint mb-1.5 uppercase tracking-wider">
-                  Container workspace path
-                </label>
-                <input type="text" value={wsDir}
+              <Field label="Host workspace source" error={wsHostIssue(wsHost)}>
+                <Input mono type="text" value={wsHost} onChange={(e) => setWsHost(e.target.value)}
+                       placeholder={defaultWsHost} />
+              </Field>
+              <Field label="Container workspace path">
+                <Input mono type="text" value={wsDir}
                        onChange={(e) => !wsFixed && setWsDir(e.target.value)}
                        readOnly={wsFixed}
-                       className={`w-full bg-sunken border border-line rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line font-mono ${wsFixed ? 'opacity-70 cursor-not-allowed' : ''}`} />
+                       className={cx(wsFixed && 'opacity-70 cursor-not-allowed')} />
                 {wsFixed && (
                   <p className="text-xs text-ink-dim mt-1">
                     Fixed by {agent.agent_type} — its CLI requires the workspace at this path
@@ -1111,25 +1101,26 @@ export default function SettingsTab({ agent }) {
                 {wsDirIssue(wsDir) && (
                   <p className="text-xs text-danger mt-1">{wsDirIssue(wsDir)}</p>
                 )}
-              </div>
+              </Field>
 
               <p className="text-xs text-ink-dim">
                 A custom workspace is a separate bind mount, outside the agent's data folder.
               </p>
-              <button
+              <Button
+                variant="primary"
+                size="sm"
                 onClick={handleWorkspaceSave}
                 disabled={saving}
-                className="px-3 py-1.5 bg-accent hover:bg-accent-hover disabled:opacity-50 text-accent-ink rounded-lg text-xs font-medium transition-colors"
               >
                 Apply workspace & recreate
-              </button>
+              </Button>
             </div>
           )}
-        </section>
+        </Card>
       )}
 
       {/* 5e. Build & lifecycle commands (plan 41) */}
-      <section className="bg-panel/60 border border-line rounded-xl p-5">
+      <Card plain className="bg-panel/60 border-line p-5">
         <div>
           <h3 className="text-sm font-medium text-ink-muted">Build &amp; lifecycle commands</h3>
           <p className="text-xs text-ink-dim mt-1 max-w-md">
@@ -1138,75 +1129,76 @@ export default function SettingsTab({ agent }) {
         </div>
 
         <div className="mt-4 space-y-4">
-          <div>
-            <label className="block text-xs font-medium text-ink-faint mb-1.5 uppercase tracking-wider">Build commands (Dockerfile)</label>
-            <textarea value={buildDraft}
+          <Field
+            label="Build commands (Dockerfile)"
+            hint={
+              <>
+                Lives in <code className="text-ink-faint font-mono">instances/{agent.name}/build/Dockerfile</code>. A change rebuilds the image (a <code className="text-ink-faint font-mono">FROM</code> line here fails the build — the current container stays up).
+              </>
+            }
+          >
+            <Textarea mono className="bg-raised" value={buildDraft}
                       onChange={(e) => { setBuildDraft(e.target.value); setBuildDirty(true) }}
                       rows={3}
                       spellCheck={false}
-                      placeholder={'RUN apt-get install -y vim'}
-                      className="w-full rounded-lg px-3 py-2 text-sm font-mono bg-raised border border-line-faint text-ink focus:outline-none focus:border-accent-line focus:ring-1 focus:ring-accent-line placeholder-ink-dim" />
-            <p className="text-xs text-ink-dim mt-1">
-              Lives in <code className="text-ink-faint font-mono">instances/{agent.name}/build/Dockerfile</code>. A change rebuilds the image (a <code className="text-ink-faint font-mono">FROM</code> line here fails the build — the current container stays up).
-            </p>
-          </div>
+                      placeholder={'RUN apt-get install -y vim'} />
+          </Field>
 
-          <div>
-            <label className="block text-xs font-medium text-ink-faint mb-1.5 uppercase tracking-wider">Post-create commands (bash)</label>
-            <textarea value={postCreateDraft}
+          <Field
+            label="Post-create commands (bash)"
+            hint="Runs once in the running container (project mounted, services up) after a recreate."
+          >
+            <Textarea mono className="bg-raised" value={postCreateDraft}
                       onChange={(e) => { setPostCreateDraft(e.target.value); setPostCreateDirty(true) }}
                       rows={3}
                       spellCheck={false}
-                      placeholder={'npm install'}
-                      className="w-full rounded-lg px-3 py-2 text-sm font-mono bg-raised border border-line-faint text-ink focus:outline-none focus:border-accent-line focus:ring-1 focus:ring-accent-line placeholder-ink-dim" />
-            <p className="text-xs text-ink-dim mt-1">
-              Runs once in the running container (project mounted, services up) after a recreate.
-            </p>
-          </div>
+                      placeholder={'npm install'} />
+          </Field>
 
-          <div>
-            <label className="block text-xs font-medium text-ink-faint mb-1.5 uppercase tracking-wider">Post-start commands (bash)</label>
-            <textarea value={postStartDraft}
+          <Field
+            label="Post-start commands (bash)"
+            hint={
+              <>
+                Runs on every container start (baked into <code className="text-ink-faint font-mono">start.sh</code>). Enabling it on an older image rebuilds it once so the hook is baked in.
+              </>
+            }
+          >
+            <Textarea mono className="bg-raised" value={postStartDraft}
                       onChange={(e) => { setPostStartDraft(e.target.value); setPostStartDirty(true) }}
                       rows={3}
                       spellCheck={false}
-                      placeholder={'service cron start'}
-                      className="w-full rounded-lg px-3 py-2 text-sm font-mono bg-raised border border-line-faint text-ink focus:outline-none focus:border-accent-line focus:ring-1 focus:ring-accent-line placeholder-ink-dim" />
-            <p className="text-xs text-ink-dim mt-1">
-              Runs on every container start (baked into <code className="text-ink-faint font-mono">start.sh</code>). Enabling it on an older image rebuilds it once so the hook is baked in.
-            </p>
-          </div>
+                      placeholder={'service cron start'} />
+          </Field>
 
-          <div>
-            <label className="block text-xs font-medium text-ink-faint mb-1.5 uppercase tracking-wider">Post-attach commands (bash)</label>
-            <textarea value={postAttachDraft}
+          <Field
+            label="Post-attach commands (bash)"
+            hint="Runs on every terminal attach inside this PAD (workspace/project mounted). No image change needed."
+          >
+            <Textarea mono className="bg-raised" value={postAttachDraft}
                       onChange={(e) => { setPostAttachDraft(e.target.value); setPostAttachDirty(true) }}
                       rows={3}
                       spellCheck={false}
-                      placeholder={'echo "attached"'}
-                      className="w-full rounded-lg px-3 py-2 text-sm font-mono bg-raised border border-line-faint text-ink focus:outline-none focus:border-accent-line focus:ring-1 focus:ring-accent-line placeholder-ink-dim" />
-            <p className="text-xs text-ink-dim mt-1">
-              Runs on every terminal attach inside this PAD (workspace/project mounted). No image change needed.
-            </p>
-          </div>
+                      placeholder={'echo "attached"'} />
+          </Field>
 
           <div className="flex items-center gap-3">
-            <button
+            <Button
+              variant="primary"
+              size="sm"
               onClick={handleBuildPostCreateSave}
               disabled={saving || (!buildDirty && !postCreateDirty && !postStartDirty && !postAttachDirty)}
-              className="px-3 py-1.5 bg-accent hover:bg-accent-hover disabled:opacity-50 text-accent-ink rounded-lg text-xs font-medium transition-colors"
             >
               Apply &amp; recreate
-            </button>
+            </Button>
             {(buildDirty || postCreateDirty || postStartDirty || postAttachDirty) && !saving && (
               <span className="text-xs text-ink-dim">Unsaved build/lifecycle changes</span>
             )}
           </div>
         </div>
-      </section>
+      </Card>
 
       {/* 5f. Dev Container (plan 41 item 20) */}
-      <section className="bg-panel/60 border border-line rounded-xl p-5">
+      <Card plain className="bg-panel/60 border-line p-5">
         <div className="flex items-start justify-between gap-4">
           <div>
             <h3 className="text-sm font-medium text-ink-muted">Dev Container</h3>
@@ -1215,19 +1207,18 @@ export default function SettingsTab({ agent }) {
             </p>
           </div>
           {dcInfo && (
-            <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-medium border whitespace-nowrap shrink-0 ${
-              dcInfo.state === 'generated'
-                ? 'bg-accent-soft text-accent-text border-accent-line/60'
-                : dcInfo.state === 'project-authored'
-                  ? 'bg-raised text-ink border-line'
-                  : 'bg-sunken text-ink-dim border-line-faint'
-            }`}>
+            <Badge
+              tone={dcInfo.state === 'generated' ? 'accent' : 'neutral'}
+              variant="soft"
+              size="md"
+              className="shrink-0"
+            >
               {dcInfo.state === 'generated'
                 ? 'Generated'
                 : dcInfo.state === 'project-authored'
                   ? 'Project-authored'
                   : 'Missing'}
-            </span>
+            </Badge>
           )}
         </div>
 
@@ -1260,126 +1251,116 @@ export default function SettingsTab({ agent }) {
         </div>
 
         <div className="mt-4 flex items-center gap-3">
-          <button
+          <Button
+            variant="secondary"
+            size="sm"
             onClick={handleDcSync}
             disabled={saving || dcAction !== '' || !dcInfo?.sync || !dcInfo?.found}
             title={!dcInfo?.sync || !dcInfo?.found ? 'Nothing to sync — the pad never adopted this devcontainer' : undefined}
-            className="px-3 py-1.5 bg-raised hover:bg-raised-hover disabled:opacity-50 text-ink rounded-lg text-xs font-medium transition-colors"
           >
             {dcAction === 'sync' ? 'Syncing…' : 'Sync'}
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
             onClick={handleDcRegenerate}
             disabled={saving || dcAction !== '' || !dcInfo?.workspacePath}
-            className="px-3 py-1.5 bg-accent hover:bg-accent-hover disabled:opacity-50 text-accent-ink rounded-lg text-xs font-medium transition-colors"
           >
             {dcAction === 'regenerate' ? 'Working…' : dcInfo?.found ? 'Regenerate' : 'Generate'}
-          </button>
+          </Button>
           {dcInfo?.state === 'project-authored' && (
             <span className="text-xs text-ink-dim">Sync preserves your custom fields — Regenerate overwrites them.</span>
           )}
         </div>
-      </section>
+      </Card>
 
       {/* 6. Danger Zone */}
-      <section className="bg-danger-soft border border-danger-line/60 rounded-xl p-5">
+      <section className={cx('rounded-card border p-5', TONES.danger.panel)}>
         <h3 className="text-sm font-medium text-danger">Danger Zone</h3>
         <p className="text-xs text-ink-dim mt-1 max-w-md">
           Permanently delete this agent, its container, and all files. This cannot be undone.
         </p>
-        <button
+        <Button
+          variant="danger"
+          size="sm"
           onClick={handleDelete}
           disabled={saving}
-          className="mt-3 px-3 py-1.5 bg-danger hover:bg-danger disabled:opacity-50 text-danger-ink rounded-lg text-xs font-medium transition-colors"
+          className="mt-3"
         >
           Delete Container
-        </button>
+        </Button>
       </section>
 
-      {recreateOpen && (
-        <div
-          className="fixed inset-0 z-[75] flex items-center justify-center bg-overlay backdrop-blur-sm"
-          onClick={() => setRecreateOpen(false)}
-        >
-          <div
-            role="dialog"
-            aria-modal="true"
-            className="bg-panel border border-line rounded-xl shadow-2xl w-full max-w-md mx-4 overflow-hidden"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="px-6 pt-5 pb-3">
-              <h3 className="text-base font-semibold text-ink">Recreate Container</h3>
-              <p className="mt-2 text-sm text-ink-faint leading-relaxed">
-                This recreates {agent.name}'s container. It can update the image, recreate the container as-is, and reset the entire user folder so the container starts completely fresh — tick the options you want.
+      <Modal
+        open={recreateOpen}
+        onClose={() => setRecreateOpen(false)}
+        title="Recreate Container"
+        width="max-w-md"
+        z="z-[75]"
+        footer={
+          <>
+            <Button variant="ghost" size="lg" onClick={() => setRecreateOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              variant={recreateReset ? 'danger' : 'primary'}
+              size="lg"
+              onClick={runRecreate}
+              disabled={saving}
+            >
+              Recreate Container
+            </Button>
+          </>
+        }
+      >
+        <p className="mt-2 text-sm text-ink-faint leading-relaxed">
+          This recreates {agent.name}'s container. It can update the image, recreate the container as-is, and reset the entire user folder so the container starts completely fresh — tick the options you want.
+        </p>
+
+        {recreateInfo && (
+          <div className="mt-3 text-xs text-ink-dim bg-sunken border border-line-faint rounded-card px-3 py-2 space-y-0.5">
+            {recreateInfo.updateAvailable ? (
+              <p className="text-warning">
+                Update available: {recreateInfo.currentVersion || 'unknown'} → {recreateInfo.availableVersion || 'latest'}
               </p>
-
-              {recreateInfo && (
-                <div className="mt-3 text-xs text-ink-dim bg-sunken border border-line-faint rounded-lg px-3 py-2 space-y-0.5">
-                  {recreateInfo.updateAvailable ? (
-                    <p className="text-warning">
-                      Update available: {recreateInfo.currentVersion || 'unknown'} → {recreateInfo.availableVersion || 'latest'}
-                    </p>
-                  ) : (
-                    <p>
-                      Already on the latest image{recreateInfo.currentVersion ? ` (${recreateInfo.currentVersion})` : ''}.
-                    </p>
-                  )}
-                </div>
-              )}
-
-              <label className="mt-4 flex items-start gap-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={recreatePull}
-                  onChange={(e) => setRecreatePull(e.target.checked)}
-                  className="mt-0.5 accent-accent"
-                />
-                <span className="text-sm text-ink">
-                  <span className="font-medium">Pull latest image update</span>
-                  <span className="block text-xs text-ink-dim mt-0.5">
-                    Re-downloads the base image and rebuilds it (update the container).
-                  </span>
-                </span>
-              </label>
-
-              <label className="mt-3 flex items-start gap-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={recreateReset}
-                  onChange={(e) => setRecreateReset(e.target.checked)}
-                  className="mt-0.5 accent-accent"
-                />
-                <span className="text-sm text-ink">
-                  <span className="font-medium text-danger">Reset the whole user folder</span>
-                  <span className="block text-xs text-ink-dim mt-0.5">
-                    Deletes the entire user data folder (config, sessions, data) so the container starts fresh. Your workspace is a separate bind-mounted folder and is NOT deleted. This cannot be undone.
-                  </span>
-                </span>
-              </label>
-            </div>
-
-            <div className="flex items-center justify-end gap-3 px-6 pb-5 pt-2">
-              <button
-                onClick={() => setRecreateOpen(false)}
-                className="px-4 py-2 text-sm font-medium text-ink-muted hover:text-ink hover:bg-panel rounded-lg transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={runRecreate}
-                disabled={saving}
-                className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors disabled:opacity-50 ${
-                  recreateReset
-                    ? 'bg-danger hover:bg-danger text-danger-ink'
-                    : 'bg-accent hover:bg-accent-hover text-accent-ink'
-                }`}
-              >
-                Recreate Container
-              </button>
-            </div>
+            ) : (
+              <p>
+                Already on the latest image{recreateInfo.currentVersion ? ` (${recreateInfo.currentVersion})` : ''}.
+              </p>
+            )}
           </div>
-        </div>
-      )}
+        )}
+
+        <label className="mt-4 flex items-start gap-3 cursor-pointer">
+          <Checkbox
+            size="sm"
+            checked={recreatePull}
+            onChange={(e) => setRecreatePull(e.target.checked)}
+            className="mt-0.5"
+          />
+          <span className="text-sm text-ink">
+            <span className="font-medium">Pull latest image update</span>
+            <span className="block text-xs text-ink-dim mt-0.5">
+              Re-downloads the base image and rebuilds it (update the container).
+            </span>
+          </span>
+        </label>
+
+        <label className="mt-3 flex items-start gap-3 cursor-pointer">
+          <Checkbox
+            size="sm"
+            checked={recreateReset}
+            onChange={(e) => setRecreateReset(e.target.checked)}
+            className="mt-0.5"
+          />
+          <span className="text-sm text-ink">
+            <span className="font-medium text-danger">Reset the whole user folder</span>
+            <span className="block text-xs text-ink-dim mt-0.5">
+              Deletes the entire user data folder (config, sessions, data) so the container starts fresh. Your workspace is a separate bind-mounted folder and is NOT deleted. This cannot be undone.
+            </span>
+          </span>
+        </label>
+      </Modal>
 
       {modal && (
         <CommandModal

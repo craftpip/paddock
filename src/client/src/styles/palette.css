@@ -62,6 +62,11 @@
 
   /* overlay */
   --t-overlay:       rgba(42, 30, 18, 0.55);
+
+  /* shadows — every box-shadow in the app is built from these two, so a
+     shadow themes with the mode instead of being a raw black rgba() */
+  --t-shadow:        rgba(42, 30, 18, 0.14);
+  --t-shadow-strong: rgba(42, 30, 18, 0.30);
 }
 
 /* ─────────────────────────── Dark — Espresso Barn ────────────────────────── */
@@ -111,4 +116,7 @@
   --t-brand-ink:     #1e1233;
 
   --t-overlay:       rgba(10, 6, 2, 0.6);
+
+  --t-shadow:        rgba(0, 0, 0, 0.45);
+  --t-shadow-strong: rgba(0, 0, 0, 0.62);
 }

@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../lib/api'
+import { cx } from '../lib/cx'
 import { useMission } from '../stores/mission'
 import { useAgents } from '../stores/agents'
+import Button from './ui/Button'
+import Choice from './ui/Choice'
+import { Input } from './ui/Input'
+import { TONES } from './ui/tone'
 
 // Create / edit a project. A project IS an (agent, folder) pair, so the dialog
 // is exactly those two choices plus a name.
@@ -106,75 +111,101 @@ export default function ProjectDialog({ project, onClose }) {
   }, [probe, folderPath])
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onMouseDown={onClose}>
+    <div
+      className="msn-dialog-backdrop fixed inset-0 z-50 flex items-center justify-center bg-overlay p-4"
+      onMouseDown={onClose}
+    >
       <div
-        className="w-full max-w-lg rounded-xl border border-line bg-panel shadow-2xl"
+        className="msn-dialog w-full max-w-lg rounded-card border border-line bg-panel shadow-modal"
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <header className="flex items-center justify-between border-b border-line-faint px-4 py-3">
-          <h2 className="text-sm font-semibold text-ink">{editing ? 'Edit project' : 'New project'}</h2>
-          <button type="button" onClick={onClose} className="text-ink-faint hover:text-ink text-lg leading-none px-1">×</button>
+        <header className="msn-dialog-header flex items-center justify-between border-b border-line-faint px-4 py-3">
+          <h2 className="msn-dialog-title text-sm font-semibold text-ink">{editing ? 'Edit project' : 'New project'}</h2>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            icon
+            onClick={onClose}
+            aria-label="Close"
+            className="msn-btn-close-dialog text-lg leading-none"
+          >
+            ×
+          </Button>
         </header>
 
-        <form onSubmit={submit} className="flex flex-col gap-3 p-4">
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted">Name</span>
-            <input
+        {/* Every msn-* class below is a browser-test hook (plans/53 §6). The
+            styles come from the primitives; the hooks stay on the exact element
+            they are on today. Do not merge one away. */}
+        <form onSubmit={submit} className="msn-dialog-form flex flex-col gap-3 p-4">
+          <label className="msn-field msn-field-name flex flex-col gap-1">
+            <span className="msn-field-label text-[11px] font-semibold uppercase tracking-wider text-ink-muted">Name</span>
+            <Input
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="Craftpip site"
               autoFocus
-              className="rounded-lg border border-line bg-sunken px-2.5 py-1.5 text-sm text-ink outline-none focus:border-accent"
+              className="msn-input-name"
             />
           </label>
 
-          <div className="flex flex-col gap-1">
-            <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted">Agent</span>
+          <div className="msn-field msn-field-agent flex flex-col gap-1">
+            <span className="msn-field-label text-[11px] font-semibold uppercase tracking-wider text-ink-muted">Agent</span>
             {allAgents.length === 0 ? (
-              <div className="rounded-lg border border-line bg-sunken px-3 py-2 text-xs text-ink-faint">
+              <div className="msn-no-agent rounded-control border border-line bg-sunken px-3 py-2 text-xs text-ink-faint">
                 No coding agent yet.{' '}
-                <a href="/agents/create" className="text-accent hover:underline">Create an agent first</a>
-                <div className="mt-1 text-ink-faint/80">Mission works with opencode, codex and claude.</div>
+                <a href="/agents/create" className="msn-link-create-agent text-accent-text hover:underline">
+                  Create an agent first
+                </a>
+                <div className="msn-no-agent-note mt-1 text-ink-dim">Mission works with opencode, codex and claude.</div>
               </div>
             ) : (
-              <div className="flex flex-wrap gap-1.5">
+              <div className="msn-agent-options flex flex-wrap gap-1.5">
                 {runningAgents.map((a) => (
-                  <button
+                  <Choice
                     key={a.name}
-                    type="button"
+                    selected={agentName === a.name}
                     onClick={() => setAgentName(a.name)}
-                    className={`rounded-lg border px-2.5 py-1 text-xs transition-colors ${
-                      agentName === a.name
-                        ? 'border-accent bg-accent/10 text-ink'
-                        : 'border-line bg-sunken text-ink-dim hover:border-line-faint'
-                    }`}
+                    // msn-selected is a browser-test hook on the SELECTED option
+                    className={cx('msn-agent-option', agentName === a.name && 'msn-selected')}
                   >
                     {a.name}
-                    <span className="ml-1.5 text-ink-faint">{a.agent_type}</span>
-                  </button>
+                    <span className="msn-agent-type ml-1.5 text-ink-faint">{a.agent_type}</span>
+                  </Choice>
                 ))}
                 {stoppedAgents.length > 0 && (
-                  <span className="self-center text-[11px] text-ink-faint">
+                  <span className="msn-stopped-note self-center text-[11px] text-ink-faint">
                     {stoppedAgents.length} stopped — start one to open a session
                   </span>
                 )}
               </div>
             )}
             {editing && (
-              <span className="text-[11px] text-ink-faint">The agent cannot be changed — a project is tied to its PAD.</span>
+              <span className="msn-field-note text-[11px] text-ink-dim">
+                The agent cannot be changed — a project is tied to its PAD.
+              </span>
             )}
           </div>
 
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted">Folder inside the PAD</span>
-            <input
+          <label className="msn-field msn-field-folder flex flex-col gap-1">
+            <span className="msn-field-label text-[11px] font-semibold uppercase tracking-wider text-ink-muted">
+              Folder inside the PAD
+            </span>
+            <Input
+              mono
+              size="sm"
               value={folderPath}
               onChange={(e) => onFolderChange(e.target.value)}
               placeholder="/www1/craftpip.com"
               spellCheck={false}
-              className="rounded-lg border border-line bg-sunken px-2.5 py-1.5 font-mono text-xs text-ink outline-none focus:border-accent"
+              className="msn-input-folder"
             />
-            <span className={`text-[11px] ${folderOk ? 'text-ok' : probe?.checking ? 'text-ink-faint' : 'text-warn'}`}>
+            <span
+              className={cx(
+                'msn-folder-status text-[11px]',
+                folderOk ? 'msn-ok text-success' : probe?.checking ? 'text-ink-faint' : 'msn-warn text-warning'
+              )}
+            >
               {!agentName
                 ? 'Pick an agent first.'
                 : !folderPath
@@ -186,47 +217,59 @@ export default function ProjectDialog({ project, onClose }) {
                       : probe?.error || 'Not found inside the PAD — mount it in Settings → Extra volumes, or pick a path the PAD already sees.'}
             </span>
             {!folderPath && agentName && (
-              <div className="mt-1 flex flex-col gap-1">
-                <span className="text-[10px] uppercase tracking-wider text-ink-faint">Mounted in this PAD</span>
+              <div className="msn-folder-chips mt-1 flex flex-col gap-1">
+                <span className="msn-field-label text-[10px] uppercase tracking-wider text-ink-faint">
+                  Mounted in this PAD
+                </span>
                 <FolderChips agentName={agentName} onPick={onFolderChange} />
               </div>
             )}
             {suggestions.length > 0 && (
-              <div className="mt-1 flex flex-wrap gap-1">
+              <div className="msn-suggestions mt-1 flex flex-wrap gap-1">
                 {suggestions.map((s) => (
-                  <button
+                  <Choice
                     key={s}
-                    type="button"
-                    onClick={() => onFolderChange(s === '..' ? folderPath.replace(/\/+$/, '').split('/').slice(0, -1).join('/') || '/' : s)}
-                    className="max-w-full truncate rounded-md bg-raised px-1.5 py-0.5 font-mono text-[10px] text-ink-dim hover:text-ink"
+                    variant="chip"
+                    mono
+                    onClick={() =>
+                      onFolderChange(
+                        s === '..' ? folderPath.replace(/\/+$/, '').split('/').slice(0, -1).join('/') || '/' : s
+                      )
+                    }
+                    className="msn-suggestion-chip"
                     title={s}
                   >
                     {s === '..' ? '..' : s.split('/').pop()}
-                  </button>
+                  </Choice>
                 ))}
               </div>
             )}
           </label>
 
           {duplicate && (
-            <div className="rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn">
-              This agent already has a project on that folder. That is allowed — the two would share the
-              same working directory.
-            </div>
+            <p className={cx('msn-dup-warning rounded-control border px-3 py-2 text-xs', TONES.warning.panel)}>
+              This agent already has a project on that folder. That is allowed — the two would share the same working
+              directory.
+            </p>
           )}
-          {error && <div className="rounded-lg border border-error/40 bg-error/10 px-3 py-2 text-xs text-error">{error}</div>}
+          {error && (
+            <p className={cx('msn-error-bar rounded-control border px-3 py-2 text-xs', TONES.danger.panel)}>{error}</p>
+          )}
 
-          <footer className="flex justify-end gap-2 pt-1">
-            <button type="button" onClick={onClose} className="rounded-lg px-3 py-1.5 text-xs text-ink-dim hover:bg-raised">
+          <footer className="msn-dialog-footer flex justify-end gap-2 pt-1">
+            <Button type="button" variant="ghost" size="sm" onClick={onClose} className="msn-btn-cancel">
               Cancel
-            </button>
-            <button
+            </Button>
+            <Button
               type="submit"
+              variant="primary"
+              size="sm"
               disabled={!canSave}
-              className="rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-ink disabled:opacity-40"
+              loading={busy}
+              className="msn-btn-submit"
             >
               {busy ? 'Saving…' : editing ? 'Save' : 'Create project'}
-            </button>
+            </Button>
           </footer>
         </form>
       </div>
@@ -262,17 +305,18 @@ export function FolderChips({ agentName, onPick }) {
   }, [agentName])
   if (hints.length === 0) return null
   return (
-    <div className="flex flex-wrap gap-1">
+    <div className="msn-folder-chips-list flex flex-wrap gap-1">
       {hints.map((h) => (
-        <button
+        <Choice
           key={h}
-          type="button"
+          variant="chip"
+          mono
           onClick={() => onPick(h)}
-          className="max-w-full truncate rounded-md bg-raised px-1.5 py-0.5 font-mono text-[10px] text-ink-dim hover:text-ink"
+          className="msn-folder-chip"
           title={h}
         >
           {h}
-        </button>
+        </Choice>
       ))}
     </div>
   )

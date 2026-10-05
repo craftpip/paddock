@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import Button from './ui/Button'
 
 /**
  * Reusable console output component.
@@ -34,7 +35,7 @@ export default function Console({
   }, [lines, autoScroll])
 
   return (
-    <div className={`flex flex-col border border-line-faint rounded-lg overflow-hidden ${className}`}>
+    <div className={`flex flex-col border border-line-faint rounded-card overflow-hidden ${className}`}>
       {(headerRight || onClear || label) && (
         <div className="flex items-center justify-between px-3 py-1.5 border-b border-line-faint bg-canvas/50">
           <span className="text-[10px] text-ink-dim font-medium">
@@ -44,7 +45,7 @@ export default function Console({
           <div className="flex items-center gap-2">
             {headerRight}
             {onClear && (
-              <button onClick={onClear} className="text-[10px] text-ink-dim hover:text-ink-muted transition-colors">Clear</button>
+              <Button variant="ghost" size="sm" onClick={onClear} className="text-[10px] text-ink-dim hover:text-ink-muted">Clear</Button>
             )}
           </div>
         </div>

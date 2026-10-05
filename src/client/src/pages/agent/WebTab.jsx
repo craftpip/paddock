@@ -5,6 +5,13 @@ import { useToast } from '../../lib/toast'
 import { useAgents } from '../../stores/agents'
 import { webUrlForPort } from '../../lib/web'
 import CommandModal from '../../components/CommandModal'
+import Button from '../../components/ui/Button'
+import { Input } from '../../components/ui/Input'
+import Card from '../../components/ui/Card'
+import Badge from '../../components/ui/Badge'
+import Switch from '../../components/ui/Switch'
+import { TONES } from '../../components/ui/tone'
+import { cx } from '../../lib/cx'
 
 function randomPassword() {
   const chars = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
@@ -285,7 +292,7 @@ export default function WebTab({ agent, run, connected, expandTerminal }) {
         <>
           {/* Published via a forwarding door when routed through a network peer */}
           {viaDoor && (
-            <section className="bg-panel/60 border border-line rounded-xl p-5">
+            <Card plain className="bg-panel/60 border-line p-5">
               <h3 className="text-sm font-medium text-ink-muted">Published via a forwarding door</h3>
               <p className="text-xs text-ink-dim mt-1 max-w-lg">
                 This agent routes through <code className="text-ink">{data.networkMode}</code> (
@@ -295,12 +302,12 @@ export default function WebTab({ agent, run, connected, expandTerminal }) {
                 <code className="text-ink">{data.networkMode}</code>'s network that forwards to it —{' '}
                 {data.networkMode} and its other tenants stay untouched.
               </p>
-            </section>
+            </Card>
           )}
 
           {/* Peer-mode collision — fixed container port already bound on the same door */}
           {data.collision && (
-            <section className="bg-warning-soft border border-warning-line/40 rounded-xl p-4">
+            <section className={cx('rounded-card border p-4', TONES.warning.panel)}>
               <h3 className="text-sm font-medium text-warning">Container port collision</h3>
               <p className="text-xs text-ink-dim mt-1 max-w-lg">
                 This console listens on a fixed container port ({webApp.containerPort}) that can't be changed, and{' '}
@@ -312,7 +319,7 @@ export default function WebTab({ agent, run, connected, expandTerminal }) {
           )}
 
           {/* Status + publish form / running service — one card */}
-          <section className="bg-panel/60 border border-line rounded-xl p-5 space-y-4">
+          <Card plain className="bg-panel/60 border-line p-5 space-y-4">
             <div className="flex items-start justify-between gap-4 flex-wrap">
               <div>
                 <h3 className="text-sm font-medium text-ink-muted">{webApp.label}</h3>
@@ -346,13 +353,9 @@ export default function WebTab({ agent, run, connected, expandTerminal }) {
                 )}
               </div>
               {active && (
-                <span
-                  className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-                    live ? 'bg-success-soft text-success' : 'bg-warning-soft text-warning'
-                  }`}
-                >
+                <Badge tone={live ? 'success' : 'warning'} variant="soft" size="md">
                   {live ? '● Live' : '○ Published — waiting for server'}
-                </span>
+                </Badge>
               )}
             </div>
 
@@ -364,19 +367,20 @@ export default function WebTab({ agent, run, connected, expandTerminal }) {
                       href={accessUrl}
                       target="_blank"
                       rel="noreferrer"
-                      className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-accent-ink rounded-lg text-xs font-medium transition-colors"
+                      className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-accent-ink rounded-control text-xs font-medium transition-colors"
                     >
                       Open {webApp.label}
                     </a>
                     {startable && (
-                      <button
+                      <Button
+                        variant="secondary"
+                        size="sm"
                         onClick={startInTerminal}
                         disabled={!connected || startBusy}
                         title={connected ? `Run ${webApp.label} in the docked terminal` : 'Waiting for the terminal to connect'}
-                        className="px-3 py-1.5 bg-raised hover:bg-raised-hover disabled:opacity-50 text-ink rounded-lg text-xs font-medium transition-colors"
                       >
                         {startBusy ? 'Building…' : 'Start in terminal'}
-                      </button>
+                      </Button>
                     )}
                     <span className="text-xs text-ink-dim whitespace-nowrap">
                       <span className="font-mono text-ink">{data.webService.hostPort}</span>
@@ -388,16 +392,13 @@ export default function WebTab({ agent, run, connected, expandTerminal }) {
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="text-xs text-ink-dim">Published</span>
-                    <button
-                      role="switch"
-                      aria-checked={active}
-                      onClick={handleApply}
+                    <Switch
+                      checked={active}
+                      onChange={handleApply}
                       disabled={saving}
+                      label="Published"
                       title="Turn off to unpublish the web app (the form comes back pre-filled)"
-                      className="relative w-10 h-6 rounded-full transition-colors shrink-0 disabled:opacity-50 bg-accent"
-                    >
-                      <span className="absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform translate-x-4" />
-                    </button>
+                    />
                   </div>
                 </div>
               </>
@@ -406,7 +407,7 @@ export default function WebTab({ agent, run, connected, expandTerminal }) {
                 <div className="grid grid-cols-2 gap-4">
                   <label className="block">
                     <span className="text-xs text-ink-dim">Host port *</span>
-                    <input
+                    <Input
                       type="number"
                       min="1"
                       max="65535"
@@ -414,14 +415,14 @@ export default function WebTab({ agent, run, connected, expandTerminal }) {
                       onChange={(e) => setHostPort(e.target.value)}
                       disabled={saving}
                       placeholder="e.g. 8081"
-                      className="mt-1 w-full bg-sunken border border-line rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line disabled:opacity-50"
+                      className="mt-1"
                     />
                   </label>
                   <label className="block">
                     <span className="text-xs text-ink-dim">
                       Container port{webApp.containerPortEditable === false ? ' (fixed)' : ''}
                     </span>
-                    <input
+                    <Input
                       type="number"
                       min="1"
                       max="65535"
@@ -430,7 +431,7 @@ export default function WebTab({ agent, run, connected, expandTerminal }) {
                       disabled={saving}
                       readOnly={webApp.containerPortEditable === false}
                       title={webApp.containerPortEditable === false ? `Fixed — ${webApp.label} always listens on ${webApp.containerPort} inside the container` : ''}
-                      className="mt-1 w-full bg-sunken border border-line rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line disabled:opacity-50"
+                      className="mt-1"
                     />
                     {webApp.containerPortEditable === false && (
                       <span className="block text-xs text-ink-dim mt-1">
@@ -444,52 +445,53 @@ export default function WebTab({ agent, run, connected, expandTerminal }) {
                     {webApp.auth?.label || 'Password'} ({webApp.auth?.required ? 'required' : 'optional'})
                   </span>
                   <div className="mt-1 flex items-center gap-2">
-                    <input
+                    <Input
                       type={showPw ? 'text' : 'password'}
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
                       disabled={saving}
                       placeholder={webApp.auth?.required ? 'Required to bind outside loopback' : 'Leave empty to keep the current password'}
-                      className="w-full bg-sunken border border-line rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line disabled:opacity-50"
                     />
-                    <button
-                      type="button"
+                    <Button
+                      variant="secondary"
+                      size="md"
                       onClick={() => setShowPw((v) => !v)}
                       disabled={saving}
-                      className="px-2 py-2 bg-raised hover:bg-raised-hover disabled:opacity-50 text-ink rounded-lg text-xs font-medium transition-colors"
                       title={showPw ? 'Hide password' : 'Show password'}
                     >
                       {showPw ? 'Hide' : 'Show'}
-                    </button>
-                    <button
-                      type="button"
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      size="md"
                       onClick={() => setPassword(randomPassword())}
                       disabled={saving}
-                      className="px-2 py-2 bg-raised hover:bg-raised-hover disabled:opacity-50 text-ink rounded-lg text-xs font-medium transition-colors"
                       title="Generate a random password"
                     >
                       Generate
-                    </button>
+                    </Button>
                   </div>
                   {webApp.auth?.hint && <span className="block text-xs text-ink-dim mt-1">{webApp.auth.hint}</span>}
                 </label>
                 <div className="flex items-center gap-3">
-                  <button
+                  <Button
+                    variant="primary"
+                    size="sm"
                     onClick={handleApply}
                     disabled={saving || !hostPort}
-                    className="px-3 py-1.5 bg-accent hover:bg-accent-hover disabled:opacity-50 text-accent-ink rounded-lg text-xs font-medium transition-colors"
                   >
                     {saving ? 'Applying…' : 'Publish & recreate'}
-                  </button>
+                  </Button>
                   {startable && (
-                    <button
+                    <Button
+                      variant="secondary"
+                      size="sm"
                       onClick={startInTerminal}
                       disabled={!connected || startBusy}
                       title={connected ? `Run ${webApp.label} in the docked terminal (no recreate)` : 'Waiting for the terminal to connect'}
-                      className="px-3 py-1.5 bg-raised hover:bg-raised-hover disabled:opacity-50 text-ink rounded-lg text-xs font-medium transition-colors"
                     >
                       {startBusy ? 'Building…' : 'Start in terminal'}
-                    </button>
+                    </Button>
                   )}
                 </div>
                 {startable && (
@@ -500,20 +502,20 @@ export default function WebTab({ agent, run, connected, expandTerminal }) {
                 )}
               </>
             )}
-          </section>
+          </Card>
         </>
       ) : (
-        <section className="bg-panel/60 border border-line rounded-xl p-5">
+        <Card plain className="bg-panel/60 border-line p-5">
           <h3 className="text-sm font-medium text-ink-muted">Web app</h3>
           <p className="text-xs text-ink-dim mt-2 max-w-md">
             This agent type doesn't ship a built-in web app. Use the port mappings below to expose anything
             running inside the container.
           </p>
-        </section>
+        </Card>
       )}
 
       {/* Expose OpenSSH */}
-      <section className="bg-panel/60 border border-line rounded-xl p-5 space-y-4">
+      <Card plain className="bg-panel/60 border-line p-5 space-y-4">
         <div className="flex items-start justify-between gap-4">
           <div>
             <h3 className="text-sm font-medium text-ink-muted">Expose OpenSSH on a host port</h3>
@@ -551,16 +553,13 @@ export default function WebTab({ agent, run, connected, expandTerminal }) {
             </div>
             <div className="flex items-center gap-2">
               <span className="text-xs text-ink-dim">Exposed</span>
-              <button
-                role="switch"
-                aria-checked={sshEnabled}
-                onClick={handleSshSave}
+              <Switch
+                checked={sshEnabled}
+                onChange={handleSshSave}
                 disabled={saving}
+                label="Exposed"
                 title="Turn off to stop publishing SSH (the form comes back pre-filled)"
-                className="relative w-10 h-6 rounded-full transition-colors shrink-0 disabled:opacity-50 bg-accent"
-              >
-                <span className="absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform translate-x-4" />
-              </button>
+              />
             </div>
           </div>
         ) : (
@@ -568,15 +567,16 @@ export default function WebTab({ agent, run, connected, expandTerminal }) {
             <div className="grid grid-cols-2 gap-4">
               <label className="block">
                 <span className="text-xs text-ink-dim">Host port</span>
-                <input
+                <Input
                   type="number"
+                  mono
                   min="1"
                   max="65535"
                   value={sshPort}
                   onChange={(e) => setSshPort(e.target.value)}
                   disabled={saving}
                   placeholder="auto (43817+)"
-                  className="mt-1 w-full bg-sunken border border-line rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line font-mono disabled:opacity-50"
+                  className="mt-1"
                 />
                 {sshPort.trim() && portIssue(sshPort) && (
                   <span className="block text-xs text-danger mt-1">{portIssue(sshPort)}</span>
@@ -584,15 +584,16 @@ export default function WebTab({ agent, run, connected, expandTerminal }) {
               </label>
               <label className="block">
                 <span className="text-xs text-ink-dim">Container port (sshd in the container)</span>
-                <input
+                <Input
                   type="number"
+                  mono
                   min="1"
                   max="65535"
                   value={sshCport}
                   onChange={(e) => setSshCport(e.target.value)}
                   disabled={saving}
                   placeholder="22"
-                  className="mt-1 w-full bg-sunken border border-line rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line font-mono disabled:opacity-50"
+                  className="mt-1"
                 />
                 {sshCport.trim() && portIssue(sshCport) && (
                   <p className="text-xs text-danger mt-1">{portIssue(sshCport)}</p>
@@ -606,32 +607,31 @@ export default function WebTab({ agent, run, connected, expandTerminal }) {
             <label className="block">
               <span className="text-xs text-ink-dim">Root / SSH password (optional)</span>
               <div className="mt-1 flex items-center gap-2">
-                <input
+                <Input
                   type={showSshPw ? 'text' : 'password'}
                   value={sshPassword}
                   onChange={(e) => setSshPassword(e.target.value)}
                   disabled={saving}
                   placeholder="Leave empty to keep the current password"
-                  className="w-full bg-sunken border border-line rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line disabled:opacity-50"
                 />
-                <button
-                  type="button"
+                <Button
+                  variant="secondary"
+                  size="md"
                   onClick={() => setShowSshPw((v) => !v)}
                   disabled={saving}
-                  className="px-2 py-2 bg-raised hover:bg-raised-hover disabled:opacity-50 text-ink rounded-lg text-xs font-medium transition-colors"
                   title={showSshPw ? 'Hide password' : 'Show password'}
                 >
                   {showSshPw ? 'Hide' : 'Show'}
-                </button>
-                <button
-                  type="button"
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="md"
                   onClick={() => setSshPassword(randomPassword())}
                   disabled={saving}
-                  className="px-2 py-2 bg-raised hover:bg-raised-hover disabled:opacity-50 text-ink rounded-lg text-xs font-medium transition-colors"
                   title="Generate a random password"
                 >
                   Generate
-                </button>
+                </Button>
               </div>
               <span className="block text-xs text-ink-dim mt-1">
                 This is the password for <code className="text-ink">root</code> logins via SSH. Empty keeps the current one.
@@ -639,20 +639,21 @@ export default function WebTab({ agent, run, connected, expandTerminal }) {
             </label>
 
             <div className="flex items-center gap-3">
-              <button
+              <Button
+                variant="primary"
+                size="sm"
                 onClick={handleSshSave}
                 disabled={saving}
-                className="px-3 py-1.5 bg-accent hover:bg-accent-hover disabled:opacity-50 text-accent-ink rounded-lg text-xs font-medium transition-colors"
               >
                 Expose & recreate
-              </button>
+              </Button>
             </div>
           </>
         )}
-      </section>
+      </Card>
 
       {/* Additional ports (create-parity table) */}
-      <section className="bg-raised border border-line-faint rounded-xl p-5 space-y-4">
+      <Card plain className="bg-raised border-line p-5 space-y-4">
         <div className="flex items-center justify-between">
           <div>
             <h3 className="text-xs font-medium text-ink-faint uppercase tracking-wider">Additional ports</h3>
@@ -666,7 +667,7 @@ export default function WebTab({ agent, run, connected, expandTerminal }) {
           <p className="text-xs text-ink-dim">No additional ports.</p>
         )}
         {portDraft.length > 0 && (
-          <div className="rounded-lg overflow-hidden border border-line-faint">
+          <div className="rounded-card overflow-hidden border border-line-faint">
             <div className="bg-sunken text-ink-faint uppercase tracking-wider text-[11px] px-2 py-2 flex items-center gap-2 font-medium">
               <span className="flex-1 min-w-0">Host port</span>
               <span className="flex-1 min-w-0">Container port</span>
@@ -675,51 +676,49 @@ export default function WebTab({ agent, run, connected, expandTerminal }) {
             {portDraft.map((p, i) => (
               <div key={i} className="border-t border-line-faint flex items-start gap-2 px-2 py-1.5">
                 <div className="flex-1 min-w-0">
-                  <input type="number" min="1" max="65535" value={p.host}
+                  <Input size="sm" mono className="bg-raised" type="number" min="1" max="65535" value={p.host}
                          onChange={(e) => setPort(i, { host: e.target.value })}
-                         placeholder="e.g. 9000"
-                         className="w-full h-7 min-w-0 bg-raised border border-line-faint rounded-lg px-2 text-xs font-mono text-ink focus:outline-none focus:border-accent-line placeholder-ink-dim" />
+                         placeholder="e.g. 9000" />
                   {portErrors[i] && <p className="text-xs text-danger mt-0.5">{portErrors[i]}</p>}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <input type="number" min="1" max="65535" value={p.container}
+                  <Input size="sm" mono className="bg-raised" type="number" min="1" max="65535" value={p.container}
                          onChange={(e) => setPort(i, { container: e.target.value })}
-                         placeholder="e.g. 80"
-                         className="w-full h-7 min-w-0 bg-raised border border-line-faint rounded-lg px-2 text-xs font-mono text-ink focus:outline-none focus:border-accent-line placeholder-ink-dim" />
+                         placeholder="e.g. 80" />
                 </div>
                 <div className="w-7 shrink-0">
-                  <button type="button" onClick={() => { setPortDraft((prev) => prev.filter((_, idx) => idx !== i)); setPortDirty(true) }}
-                          className="w-7 h-7 grid place-items-center rounded-md text-ink-dim hover:text-danger hover:bg-raised transition-colors"
-                          title="Remove port">✕</button>
+                  <Button variant="dangerGhost" size="sm" icon
+                          onClick={() => { setPortDraft((prev) => prev.filter((_, idx) => idx !== i)); setPortDirty(true) }}
+                          title="Remove port">✕</Button>
                 </div>
               </div>
             ))}
           </div>
         )}
 
-        <button type="button"
+        <Button variant="secondary" size="sm"
                 onClick={() => { setPortDraft((prev) => [...prev, { host: '', container: '' }]); setPortDirty(true) }}
-                disabled={saving}
-                className="px-3 py-1.5 bg-raised hover:bg-raised-hover text-ink rounded-lg text-xs font-medium transition-colors">
+                disabled={saving}>
           + Add port
-        </button>
+        </Button>
         {portHasErrors && (
           <p className="text-xs text-danger">Fix the invalid port fields.</p>
         )}
 
         <div className="flex items-center gap-3">
-          <button
+          <Button
+            variant="primary"
+            size="sm"
             onClick={handlePortsSave}
             disabled={saving || !portDirty || portHasErrors}
-            className="px-3 py-1.5 bg-accent hover:bg-accent-hover disabled:opacity-50 text-accent-ink rounded-lg text-xs font-medium transition-colors"
             title="Apply port changes">
             Apply ports & recreate
-          </button>
+          </Button>
           {portDirty && !saving && (
             <span className="text-xs text-ink-dim">Unsaved port changes</span>
           )}
         </div>
-      </section>
+      </Card>
 
       {modal && (
         <CommandModal

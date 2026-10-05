@@ -1,4 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
+import Modal from './ui/Modal'
+import Button from './ui/Button'
+import { Input } from './ui/Input'
+
+const FORM_ID = 'paddock-prompt-modal-form'
 
 /**
  * Self-contained prompt dialog (replaces window.prompt).
@@ -13,68 +18,44 @@ export default function PromptModal({ title, message, initialValue = '', placeho
     inputRef.current?.select()
   }, [])
 
-  function handleKeyDown(e) {
-    if (e.key === 'Escape') {
-      e.preventDefault()
-      onCancel()
-    }
-  }
-
-  function handleBackdrop(e) {
-    if (e.target === e.currentTarget) onCancel()
-  }
-
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-overlay backdrop-blur-sm"
-      onClick={handleBackdrop}
-      onKeyDown={handleKeyDown}
-      tabIndex={-1}
+    <Modal
+      open
+      onClose={onCancel}
+      title={title || 'Enter value'}
+      tone={danger ? 'danger' : undefined}
+      footer={
+        <>
+          <Button variant="ghost" size="lg" onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button type="submit" form={FORM_ID} variant={danger ? 'danger' : 'primary'} size="lg">
+            {confirmText || 'OK'}
+          </Button>
+        </>
+      }
     >
-      <div
-        role="dialog"
-        aria-modal="true"
-        className="bg-panel border border-line rounded-xl shadow-2xl w-full max-w-md mx-4 overflow-hidden focus:outline-none"
+      {/* the confirm button lives in Modal's footer, outside this <form>, so it
+          carries form={FORM_ID} to submit it — same trick as lib/prompt.jsx */}
+      <form
+        id={FORM_ID}
+        onSubmit={(e) => {
+          e.preventDefault()
+          onSubmit(value)
+        }}
       >
-        <form onSubmit={(e) => { e.preventDefault(); onSubmit(value) }}>
-          <div className="px-6 pt-5 pb-3">
-            <h3 className={`text-base font-semibold ${danger ? 'text-danger' : 'text-ink'}`}>
-              {title || 'Enter value'}
-            </h3>
-            {message && (
-              <div className="mt-2 text-sm text-ink-faint leading-relaxed whitespace-pre-wrap">{message}</div>
-            )}
-          </div>
-          <div className="px-6 pb-4">
-            <input
-              ref={inputRef}
-              type="text"
-              value={value}
-              onChange={(e) => setValue(e.target.value)}
-              placeholder={placeholder}
-              spellCheck={false}
-              className="w-full px-3 py-2 text-sm bg-sunken border border-line rounded-lg text-ink focus:border-accent-line focus:outline-none placeholder-ink-dim"
-            />
-          </div>
-          <div className="flex items-center justify-end gap-3 px-6 pb-5 pt-2">
-            <button
-              type="button"
-              onClick={onCancel}
-              className="px-4 py-2 text-sm font-medium text-ink-muted hover:text-ink hover:bg-panel rounded-lg transition-colors"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
-                danger ? 'bg-danger hover:bg-danger text-danger-ink' : 'bg-accent hover:bg-accent-hover text-accent-ink'
-              }`}
-            >
-              {confirmText || 'OK'}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
+        {message && (
+          <div className="text-sm text-ink-faint leading-relaxed whitespace-pre-wrap mb-4">{message}</div>
+        )}
+        <Input
+          ref={inputRef}
+          type="text"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder={placeholder}
+          spellCheck={false}
+        />
+      </form>
+    </Modal>
   )
 }

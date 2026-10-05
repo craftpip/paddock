@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
+import Button from '../../components/ui/Button'
+import { Input } from '../../components/ui/Input'
 
 /**
  * Workspace toolbar — a single navigation row.
@@ -7,6 +9,10 @@ import { useEffect, useRef, useState } from 'react'
  * file/folder (single input, dot-based auto-detect) or upload a file, folder
  * or dragged-in files/folders. Upload progress renders as an ephemeral second
  * row that disappears when done, leaving the one-row toolbar behind.
+ *
+ * The "+" popup is a fixed-position popover anchored to the button, not a
+ * dialog: it has no backdrop and closing it is an outside-click. It is NOT a
+ * Modal and must not become one.
  */
 export default function WorkspaceToolbar({
   agentName,
@@ -131,62 +137,85 @@ export default function WorkspaceToolbar({
   }
 
   return (
-    <div className="rounded-lg bg-panel p-1.5 w-full mb-2" title="Browse (Container/Host), create files/folders, or upload">
+    <div className="rounded-card bg-panel p-1.5 w-full mb-2" title="Browse (Container/Host), create files/folders, or upload">
       {/* Row 1 — navigation */}
       <div ref={wrapRef} className="flex items-center gap-1.5 min-w-0">
-        <div className="flex items-center rounded-md bg-sunken/60 p-0.5 shrink-0">
-          <button onClick={() => onSwitchScope('container')} disabled={!containerAvailable}
-                  className={`inline-flex items-center h-7 px-3 rounded-md text-xs font-medium transition-colors whitespace-nowrap ${scope === 'container' ? 'bg-accent text-accent-ink' : 'text-ink-muted hover:text-ink'} ${!containerAvailable ? 'opacity-40 cursor-not-allowed' : ''}`}>
+        {/* Segmented scope switcher. `Choice` looked like the fit but it injects
+            aria-pressed, and these two are actions (they re-navigate the URL),
+            not options in a pick-one group. */}
+        <div className="flex items-center rounded-control bg-sunken/60 p-0.5 shrink-0">
+          <Button
+            variant={scope === 'container' ? 'primary' : 'ghost'}
+            size="sm"
+            onClick={() => onSwitchScope('container')}
+            disabled={!containerAvailable}
+          >
             Container
-          </button>
+          </Button>
           {hostBrowsable && (
-            <button onClick={() => onSwitchScope('host')}
-                    className={`inline-flex items-center h-7 px-3 rounded-md text-xs font-medium transition-colors whitespace-nowrap ${scope === 'host' ? 'bg-accent text-accent-ink' : 'text-ink-muted hover:text-ink'}`}>
+            <Button
+              variant={scope === 'host' ? 'primary' : 'ghost'}
+              size="sm"
+              onClick={() => onSwitchScope('host')}
+            >
               Host
-            </button>
+            </Button>
           )}
         </div>
         <span className="w-px h-7 bg-raised mx-0.5 shrink-0" />
-        <button onClick={onGoUp} disabled={isNavRoot}
-                title="Go up one level"
-                className="flex items-center justify-center w-7 h-7 rounded-md text-ink-faint hover:text-ink hover:bg-raised disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-not-allowed transition-colors shrink-0">
+        <Button variant="ghost" size="sm" icon onClick={onGoUp} disabled={isNavRoot} title="Go up one level">
           <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M5 15l7-7 7 7" /></svg>
-        </button>
+        </Button>
         <form onSubmit={(e) => { e.preventDefault(); onGo(pathDraft) }}
               className="flex flex-1 items-center gap-1.5 min-w-0 px-1">
-          <svg className="w-5 h-5 text-ink-dim shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>
-          <input
+          <svg className="w-5 h-5 text-ink-dim shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-6l-2-2H5a2 2 0 0 0-2 2z" /></svg>
+          {/* Address-bar field: still borderless and transparent (it sits between
+              a folder icon and a Go button), but the surface, the mono font and
+              the focus treatment are the primitive's now. */}
+          <Input
             ref={pathInputRef}
+            size="sm"
+            mono
             value={pathDraft}
             onChange={(e) => setPathDraft(e.target.value)}
             spellCheck={false}
             placeholder="/"
-            className="flex-1 min-w-0 bg-transparent text-xs text-ink font-mono placeholder-ink-dim focus:outline-none"
+            className="flex-1 bg-transparent border-0"
           />
-          <button type="submit"
-                  className="inline-flex items-center h-7 px-3 bg-accent hover:bg-accent-hover text-accent-ink rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0">
+          <Button type="submit" variant="primary" size="sm" className="shrink-0">
             Go
-          </button>
+          </Button>
         </form>
         <span className="w-px h-7 bg-raised mx-0.5 shrink-0" />
-        <div className="flex items-center rounded-md bg-sunken/60 p-0.5 shrink-0">
-          <button ref={btnRef} onClick={toggle}
-                  title="Create a file/folder or upload"
-                  className={`flex items-center justify-center w-7 h-7 rounded-md transition-colors shrink-0 ${open ? 'bg-accent-soft text-accent-text' : 'text-ink-muted hover:text-ink hover:bg-raised'}`}>
+        <div className="flex items-center rounded-control bg-sunken/60 p-0.5 shrink-0">
+          <Button
+            ref={btnRef}
+            variant={open ? 'accentGhost' : 'ghost'}
+            size="sm"
+            icon
+            onClick={toggle}
+            title="Create a file/folder or upload"
+            className={open ? 'bg-accent-soft' : undefined}
+          >
             <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M5 12h14" /></svg>
-          </button>
-          <button onClick={onHome}
-                  title="Go to the workspace"
-                  className="inline-flex items-center h-7 gap-1.5 pl-1.5 pr-3 rounded-md text-xs text-ink-muted hover:text-ink hover:bg-raised transition-colors whitespace-nowrap">
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onHome}
+            title="Go to the workspace"
+            className="pl-1.5 pr-3"
+          >
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20C12 13 15 9.5 19 5" /><path d="M19 5L14.5 6.5" /><path d="M19 5L18.5 10" /></svg>
             Workspace
-          </button>
+          </Button>
         </div>
 
-        {/* "+" popup */}
+        {/* "+" popup — a fixed-position popover anchored to the button, NOT a
+            Modal: no backdrop, and it closes on an outside click. */}
         {open && anchor && (
           <div
-            className="fixed z-50 w-80 rounded-lg border border-line bg-sunken shadow-xl overflow-hidden"
+            className="fixed z-50 w-80 rounded-card border border-line bg-sunken shadow-modal overflow-hidden"
             style={{ top: anchor.bottom + 6, right: Math.max(8, window.innerWidth - anchor.right) }}
           >
             <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-line-faint">
@@ -196,32 +225,49 @@ export default function WorkspaceToolbar({
 
             <form onSubmit={submitCreate} className="flex items-center gap-1.5 px-2 py-2 border-b border-line-faint"
                   title="Name with a dot (e.g. notes.md) creates a file; a name without a dot creates a folder">
-              <input ref={createInputRef} type="text" value={createName} onChange={(e) => setCreateName(e.target.value)}
-                     placeholder="notes.md = file · notes = folder"
-                     className="flex-1 min-w-0 px-2 py-1.5 rounded-lg text-xs bg-sunken border border-line text-ink focus:border-accent-line focus:outline-none placeholder-ink-dim" />
-              <button type="submit" disabled={!createName.trim()}
-                      className="px-3 py-1.5 rounded-lg text-xs bg-accent hover:bg-accent-hover disabled:bg-raised disabled:text-ink-dim text-accent-ink transition-colors whitespace-nowrap">
+              <Input
+                ref={createInputRef}
+                size="sm"
+                type="text"
+                value={createName}
+                onChange={(e) => setCreateName(e.target.value)}
+                placeholder="notes.md = file · notes = folder"
+                className="flex-1"
+              />
+              <Button type="submit" variant="primary" size="sm" disabled={!createName.trim()}>
                 Create
-              </button>
+              </Button>
             </form>
 
             <div className="px-2 py-2 space-y-1"
                  onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setDragOver(true) }}
                  onDragLeave={(e) => { e.stopPropagation(); setDragOver(false) }}
                  onDrop={handleDrop}>
-              <button onClick={() => fileInputRef.current?.click()}
-                      className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-ink-muted hover:text-ink hover:bg-panel transition-colors">
-                <svg className="w-4 h-4 text-ink-dim shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
+              <Button
+                variant="ghost"
+                size="sm"
+                block
+                onClick={() => fileInputRef.current?.click()}
+                className="justify-start px-2.5 hover:bg-panel"
+              >
+                <svg className="w-4 h-4 text-ink-dim shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a 3 3 0 0 0 3 3h10a 3 3 0 0 0 3 -3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
                 Upload file
-              </button>
-              <button onClick={() => folderInputRef.current?.click()}
-                      className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-ink-muted hover:text-ink hover:bg-panel transition-colors">
-                <svg className="w-4 h-4 text-ink-dim shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                block
+                onClick={() => folderInputRef.current?.click()}
+                className="justify-start px-2.5 hover:bg-panel"
+              >
+                <svg className="w-4 h-4 text-ink-dim shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-6l-2-2H5a2 2 0 0 0-2 2z" /></svg>
                 Upload folder
-              </button>
-              <div className={`mt-1.5 px-2.5 py-3 rounded-lg border border-dashed text-center text-[11px] transition-colors ${dragOver ? 'border-accent-line bg-accent-soft text-accent-text' : 'border-line text-ink-dim'}`}>
+              </Button>
+              <div className={`mt-1.5 px-2.5 py-3 rounded-control border border-dashed text-center text-[11px] transition-colors ${dragOver ? 'border-accent-line bg-accent-soft text-accent-text' : 'border-line text-ink-dim'}`}>
                 Drag &amp; drop files or folders here
               </div>
+              {/* Deliberately NOT Input primitives: a file picker has no text
+                  surface and `hidden` is the whole styling of these two. */}
               <input ref={fileInputRef} type="file" multiple className="hidden" onChange={pickFiles} />
               <input ref={folderInputRef} type="file" {...{ webkitdirectory: '', directory: '' }} className="hidden" onChange={pickFolder} />
             </div>

@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import Console from './Console'
+import Modal from './ui/Modal'
+import Button from './ui/Button'
+import Badge from './ui/Badge'
+import { TONES } from './ui/tone'
+import { cx } from '../lib/cx'
 
 const STEP_COMMANDS = {
   stop: (name) => `docker stop ${name}`,
@@ -98,45 +103,33 @@ export default function CommandModal({ name, title, onDone, onClose }) {
 
   const busy = phase === 'running'
 
+  const PHASE_TONE = { running: 'accent', done: 'success', failed: 'danger' }
+  const PHASE_LABEL = { running: 'Running…', done: 'Done', failed: 'Failed' }
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-overlay backdrop-blur-sm">
-      <div
-        role="dialog"
-        aria-modal="true"
-        className="bg-panel border border-line rounded-xl shadow-2xl w-full max-w-2xl mx-4 overflow-hidden focus:outline-none"
-      >
-        <div className="flex items-center justify-between px-5 pt-4 pb-2">
-          <h3 className="text-base font-semibold text-ink">{title}</h3>
-          <span
-            className={`text-xs font-medium px-2 py-0.5 rounded-full ${
-              phase === 'running'
-                ? 'bg-accent-soft text-accent-text'
-                : phase === 'done'
-                  ? 'bg-success-soft text-success'
-                  : 'bg-danger-soft text-danger'
-            }`}
-          >
-            {phase === 'running' ? 'Running…' : phase === 'done' ? 'Done' : 'Failed'}
-          </span>
-        </div>
-
-        <div className="px-5">
-          <Console label="Command output" runningCmd={runningCmd} lines={lines} emptyMessage="Waiting for output…" className="h-72" />
-          {phase === 'failed' && (
-            <p className="mt-3 bg-danger-soft border border-danger-line rounded-lg p-3 text-xs text-danger whitespace-pre-wrap">{error}</p>
+    <Modal
+      open
+      onClose={onClose}
+      title={title}
+      width="max-w-2xl"
+      headerExtra={<Badge tone={PHASE_TONE[phase]}>{PHASE_LABEL[phase]}</Badge>}
+      footer={
+        <>
+          {busy && (
+            <p className="mr-auto text-xs text-ink-dim">
+              You can close this — the operation continues in the background.
+            </p>
           )}
-        </div>
-
-        <div className="flex items-center justify-end gap-3 px-5 py-4">
-          {busy && <p className="mr-auto text-xs text-ink-dim">You can close this — the operation continues in the background.</p>}
-          <button
-            onClick={onClose}
-            className="px-4 py-2 text-sm font-medium text-ink bg-raised hover:bg-raised-hover rounded-lg transition-colors"
-          >
+          <Button variant="secondary" size="lg" onClick={onClose}>
             {phase === 'done' ? 'Done' : 'Close'}
-          </button>
-        </div>
-      </div>
-    </div>
+          </Button>
+        </>
+      }
+    >
+      <Console label="Command output" runningCmd={runningCmd} lines={lines} emptyMessage="Waiting for output…" className="h-72" />
+      {phase === 'failed' && (
+        <p className={cx('mt-3 rounded-card border p-3 text-xs whitespace-pre-wrap', TONES.danger.panel)}>{error}</p>
+      )}
+    </Modal>
   )
 }

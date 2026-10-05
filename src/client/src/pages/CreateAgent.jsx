@@ -2,6 +2,14 @@ import { useState, useEffect, useRef } from 'react'
 import { useNavigate, useParams, Link } from 'react-router-dom'
 import { api } from '../lib/api'
 import Console from '../components/Console'
+import Button from '../components/ui/Button'
+import { Input, Textarea, Select, Checkbox } from '../components/ui/Input'
+import Field from '../components/ui/Field'
+import Card from '../components/ui/Card'
+import Badge from '../components/ui/Badge'
+import Switch from '../components/ui/Switch'
+import { TONES } from '../components/ui/tone'
+import { cx } from '../lib/cx'
 
 const STEP_COMMANDS = {
   build: (name) => `docker compose -f instances/${name}/docker-compose.yml build`,
@@ -654,24 +662,25 @@ export default function CreateAgent() {
       {phase === 'idle' ? (
         <form onSubmit={handleSubmit} className="space-y-6">
           {/* Core card — agent identity + workspace source folder */}
-          <div className="bg-panel/60 border border-accent-line/60 rounded-xl p-5 space-y-5">
+          <Card className="border-accent-line/60 p-5 space-y-5">
             <h3 className="text-xs font-medium text-ink-faint uppercase tracking-wider">Create your agent</h3>
 
             {/* Identity */}
             <div>
               <div className="flex items-center gap-2">
                 <span className="text-sm font-medium text-ink-faint">{prefix}-</span>
-                <select value={agentType} onChange={(e) => setAgentType(e.target.value)}
-                        className="bg-raised border border-line-faint rounded-lg px-3 py-2.5 text-sm text-ink focus:outline-none focus:border-accent-line focus:ring-1 focus:ring-accent-line w-36">
-                  {agentTypes.length > 0
-                    ? agentTypes.map((t) => <option key={t.type} value={t.type}>{t.type}</option>)
-                    : <option value="openclaw">openclaw</option>}
-                </select>
+                <div className="w-36 shrink-0">
+                  <Select value={agentType} onChange={(e) => setAgentType(e.target.value)}>
+                    {agentTypes.length > 0
+                      ? agentTypes.map((t) => <option key={t.type} value={t.type}>{t.type}</option>)
+                      : <option value="openclaw">openclaw</option>}
+                  </Select>
+                </div>
                 <span className="text-sm text-ink-dim">-</span>
-                <input type="text" value={name} onChange={(e) => setName(e.target.value)} required
+                <Input type="text" value={name} onChange={(e) => setName(e.target.value)} required
+                       className="flex-1"
                        placeholder="my-agent"
-                       autoFocus
-                       className="flex-1 bg-raised border border-line-faint rounded-lg px-3 py-2.5 text-sm text-ink focus:outline-none focus:border-accent-line focus:ring-1 focus:ring-accent-line placeholder-ink-dim" />
+                       autoFocus />
               </div>
 
               {nameIssue && <p className="text-xs text-danger mt-2">{nameIssue}</p>}
@@ -689,46 +698,55 @@ export default function CreateAgent() {
             {/* Workspace source folder — the heart of the form */}
             {!wsHidden && (
               <div className="border-t border-line pt-4">
-                <div className="flex items-center justify-between mb-1.5">
-                  <label htmlFor="ws-host" className="block text-xs font-medium text-ink-faint uppercase tracking-wider">
-                    Host workspace path
-                  </label>
-                  <span className="text-[11px] text-ink-faint">The project your agent works on</span>
-                </div>
+                <Field
+                  htmlFor="ws-host"
+                  labelClassName="flex items-center justify-between"
+                  label={
+                    <>
+                      Host workspace path
+                      <span className="text-[11px] font-normal normal-case tracking-normal text-ink-faint">The project your agent works on</span>
+                    </>
+                  }
+                >
                 <div className="relative">
-                  <input id="ws-host" type="text" value={wsHost}
+                  <Input id="ws-host" type="text" value={wsHost} mono
                          onChange={(e) => onWsHostChange(e.target.value)}
                          onKeyDown={onWsKeyDown}
                          onBlur={() => setTimeout(() => setSuggestOpen(false), 150)}
                          placeholder={defaultWsHost}
-                         className="w-full bg-raised border border-line-faint rounded-lg pl-3 pr-9 py-2.5 text-sm font-mono text-ink focus:outline-none focus:border-accent-line focus:ring-1 focus:ring-accent-line placeholder-ink-dim" />
+                         className="pr-9" />
                   {hostWorkspaceRoot && !wsHidden && !wsFixed && wsHost.trim().startsWith('/') && !wsHost.trim().startsWith('instances/') && (
-                    <button type="button"
+                    <Button
                             onClick={() => { wsDirTouched.current = true; setWsDir(wsHost.trim()) }}
                             title={wsDir === wsHost.trim() ? 'Paths are synced' : 'Sync container path to this path'}
-                            className={`absolute right-1.5 top-1/2 -translate-y-1/2 w-6 h-6 flex items-center justify-center rounded transition-colors ${
+                            variant="ghost"
+                            size="sm"
+                            icon
+                            className={cx(
+                              'absolute right-1.5 top-1/2 h-6 w-6 -translate-y-1/2',
                               wsDir === wsHost.trim() && wsDir
-                                ? 'bg-success text-white'
+                                ? 'bg-success text-success-ink hover:bg-success'
                                 : 'text-ink-faint hover:bg-sunken hover:text-ink'
-                            }`}>
+                            )}>
                       <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                         <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
                         <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
                       </svg>
-                    </button>
+                    </Button>
                   )}
                   {suggestOpen && suggestions.length > 0 && (
-                    <div className="absolute z-20 mt-1 w-full max-h-60 overflow-auto bg-raised border border-line rounded-lg shadow-xl">
+                    <div className="absolute z-20 mt-1 w-full max-h-60 overflow-auto bg-raised border border-line rounded-card shadow-xl">
                       {suggestions.map((s, i) => (
-                        <button key={s} type="button"
+                        <Button key={s} size="sm"
                                 onMouseDown={(e) => { e.preventDefault(); pickSuggestion(s) }}
-                                className={`block w-full text-left px-3 py-2 text-xs font-mono text-ink hover:bg-sunken transition-colors ${i === acIndex ? 'bg-sunken' : ''}`}>
+                                className={cx('block w-full px-3 py-2 text-left font-mono text-ink hover:bg-sunken', i === acIndex && 'bg-sunken')}>
                           {s}
-                        </button>
+                        </Button>
                       ))}
                     </div>
                   )}
                 </div>
+                </Field>
                 <p className="text-xs text-ink-dim mt-1.5">
                   This folder is where your agent's files live on this PC — open it directly from your file manager.
                 </p>
@@ -737,13 +755,13 @@ export default function CreateAgent() {
                   <p className="text-xs text-danger mt-1">System directory — cannot be a workspace source.</p>
                 )}
                 {wsProbe && !wsProbe.forbidden && !wsProbe.exists && (
-                  <p className="text-xs text-amber mt-1">Folder not found in paddock — mount the project folder one-to-one (same path in host and container) to use it.</p>
+                  <p className="text-xs text-warning mt-1">Folder not found in paddock — mount the project folder one-to-one (same path in host and container) to use it.</p>
                 )}
                 {wsProbe && !wsProbe.forbidden && wsProbe.exists && !wsProbe.compose && (
                   <p className="text-xs text-success mt-1">Path resolves.</p>
                 )}
                 {discovered && (
-                  <div className="mt-2 rounded-lg bg-success-soft border border-success-line px-3 py-2 text-xs text-success">
+                  <div className={cx('mt-2 rounded-card border px-3 py-2 text-xs', TONES.success.panel)}>
                     {discovered.count} volume{discovered.count === 1 ? '' : 's'} found in <code className="font-mono">{discovered.project}</code>'s compose file — pre-filled under <span className="font-medium">Advanced settings → Additional volumes</span>. Review, edit or remove them before creating.
                   </div>
                 )}
@@ -757,22 +775,20 @@ export default function CreateAgent() {
                   <div className="flex items-center gap-2">
                     <p className="text-sm font-medium text-ink">Advanced settings</p>
                     {advancedCount > 0 && (
-                      <span className="px-1.5 py-0.5 rounded-full bg-accent/15 text-accent text-xs font-semibold leading-none">
+                      <Badge tone="accent" size="md" className="font-semibold leading-none">
                         {advancedCount}
-                      </span>
+                      </Badge>
                     )}
                   </div>
                   <p className="text-xs text-ink-dim mt-1 max-w-md">
                     Custom workspace path, docker access, network routing, extra volumes and ports.
                   </p>
                 </div>
-                <button type="button"
-                        role="switch"
-                        aria-checked={showAdvanced}
-                        onClick={() => setShowAdvanced(!showAdvanced)}
-                        className={`relative w-10 h-6 rounded-full transition-colors shrink-0 ${showAdvanced ? 'bg-accent' : 'bg-raised'}`}>
-                  <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${showAdvanced ? 'translate-x-4' : ''}`} />
-                </button>
+                <Switch
+                  checked={showAdvanced}
+                  onChange={setShowAdvanced}
+                  label="Advanced settings"
+                />
               </div>
             </div>
 
@@ -784,40 +800,44 @@ export default function CreateAgent() {
               <div className="flex items-center justify-between mb-2">
                 <h3 className="text-xs font-medium text-ink-faint uppercase tracking-wider">Container workspace path</h3>
                 {wsFixed && (
-                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-sunken border border-line-faint text-ink-dim text-[11px] font-medium">
+                  <Badge tone="neutral" variant="outline" size="sm">
                     <svg className="w-3 h-3" viewBox="0 0 20 20" fill="currentColor">
-                      <path fillRule="evenodd" d="M10 1a4.5 4.5 0 00-4.5 4.5V9H5a2 2 0 00-2 2v6a2 2 0 002 2h10a2 2 0 002-2v-6a2 2 0 00-2-2h-.5V5.5A4.5 4.5 0 0010 1zm3 8V5.5a3 3 0 10-6 0V9h6z" clipRule="evenodd" />
+                      <path fillRule="evenodd" d="M10 1a 4.5 4.5 0 0 0 -4.5 4.5V9H5a 2 2 0 0 0 -2 2v6a 2 2 0 0 0 2 2h10a 2 2 0 0 0 2 -2v-6a 2 2 0 0 0 -2 -2h-.5V5.5A 4.5 4.5 0 0 0 10 1zm3 8V5.5a 3 3 0 1 0 -6 0V9h6z" clipRule="evenodd" />
                     </svg>
                     Fixed
-                  </span>
+                  </Badge>
                 )}
               </div>
               <p className="text-xs text-ink-dim mb-2">
                 The path inside the container where the agent sees the workspace folder. Leave empty to use the driver default.
               </p>
               <div className="relative">
-                <input type="text" value={wsDir}
+                <Input type="text" value={wsDir} mono
                        onChange={(e) => { if (!wsFixed) { wsDirTouched.current = true; setWsDir(e.target.value) } }}
                        readOnly={wsFixed}
                        tabIndex={wsFixed ? -1 : 0}
                        placeholder={defaultWsDir || '/root/.openclaw/workspace'}
-                       className={`w-full rounded-lg text-sm font-mono focus:outline-none ${wsFixed
-                         ? 'bg-sunken border border-dashed border-line-faint text-ink-dim cursor-not-allowed px-3 py-2'
-                         : 'bg-raised border border-line-faint text-ink focus:border-accent-line pl-3 pr-9 py-2'}`} />
+                       className={wsFixed
+                         ? 'border-dashed border-line-faint text-ink-dim cursor-not-allowed'
+                         : 'pr-9'} />
                 {!wsFixed && wsHost.trim().startsWith('/') && !wsHost.trim().startsWith('instances/') && (
-                  <button type="button"
+                  <Button
                           onClick={() => { wsDirTouched.current = true; setWsDir(wsHost.trim()) }}
                           title={wsDir === wsHost.trim() ? 'Paths are synced' : 'Sync container path to this path'}
-                          className={`absolute right-1.5 top-1/2 -translate-y-1/2 w-6 h-6 flex items-center justify-center rounded transition-colors ${
+                          variant="ghost"
+                          size="sm"
+                          icon
+                          className={cx(
+                            'absolute right-1.5 top-1/2 h-6 w-6 -translate-y-1/2',
                             wsDir === wsHost.trim() && wsDir
-                              ? 'bg-success text-white'
+                              ? 'bg-success text-success-ink hover:bg-success'
                               : 'text-ink-faint hover:bg-sunken hover:text-ink'
-                          }`}>
+                          )}>
                     <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
                       <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
                     </svg>
-                  </button>
+                  </Button>
                 )}
               </div>
               {wsFixed && (
@@ -840,41 +860,45 @@ export default function CreateAgent() {
                   Mounts the host docker socket + installs the docker CLI. Rebuilds the image during creation.
                 </p>
               </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={allowDocker}
-                onClick={() => setAllowDocker(!allowDocker)}
-                className={`relative w-10 h-6 rounded-full transition-colors shrink-0 ${allowDocker ? 'bg-accent' : 'bg-raised'}`}
-              >
-                <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${allowDocker ? 'translate-x-4' : ''}`} />
-              </button>
+              <Switch
+                checked={allowDocker}
+                onChange={setAllowDocker}
+                label="Allow docker in the container"
+              />
             </div>
             {allowDocker && (
-              <p className="text-xs text-warning/90 bg-warning-soft border border-warning-line/60 rounded-lg px-3 py-2">
+              <p className={cx('mt-3 rounded-card border px-3 py-2 text-xs', TONES.warning.panel)}>
                 ⚠ The docker socket is host-root equivalent — this agent can control the entire host.
               </p>
             )}
 
             {/* Container user (plan 43 Phase 7): root vs the pad user */}
             <div className="mt-4">
-              <div className="flex items-center justify-between">
-                <label className="block text-xs font-medium text-ink-faint mb-1.5 uppercase tracking-wider">Container user</label>
-                <span className="text-[11px] text-ink-dim">pad uid {prefix === 'vm' ? '1000:1000' : 'PUID:PGID'}</span>
-              </div>
-              <div className="inline-flex rounded-lg border border-line-faint bg-sunken p-0.5">
-                <button type="button"
-                        onClick={() => { userModeTouched.current = true; setUserMode('root') }}
-                        className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${userMode === 'root' ? 'bg-accent text-white' : 'text-ink-dim hover:text-ink'}`}>
-                  Root
-                </button>
-                <button type="button"
-                        disabled={agentType === 'hermes'}
-                        onClick={() => { userModeTouched.current = true; setUserMode('user') }}
-                        className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${userMode === 'user' ? 'bg-accent text-white' : 'text-ink-dim hover:text-ink'} ${agentType === 'hermes' ? 'opacity-40 cursor-not-allowed' : ''}`}>
-                  Local user
-                </button>
-              </div>
+              <Field
+                labelClassName="flex items-center justify-between"
+                label={
+                  <>
+                    Container user
+                    <span className="text-[11px] font-normal normal-case tracking-normal text-ink-dim">pad uid {prefix === 'vm' ? '1000:1000' : 'PUID:PGID'}</span>
+                  </>
+                }
+              >
+                <div className="inline-flex rounded-control border border-line-faint bg-sunken p-0.5">
+                  <Button size="sm"
+                          variant={userMode === 'root' ? 'primary' : 'ghost'}
+                          className="px-3 rounded-control"
+                          onClick={() => { userModeTouched.current = true; setUserMode('root') }}>
+                    Root
+                  </Button>
+                  <Button size="sm"
+                          variant={userMode === 'user' ? 'primary' : 'ghost'}
+                          disabled={agentType === 'hermes'}
+                          className="px-3 rounded-control"
+                          onClick={() => { userModeTouched.current = true; setUserMode('user') }}>
+                    Local user
+                  </Button>
+                </div>
+              </Field>
               {agentType === 'hermes' ? (
                 <p className="text-xs text-ink-dim mt-1.5">
                   Hermes already runs its daemon as its own user (/opt/data) — the option does not apply.
@@ -889,16 +913,18 @@ export default function CreateAgent() {
             </div>
 
             <div className="mt-4">
-              <label className="block text-xs font-medium text-ink-faint mb-1.5 uppercase tracking-wider">Network</label>
-              <select value={network} onChange={(e) => setNetwork(e.target.value)}
-                      className="w-full sm:w-96 bg-raised border border-line-faint rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line">
-                <option value="">Default (no override)</option>
-                {networkOptions.map((c) => (
-                  <option key={c.name} value={c.name}>
-                    {c.name}{c.state !== 'running' ? '  (stopped)' : ''}
-                  </option>
-                ))}
-              </select>
+              <Field label="Network">
+                <div className="sm:w-96">
+                  <Select value={network} onChange={(e) => setNetwork(e.target.value)}>
+                    <option value="">Default (no override)</option>
+                    {networkOptions.map((c) => (
+                      <option key={c.name} value={c.name}>
+                        {c.name}{c.state !== 'running' ? '  (stopped)' : ''}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+              </Field>
               <p className="text-xs text-ink-dim mt-1.5">
                 Route the agent through another running container by joining its network namespace (e.g. gluetun for VPN).
               </p>
@@ -923,7 +949,7 @@ export default function CreateAgent() {
               <p className="text-xs text-ink-dim">No additional volumes.</p>
             )}
             {extraVolumes.length > 0 && (
-              <div className="rounded-lg overflow-hidden border border-line-faint">
+              <div className="rounded-card overflow-hidden border border-line-faint">
                 <div className="bg-sunken text-ink-faint uppercase tracking-wider text-[11px] px-2 py-2 flex items-center gap-2 font-medium">
                   <span className="w-32 shrink-0">Type</span>
                   <span className="flex-1 min-w-0">Host source / Volume name</span>
@@ -934,49 +960,45 @@ export default function CreateAgent() {
                 {extraVolumes.map((v, i) => (
                   <div key={i} className="border-t border-line-faint flex items-start gap-2 px-2 py-1.5">
                     <div className="w-32 shrink-0">
-                      <select value={v.type || 'bind'}
-                              onChange={(e) => updateVolume(i, { type: e.target.value })}
-                              className="w-full h-7 bg-raised border border-line-faint rounded-lg px-1.5 text-xs text-ink focus:outline-none focus:border-accent-line">
+                      <Select size="sm" className="px-1.5" value={v.type || 'bind'}
+                              onChange={(e) => updateVolume(i, { type: e.target.value })}>
                         <option value="bind">Bind mount</option>
                         <option value="volume">Named volume</option>
-                      </select>
+                      </Select>
                     </div>
                     <div className="flex-1 min-w-0">
-                      <input type="text" value={v.host}
+                      <Input size="sm" mono value={v.host}
                              onChange={(e) => updateVolume(i, { host: e.target.value })}
                              title={v.type === 'volume' ? (v.external ? `Attaches the existing volume ${v.external}` : 'Creates a fresh volume') : undefined}
-                             placeholder={v.type === 'volume' ? 'e.g. mempalace-dbdata' : 'e.g. /mnt/shared'}
-                             className="w-full h-7 min-w-0 bg-raised border border-line-faint rounded-lg px-2 text-xs font-mono text-ink focus:outline-none focus:border-accent-line placeholder-ink-dim" />
+                             placeholder={v.type === 'volume' ? 'e.g. mempalace-dbdata' : 'e.g. /mnt/shared'} />
                       {volumeErrors[i].host && <p className="text-xs text-danger mt-0.5">{volumeErrors[i].host}</p>}
                     </div>
                     <div className="flex-1 min-w-0">
-                      <input type="text" value={v.container}
+                      <Input size="sm" mono value={v.container}
                              onChange={(e) => updateVolume(i, { container: e.target.value })}
-                             placeholder="e.g. /data"
-                             className="w-full h-7 min-w-0 bg-raised border border-line-faint rounded-lg px-2 text-xs font-mono text-ink focus:outline-none focus:border-accent-line placeholder-ink-dim" />
+                             placeholder="e.g. /data" />
                       {volumeErrors[i].dir && <p className="text-xs text-danger mt-0.5">{volumeErrors[i].dir}</p>}
                     </div>
                     <div className="w-7 shrink-0 h-7 flex items-center justify-center" title="Read-only mount">
-                      <input type="checkbox" checked={!!v.readonly}
-                             onChange={(e) => updateVolume(i, { readonly: e.target.checked })}
-                             title="Read-only mount"
-                             className="w-3.5 h-3.5 accent-accent" />
+                      <Checkbox size="sm" checked={!!v.readonly}
+                               onChange={(e) => updateVolume(i, { readonly: e.target.checked })}
+                               title="Read-only mount" />
                     </div>
                     <div className="w-7 shrink-0">
-                      <button type="button" onClick={() => setExtraVolumes(prev => prev.filter((_, idx) => idx !== i))}
-                              className="w-7 h-7 grid place-items-center rounded-md text-ink-dim hover:text-danger hover:bg-raised transition-colors"
-                              title="Remove volume">✕</button>
+                      <Button variant="ghost" size="sm" icon
+                              onClick={() => setExtraVolumes(prev => prev.filter((_, idx) => idx !== i))}
+                              className="hover:text-danger hover:bg-raised"
+                              title="Remove volume">✕</Button>
                     </div>
                   </div>
                 ))}
               </div>
             )}
 
-            <button type="button"
-                    onClick={() => setExtraVolumes(prev => [...prev, { type: 'bind', host: '', container: '', readonly: false }])}
-                    className="px-3 py-1.5 bg-raised hover:bg-raised-hover text-ink rounded-lg text-xs font-medium transition-colors">
+            <Button variant="secondary" size="sm" className="px-3"
+                    onClick={() => setExtraVolumes(prev => [...prev, { type: 'bind', host: '', container: '', readonly: false }])}>
               + Add volume
-            </button>
+            </Button>
             {hasVolumeErrors && (
               <p className="text-xs text-danger">Fix the invalid volume fields — the source and container path must both be valid.</p>
             )}
@@ -997,7 +1019,7 @@ export default function CreateAgent() {
               <p className="text-xs text-ink-dim">No port mappings.</p>
             )}
             {extraPorts.length > 0 && (
-              <div className="rounded-lg overflow-hidden border border-line-faint">
+              <div className="rounded-card overflow-hidden border border-line-faint">
                 <div className="bg-sunken text-ink-faint uppercase tracking-wider text-[11px] px-2 py-2 flex items-center gap-2 font-medium">
                   <span className="flex-1 min-w-0">Host port</span>
                   <span className="flex-1 min-w-0">Container port</span>
@@ -1006,33 +1028,31 @@ export default function CreateAgent() {
                 {extraPorts.map((p, i) => (
                   <div key={i} className="border-t border-line-faint flex items-start gap-2 px-2 py-1.5">
                     <div className="flex-1 min-w-0">
-                      <input type="number" min="1" max="65535" value={p.host}
+                      <Input size="sm" mono type="number" min="1" max="65535" value={p.host}
                              onChange={(e) => updatePort(i, { host: e.target.value })}
-                             placeholder="e.g. 9000"
-                             className="w-full h-7 min-w-0 bg-raised border border-line-faint rounded-lg px-2 text-xs font-mono text-ink focus:outline-none focus:border-accent-line placeholder-ink-dim" />
+                             placeholder="e.g. 9000" />
                       {portErrors[i] && <p className="text-xs text-danger mt-0.5">{portErrors[i]}</p>}
                     </div>
                     <div className="flex-1 min-w-0">
-                      <input type="number" min="1" max="65535" value={p.container}
+                      <Input size="sm" mono type="number" min="1" max="65535" value={p.container}
                              onChange={(e) => updatePort(i, { container: e.target.value })}
-                             placeholder="e.g. 80"
-                             className="w-full h-7 min-w-0 bg-raised border border-line-faint rounded-lg px-2 text-xs font-mono text-ink focus:outline-none focus:border-accent-line placeholder-ink-dim" />
+                             placeholder="e.g. 80" />
                     </div>
                     <div className="w-7 shrink-0">
-                      <button type="button" onClick={() => setExtraPorts(prev => prev.filter((_, idx) => idx !== i))}
-                              className="w-7 h-7 grid place-items-center rounded-md text-ink-dim hover:text-danger hover:bg-raised transition-colors"
-                              title="Remove port">✕</button>
+                      <Button variant="ghost" size="sm" icon
+                              onClick={() => setExtraPorts(prev => prev.filter((_, idx) => idx !== i))}
+                              className="hover:text-danger hover:bg-raised"
+                              title="Remove port">✕</Button>
                     </div>
                   </div>
                 ))}
               </div>
             )}
 
-            <button type="button"
-                    onClick={() => setExtraPorts(prev => [...prev, { host: '', container: '' }])}
-                    className="px-3 py-1.5 bg-raised hover:bg-raised-hover text-ink rounded-lg text-xs font-medium transition-colors">
+            <Button variant="secondary" size="sm" className="px-3"
+                    onClick={() => setExtraPorts(prev => [...prev, { host: '', container: '' }])}>
               + Add port
-            </button>
+            </Button>
             {hasPortErrors && (
               <p className="text-xs text-danger">Fix the invalid port fields.</p>
             )}
@@ -1048,66 +1068,57 @@ export default function CreateAgent() {
                 </p>
               </div>
               {devContainer && (
-                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-sunken border border-line-faint text-ink-dim text-[11px] font-medium">
+                <Badge tone="neutral" variant="outline" size="sm">
                   from .devcontainer/devcontainer.json
-                </span>
+                </Badge>
               )}
             </div>
 
-            <div>
-              <label className="block text-xs font-medium text-ink-faint mb-1.5 uppercase tracking-wider">Build commands (Dockerfile)</label>
-              <textarea value={buildCommands} onChange={(e) => setBuildCommands(e.target.value)}
+            <Field label="Build commands (Dockerfile)">
+              <Textarea mono value={buildCommands} onChange={(e) => setBuildCommands(e.target.value)}
                         rows={3}
                         spellCheck={false}
-                        placeholder={'RUN apt-get install -y vim\n# or an ARG line, picked up by the next build'}
-                        className="w-full rounded-lg px-3 py-2 text-sm font-mono bg-raised border border-line-faint text-ink focus:outline-none focus:border-accent-line focus:ring-1 focus:ring-accent-line placeholder-ink-dim" />
+                        placeholder={'RUN apt-get install -y vim\n# or an ARG line, picked up by the next build'} />
               <p className="text-xs text-ink-dim mt-1">
                 Runs inside <code className="text-ink-faint font-mono">instances/&lt;name&gt;/build/Dockerfile</code> on every image build. A <code className="text-ink-faint font-mono">FROM</code> line here fails the build (the current container stays up).
               </p>
-            </div>
+            </Field>
 
-            <div>
-              <label className="block text-xs font-medium text-ink-faint mb-1.5 uppercase tracking-wider">Post-create commands (bash)</label>
-              <textarea value={postCreate} onChange={(e) => setPostCreate(e.target.value)}
+            <Field label="Post-create commands (bash)">
+              <Textarea mono value={postCreate} onChange={(e) => setPostCreate(e.target.value)}
                         rows={3}
                         spellCheck={false}
-                        placeholder={'npm install\n# project setup, run once after the container boots'}
-                        className="w-full rounded-lg px-3 py-2 text-sm font-mono bg-raised border border-line-faint text-ink focus:outline-none focus:border-accent-line focus:ring-1 focus:ring-accent-line placeholder-ink-dim" />
+                        placeholder={'npm install\n# project setup, run once after the container boots'} />
               <p className="text-xs text-ink-dim mt-1">
                 Runs once in the running container (project mounted, services up) after creation. Pre-filled from the workspace's <code className="text-ink-faint font-mono">devcontainer.json</code> when present — edit freely.
               </p>
-            </div>
+            </Field>
 
-            <div>
-              <label className="block text-xs font-medium text-ink-faint mb-1.5 uppercase tracking-wider">Post-start commands (bash)</label>
-              <textarea value={postStart} onChange={(e) => setPostStart(e.target.value)}
+            <Field label="Post-start commands (bash)">
+              <Textarea mono value={postStart} onChange={(e) => setPostStart(e.target.value)}
                         rows={3}
                         spellCheck={false}
-                        placeholder={'service cron start\n# runs on every container start'}
-                        className="w-full rounded-lg px-3 py-2 text-sm font-mono bg-raised border border-line-faint text-ink focus:outline-none focus:border-accent-line focus:ring-1 focus:ring-accent-line placeholder-ink-dim" />
+                        placeholder={'service cron start\n# runs on every container start'} />
               <p className="text-xs text-ink-dim mt-1">
                 Runs on every container start (baked into <code className="text-ink-faint font-mono">start.sh</code>). Pre-filled from <code className="text-ink-faint font-mono">postStartCommand</code> in the workspace's devcontainer.
               </p>
-            </div>
+            </Field>
 
-            <div>
-              <label className="block text-xs font-medium text-ink-faint mb-1.5 uppercase tracking-wider">Post-attach commands (bash)</label>
-              <textarea value={postAttach} onChange={(e) => setPostAttach(e.target.value)}
+            <Field label="Post-attach commands (bash)">
+              <Textarea mono value={postAttach} onChange={(e) => setPostAttach(e.target.value)}
                         rows={3}
                         spellCheck={false}
-                        placeholder={'echo "terminal attached"\n# runs on every terminal attach'}
-                        className="w-full rounded-lg px-3 py-2 text-sm font-mono bg-raised border border-line-faint text-ink focus:outline-none focus:border-accent-line focus:ring-1 focus:ring-accent-line placeholder-ink-dim" />
+                        placeholder={'echo "terminal attached"\n# runs on every terminal attach'} />
               <p className="text-xs text-ink-dim mt-1">
                 Runs on every terminal attach inside this PAD (workspace/project mounted). Pre-filled from <code className="text-ink-faint font-mono">postAttachCommand</code> in the workspace's devcontainer.
               </p>
-            </div>
+            </Field>
 
             {/* Plan 41 item 20: generate a devcontainer mirror in the workspace */}
-            <label className="flex items-start gap-2.5 rounded-lg border border-line-faint bg-sunken/50 px-3 py-2.5 cursor-pointer select-none">
-              <input type="checkbox"
+            <label className="flex items-start gap-2.5 rounded-control border border-line-faint bg-sunken/50 px-3 py-2.5 cursor-pointer select-none">
+              <Checkbox size="sm" className="mt-0.5"
                      checked={generateDevContainer}
-                     onChange={(e) => setGenerateDevContainer(e.target.checked)}
-                     className="mt-0.5 w-3.5 h-3.5 accent-accent" />
+                     onChange={(e) => setGenerateDevContainer(e.target.checked)} />
               <span>
                 <span className="block text-xs font-medium text-ink">
                   Generate <code className="text-ink-faint font-mono">.devcontainer/devcontainer.json</code> for this workspace
@@ -1120,12 +1131,11 @@ export default function CreateAgent() {
           </div>
             </div>
           )}
-          </div>
+          </Card>
 
-          <button type="submit" disabled={!name || !!nameIssue}
-                  className="w-full bg-gradient-to-r from-accent to-accent-deep hover:from-accent-hover hover:to-accent-deep text-accent-ink font-semibold py-3.5 rounded-xl transition-all duration-200 shadow-lg shadow-accent/25 disabled:opacity-50">
+          <Button type="submit" variant="primary" size="lg" block disabled={!name || !!nameIssue}>
             {name && !nameIssue ? `Create ${fullName}` : 'Create my agent'}
-          </button>
+          </Button>
           <p className="text-xs text-ink-dim text-center -mt-2">
             {name && !nameIssue
               ? 'Your agent will be built and booted — this usually takes about a minute.'
@@ -1152,15 +1162,14 @@ export default function CreateAgent() {
               )}
             </div>
             {phase !== 'creating' && (
-              <button onClick={resetForm}
-                      className="text-sm text-ink-faint hover:text-ink transition-colors">
+              <Button variant="ghost" size="sm" onClick={resetForm}>
                 ← Back to form
-              </button>
+              </Button>
             )}
           </div>
 
           {phase === 'failed' && (
-            <div className="bg-danger-soft border border-danger-line rounded-xl p-4 text-sm text-danger">{error}</div>
+            <div className={cx('rounded-card border px-4 py-3 text-sm', TONES.danger.panel)}>{error}</div>
           )}
 
           <Console
@@ -1172,10 +1181,9 @@ export default function CreateAgent() {
           />
 
           {phase === 'done' && (
-            <button onClick={() => navigate('/agents/' + jobName)}
-                    className="w-full bg-gradient-to-r from-accent to-accent-deep hover:from-accent-hover hover:to-accent-deep text-accent-ink font-semibold py-3.5 rounded-xl transition-all duration-200 shadow-lg shadow-accent/25">
+            <Button variant="primary" size="lg" block onClick={() => navigate('/agents/' + jobName)}>
               Go to {jobName}
-            </button>
+            </Button>
           )}
         </div>
       )}

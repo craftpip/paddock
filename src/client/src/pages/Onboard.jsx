@@ -2,6 +2,13 @@ import { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { api } from '../lib/api'
 import { statusMeta } from '../lib/status'
+import Button from '../components/ui/Button'
+import { Input, Select } from '../components/ui/Input'
+import Field from '../components/ui/Field'
+import Card from '../components/ui/Card'
+import Badge from '../components/ui/Badge'
+import { TONES } from '../components/ui/tone'
+import { cx } from '../lib/cx'
 
 export default function Onboard() {
   const { agentId } = useParams()
@@ -57,65 +64,69 @@ export default function Onboard() {
         <h1 className="text-2xl font-bold">Onboard Bot</h1>
       </div>
 
-      <div className="bg-panel/60 border border-line rounded-xl p-5 space-y-4 mb-4">
+      <Card className="p-5 space-y-4 mb-4">
         <div className="flex items-center justify-between">
           <span className="text-sm text-ink-muted">Status</span>
-          <span className={`inline-block px-2.5 py-1 rounded-full text-xs font-medium ${agent.status === 'running' ? 'bg-success-soft text-success border border-success-line' : 'bg-panel text-ink-faint border border-line'}`}>
+          <Badge
+            tone={agent.status === 'running' ? 'success' : 'neutral'}
+            size="md"
+            className={agent.status === 'running' ? 'border border-success-line' : 'border border-line'}
+          >
             {agent.status}
-          </span>
+          </Badge>
         </div>
         <div className="text-sm text-ink-muted">
           Agent: <span className="font-semibold">{agent.agent_type}</span>
         </div>
-      </div>
+      </Card>
 
       <form onSubmit={handleSubmit} className="space-y-4">
-        <div className="bg-panel/60 border border-line rounded-xl p-5 space-y-4">
+        <Card className="p-5 space-y-4">
           <h2 className="text-sm font-semibold text-ink-faint uppercase tracking-wider">Telegram Bot</h2>
 
-          <div>
-            <label className="block text-sm text-ink-muted mb-1">Bot Token</label>
-            <input type="text" value={botToken} onChange={(e) => setBotToken(e.target.value)} placeholder="123456:ABCdef..."
-                   className="w-full bg-raised border border-line-faint rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line placeholder-ink-dim" />
-          </div>
+          <Field label="Bot Token" labelVariant="compact">
+            <Input type="text" value={botToken} onChange={(e) => setBotToken(e.target.value)} placeholder="123456:ABCdef..." />
+          </Field>
 
-          <div>
-            <label className="block text-sm text-ink-muted mb-1">Allow User ID</label>
-            <input type="text" value={userId} onChange={(e) => setUserId(e.target.value)} placeholder="532156945"
-                   className="w-full bg-raised border border-line-faint rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line placeholder-ink-dim" />
-          </div>
-        </div>
+          <Field label="Allow User ID" labelVariant="compact">
+            <Input type="text" value={userId} onChange={(e) => setUserId(e.target.value)} placeholder="532156945" />
+          </Field>
+        </Card>
 
-        <div className="bg-panel/60 border border-line rounded-xl p-5 space-y-4">
+        <Card className="p-5 space-y-4">
           <h2 className="text-sm font-semibold text-ink-faint uppercase tracking-wider">Provider API Key</h2>
 
-          <div>
-            <label className="block text-sm text-ink-muted mb-1">API Key</label>
-            <div className="flex gap-2">
-              <select value={apiKeyProvider} onChange={(e) => setApiKeyProvider(e.target.value)} className="bg-raised border border-line-faint rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line">
-                <option value="">Provider</option>
-                <option value="openai">OpenAI</option>
-                <option value="openrouter">OpenRouter</option>
-                <option value="ollama-cloud">Ollama Cloud</option>
-                <option value="anthropic">Anthropic</option>
-              </select>
-              <input type="text" value={apiKeyValue} onChange={(e) => setApiKeyValue(e.target.value)} placeholder="sk-..."
-                     className="flex-1 bg-raised border border-line-faint rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-line placeholder-ink-dim font-mono" />
+          <Field label="API Key" labelVariant="compact">
+            <div className="flex gap-2 items-center">
+              {/* Select wraps the native control in a `relative block w-full` span,
+                  which as a bare flex item would shrink to nothing — w-fit keeps
+                  it sized to its widest option, as the bare <select> was. */}
+              <div className="w-fit shrink-0">
+                <Select value={apiKeyProvider} onChange={(e) => setApiKeyProvider(e.target.value)}>
+                  <option value="">Provider</option>
+                  <option value="openai">OpenAI</option>
+                  <option value="openrouter">OpenRouter</option>
+                  <option value="ollama-cloud">Ollama Cloud</option>
+                  <option value="anthropic">Anthropic</option>
+                </Select>
+              </div>
+              <Input type="text" value={apiKeyValue} onChange={(e) => setApiKeyValue(e.target.value)} placeholder="sk-..."
+                     mono className="flex-1" />
             </div>
-          </div>
-        </div>
+          </Field>
+        </Card>
 
-        <button type="submit" disabled={loading}
-                className="w-full bg-brand hover:bg-brand text-brand-ink font-semibold py-3 rounded-xl transition-colors disabled:opacity-50">
+        <Button type="submit" variant="primary" size="lg" block disabled={loading}
+                className="bg-brand hover:bg-brand text-brand-ink font-semibold">
           {loading ? 'Running...' : 'Run Onboard'}
-        </button>
+        </Button>
       </form>
 
-      {error && <div className="mt-4 bg-danger-soft border border-danger-line rounded-xl p-4 text-sm text-danger">{error}</div>}
+      {error && <div className={cx('mt-4 rounded-card border p-4 text-sm', TONES.danger.panel)}>{error}</div>}
 
-      <div className="mt-4 bg-sunken border border-line rounded-xl p-4 text-xs font-mono text-ink-muted overflow-auto max-h-96 whitespace-pre-wrap">
+      <Card plain className="mt-4 p-4 text-xs font-mono text-ink-muted overflow-auto max-h-96 whitespace-pre-wrap">
         {output}
-      </div>
+      </Card>
     </div>
   )
 }

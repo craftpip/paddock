@@ -1,6 +1,12 @@
 import { createContext, useContext, useState, useCallback, useRef, useEffect } from 'react'
+import Modal from '../components/ui/Modal'
+import Button from '../components/ui/Button'
+import Field from '../components/ui/Field'
+import { Input, Select, Checkbox } from '../components/ui/Input'
 
 const PromptContext = createContext()
+
+const FORM_ID = 'paddock-prompt-form'
 
 export function PromptProvider({ children }) {
   const [state, setState] = useState(null)
@@ -28,14 +34,6 @@ export function PromptProvider({ children }) {
     close(null)
   }
 
-  function handleBackdrop(e) {
-    if (e.target === e.currentTarget) handleCancel()
-  }
-
-  function handleKeyDown(e) {
-    if (e.key === 'Escape') handleCancel()
-  }
-
   return (
     <PromptContext.Provider value={showPrompt}>
       {children}
@@ -48,15 +46,13 @@ export function PromptProvider({ children }) {
           danger={state.danger}
           onSubmit={handleSubmit}
           onCancel={handleCancel}
-          onBackdrop={handleBackdrop}
-          onKeyDown={handleKeyDown}
         />
       )}
     </PromptContext.Provider>
   )
 }
 
-function PromptModal({ title, message, fields, confirmText, danger, onSubmit, onCancel, onBackdrop, onKeyDown }) {
+function PromptModal({ title, message, fields, confirmText, danger, onSubmit, onCancel }) {
   const [values, setValues] = useState(() => {
     const v = {}
     for (const f of fields || []) v[f.key] = f.defaultValue || ''
@@ -75,93 +71,79 @@ function PromptModal({ title, message, fields, confirmText, danger, onSubmit, on
     onSubmit(values)
   }
 
+  // Modal renders its footer OUTSIDE the children, so the confirm button is
+  // not inside the <form> — it carries form={FORM_ID} to submit it anyway.
+  // (A nested <form> is invalid HTML, and an onClick handler would bypass
+  // Enter-to-submit.)
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-overlay backdrop-blur-sm"
-      onClick={onBackdrop}
-      onKeyDown={onKeyDown}
-      tabIndex={-1}
+    <Modal
+      open
+      onClose={onCancel}
+      title={title || 'Enter value'}
+      tone={danger ? 'danger' : undefined}
+      footer={
+        <>
+          <Button variant="ghost" size="lg" onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button
+            type="submit"
+            form={FORM_ID}
+            variant={danger ? 'danger' : 'primary'}
+            size="lg"
+          >
+            {confirmText || 'OK'}
+          </Button>
+        </>
+      }
     >
-      <div
-        className="bg-panel border border-line rounded-xl shadow-2xl w-full max-w-md mx-4 overflow-hidden"
-        role="dialog"
-        aria-modal="true"
-      >
-        <form onSubmit={handleSubmit}>
-          <div className="px-6 pt-5 pb-3">
-            <h3 className={`text-base font-semibold ${danger ? 'text-danger' : 'text-ink'}`}>
-              {title || 'Enter value'}
-            </h3>
-            {message && (
-              <div className="mt-2 text-sm text-ink-faint leading-relaxed whitespace-pre-wrap">{message}</div>
-            )}
-          </div>
-          <div className="px-6 pb-4 space-y-4">
-            {(fields || []).map((f) => {
-              if (typeof f.when === 'function' && !f.when(values)) return null
-              const opts = Array.isArray(f.options)
-                ? f.options.map((o) => (typeof o === 'string' ? { value: o, label: o } : o))
-                : []
-              return (
-                <div key={f.key}>
-                  <label className="block text-xs font-medium text-ink-muted mb-1.5">{f.label}</label>
-                  {f.type === 'select' ? (
-                    <select
-                      ref={f.key === fields[0].key ? firstRef : null}
-                      value={values[f.key] || ''}
-                      onChange={(e) => set(f.key, e.target.value)}
-                      className="w-full px-3 py-2 text-sm bg-sunken border border-line rounded-lg text-ink focus:border-accent-line focus:outline-none"
-                    >
-                      {opts.map((o) => (
-                        <option key={o.value} value={o.value}>{o.label}</option>
-                      ))}
-                    </select>
-                  ) : f.type === 'checkbox' ? (
-                    <label className="flex items-center gap-2 select-none">
-                      <input
-                        ref={f.key === fields[0].key ? firstRef : null}
-                        type="checkbox"
-                        checked={!!values[f.key]}
-                        onChange={(e) => set(f.key, e.target.checked)}
-                        className="w-4 h-4 accent-accent bg-sunken border border-line rounded"
-                      />
-                      {f.checkLabel && <span className="text-sm text-ink">{f.checkLabel}</span>}
-                    </label>
-                  ) : (
-                    <input
-                      ref={f.key === fields[0].key ? firstRef : null}
-                      type={f.type || 'text'}
-                      value={values[f.key] || ''}
-                      onChange={(e) => set(f.key, e.target.value)}
-                      placeholder={f.placeholder}
-                      className="w-full px-3 py-2 text-sm bg-sunken border border-line rounded-lg text-ink focus:border-accent-line focus:outline-none placeholder-ink-dim"
+      <form id={FORM_ID} onSubmit={handleSubmit}>
+        {message && (
+          <div className="text-sm text-ink-faint leading-relaxed whitespace-pre-wrap mb-4">{message}</div>
+        )}
+        <div className="space-y-4">
+          {(fields || []).map((f) => {
+            if (typeof f.when === 'function' && !f.when(values)) return null
+            const opts = Array.isArray(f.options)
+              ? f.options.map((o) => (typeof o === 'string' ? { value: o, label: o } : o))
+              : []
+            const first = f.key === fields[0].key
+            return (
+              <Field key={f.key} label={f.label} hint={f.hint} labelVariant="compact">
+                {f.type === 'select' ? (
+                  <Select
+                    ref={first ? firstRef : null}
+                    value={values[f.key] || ''}
+                    onChange={(e) => set(f.key, e.target.value)}
+                  >
+                    {opts.map((o) => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </Select>
+                ) : f.type === 'checkbox' ? (
+                  <label className="flex items-center gap-2 select-none cursor-pointer">
+                    <Checkbox
+                      ref={first ? firstRef : null}
+                      checked={!!values[f.key]}
+                      onChange={(e) => set(f.key, e.target.checked)}
                     />
-                  )}
-                  {f.hint && <p className="mt-1.5 text-xs text-ink-dim leading-relaxed">{f.hint}</p>}
-                </div>
-              )
-            })}
-          </div>
-          <div className="flex items-center justify-end gap-3 px-6 pb-5 pt-2">
-            <button
-              type="button"
-              onClick={onCancel}
-              className="px-4 py-2 text-sm font-medium text-ink-muted hover:text-ink hover:bg-panel rounded-lg transition-colors"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
-                danger ? 'bg-danger hover:bg-danger text-danger-ink' : 'bg-accent hover:bg-accent-hover text-accent-ink'
-              }`}
-            >
-              {confirmText || 'OK'}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
+                    {f.checkLabel && <span className="text-sm text-ink">{f.checkLabel}</span>}
+                  </label>
+                ) : (
+                  <Input
+                    ref={first ? firstRef : null}
+                    type={f.type || 'text'}
+                    value={values[f.key] || ''}
+                    onChange={(e) => set(f.key, e.target.value)}
+                    placeholder={f.placeholder}
+                  />
+                )}
+              </Field>
+            )
+          })}
+        </div>
+      </form>
+    </Modal>
   )
 }
 

@@ -1,4 +1,7 @@
 import { createContext, useContext, useState, useCallback, useRef, useEffect } from 'react'
+import { cx } from './cx'
+import Button from '../components/ui/Button'
+import { TONES } from '../components/ui/tone'
 
 const ToastContext = createContext()
 
@@ -50,12 +53,10 @@ export function ToastProvider({ children }) {
     if (action) action()
   }
 
-  const TYPE_STYLES = {
-    success: 'bg-success-soft border-success-line text-success',
-    error: 'bg-danger-soft border-danger-line text-danger',
-    warning: 'bg-warning-soft border-warning-line text-warning',
-    info: 'bg-panel/90 border-line-faint text-ink',
-  }
+  // Toasts are the `panel` flavour of a tone: soft tinted fill + a line border,
+  // which is the same pairing the inline error/warning banners use. It used to
+  // be a private map here that had drifted from the badges.
+  const TYPE_TONES = { success: 'success', error: 'danger', warning: 'warning', info: 'info' }
 
   const TYPE_ICONS = {
     success: (
@@ -75,7 +76,7 @@ export function ToastProvider({ children }) {
     ),
     info: (
       <svg className="w-4 h-4 text-accent-text flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-        <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a 9 9 0 1 1 -18 0 9 9 0 0118 0z" />
       </svg>
     ),
   }
@@ -84,31 +85,43 @@ export function ToastProvider({ children }) {
     <ToastContext.Provider value={toast}>
       {children}
       <div className="fixed top-4 right-4 z-[70] flex flex-col gap-2 w-80 pointer-events-none" role="region" aria-label="Notifications">
-        {toasts.map((t) => (
+        {toasts.map((t) => {
+          const tone = t.type === 'error' ? TONES.danger : TONES[TYPE_TONES[t.type]] || TONES.neutral
+          return (
           <div
             key={t.id}
-            className={`pointer-events-auto flex items-start gap-3 px-4 py-3 rounded-lg border shadow-xl backdrop-blur-sm transition-all animate-slide-in ${TYPE_STYLES[t.type]}`}
+            className={cx(
+              'pointer-events-auto flex items-start gap-3 px-4 py-3 rounded-card border shadow-modal backdrop-blur-sm transition-all animate-slide-in',
+              tone.panel
+            )}
           >
             {TYPE_ICONS[t.type]}
             <p className="text-sm flex-1 min-w-0">{t.message}</p>
             {t.action && (
-              <button
+              <Button
+                variant="accentGhost"
+                size="sm"
                 onClick={() => handleAction(t.id, t.action)}
-                className="text-xs font-medium text-accent-text hover:text-accent-text whitespace-nowrap flex-shrink-0"
+                className="shrink-0"
               >
                 {t.actionLabel || 'Undo'}
-              </button>
+              </Button>
             )}
-            <button
+            <Button
+              variant="ghost"
+              size="sm"
+              icon
               onClick={() => removeToast(t.id)}
-              className="text-ink-dim hover:text-ink flex-shrink-0 ml-1"
+              aria-label="Dismiss"
+              className="shrink-0 -ml-1"
             >
               <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
               </svg>
-            </button>
+            </Button>
           </div>
-        ))}
+          )
+        })}
       </div>
     </ToastContext.Provider>
   )

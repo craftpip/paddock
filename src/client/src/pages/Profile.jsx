@@ -4,55 +4,22 @@ import { api } from '../lib/api'
 import { useAuth } from '../stores/auth'
 import { useConfirm } from '../lib/confirm'
 import { useAlert } from '../lib/alert'
+import Button from '../components/ui/Button'
+import { Input, Select } from '../components/ui/Input'
+import Field from '../components/ui/Field'
+import Card from '../components/ui/Card'
+import Badge from '../components/ui/Badge'
+import Modal from '../components/ui/Modal'
+import { TONES } from '../components/ui/tone'
+import { cx } from '../lib/cx'
 
 const SCOPES = ['default', 'read', 'control']
 const USERNAME_RE = /^[A-Za-z0-9]{3,32}$/
 const KEY_NAME_RE = /^[A-Za-z0-9]{3,64}$/
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
-const inputBase = "w-full px-3 py-2 bg-sunken border rounded-lg text-ink text-sm placeholder:text-ink-dim focus:border-accent-line focus:outline-none focus:ring-1 focus:ring-accent-line/20"
-const inputCls = inputBase + " border-line"
-const inputErrCls = inputBase + " border-danger-line"
-const cardCls = "border border-line-faint rounded-xl bg-canvas/50 p-5"
-const btnCls = "px-4 py-2 bg-accent hover:bg-accent-hover disabled:bg-accent-soft disabled:cursor-not-allowed text-accent-ink rounded-lg text-sm font-medium transition-colors"
-const btnGhost = "px-4 py-2 bg-panel hover:bg-raised text-ink rounded-lg text-sm font-medium transition-colors"
-
-function Field({ label, hint, error, children }) {
-  return (
-    <div>
-      <label className="block text-xs font-medium text-ink-faint mb-1.5">{label}</label>
-      {children}
-      {error ? (
-        <p className="text-xs text-danger mt-1.5">{error}</p>
-      ) : hint ? (
-        <p className="text-xs text-ink-dim mt-1.5">{hint}</p>
-      ) : null}
-    </div>
-  )
-}
-
-function Modal({ title, description, onClose, width = 'max-w-sm', children }) {
-  useEffect(() => {
-    function onKey(e) {
-      if (e.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
-
-  return (
-    <div className="fixed inset-0 bg-overlay backdrop-blur-sm flex items-center justify-center z-50" onClick={onClose}>
-      <div className={`bg-panel rounded-xl p-6 ${width} w-full mx-4 border border-line shadow-2xl`} onClick={(e) => e.stopPropagation()}>
-        <h2 className="text-lg font-bold text-ink">{title}</h2>
-        {description && <p className="text-sm text-ink-faint mt-1 mb-4">{description}</p>}
-        {children}
-      </div>
-    </div>
-  )
-}
-
 function ErrorBanner({ children }) {
-  return <div className="bg-danger-soft border border-danger-line/60 text-danger px-4 py-3 rounded-lg text-sm mb-4">{children}</div>
+  return <div className={cx('rounded-card border px-4 py-3 text-sm mb-4', TONES.danger.panel)}>{children}</div>
 }
 
 function Snippet({ label, code }) {
@@ -70,9 +37,17 @@ function Snippet({ label, code }) {
     <div>
       <div className="flex items-center justify-between mb-1.5">
         <p className="text-xs font-medium text-ink-muted">{label}</p>
-        <button onClick={copyCode} className="text-xs text-ink-dim hover:text-accent-text transition-colors">{copied ? 'Copied' : 'Copy'}</button>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={copyCode}
+          style={{ minHeight: 0 }}
+          className="text-xs py-0 px-1.5 text-ink-dim hover:bg-transparent hover:text-accent-text"
+        >
+          {copied ? 'Copied' : 'Copy'}
+        </Button>
       </div>
-      <pre className="bg-sunken border border-line-faint rounded-lg p-3 text-[11px] text-ink-muted overflow-x-auto">{code}</pre>
+      <pre className="bg-sunken border border-line-faint rounded-card p-3 text-[11px] text-ink-muted overflow-x-auto">{code}</pre>
     </div>
   )
 }
@@ -292,28 +267,32 @@ export default function Profile() {
         <h1 className="text-2xl font-bold text-ink">Settings</h1>
         <div className="flex items-center gap-2 mt-1.5">
           <span className="text-ink-faint text-sm">{username}</span>
-          <span className={`px-2 py-0.5 rounded-full text-xs font-medium capitalize ${role === 'admin' ? 'bg-brand-soft text-brand border border-brand-line' : 'bg-panel text-ink-muted border border-line'}`}>
+          <Badge tone={role === 'admin' ? 'brand' : 'neutral'} size="md" className="capitalize">
             {role}
-          </span>
+          </Badge>
         </div>
       </div>
 
       <div className="flex gap-1 border-b border-line-faint mb-6">
         {navItems.map((t) => (
-          <button
+          <Button
             key={t.id}
+            variant="ghost"
             onClick={() => selectTab(t.id)}
-            className={`px-3 py-2 text-sm font-medium whitespace-nowrap border-b-2 -mb-px transition-colors ${tab === t.id ? 'text-ink border-accent-line' : 'text-ink-faint border-transparent hover:text-ink'}`}
+            className={cx(
+              'rounded-none px-3 py-2 text-sm border-b-2 -mb-px whitespace-nowrap hover:bg-transparent',
+              tab === t.id ? 'text-ink border-accent-line' : 'text-ink-faint border-transparent hover:text-ink'
+            )}
           >
             {t.label}
-          </button>
+          </Button>
         ))}
       </div>
 
       <div className="min-w-0">
         {tab === 'general' && (
           <div className="space-y-6">
-            <div className={cardCls}>
+            <Card className="p-5">
               <div className="mb-4">
                 <h2 className="text-sm font-semibold text-ink">Account</h2>
                 <p className="text-xs text-ink-dim mt-0.5">Basic information about your sign-in.</p>
@@ -334,56 +313,59 @@ export default function Profile() {
                   </dd>
                 </div>
               </dl>
-            </div>
+            </Card>
 
-            <div className={cardCls}>
+            <Card className="p-5">
               <div className="mb-4">
                 <h2 className="text-sm font-semibold text-ink">Email</h2>
                 <p className="text-xs text-ink-dim mt-0.5">Used for account recovery and notifications.</p>
               </div>
               <form onSubmit={saveEmail} className="flex gap-2 items-start">
                 <div className="flex-1">
-                  <input
-                    type="email"
-                    value={email}
-                    onChange={(e) => { setEmail(e.target.value); setEmailError('') }}
-                    placeholder="you@example.com"
-                    className={emailError ? inputErrCls : inputCls}
-                  />
-                  {emailError && <p className="text-xs text-danger mt-1.5">{emailError}</p>}
+                  <Field error={emailError || undefined}>
+                    <Input
+                      type="email"
+                      value={email}
+                      onChange={(e) => { setEmail(e.target.value); setEmailError('') }}
+                      placeholder="you@example.com"
+                      invalid={!!emailError}
+                    />
+                  </Field>
                 </div>
-                <button type="submit" disabled={saving} className={`${btnCls} whitespace-nowrap`}>{saving ? 'Saving…' : 'Save'}</button>
+                <Button type="submit" variant="primary" size="md" disabled={saving} className="whitespace-nowrap">
+                  {saving ? 'Saving…' : 'Save'}
+                </Button>
               </form>
               {msg && !emailError && <p className={`text-xs mt-2 ${msg.includes('Failed') ? 'text-danger' : 'text-success'}`}>{msg}</p>}
-            </div>
+            </Card>
 
-            <div className={cardCls}>
+            <Card className="p-5">
               <div className="mb-4">
                 <h2 className="text-sm font-semibold text-ink">Password</h2>
                 <p className="text-xs text-ink-dim mt-0.5">Keep your account secure with a strong password.</p>
               </div>
               <form onSubmit={changePassword} className="space-y-3 max-w-md">
                 <Field label="Current password">
-                  <input type="password" value={pwCurrent} onChange={(e) => setPwCurrent(e.target.value)} placeholder="Current password" required autoComplete="current-password" className={inputCls} />
+                  <Input type="password" value={pwCurrent} onChange={(e) => setPwCurrent(e.target.value)} placeholder="Current password" required autoComplete="current-password" />
                 </Field>
                 <Field label="New password" hint="At least 4 characters.">
-                  <input type="password" value={pwNew} onChange={(e) => setPwNew(e.target.value)} placeholder="New password" required autoComplete="new-password" className={inputCls} />
+                  <Input type="password" value={pwNew} onChange={(e) => setPwNew(e.target.value)} placeholder="New password" required autoComplete="new-password" />
                 </Field>
                 <Field label="Confirm new password">
-                  <input type="password" value={pwConfirm} onChange={(e) => setPwConfirm(e.target.value)} placeholder="Confirm new password" required autoComplete="new-password" className={inputCls} />
+                  <Input type="password" value={pwConfirm} onChange={(e) => setPwConfirm(e.target.value)} placeholder="Confirm new password" required autoComplete="new-password" />
                 </Field>
                 <div>
-                  <button type="submit" disabled={pwSaving} className={btnCls}>{pwSaving ? 'Updating…' : 'Change Password'}</button>
+                  <Button type="submit" variant="primary" size="md" disabled={pwSaving}>{pwSaving ? 'Updating…' : 'Change Password'}</Button>
                   {pwMsg && <p className={`text-xs mt-2 ${pwMsg.includes('incorrect') || pwMsg.includes('Failed') || pwMsg.includes('match') ? 'text-danger' : 'text-success'}`}>{pwMsg}</p>}
                 </div>
               </form>
-            </div>
+            </Card>
           </div>
         )}
 
         {tab === 'keys' && (
           <>
-          <div className={cardCls}>
+          <Card className="p-5">
             <div className="mb-4">
               <h2 className="text-sm font-semibold text-ink">API Keys</h2>
               <p className="text-xs text-ink-dim mt-0.5">Bearer tokens that MCP clients use to authenticate with this server.</p>
@@ -391,28 +373,32 @@ export default function Profile() {
 
             <form onSubmit={createKey} className="flex flex-col sm:flex-row gap-2 mb-4 items-start">
               <div className="flex-1 w-full">
-                <input
-                  type="text"
-                  value={name}
-                  maxLength={64}
-                  onChange={(e) => {
-                    const v = e.target.value
-                    const cleaned = v.replace(/[^A-Za-z0-9]/g, '')
-                    setKeyNameNote(cleaned !== v ? 'Only letters and numbers are allowed' : '')
-                    setKeyMsg('')
-                    setName(cleaned)
-                  }}
-                  placeholder="Key name (e.g. opencode)"
-                  className={keyNameError ? inputErrCls : inputCls}
-                />
-                <p className={`text-xs mt-1.5 ${keyNameError ? 'text-danger' : 'text-ink-dim'}`}>
-                  {keyNameError || 'Letters and numbers only.'}
-                </p>
+                <Field
+                  error={keyNameError || undefined}
+                  hint="Letters and numbers only."
+                >
+                  <Input
+                    type="text"
+                    value={name}
+                    maxLength={64}
+                    onChange={(e) => {
+                      const v = e.target.value
+                      const cleaned = v.replace(/[^A-Za-z0-9]/g, '')
+                      setKeyNameNote(cleaned !== v ? 'Only letters and numbers are allowed' : '')
+                      setKeyMsg('')
+                      setName(cleaned)
+                    }}
+                    placeholder="Key name (e.g. opencode)"
+                    invalid={!!keyNameError}
+                  />
+                </Field>
               </div>
-              <select value={scope} onChange={(e) => setScope(e.target.value)} className={`${inputCls} sm:w-40`}>
-                {SCOPES.map((s) => <option key={s} value={s}>{s}</option>)}
-              </select>
-              <button type="submit" disabled={creating || !canCreateKey} className={`${btnCls} whitespace-nowrap`}>{creating ? 'Creating…' : 'Create Key'}</button>
+              <div className="sm:w-40">
+                <Select value={scope} onChange={(e) => setScope(e.target.value)}>
+                  {SCOPES.map((s) => <option key={s} value={s}>{s}</option>)}
+                </Select>
+              </div>
+              <Button type="submit" variant="primary" size="md" disabled={creating || !canCreateKey} className="whitespace-nowrap">{creating ? 'Creating…' : 'Create Key'}</Button>
             </form>
             {keyMsg && <p className="text-xs text-danger mb-3">{keyMsg}</p>}
 
@@ -436,29 +422,36 @@ export default function Profile() {
                     <tr key={k.id} className="border-b border-line-faint">
                       <td className="py-3 pr-3 font-medium text-ink">{k.name}</td>
                       <td className="py-3 pr-3">
-                        <span className="inline-flex items-center gap-1.5 font-mono text-xs text-ink-faint bg-sunken border border-line-faint rounded-md px-2 py-0.5">
+                        <span className="inline-flex items-center gap-1.5 font-mono text-xs text-ink-faint bg-sunken border border-line-faint rounded-control px-2 py-0.5">
                           {k.prefix}
-                          <button onClick={() => copy(k.prefix)} title="Copy prefix" className="text-ink-dim hover:text-accent-text transition-colors">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => copy(k.prefix)}
+                            title="Copy prefix"
+                            style={{ minHeight: 0 }}
+                            className="h-4 w-4 min-w-4 p-0 text-ink-dim hover:bg-transparent hover:text-accent-text"
+                          >
                             <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                               <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
                               <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
                             </svg>
-                          </button>
+                          </Button>
                         </span>
                       </td>
                       <td className="py-3 pr-3">
-                        <span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-panel text-ink-muted">{k.scopes}</span>
+                        <Badge tone="neutral" size="md">{k.scopes}</Badge>
                       </td>
                       <td className="py-3 pr-3 text-xs text-ink-dim">{fmt(k.last_used_at)}</td>
                       <td className="py-3 text-right">
-                        <button onClick={() => revokeKey(k.id, k.name)} className="px-2.5 py-1 bg-danger-soft hover:bg-danger-soft text-danger rounded-lg text-xs transition-colors">Revoke</button>
+                        <Button variant="dangerGhost" size="sm" onClick={() => revokeKey(k.id, k.name)}>Revoke</Button>
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             )}
-          </div>
+          </Card>
 
           <div className="mt-6">
             <div className="flex items-start justify-between gap-3 mb-4">
@@ -466,10 +459,15 @@ export default function Profile() {
                 <h2 className="text-sm font-semibold text-ink">Connect an MCP client</h2>
                 <p className="text-xs text-ink-dim mt-0.5">Paddock serves a Streamable HTTP MCP server. Coding agents can use it to control the fleet — list/start/stop PADs, read & write workspace files, manage backups, view configs and logs, and run in-container commands.</p>
               </div>
-              <button
+              <Button
+                variant="secondary"
+                size="sm"
                 onClick={() => setShowUrlNote((v) => !v)}
                 title="Why does the URL change?"
-                className={`shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium transition-colors ${showUrlNote ? 'bg-accent-soft text-accent-text border border-accent-line' : 'bg-panel text-ink-faint border border-line hover:text-ink'}`}
+                className={cx(
+                  'shrink-0 rounded-pill gap-1',
+                  showUrlNote && 'bg-accent-soft text-accent-text border-accent-line'
+                )}
               >
                 <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <circle cx="12" cy="12" r="10" />
@@ -477,10 +475,10 @@ export default function Profile() {
                   <path d="M12 8h.01" />
                 </svg>
                 Info
-              </button>
+              </Button>
             </div>
             {showUrlNote && (
-              <div className="mb-5 border border-line bg-sunken rounded-lg p-3.5 text-xs text-ink-faint leading-relaxed">
+              <div className="mb-5 border border-line bg-sunken rounded-card p-3.5 text-xs text-ink-faint leading-relaxed">
                 <p className="font-medium text-ink mb-1">About the server URL</p>
                 The URL in the snippets below always matches the address you are currently using to reach Paddock. If you opened it through <code className="text-ink-muted">localhost</code>, the snippets will say <code className="text-ink-muted">localhost</code> — that only works for clients running on this same machine. To let clients on other machines connect, open Paddock via its LAN address or hostname instead and the snippets update automatically.
               </div>
@@ -530,22 +528,24 @@ export default function Profile() {
         )}
 
         {tab === 'users' && (
-          <div className={cardCls}>
+          <Card className="p-5">
             <div className="flex items-start justify-between mb-4">
               <div>
                 <h2 className="text-sm font-semibold text-ink">Users</h2>
                 <p className="text-xs text-ink-dim mt-0.5">People who can sign in to this dashboard.</p>
               </div>
-              <button
+              <Button
+                variant="primary"
+                size="sm"
                 onClick={() => {
                   setUsersError(''); setUsernameNote('')
                   setNewUser({ username: '', password: '', role: 'user' })
                   setShowCreate(true)
                 }}
-                className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-accent-ink rounded-lg text-xs font-medium transition-colors whitespace-nowrap"
+                className="whitespace-nowrap"
               >
                 + Create User
-              </button>
+              </Button>
             </div>
 
             {usersLoading ? (
@@ -571,24 +571,25 @@ export default function Profile() {
                         <td className="py-3 pr-4 font-medium text-ink">{u.username}</td>
                         <td className="py-3 pr-4 text-ink-faint">{u.email || '—'}</td>
                         <td className="py-3 pr-4">
-                          <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${u.role === 'admin' ? 'bg-brand-soft text-brand' : 'bg-panel text-ink-muted'}`}>
+                          <Badge tone={u.role === 'admin' ? 'brand' : 'neutral'} size="md">
                             {u.role}
-                          </span>
+                          </Badge>
                         </td>
                         <td className="py-3 pr-4">{u.agent_count}</td>
                         <td className="py-3 pr-4 text-ink-faint">{u.created_at ? new Date(u.created_at + 'Z').toLocaleDateString() : '—'}</td>
                         <td className="py-3">
                           <div className="flex gap-2 justify-end">
-                            <button
+                            <Button
+                              variant="secondary"
+                              size="sm"
                               onClick={() => { setUsersError(''); setResetPassword(''); setResetCurrentPassword(''); setResetPwUser(u) }}
-                              className="px-3 py-1 bg-panel hover:bg-raised text-ink-muted rounded-lg text-xs transition-colors"
                             >
                               Reset PW
-                            </button>
+                            </Button>
                             {u.role !== 'admin' && (
-                              <button onClick={() => deleteUser(u.id)} className="px-3 py-1 bg-danger-soft hover:bg-danger-soft text-danger rounded-lg text-xs transition-colors">
+                              <Button variant="dangerGhost" size="sm" onClick={() => deleteUser(u.id)}>
                                 Delete
-                              </button>
+                              </Button>
                             )}
                           </div>
                         </td>
@@ -598,18 +599,31 @@ export default function Profile() {
                 </table>
               </div>
             )}
-          </div>
+          </Card>
         )}
       </div>
 
       {revealed && (
-        <Modal title="API key created" description="Copy this key now — you will not be able to see it again." onClose={() => setRevealed(null)} width="max-w-lg">
+        <Modal
+          open
+          title="API key created"
+          onClose={() => setRevealed(null)}
+          width="max-w-lg"
+        >
+          <p className="text-sm text-ink-faint mb-4">Copy this key now — you will not be able to see it again.</p>
           <div className="flex gap-2 mb-4">
-            <code className="flex-1 px-3 py-2.5 bg-sunken border border-line rounded-lg text-xs text-success font-mono break-all">{revealed.key}</code>
-            <button onClick={() => { copy(revealed.key); setCopied(true) }} className={`${btnCls} whitespace-nowrap`}>{copied ? 'Copied' : 'Copy'}</button>
+            <code className="flex-1 px-3 py-2.5 bg-sunken border border-line rounded-control text-xs text-success font-mono break-all">{revealed.key}</code>
+            <Button
+              variant="primary"
+              size="lg"
+              className="whitespace-nowrap"
+              onClick={() => { copy(revealed.key); setCopied(true) }}
+            >
+              {copied ? 'Copied' : 'Copy'}
+            </Button>
           </div>
           <p className="text-xs font-medium text-ink-muted mb-2">Client config for “{revealed.name}”</p>
-          <pre className="bg-sunken border border-line rounded-lg p-3 text-[11px] text-ink-muted overflow-x-auto mb-4">{`{
+          <pre className="bg-sunken border border-line rounded-card p-3 text-[11px] text-ink-muted overflow-x-auto mb-4">{`{
   "mcpServers": {
     "paddock": {
       "type": "http",
@@ -618,24 +632,26 @@ export default function Profile() {
     }
   }
 }`}</pre>
-          <button onClick={() => setRevealed(null)} className={`${btnCls} w-full`}>Done</button>
+          <Button variant="primary" size="lg" block onClick={() => setRevealed(null)}>Done</Button>
         </Modal>
       )}
 
       {showCreate && (
         <Modal
+          open
           title="Create User"
-          description="Add a new person who can sign in to this dashboard."
           onClose={() => { setShowCreate(false); setUsersError(''); setUsernameNote('') }}
         >
+          <p className="text-sm text-ink-faint mb-4">Add a new person who can sign in to this dashboard.</p>
           {usersError && <ErrorBanner>{usersError}</ErrorBanner>}
           <form onSubmit={(e) => { e.preventDefault(); createUser() }} className="space-y-4">
             <Field
               label="Username"
+              labelVariant="compact"
               hint={usernameError ? undefined : 'Letters and numbers only, 3–32 characters.'}
               error={usernameError || undefined}
             >
-              <input
+              <Input
                 type="text"
                 value={newUser.username}
                 maxLength={32}
@@ -648,28 +664,29 @@ export default function Profile() {
                   setNewUser((u) => ({ ...u, username: cleaned }))
                 }}
                 placeholder="e.g. janedoe"
-                className={usernameError ? inputErrCls : inputCls}
+                invalid={!!usernameError}
               />
             </Field>
-            <Field label="Password" hint="At least 4 characters.">
-              <input
+            <Field label="Password" hint="At least 4 characters." labelVariant="compact">
+              <Input
                 type="password"
                 value={newUser.password}
                 onChange={(e) => { setUsersError(''); setNewUser((u) => ({ ...u, password: e.target.value })) }}
                 placeholder="Password"
                 autoComplete="new-password"
-                className={inputCls}
               />
             </Field>
-            <Field label="Role" hint="Admins can manage users, agents, and the vault.">
-              <select value={newUser.role} onChange={(e) => setNewUser((u) => ({ ...u, role: e.target.value }))} className={inputCls}>
+            <Field label="Role" hint="Admins can manage users, agents, and the vault." labelVariant="compact">
+              <Select value={newUser.role} onChange={(e) => setNewUser((u) => ({ ...u, role: e.target.value }))}>
                 <option value="user">User</option>
                 <option value="admin">Admin</option>
-              </select>
+              </Select>
             </Field>
+            {/* Strategy (a): the submit button stays INSIDE the form, so
+                Enter-to-submit works without a form= attribute. */}
             <div className="flex gap-2 pt-2">
-              <button type="button" onClick={() => { setShowCreate(false); setUsersError(''); setUsernameNote('') }} className={`${btnGhost} flex-1`}>Cancel</button>
-              <button type="submit" disabled={!canCreateUser} className={`${btnCls} flex-1`}>Create User</button>
+              <Button variant="ghost" size="lg" className="flex-1" onClick={() => { setShowCreate(false); setUsersError(''); setUsernameNote('') }}>Cancel</Button>
+              <Button type="submit" variant="primary" size="lg" disabled={!canCreateUser} className="flex-1">Create User</Button>
             </div>
           </form>
         </Modal>
@@ -677,39 +694,41 @@ export default function Profile() {
 
       {resetPwUser && (
         <Modal
+          open
           title="Reset Password"
-          description={resetPwUser.id === userId ? `Set a new password for your account.` : `Set a new password for ${resetPwUser.username}.`}
           onClose={() => { setResetPwUser(null); setResetPassword(''); setResetCurrentPassword(''); setUsersError('') }}
         >
+          <p className="text-sm text-ink-faint mb-4">
+            {resetPwUser.id === userId ? `Set a new password for your account.` : `Set a new password for ${resetPwUser.username}.`}
+          </p>
           {usersError && <ErrorBanner>{usersError}</ErrorBanner>}
           <form onSubmit={(e) => { e.preventDefault(); resetUserPassword() }} className="space-y-4">
             {resetPwUser.id === userId && (
-              <Field label="Current password" hint="Confirm your current password to change your own password.">
-                <input
+              <Field label="Current password" hint="Confirm your current password to change your own password." labelVariant="compact">
+                <Input
                   type="password"
                   value={resetCurrentPassword}
                   onChange={(e) => { setUsersError(''); setResetCurrentPassword(e.target.value) }}
                   placeholder="Current password"
                   autoFocus
                   autoComplete="current-password"
-                  className={inputCls}
                 />
               </Field>
             )}
-            <Field label="New password" hint="At least 4 characters.">
-              <input
+            <Field label="New password" hint="At least 4 characters." labelVariant="compact">
+              <Input
                 type="password"
                 value={resetPassword}
                 onChange={(e) => { setUsersError(''); setResetPassword(e.target.value) }}
                 placeholder="New password"
                 autoFocus={resetPwUser.id !== userId}
                 autoComplete="new-password"
-                className={inputCls}
               />
             </Field>
+            {/* Strategy (a): the submit button stays INSIDE the form. */}
             <div className="flex gap-2 pt-4">
-              <button type="button" onClick={() => { setResetPwUser(null); setResetPassword(''); setResetCurrentPassword(''); setUsersError('') }} className={`${btnGhost} flex-1`}>Cancel</button>
-              <button type="submit" className={`${btnCls} flex-1`}>Reset</button>
+              <Button variant="ghost" size="lg" className="flex-1" onClick={() => { setResetPwUser(null); setResetPassword(''); setResetCurrentPassword(''); setUsersError('') }}>Cancel</Button>
+              <Button type="submit" variant="primary" size="lg" className="flex-1">Reset</Button>
             </div>
           </form>
         </Modal>

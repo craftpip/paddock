@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useImperativeHandle, forwardRef, useState, useCallback } from 'react'
 import { useConfirm } from '../lib/confirm'
+import Button from './ui/Button'
 
 /**
  * ─────────────────────────────────────────────────────────────────────────────
@@ -143,7 +144,7 @@ import { useConfirm } from '../lib/confirm'
  *    hidden while fullscreen since collapsing a fullscreen pane is meaningless.
  */
 const Terminal = forwardRef(function Terminal(
-  { name, title, height = '70vh', minHeight = '480px', disabled = false, collapsed = false, showCollapse = true, onToggleCollapse, onCommandStart, onCommandDone, onConnChange, className = '', running = true },
+  { name, title, height = '70vh', minHeight = '480px', disabled = false, collapsed = false, showCollapse = true, onToggleCollapse, onCommandStart, onCommandDone, onConnChange, className = '', running = true, sessionId: controlledSessionId = '', showSessions = true, bordered = true },
   ref
 ) {
   const containerRef = useRef(null)
@@ -166,6 +167,10 @@ const Terminal = forwardRef(function Terminal(
   const runningRef = useRef(!!running) // the agent is running → auto-reconnect allowed
   const wasRunningRef = useRef(!!running) // previous `running` value, for edge detection
   const takeoverRef = useRef(false) // 4001 superseded → reconnect is manual-only
+  // Set for one connect when the page swapped which session is open: the buffer
+  // is already on screen, so the server's scrollback replay is redundant and
+  // slow. Read (and cleared) where the WebSocket URL is built.
+  const skipHistoryRef = useRef(false)
   const initInFlightRef = useRef(false) // an async initTerminal() is mid-flight
   const cmdRunningRef = useRef(false) // an injected command is in flight
   const shellBusyRef = useRef(false) // prompt-based: the shell is occupied by a command
@@ -199,6 +204,12 @@ const Terminal = forwardRef(function Terminal(
       return 'main'
     }
   })
+  // Mission drives the pane: col 3 pins the session to the row the user picked
+  // in col 2, so the pane follows the selection instead of whatever this
+  // browser last used for this PAD. Controlled mode owns the value outright —
+  // no localStorage, no tab switching (that is what showSessions=false is for).
+  const controlled = !!controlledSessionId
+  const activeSessionId = controlled ? controlledSessionId : sessionId
   const sessionIdRef = useRef(sessionId) // sync'd below; initTerminal reads this
   const [sessions, setSessions] = useState([])
   const [sessionsLoading, setSessionsLoading] = useState(false)
@@ -476,8 +487,12 @@ const Terminal = forwardRef(function Terminal(
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     setStateSafe(setConnState, 'connecting')
     setStateSafe(setDynTitle, '') // a new session has its own title
+    // `history=0` on a soft swap only — see skipHistoryRef. Consumed here, so a
+    // later reconnect of the same session still replays its scrollback.
+    const skipHistory = skipHistoryRef.current
+    skipHistoryRef.current = false
     const ws = new WebSocket(
-      `${protocol}//${window.location.host}/ws/terminal/${name}?session=${encodeURIComponent(sessionIdRef.current || 'main')}&cols=${term.cols}&rows=${term.rows}`
+      `${protocol}//${window.location.host}/ws/terminal/${name}?session=${encodeURIComponent(sessionIdRef.current || 'main')}&cols=${term.cols}&rows=${term.rows}${skipHistory ? '&history=0' : ''}`
     )
     wsRef.current = ws
 
@@ -566,6 +581,17 @@ const Terminal = forwardRef(function Terminal(
         writeTerm('\r\n\x1b[33m[Terminal taken over by another connection — click Reconnect to retake.]\x1b[0m\r\n')
         return
       }
+      // 4003 = the server says this MISSION SESSION is closed (its row is gone
+      // from the page). It is not a stopped PAD and it will never come back, so
+      // retrying is pointless: the client used to share 4002 with "agent is
+      // stopped" and reconnected forever against a session that no longer
+      // exists. Stop for good — the page's next selection reconnects anyway.
+      if (evt.code === 4003) {
+        wasConnectedRef.current = false
+        setStateSafe(setConnState, 'disconnected')
+        writeTerm('\r\n\x1b[33m[This session was closed.]\x1b[0m\r\n')
+        return
+      }
       // 4002 = the PAD is stopped/not running. When the agent is truly stopped
       // (`running` prop false) stop retrying entirely — the `running` prop
       // triggers a fresh connect when it comes back up. But when the agent is
@@ -638,14 +664,21 @@ const Terminal = forwardRef(function Terminal(
   // Mount / name change: create session. Unmount: full teardown.
   useEffect(() => {
     mountedRef.current = true
-    // Restore the persisted session for this PAD (handles name changes too).
-    try {
-      const s = localStorage.getItem(`pad-term-session-${name}`)
-      if (s && SAFE_SESSION_RE.test(s)) {
-        sessionIdRef.current = s
-        setSessionId(s)
-      }
-    } catch {}
+    // Controlled mode (Mission): the page picked the pane — no localStorage,
+    // and a missing controlled value must not fall back to the browser's own.
+    if (controlledSessionId) {
+      sessionIdRef.current = controlledSessionId
+      setSessionId(controlledSessionId)
+    } else {
+      // Restore the persisted session for this PAD (handles name changes too).
+      try {
+        const s = localStorage.getItem(`pad-term-session-${name}`)
+        if (s && SAFE_SESSION_RE.test(s)) {
+          sessionIdRef.current = s
+          setSessionId(s)
+        }
+      } catch {}
+    }
     if (!containerRef.current) return
     initTerminal().catch(() => {})
     return () => {
@@ -657,8 +690,8 @@ const Terminal = forwardRef(function Terminal(
 
   // Keep the ref in sync with the visible session id (initTerminal reads ref).
   useEffect(() => {
-    sessionIdRef.current = sessionId
-  }, [sessionId])
+    sessionIdRef.current = activeSessionId
+  }, [activeSessionId])
 
   // Keep the collapse ref in sync (the ResizeObserver closure captures the
   // init-time value, so it must read the live ref to skip fit() while hidden).
@@ -804,7 +837,7 @@ const Terminal = forwardRef(function Terminal(
     try {
       tabListRef.current?.querySelector('[data-active="true"]')?.scrollIntoView({ inline: 'nearest', block: 'nearest' })
     } catch {}
-  }, [sessionId, sessions])
+  }, [activeSessionId, sessions])
 
   /** Switch to a session: persist choice, tear down, reconnect (backend
    *  auto-creates the tmux session on attach if it does not exist yet). Like
@@ -813,6 +846,9 @@ const Terminal = forwardRef(function Terminal(
   const switchSession = useCallback(
     (id) => {
       if (!id || id === sessionIdRef.current) return
+      // Controlled mode: the page owns the pane (col 2 selection), so a stray
+      // tab click must not be able to drag the terminal off the mission session.
+      if (controlled) return
       sessionIdRef.current = id
       setSessionId(id)
       try { localStorage.setItem(`pad-term-session-${name}`, id) } catch {}
@@ -828,8 +864,38 @@ const Terminal = forwardRef(function Terminal(
       setStateSafe(setConnState, 'connecting')
       initTerminal().catch(() => {})
     },
-    [name]
+    [name, controlled]
   )
+
+  // Controlled mode: the page changed which session is open (col 2 selection,
+  // or a session that just came up). Soft swap — reuse the live xterm and only
+  // reconnect the WebSocket to the new pane, so picking another row never
+  // blanks the terminal.
+  const controlledRef = useRef(controlledSessionId)
+  useEffect(() => {
+    if (controlledRef.current === controlledSessionId) return
+    controlledRef.current = controlledSessionId
+    if (!controlledSessionId || !containerRef.current) return
+    sessionIdRef.current = controlledSessionId
+    genRef.current++
+    initInFlightRef.current = false
+    if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null }
+    if (wsRef.current) { try { wsRef.current.close() } catch {} ; wsRef.current = null }
+    // Wipe the outgoing session's screen NOW rather than leaving it on display
+    // for the ~half second the new attach takes to repaint: the header already
+    // says the new session, and a pane of someone else's output under it reads
+    // as "it restarted from the beginning". The attach repaint lands on an empty
+    // buffer, which is the same thing a real terminal does when you switch.
+    const t = termRef.current
+    if (t) { try { t.reset() } catch {} }
+    // …and tell the server not to replay scrollback into a buffer we just
+    // emptied (it would land under the live screen, and it was most of the
+    // switch latency). A first connect / reload still gets its history.
+    skipHistoryRef.current = true
+    setStateSafe(setConnState, 'connecting')
+    initTerminal().catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [controlledSessionId])
 
   /** Create a new session with the next free `term-N` name. */
   const newSession = useCallback(async () => {
@@ -975,7 +1041,7 @@ const Terminal = forwardRef(function Terminal(
   )
 
   return (
-    <div className={`flex flex-col border border-line-faint overflow-hidden bg-sunken ${fullscreen ? 'fixed inset-0 z-[100] rounded-none' : 'relative rounded-xl'} ${className}`}>
+    <div className={`flex flex-col overflow-hidden bg-sunken ${fullscreen ? 'fixed inset-0 z-[100]' : bordered ? 'relative rounded-card border border-line-faint' : ''} ${className}`}>
       <div className="flex items-center gap-3 px-4 py-2 border-b border-line-faint bg-sunken/80 select-none">
         <div className="flex items-center gap-2 shrink-0">
           <span
@@ -991,9 +1057,10 @@ const Terminal = forwardRef(function Terminal(
             </span>
           )}
         </div>
+        {showSessions && (
         <div ref={tabListRef} role="tablist" aria-label="Terminal sessions" className="flex flex-1 min-w-0 items-center gap-1 overflow-x-auto">
-          {(sessions.some((s) => s.name === sessionId) ? sessions : [...sessions, { name: sessionId }]).map((s) => {
-            const isCur = s.name === sessionId
+          {(sessions.some((s) => s.name === activeSessionId) ? sessions : [...sessions, { name: activeSessionId }]).map((s) => {
+            const isCur = s.name === activeSessionId
             return (
               <div
                 key={s.name}
@@ -1004,7 +1071,7 @@ const Terminal = forwardRef(function Terminal(
                 onClick={() => switchSession(s.name)}
                 onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); switchSession(s.name) } }}
                 title={isCur && (dynTitle || s.title) ? `${s.name} — ${dynTitle || s.title}` : `Session ${s.name}`}
-                className={`group flex max-w-40 shrink-0 cursor-pointer items-center gap-1 rounded-md px-2.5 py-1 text-xs font-mono transition-colors ${isCur ? 'bg-panel text-ink' : 'text-ink-muted hover:bg-panel/60 hover:text-ink'}`}
+                className={`group flex max-w-40 shrink-0 cursor-pointer items-center gap-1 px-2.5 py-1 text-xs font-mono transition-colors ${isCur ? 'text-ink shadow-[inset_0_-2px_0_0_var(--t-accent)]' : 'text-ink-dim hover:text-ink hover:bg-raised/40'}`}
               >
                 <span className={`tab-marquee relative min-w-0 flex-1 ${sessionsLoading && !sessionsLoaded ? 'animate-pulse' : ''}`}>
                   {(() => {
@@ -1028,51 +1095,63 @@ const Terminal = forwardRef(function Terminal(
                     )
                   })()}
                 </span>
-                <button
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  icon
                   onClick={(e) => { e.stopPropagation(); closeSession(s.name) }}
                   title={`Close session ${s.name}`}
                   aria-label={`Close session ${s.name}`}
-                  className="shrink-0 px-0.5 text-ink-dim hover:text-danger opacity-0 group-hover:opacity-100 focus:opacity-100 focus-visible:opacity-100 transition-opacity text-xs leading-none"
+                  className="shrink-0 text-ink-dim hover:text-danger opacity-0 group-hover:opacity-100 focus:opacity-100 focus-visible:opacity-100 transition-opacity leading-none"
                 >
                   ×
-                </button>
+                </Button>
               </div>
             )
           })}
-          <button
+          <Button
+            variant="ghost"
+            size="sm"
+            icon
             onClick={newSession}
             title="New terminal tab"
             aria-label="New terminal tab"
-            className="shrink-0 px-2 py-1 text-sm leading-none text-ink-dim hover:text-accent-text hover:bg-panel/60 rounded transition-colors"
+            className="shrink-0 text-ink-dim hover:text-accent-text hover:bg-panel/60"
           >
             +
-          </button>
+          </Button>
           {shellBusy && !collapsed && (
-            <button
+            <Button
+              variant="dangerGhost"
+              size="sm"
               onClick={() => ref.current?.close()}
               title="Send Ctrl+C to interrupt the running command"
-              className="shrink-0 px-2 py-1 text-xs text-danger hover:text-ink hover:bg-danger-soft rounded transition-colors"
+              className="shrink-0 hover:text-ink"
             >
               Stop Command
-            </button>
+            </Button>
           )}
         </div>
+        )}
         <div className="relative flex shrink-0 items-center gap-1.5">
           <span className="w-px h-4 bg-raised" />
-          <button onClick={() => setFontSize((s) => Math.max(10, s - 1))} className="px-2 py-1 text-xs text-ink-faint hover:text-ink hover:bg-raised rounded transition-colors">A-</button>
+          <Button variant="ghost" size="sm" onClick={() => setFontSize((s) => Math.max(10, s - 1))} className="text-ink-faint">A-</Button>
           <span className="text-xs text-ink-dim w-6 text-center">{fontSize}</span>
-          <button onClick={() => setFontSize((s) => Math.min(24, s + 1))} className="px-2 py-1 text-xs text-ink-faint hover:text-ink hover:bg-raised rounded transition-colors">A+</button>
+          <Button variant="ghost" size="sm" onClick={() => setFontSize((s) => Math.min(24, s + 1))} className="text-ink-faint">A+</Button>
           <span className="w-px h-4 bg-raised" />
-          <button onClick={() => ref.current?.clear()} className="px-2 py-1 text-xs text-ink-faint hover:text-ink hover:bg-raised rounded transition-colors">Clear</button>
-          <button onClick={reconnect} className="px-2 py-1 text-xs text-ink-faint hover:text-ink hover:bg-raised rounded transition-colors">Reconnect</button>
+          <Button variant="ghost" size="sm" onClick={() => ref.current?.clear()} className="text-ink-faint">Clear</Button>
+          <Button variant="ghost" size="sm" onClick={reconnect} className="text-ink-faint">Reconnect</Button>
 
           {onToggleCollapse && showCollapse && !fullscreen && (
             <>
               <span className="w-px h-4 bg-raised" />
-              <button
+              <Button
+                variant="ghost"
+                size="sm"
+                icon
                 onClick={onToggleCollapse}
                 title={collapsed ? 'Expand terminal' : 'Collapse terminal'}
-                className="px-2 py-1 text-ink-faint hover:text-ink hover:bg-raised rounded transition-colors"
+                className="text-ink-faint"
               >
                 {collapsed ? (
                   <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -1083,15 +1162,18 @@ const Terminal = forwardRef(function Terminal(
                     <path d="M6 9l6 6 6-6" />
                   </svg>
                 )}
-              </button>
+              </Button>
             </>
           )}
 
           {fullscreen ? (
-            <button
+            <Button
+              variant="ghost"
+              size="sm"
+              icon
               onClick={() => setFullscreen(false)}
               title="Exit fullscreen (Esc)"
-              className="px-2 py-1 text-ink-faint hover:text-ink hover:bg-raised rounded transition-colors"
+              className="text-ink-faint"
             >
               <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M4 14h6v6" />
@@ -1099,12 +1181,15 @@ const Terminal = forwardRef(function Terminal(
                 <path d="M14 10l7-7" />
                 <path d="M3 21l7-7" />
               </svg>
-            </button>
+            </Button>
           ) : (
-            <button
+            <Button
+              variant="ghost"
+              size="sm"
+              icon
               onClick={() => setFullscreen(true)}
               title="Fullscreen"
-              className="px-2 py-1 text-ink-faint hover:text-ink hover:bg-raised rounded transition-colors"
+              className="text-ink-faint"
             >
               <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M15 3h6v6" />
@@ -1112,7 +1197,7 @@ const Terminal = forwardRef(function Terminal(
                 <path d="M21 3l-7 7" />
                 <path d="M3 21l7-7" />
               </svg>
-            </button>
+            </Button>
           )}
         </div>
       </div>

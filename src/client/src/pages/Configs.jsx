@@ -2,14 +2,10 @@ import { useState, useEffect, useCallback } from 'react'
 import { api } from '../lib/api'
 import { useToast } from '../lib/toast'
 import { useConfirm } from '../lib/confirm'
-
-const inputBase = "w-full px-3 py-2 bg-sunken border rounded-lg text-ink text-sm placeholder:text-ink-dim focus:border-accent-line focus:outline-none focus:ring-1 focus:ring-accent-line/20"
-const inputCls = inputBase + " border-line"
-const inputSecretCls = inputBase + " border-line font-mono"
-const cardCls = "border border-line-faint rounded-xl bg-canvas/50 p-5"
-const btnAccent = "px-4 py-2 bg-accent hover:bg-accent-hover disabled:bg-accent-soft disabled:cursor-not-allowed text-accent-ink rounded-lg text-sm font-medium transition-colors"
-const btnDanger = "px-4 py-2 bg-danger hover:bg-danger-hover disabled:bg-danger-soft disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors"
-const btnGhost = "px-4 py-2 bg-panel hover:bg-raised text-ink rounded-lg text-sm font-medium transition-colors"
+import Button from '../components/ui/Button'
+import { Input, Select } from '../components/ui/Input'
+import Card from '../components/ui/Card'
+import Switch from '../components/ui/Switch'
 
 const GROUPS = [
   {
@@ -80,61 +76,59 @@ function VarInput({ varDef, value, onChange, disabled }) {
   if (varDef.isLocked) {
     return (
       <div className="relative">
-        <input type="password" value="••••••••" disabled className={inputSecretCls + " opacity-60 cursor-not-allowed pr-10"} />
+        <Input type="password" value="••••••••" disabled mono className="opacity-60 cursor-not-allowed pr-10" />
         <span className="absolute right-3 top-1/2 -translate-y-1/2 text-ink-dim" title="This value is locked to prevent vault breakage">
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M12 15v2m-6 4h12a 2 2 0 0 0 2 -2v-6a 2 2 0 0 0 -2 -2H6a 2 2 0 0 0 -2 2v6a 2 2 0 0 0 2 2zm10-10V7a 4 4 0 0 0 -8 0v4h8z" /></svg>
         </span>
       </div>
     )
   }
 
   if (varDef.isReadonly) {
-    return <input type="text" value={value} disabled className={inputCls + " opacity-60 cursor-not-allowed"} />
+    return <Input type="text" value={value} disabled className="opacity-60 cursor-not-allowed" />
   }
 
   if (inputType === 'toggle') {
     const on = value === '1' || value === 'true'
     return (
-      <button
-        type="button"
-        onClick={() => onChange(on ? '0' : '1')}
+      <Switch
+        checked={on}
+        onChange={(next) => onChange(next ? '1' : '0')}
         disabled={disabled}
-        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-accent-line/30 ${on ? 'bg-accent' : 'bg-raised'}`}
-      >
-        <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${on ? 'translate-x-6' : 'translate-x-1'}`} />
-      </button>
+        label={meta.label || varDef.key}
+      />
     )
   }
 
   if (inputType === 'select') {
     return (
-      <select value={value} onChange={(e) => onChange(e.target.value)} disabled={disabled} className={inputCls}>
+      <Select value={value} onChange={(e) => onChange(e.target.value)} disabled={disabled}>
         {meta.options?.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
-      </select>
+      </Select>
     )
   }
 
   if (inputType === 'number') {
     return (
-      <input
+      <Input
         type="number"
         value={value}
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled}
-        className={inputCls}
       />
     )
   }
 
   if (inputType === 'url') {
     return (
-      <input
+      <Input
         type="url"
         value={value}
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled}
         placeholder="http://..."
-        className={inputCls + " font-mono text-xs"}
+        mono
+        className="text-xs"
       />
     )
   }
@@ -143,36 +137,38 @@ function VarInput({ varDef, value, onChange, disabled }) {
     const revealed = SECRET_REVEAL_MAP[varDef.key]
     return (
       <div className="relative">
-        <input
+        <Input
           type={revealed ? 'text' : 'password'}
           value={value}
           onChange={(e) => onChange(e.target.value)}
           disabled={disabled}
-          className={inputSecretCls + " pr-10"}
+          mono
+          className="pr-10"
         />
-        <button
-          type="button"
+        <Button
+          variant="ghost"
+          size="sm"
+          icon
+          className="absolute right-1.5 top-1/2 -translate-y-1/2"
           onClick={() => { SECRET_REVEAL_MAP[varDef.key] = !SECRET_REVEAL_MAP[varDef.key]; onChange(value) }}
-          className="absolute right-3 top-1/2 -translate-y-1/2 text-ink-dim hover:text-ink transition-colors"
           title={revealed ? 'Hide value' : 'Reveal value'}
         >
           {revealed ? (
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.878 9.878L3 3m6.878 6.878L21 21" /></svg>
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M13.875 18.825A 10.05 10.05 0 0 1 12 19c-4.478 0-8.268-2.943-9.543-7a 9.97 9.97 0 0 1 1.563 -3.029m5.858.908a 3 3 0 1 1 4.243 4.243M9.878 9.878l4.242 4.242M9.878 9.878L3 3m6.878 6.878L21 21" /></svg>
           ) : (
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M15 12a 3 3 0 1 1 -6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
           )}
-        </button>
+        </Button>
       </div>
     )
   }
 
   return (
-    <input
+    <Input
       type="text"
       value={value}
       onChange={(e) => onChange(e.target.value)}
       disabled={disabled}
-      className={inputCls}
     />
   )
 }
@@ -199,7 +195,7 @@ function GroupSection({ group, vars, originalVars, onChange, saving }) {
     ? 'Apply Changes'
     : null
 
-  const actionBtnCls = impact === 'recreate' ? btnDanger : btnAccent
+  const actionBtnVariant = impact === 'recreate' ? 'danger' : 'primary'
 
   async function handleAction() {
     if (!isDirty && impact !== 'none') return
@@ -247,20 +243,20 @@ function GroupSection({ group, vars, originalVars, onChange, saving }) {
   }
 
   return (
-    <section className={cardCls}>
+    <Card plain className="p-5">
       <div className="flex items-start justify-between mb-4">
         <div>
           <h3 className="text-sm font-medium text-ink">{group.title}</h3>
           <p className="text-xs text-ink-dim mt-1 max-w-lg">{group.description}</p>
         </div>
         {actionLabel && impact !== 'none' && (
-          <button
+          <Button
+            variant={actionBtnVariant}
             onClick={handleAction}
             disabled={!isDirty || acting || saving}
-            className={actionBtnCls}
           >
             {acting ? 'Working…' : actionLabel}
-          </button>
+          </Button>
         )}
       </div>
 
@@ -275,7 +271,7 @@ function GroupSection({ group, vars, originalVars, onChange, saving }) {
               <div className="sm:w-48 flex-shrink-0 pt-2">
                 <label className="text-xs font-medium text-ink-faint flex items-center gap-1.5">
                   {meta.label || v.key}
-                  {isChanged && <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" title="Unsaved change" />}
+                  {isChanged && <span className="w-1.5 h-1.5 rounded-pill bg-accent animate-pulse" title="Unsaved change" />}
                 </label>
               </div>
               <div className="flex-1 max-w-md">
@@ -288,7 +284,7 @@ function GroupSection({ group, vars, originalVars, onChange, saving }) {
           )
         })}
       </div>
-    </section>
+    </Card>
   )
 }
 
@@ -331,7 +327,7 @@ export default function Configs() {
           <p className="text-sm text-ink-faint mt-1">Manage the Paddock's <code className="text-xs bg-sunken px-1.5 py-0.5 rounded font-mono">.env</code> variables</p>
         </div>
         {anyDirty && (
-          <button onClick={handleReset} className={btnGhost}>Reset</button>
+          <Button variant="secondary" onClick={handleReset}>Reset</Button>
         )}
       </div>
 

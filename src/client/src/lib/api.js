@@ -24,6 +24,13 @@ export async function api(path, options = {}) {
     headers,
     body: body ? JSON.stringify(body) : undefined,
     credentials: 'same-origin',
+    // Never let the HTTP cache answer an API read. Express sends ETag +
+    // Last-Modified, so a polled GET comes back 304 and `fetch` replays the
+    // CACHED BODY — live state (is this session still alive? did the TUI exit?)
+    // silently froze at whatever it was when the page loaded. Anything polled
+    // has to ask the server every time. `no-store` also covers the request
+    // being written to the disk cache at all.
+    cache: 'no-store',
   })
 
   if (res.status === 401) {
@@ -40,7 +47,7 @@ export async function api(path, options = {}) {
     const data = await res.json().catch(() => ({}))
     if (data.error === 'CSRF token invalid') {
       try {
-        const s = await fetch('/api/session', { credentials: 'same-origin' }).then((r) => r.json())
+        const s = await fetch('/api/session', { credentials: 'same-origin', cache: 'no-store' }).then((r) => r.json())
         if (s.csrfToken) setCsrfToken(s.csrfToken)
         return api(path, { ...options, _retried: true })
       } catch {}

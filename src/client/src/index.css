@@ -55,6 +55,67 @@
 
   /* overlay */
   --color-overlay: var(--t-overlay);
+
+  /* ── Scale tokens ────────────────────────────────────────────────────────
+     The non-color dimensions, so a control's SHAPE is as editable as its
+     color. Radius and shadow are real Tailwind namespaces (`rounded-*`,
+     `shadow-*`); control heights and the focus ring are custom utilities at
+     the bottom of this file, because v4 has no `--height-*` namespace (h-*
+     derives from --spacing). */
+
+  /* radius */
+  --radius-control: 0.5rem;   /* buttons, inputs, selects — was `rounded-lg` */
+  --radius-card:    0.75rem;  /* cards, modals, panels      — was `rounded-xl` */
+  --radius-pill:    999px;    /* chips, avatars             — was `rounded-full` */
+
+  /* shadows */
+  --shadow-card:    0 1px 2px var(--t-shadow);
+  --shadow-modal:   0 20px 50px var(--t-shadow-strong);
+  --shadow-tooltip: 0 4px 14px var(--t-shadow);
+}
+
+/* Control heights. min-height, not height: a button that wraps its label grows
+   instead of clipping, and every size still lands on one uniform height. */
+@theme {
+  --ctl-h-sm: 1.75rem;
+  --ctl-h-md: 2.25rem;
+  --ctl-h-lg: 2.75rem;
+  --focus-ring-w: 1px;
+}
+
+@utility ctl-sm { min-height: var(--ctl-h-sm); }
+@utility ctl-md { min-height: var(--ctl-h-md); }
+@utility ctl-lg { min-height: var(--ctl-h-lg); }
+
+/* The themed chevron for <Select>. A mask (not a background-image data URI)
+   because a data URI is an isolated document that cannot read currentColor —
+   a background-image chevron needs a hardcoded hex and is therefore the wrong
+   colour in one of the two modes. A mask's shape comes from the SVG and its
+   colour from background-color, so it follows --t-ink-dim for free. */
+@utility select-chevron {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.4 4.4 6 8l3.6-3.6 1.1 1.1L6 9.6.9 5.5z'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.4 4.4 6 8l3.6-3.6 1.1 1.1L6 9.6.9 5.5z'/%3E%3C/svg%3E");
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: 100% 100%;
+  mask-size: 100% 100%;
+  background-color: var(--t-ink-dim);
+}
+
+/* The ONE focus treatment for every focusable control in the app. It used to
+   exist in four spellings (border-only, ring-1, ring-2 + offset, and
+   `focus:border-accent outline-none` on the Mission inputs). Lives in the
+   utilities layer via @utility so a caller's own `focus:border-*` still wins
+   instead of being beaten by an unlayered rule. */
+@utility focus-ring {
+  &:focus,
+  &:focus-visible {
+    outline: none;
+    border-color: var(--t-accent-line);
+    box-shadow: 0 0 0 var(--focus-ring-w) var(--t-accent-line);
+  }
 }
 
 /* ────────────────────────────── Base font ──────────────────────────────── */
@@ -69,6 +130,9 @@ html {
   overflow-y: scroll;
 }
 
+/* The app's default scrollbar: a thin, always-visible one. A stylesheet cannot
+   make this genuinely overlay the content (see the overlay scrollbar below for
+   the listings that need that), so the native bar keeps its own space. */
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--t-raised) transparent;
@@ -97,6 +161,68 @@ html {
 
 *::-webkit-scrollbar-corner {
   background: transparent;
+}
+
+/* ──────────────────────── Overlay scrollbar (msn-ovsb) ─────────────────────
+   A real floating scrollbar for a listing that must not lose a single pixel of
+   width to it. The native bar is switched off entirely (so it reserves NO
+   space — the whole reason the old `scrollbar-gutter: stable` hack existed is
+   gone, and with it the 10px twitch when a list crossed the overflow
+   threshold) and a thumb is drawn on top instead, see components/OverlayScroll.
+   Only the 12px lane at the very edge is interactive, and Mission rows keep a
+   10px right padding, so the lane never lands on a row's edit/del buttons. */
+
+.msn-ovsb-scroll {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.msn-ovsb-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+.msn-ovsb-thumb {
+  position: absolute;
+  top: 0;
+  right: 2px;
+  z-index: 20;
+  width: 6px;
+  border-radius: 999px;
+  background: var(--t-raised-hover);
+  /* Deliberately NOT transitioned. A CSS transition on opacity can sit at its
+     start value indefinitely when the page is not painting frames (headless,
+     background tab), which leaves the thumb invisible while every style rule
+     reads as correct. A 6px pill appearing instantly is what an overlay bar
+     looks like anyway, and it cannot get stuck. */
+  opacity: 0;
+  pointer-events: none;
+  touch-action: none;
+}
+
+.msn-ovsb[data-visible='true'] .msn-ovsb-thumb {
+  opacity: 1;
+}
+
+/* The drag handle is the thumb plus a wider invisible grab area, so a 6px pill
+   is still comfortable to grab without stealing clicks from the rows. */
+.msn-ovsb-grab {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 12px;
+  opacity: 0;
+  cursor: grab;
+  touch-action: none;
+}
+
+.msn-ovsb[data-visible='true'] .msn-ovsb-grab {
+  opacity: 1;
+}
+
+.msn-ovsb-grab:active {
+  cursor: grabbing;
 }
 
 .skeleton {
@@ -185,7 +311,10 @@ html {
   background: var(--t-raised);
   border: 1px solid var(--t-line);
   border-radius: 6px;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+  /* the tooltip's own scale token — this rule lives in hand-written CSS, so
+     Tailwind never emits a `.shadow-tooltip` utility for it; reading the
+     `--shadow-tooltip` variable is the only way to keep the one source. */
+  box-shadow: var(--shadow-tooltip);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

@@ -11,6 +11,11 @@ import SettingsTab from './agent/SettingsTab'
 import WebTab from './agent/WebTab'
 import WorkspaceToolbar from './agent/WorkspaceToolbar'
 import PromptModal from '../components/PromptModal'
+import Button from '../components/ui/Button'
+import { Textarea, Select } from '../components/ui/Input'
+import Badge from '../components/ui/Badge'
+import Modal from '../components/ui/Modal'
+import { cx } from '../lib/cx'
 
 const MODES = [
   { id: 'commands', label: 'Commands' },
@@ -47,14 +52,17 @@ function AgentHeader({ agent }) {
   return (
     <div className="flex items-center gap-4 px-6 py-3 border-b border-line-faint bg-canvas/40 flex-wrap">
       <Link to="/agents" className="text-xs text-ink-dim hover:text-ink-muted transition-colors">&larr; Fleet</Link>
-      <div className="w-9 h-9 rounded-xl bg-panel flex items-center justify-center text-lg font-bold text-accent-text flex-shrink-0">
+      <div className="w-9 h-9 rounded-card bg-panel flex items-center justify-center text-lg font-bold text-accent-text flex-shrink-0">
         {agent.display_name?.charAt(0) || '?'}
       </div>
       <div className="min-w-0">
         <h1 className="text-sm font-bold text-ink truncate leading-tight">{agent.display_name || agent.name}</h1>
         <p className="text-xs text-ink-dim truncate leading-tight font-mono">{agent.name}</p>
       </div>
-      <span className={`px-2 py-0.5 rounded-full text-xs font-medium flex items-center gap-1.5 ${st.pill}`}>
+      {/* Left alone: this pill's colours come from STATUS_META.pill in
+          lib/status.js, which has no Badge `tone` field. Mapping status→tone
+          here would be a second source of truth for the same colours. */}
+      <span className={`px-2 py-0.5 rounded-pill text-xs font-medium flex items-center gap-1.5 ${st.pill}`}>
         {isTransition ? (
           <span className="flex items-center gap-1.5">
             <span className={`w-2 h-2 rounded-full ${st.dot} animate-pulse`} />
@@ -73,14 +81,33 @@ function AgentHeader({ agent }) {
         <span className="text-ink-dim">MEM <span className="text-ink font-mono ml-1">{agent.status === 'running' && stats ? memUsage : '—'}</span></span>
       </div>
       <div className="flex-1" />
+      {/* Stop is a solid warning fill and Start a solid success fill. Neither is
+          a Button variant, so both ride on `primary` with the tone overridden —
+          and the disabled look comes from the primitive, not per-button. */}
       <div className="flex items-center gap-2">
         {agent.status === 'running' ? (
           <>
-            <button onClick={() => stopAgent(agent.name)} className="px-3 py-1.5 bg-warning hover:bg-warning text-warning-ink rounded-lg text-xs font-medium transition-colors">Stop</button>
-            <button onClick={() => restartAgent(agent.name)} className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-accent-ink rounded-lg text-xs font-medium transition-colors">Restart</button>
+            <Button
+              variant="primary"
+              size="md"
+              onClick={() => stopAgent(agent.name)}
+              className="bg-warning text-warning-ink hover:bg-warning"
+            >
+              Stop
+            </Button>
+            <Button variant="primary" size="md" onClick={() => restartAgent(agent.name)}>
+              Restart
+            </Button>
           </>
         ) : (
-          <button onClick={() => startAgent(agent.name)} className="px-3 py-1.5 bg-success hover:bg-success text-success-ink rounded-lg text-xs font-medium transition-colors">Start</button>
+          <Button
+            variant="primary"
+            size="md"
+            onClick={() => startAgent(agent.name)}
+            className="bg-success text-success-ink hover:bg-success"
+          >
+            Start
+          </Button>
         )}
       </div>
     </div>
@@ -194,7 +221,7 @@ export default function AgentDetail() {
     return (
       <div className="flex flex-col items-center justify-center h-64 text-ink-dim gap-4">
         <p>Agent not found — it may have been deleted.</p>
-        <Link to="/agents" className="px-4 py-2 bg-accent hover:bg-accent-hover text-accent-ink rounded-lg text-sm font-medium transition-colors">
+        <Link to="/agents" className="px-4 py-2 bg-accent hover:bg-accent-hover text-accent-ink rounded-control text-sm font-medium transition-colors">
           ← Back to fleet
         </Link>
       </div>
@@ -210,19 +237,25 @@ export default function AgentDetail() {
         {MODES.map((m) => {
           const webUrl = m.id === 'web' ? webUrlForAgent(agent) : ''
           return (
-            <button
+            <Button
               key={m.id}
+              variant="ghost"
+              size="md"
               onClick={() => navigate(`/agents/${agent.name}/${m.id}`, { replace: true })}
-              className={`px-3 py-1.5 text-sm font-medium rounded-lg transition-colors whitespace-nowrap inline-flex items-center gap-1.5 ${
-                mode === m.id ? 'bg-panel' : 'hover:bg-panel/50'
-              } ${
+              className={cx(
+                mode === m.id ? 'bg-panel' : 'hover:bg-panel/50',
                 m.id === 'commands'
                   ? 'text-warning'
                   : mode === m.id ? 'text-accent-text' : 'text-ink-faint hover:text-ink'
-              }`}
+              )}
             >
               {m.id === 'commands' ? (agent.agent_type ? agent.agent_type.charAt(0).toUpperCase() + agent.agent_type.slice(1) : 'Commands') : m.label}
               {webUrl && (
+                /* Still a bare <button>, and still nested inside the tab button —
+                   invalid HTML that predates this migration. A Button here would
+                   add ctl-sm's 28px min-height inside a 36px tab and break the
+                   inline layout, and `icon` would force 28px via inline style.
+                   Only the radius token is folded; focus gets the one focus-ring. */
                 <button
                   onClick={(e) => {
                     e.stopPropagation()
@@ -230,16 +263,17 @@ export default function AgentDetail() {
                   }}
                   title={`Open ${agent.web.label || 'web app'} at ${webUrl}`}
                   aria-label={`Open ${agent.web.label || 'web app'} in a new tab`}
-                  className={`p-0.5 rounded transition-colors ${
+                  className={cx(
+                    'p-0.5 rounded-control focus-ring transition-colors',
                     mode === 'web' ? 'text-accent-text hover:bg-raised' : 'hover:bg-raised'
-                  }`}
+                  )}
                 >
                   <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M14 5h5v5M19 5l-8 8M9 5H5a2 2 0 00-2 2v12a2 2 0 002 2h12a2 2 0 002-2v-4" />
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M14 5h5v5M19 5l-8 8M9 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4" />
                   </svg>
                 </button>
               )}
-            </button>
+            </Button>
           )
         })}
       </div>
@@ -316,6 +350,14 @@ function WorkspaceTab({ agent }) {
     return clean || '/'
   }
   const containerAvailable = agent.status === 'running'
+  // Host scope starts wherever the SERVER says host scope starts. For most pads
+  // that is the data dir (`workspace_root`), but a pad that mounted a workspace
+  // elsewhere browses that folder instead, and the server moved the root to
+  // `host_browse_root` when it granted it. Deriving it here from
+  // `workspace_root` made the browser show the data dir while every write went
+  // to the mounted workspace — a client disagreeing with the gate about which
+  // folder "the host" is, which is the same split that produces a refusal on
+  // one surface and a success on the other.
   const hostRoot = normalizePath(agent.host_browse_root || agent.workspace_root || `/workspace/instances/${agent.name}/openclaw`)
   // Container-side roots come from the agent driver (data_dir = data dir,
   // workspace_dir = the workspace inside it).
@@ -617,18 +659,16 @@ function WorkspaceTab({ agent }) {
   const ext = fileModal ? '.' + (fileModal.name || '').split('.').pop()?.toLowerCase() : ''
   const editable = !!fileModal && !/[\u0000]/.test((fileModal.content || '').slice(0, 4096))
 
-  useEffect(() => {
-    if (!fileModal) return
-    function onKey(e) { if (e.key === 'Escape') closeFileModal() }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [fileModal])
+  // No window Escape listener here any more: Modal owns Escape and routes it to
+  // onClose (= closeFileModal). Leaving both in place would call closeFileModal
+  // twice on one keypress, and with unsaved changes that is two stacked
+  // "Discard changes" confirms.
 
   return (
     <div>
       {wsBrowseBlocked ? (
         <div className="flex flex-col items-center justify-center py-20 text-center">
-          <svg className="w-10 h-10 text-ink-dim mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5"><path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>
+          <svg className="w-10 h-10 text-ink-dim mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5"><path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-6l-2-2H5a2 2 0 0 0-2 2z" /></svg>
           <p className="text-sm text-ink-faint max-w-md leading-relaxed">
             This agent's workspace is mounted from a folder outside the webui's reach, and the container is not running, so there's nothing to browse right now.
           </p>
@@ -678,7 +718,7 @@ function WorkspaceTab({ agent }) {
 
       {/* File Table */}
       {listing && !loading && (
-        <div className="border border-line-faint rounded-xl overflow-hidden">
+        <div className="border border-line-faint rounded-card overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
@@ -707,7 +747,11 @@ function WorkspaceTab({ agent }) {
                         {entry.type === 'directory' ? (
                           <span className="text-accent-text">
                             <span className="mr-1.5 text-ink-dim">📁</span>{entry.name}
-                            {scope === 'container' && entry.name === 'workspace' && <span className="ml-2 inline-block px-1.5 py-0.5 rounded text-[10px] font-medium bg-accent-soft text-accent-text border border-accent-line/50 align-middle">workspace</span>}
+                            {scope === 'container' && entry.name === 'workspace' && (
+                              <Badge tone="accent" size="sm" className="ml-2 border border-accent-line/50 align-middle">
+                                workspace
+                              </Badge>
+                            )}
                           </span>
                         ) : (
                           <span className="text-ink">
@@ -721,12 +765,14 @@ function WorkspaceTab({ agent }) {
                         <div className="flex items-center gap-1 opacity-50 group-hover:opacity-100 transition-opacity">
                           {entry.type === 'file' && (
                             <a href={`/api/agents/${agent.name}/workspace/download?path=${encodeURIComponent(entryPath)}&scope=${scope}`}
-                               className="px-2 py-1 text-xs text-ink-faint hover:text-ink hover:bg-raised rounded transition-colors" title="Download" download>DL</a>
+                               className="px-2 py-1 text-xs text-ink-faint hover:text-ink hover:bg-raised rounded-control transition-colors" title="Download" download>DL</a>
                           )}
-                          <button onClick={() => renameEntry(entryPath)}
-                                  className="px-2 py-1 text-xs text-ink-faint hover:text-ink hover:bg-raised rounded transition-colors" title="Move">MV</button>
-                          <button onClick={() => deleteEntry(entryPath, entry.name)}
-                                  className="px-2 py-1 text-xs text-danger hover:text-danger hover:bg-raised rounded transition-colors" title="Delete">RM</button>
+                          <Button variant="ghost" size="sm" onClick={() => renameEntry(entryPath)} title="Move">
+                            MV
+                          </Button>
+                          <Button variant="dangerGhost" size="sm" onClick={() => deleteEntry(entryPath, entry.name)} title="Delete">
+                            RM
+                          </Button>
                         </div>
                       </td>
                     </tr>
@@ -735,7 +781,7 @@ function WorkspaceTab({ agent }) {
                 {listing.entries?.length === 0 && (
                   <tr>
                     <td colSpan={4} className="px-4 py-12 text-center">
-                      <svg className="w-8 h-8 mx-auto mb-2 text-ink-dim" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5"><path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>
+                      <svg className="w-8 h-8 mx-auto mb-2 text-ink-dim" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5"><path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-6l-2-2H5a2 2 0 0 0-2 2z" /></svg>
                       <p className="text-ink-dim">Empty directory</p>
                     </td>
                   </tr>
@@ -748,52 +794,78 @@ function WorkspaceTab({ agent }) {
         </>
       )}
 
-      {/* File Viewer/Editor Modal */}
+      {/* File Viewer/Editor Modal.
+          This is a plain backdrop+panel with no msn-* hooks, so it is the shared
+          Modal now. The two header clusters map onto Modal's `title` (icon,
+          name, size·ext, dirty/saved state) and `headerExtra` (Save, Download,
+          Close); the editor itself is Modal's body, so `className` there is the
+          body — it must carry `flex-1 min-h-0` for the panel's flex column. */}
       {fileModal && (
-        <div className="fixed inset-0 z-[60] bg-overlay flex items-center justify-center"
-             onClick={(e) => { if (e.target === e.currentTarget) closeFileModal() }}>
-          <div className="bg-panel border border-line rounded-xl shadow-2xl flex flex-col" style={{ width: '80vw', maxWidth: '900px', height: '80vh' }}>
-            <div className="flex items-center justify-between px-4 py-3 border-b border-line">
-              <div className="flex items-center gap-3 min-w-0">
-                <span className="text-ink-faint">📄</span>
-                <span className="text-sm font-medium text-ink truncate">{fileModal.name}</span>
-                <span className="text-xs text-ink-dim">{fileModal.size_hr || (fileModal.size != null ? fileModal.size + ' bytes' : '')} · {ext.replace('.', '').toUpperCase()}</span>
-                {editable && (
-                  <span className={`text-xs ml-2 ${jsonError ? 'text-danger' : fileSaved ? 'text-success' : fileDirty ? 'text-warning' : 'text-ink-dim'}`}>
-                    {jsonError || (fileSaved ? 'Saved' : fileDirty ? 'Unsaved' : '')}
-                  </span>
-                )}
-                {!editable && !fileModal.media && (
-                  <span className="text-xs text-ink-dim ml-2">Binary file — read-only</span>
-                )}
-              </div>
-              <div className="flex items-center gap-2">
-                {editable && <button onClick={saveFile} className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-accent-ink rounded text-sm transition-colors">Save</button>}
-                <a href={`/api/agents/${agent.name}/workspace/download?path=${encodeURIComponent(fileModal.path || fileModal.name)}&scope=${scope}`}
-                   className="px-3 py-1.5 bg-raised hover:bg-raised-hover text-ink rounded text-sm transition-colors" download>Download</a>
-                <button onClick={closeFileModal} className="px-3 py-1.5 bg-raised hover:bg-raised-hover text-ink rounded text-sm transition-colors">Close</button>
-              </div>
-            </div>
-            <div className="flex-1 overflow-hidden p-4">
-              {fileModal.media === 'image' ? (
-                <div className="w-full h-full flex items-center justify-center">
-                  <img src={fileModal.mediaUrl} alt={fileModal.name} className="max-w-full max-h-full object-contain rounded-lg" />
-                </div>
-              ) : fileModal.media === 'video' ? (
-                <div className="w-full h-full flex items-center justify-center">
-                  <video src={fileModal.mediaUrl} controls autoPlay className="max-w-full max-h-full rounded-lg" />
-                </div>
-              ) : editable ? (
-                <textarea id="file-editor" value={fileModal.content}
-                          onChange={(e) => { setFileModal({ ...fileModal, content: e.target.value }); setFileDirty(true); setFileSaved(false); setJsonError('') }}
-                          className="w-full h-full bg-sunken text-ink font-mono text-sm p-4 rounded-lg border border-line focus:border-accent-line focus:outline-none resize-none"
-                          style={{ minHeight: '100%' }} />
-              ) : (
-                <pre className="text-xs text-ink-muted font-mono whitespace-pre-wrap">{fileModal.content}</pre>
+        <Modal
+          open
+          onClose={closeFileModal}
+          z="z-[60]"
+          width="w-[80vw] max-w-[900px]"
+          panelClassName="h-[80vh]"
+          divided
+          className="flex-1 min-h-0 overflow-hidden p-4"
+          title={
+            <span className="flex items-center gap-3 min-w-0">
+              <span className="text-ink-faint">📄</span>
+              <span className="text-sm font-medium text-ink truncate">{fileModal.name}</span>
+              <span className="text-xs font-normal text-ink-dim">
+                {fileModal.size_hr || (fileModal.size != null ? fileModal.size + ' bytes' : '')} · {ext.replace('.', '').toUpperCase()}
+              </span>
+              {editable && (
+                <span className={`text-xs font-normal ml-2 ${jsonError ? 'text-danger' : fileSaved ? 'text-success' : fileDirty ? 'text-warning' : 'text-ink-dim'}`}>
+                  {jsonError || (fileSaved ? 'Saved' : fileDirty ? 'Unsaved' : '')}
+                </span>
               )}
+              {!editable && !fileModal.media && (
+                <span className="text-xs font-normal text-ink-dim ml-2">Binary file — read-only</span>
+              )}
+            </span>
+          }
+          headerExtra={
+            <div className="flex items-center gap-2">
+              {editable && (
+                <Button variant="primary" size="md" onClick={saveFile}>
+                  Save
+                </Button>
+              )}
+              {/* An anchor, not a button: the browser owns the download, so it
+                  stays an <a download> — only the radius is tokenised. */}
+              <a href={`/api/agents/${agent.name}/workspace/download?path=${encodeURIComponent(fileModal.path || fileModal.name)}&scope=${scope}`}
+                 className="px-3 py-2 bg-raised hover:bg-raised-hover text-ink rounded-control text-sm transition-colors" download>Download</a>
+              <Button variant="secondary" size="md" onClick={closeFileModal}>
+                Close
+              </Button>
             </div>
-          </div>
-        </div>
+          }
+        >
+          {fileModal.media === 'image' ? (
+            <div className="w-full h-full flex items-center justify-center">
+              <img src={fileModal.mediaUrl} alt={fileModal.name} className="max-w-full max-h-full object-contain rounded-lg" />
+            </div>
+          ) : fileModal.media === 'video' ? (
+            <div className="w-full h-full flex items-center justify-center">
+              <video src={fileModal.mediaUrl} controls autoPlay className="max-w-full max-h-full rounded-lg" />
+            </div>
+          ) : editable ? (
+            /* id="file-editor" is load-bearing: saveFile() reads the textarea
+               through document.getElementById, not through a ref. */
+            <Textarea
+              id="file-editor"
+              mono
+              value={fileModal.content}
+              onChange={(e) => { setFileModal({ ...fileModal, content: e.target.value }); setFileDirty(true); setFileSaved(false); setJsonError('') }}
+              className="h-full resize-none"
+              style={{ minHeight: '100%' }}
+            />
+          ) : (
+            <pre className="text-xs text-ink-muted font-mono whitespace-pre-wrap">{fileModal.content}</pre>
+          )}
+        </Modal>
       )}
 
       {moveTarget && (
@@ -852,16 +924,26 @@ function LogsTab({ agent }) {
           <span className="w-2 h-2 rounded-full bg-success animate-pulse" />
         </div>
         <div className="flex items-center gap-2">
-          <select value={tail} onChange={(e) => setTail(parseInt(e.target.value))}
-                  className="px-2 py-1 bg-sunken border border-line rounded text-xs text-ink">
-            <option value={50}>50</option><option value={100}>100</option><option value={500}>500</option><option value={1000}>1000</option>
-          </select>
-          <button onClick={() => { setAutoScroll(true); if (preRef.current) preRef.current.scrollTop = preRef.current.scrollHeight }}
-                  className={`px-2 py-1 rounded text-xs ${autoScroll ? 'bg-accent text-accent-ink' : 'bg-panel text-ink-faint'}`}>Auto-scroll</button>
+          {/* The w-20 wrapper keeps the select shrink-to-fit: Select's own
+              wrapper span is `w-full`, which inside a flex row would eat the
+              row and squeeze the button next to it. */}
+          <div className="w-20 shrink-0">
+            <Select size="sm" value={tail} onChange={(e) => setTail(parseInt(e.target.value))}>
+              <option value={50}>50</option><option value={100}>100</option><option value={500}>500</option><option value={1000}>1000</option>
+            </Select>
+          </div>
+          <Button
+            variant={autoScroll ? 'primary' : 'ghost'}
+            size="sm"
+            onClick={() => { setAutoScroll(true); if (preRef.current) preRef.current.scrollTop = preRef.current.scrollHeight }}
+            className={autoScroll ? undefined : 'bg-panel text-ink-faint'}
+          >
+            Auto-scroll
+          </Button>
         </div>
       </div>
       <pre ref={preRef} onScroll={onScroll}
-           className="flex-1 min-h-0 text-xs leading-tight overflow-auto bg-sunken border border-line-faint rounded-xl p-4 text-ink-muted font-mono">
+           className="flex-1 min-h-0 text-xs leading-tight overflow-auto bg-sunken border border-line-faint rounded-card p-4 text-ink-muted font-mono">
         {logs || 'No logs available'}
       </pre>
     </div>
@@ -881,7 +963,7 @@ function SessionsTab({ agent }) {
 
   if (sessions.length === 0) return <p className="text-ink-dim text-sm">No sessions recorded yet.</p>
   return (
-    <div className="border border-line-faint rounded-xl overflow-hidden">
+    <div className="border border-line-faint rounded-card overflow-hidden">
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
@@ -897,8 +979,12 @@ function SessionsTab({ agent }) {
             {sessions.map((s) => (
               <tr key={s.id} className="border-b border-line-faint/50">
                 <td className="px-4 py-2 text-ink-faint font-mono text-xs">{s.id?.slice(0, 12)}...</td>
-                <td className="px-4 py-2"><span className="px-2 py-0.5 rounded text-xs bg-panel text-ink-muted">{s.kind}</span></td>
-                <td className="px-4 py-2"><span className={`px-2 py-0.5 rounded text-xs ${s.status === 'active' ? 'bg-success-soft text-success' : 'bg-panel text-ink-faint'}`}>{s.status}</span></td>
+                  <td className="px-4 py-2"><Badge tone="neutral" size="md" className="bg-panel">{s.kind}</Badge></td>
+                  <td className="px-4 py-2">
+                    {s.status === 'active'
+                      ? <Badge tone="success" size="md">{s.status}</Badge>
+                      : <Badge tone="neutral" size="md" className="bg-panel">{s.status}</Badge>}
+                  </td>
                 <td className="px-4 py-2 text-ink-muted">{s.model || '-'}</td>
                 <td className="px-4 py-2 text-right text-ink-faint">{s.tokens_in || 0}/{s.tokens_out || 0}</td>
               </tr>
@@ -923,7 +1009,7 @@ function ActivityTab({ agent }) {
 
   if (activity.length === 0) return <p className="text-ink-dim text-sm">No activity recorded yet.</p>
   return (
-    <div className="border border-line-faint rounded-xl overflow-hidden">
+    <div className="border border-line-faint rounded-card overflow-hidden">
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
@@ -991,14 +1077,19 @@ function ConfigTab({ agent }) {
         </div>
         <div className="flex items-center gap-2">
           <span className={`text-xs ${saved ? 'text-ink-dim' : 'text-warning'}`}>{saved ? 'Saved' : 'Unsaved changes'}</span>
-          <button onClick={handleSave}
-                  className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-accent-ink rounded-lg text-xs font-medium transition-colors">Save</button>
+          <Button variant="primary" size="md" onClick={handleSave}>
+            Save
+          </Button>
         </div>
       </div>
       {msg && <div className="mb-4 text-xs text-accent-text">{msg}</div>}
-      <textarea value={raw} onChange={(e) => { setRaw(e.target.value); setSaved(false); setMsg('') }}
-                className="w-full h-[500px] bg-sunken border border-line-faint rounded-xl p-4 text-xs font-mono text-ink focus:outline-none focus:border-accent-line resize-none"
-                spellCheck={false} />
+      <Textarea
+        mono
+        value={raw}
+        onChange={(e) => { setRaw(e.target.value); setSaved(false); setMsg('') }}
+        className="h-[500px] text-xs resize-none"
+        spellCheck={false}
+      />
     </div>
   )
 }

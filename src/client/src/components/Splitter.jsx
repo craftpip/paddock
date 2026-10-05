@@ -28,6 +28,7 @@ export default function Splitter({
   min = 200,
   max = 60,          // % of the container, so a column can never eat the next one
   defaultWidth = null, // what double-click resets to
+  openAt = null,     // width a keyboard nudge jumps to when the panel is on its floor
   label = 'Resize panel',
   storageKey = null,  // persist the width under this localStorage key
   className = '',
@@ -104,9 +105,15 @@ export default function Splitter({
     const step = e.shiftKey ? 64 : 16
     const panel = containerRef.current?.previousElementSibling
     const current = panel ? panel.getBoundingClientRect().width : min
+    // A nudge is a delta from the current width, so a panel sitting on its
+    // floor can only ever ask for `min + step` — which the floor clamps back to
+    // `min`, and a collapsed column would be unreachable by keyboard for ever.
+    // Jumping straight to `openAt` (the width the parent considers open) makes
+    // the first press reopen it and every press after that a normal step.
+    const atFloor = openAt ? current <= min + 1 : false
     let next = null
-    if (e.key === 'ArrowLeft') next = current - step
-    else if (e.key === 'ArrowRight') next = current + step
+    if (e.key === 'ArrowLeft') next = atFloor ? current : current - step
+    else if (e.key === 'ArrowRight') next = atFloor ? openAt : current + step
     else if (e.key === 'Home') next = min
     else if (e.key === 'End') next = clamp(current * 2)
     else if (e.key === 'Enter' && defaultWidth) next = defaultWidth
