@@ -694,6 +694,22 @@ notice — `fetchSessionState(id, { autoReopen: true })` calls `restart(id)` onc
   failure text plus the retry. Mutation control: moving the clear back ahead of
   the read reproduces the flash.
 
+**The guards are tested, not just observed — `src/test/mission-reopen.test.js`.**
+A browser-only oracle is the weakest kind: a source-text assert pins the order in
+the file rather than in the behaviour, and the flash is invisible to every other
+suite because it is a render glitch on the success path. The test subscribes to
+the store and asserts the invariant **as a sequence** — once the reopen has
+started, the guard must never read null while `sessionState` is still the dead
+read — because "the guard is eventually cleared" passes on the broken build.
+Two things that made the test lie at first, worth carrying: the predicate must be
+scoped to *after* the reopen starts (before it, a harmless `(null, live:false)`
+state genuinely exists and React batches it away), and `openSession` must be set
+in the fixture or every call takes the "the user left on another row" early
+return and a negative assertion passes vacuously. Running the store's ESM under
+`node --test` needs `src/test/helpers/client-store-resolve.mjs` — a resolve hook
+for extensionless imports inside the client package, rather than editing the
+store's import to suit a test harness.
+
 **The listing speaks the user's language, in one rhythm (plan 58, 2026-09-28).**
 Two presentation rules that are now part of this page's contract:
 
