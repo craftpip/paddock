@@ -198,6 +198,25 @@ function migrate(db) {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_vault_name ON vault_items(name);
     CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id);
     CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
+    CREATE TABLE IF NOT EXISTS task_steps (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      step TEXT NOT NULL,
+      attempt INTEGER NOT NULL DEFAULT 1,
+      state TEXT NOT NULL DEFAULT 'pending',
+      status TEXT,
+      session_id TEXT,
+      reported_by TEXT,
+      notes TEXT DEFAULT '',
+      artifact TEXT DEFAULT '',
+      occurred_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (session_id) REFERENCES mission_sessions(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_task_steps_task ON task_steps(task_id);
+    CREATE INDEX IF NOT EXISTS idx_task_steps_session ON task_steps(session_id);
+
   `);
 
   // Add owner_id to agents if missing (from older schema)
