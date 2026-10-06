@@ -178,6 +178,16 @@ project's folder, so a plan belongs to a project through the \`sessionProject\` 
 bound session — and \`plan_list {agent, folder}\` does that narrowing for you (plans whose
 session the page does not know come back as \`sessionUnattributed\`, never quietly
 dropped). Take the \`folder\` from \`mission_projects\`.
+
+**A plan is also the checklist that survives a closed chat.** There is no separate
+notes/journal store — the plan IS the memory, so a multi-step job is one plan whose body
+carries the ordered checklist (a plan's body is yours; only the frontmatter is managed).
+Work it in order, **one item at a time, in a visible session** — exactly the session rule
+above; nothing here runs where the human cannot watch. Tick each item off by rewriting
+the checklist in the plan body with \`plan_write {agent, path, content}\` when it is done
+(that bump is what makes \`plan_list\` answer "what is being worked on RIGHT NOW"). Read
+the plan on arrival (\`plan_list {agent, path}\`) before starting work, and write
+decisions back into it as you make them.
 ## Workflow recipes
 
 1. **Survey the fleet:** \`list_agents\` → \`get_agent\` (or \`agent_logs\`) for detail/logs.

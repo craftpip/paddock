@@ -1853,11 +1853,20 @@ describe('MCP secret hygiene (plan 60)', () => {
     assert.ok(reuseAt !== -1, 'recipe 13 still tells the caller to look for a reusable session first');
     assert.ok(reuseAt < startAt, 'recipe 13 checks for a reusable session BEFORE starting one');
     // ...and it must not send anyone after a tool that does not exist. The
-    // per-project notes + ordered checklist are plan 53 Phase 9 and are NOT
-    // built, so a pointer here would teach the LLM to hallucinate a capability.
+    // per-project notes + ordered checklist were plan 53 Phase 9 and are NOT
+    // built; plan 64 SUPERSEDED that phase by making a plan file the checklist,
+    // so the journal clauses teach the plans facility instead of a ghost tool.
     for (const ghost of ['mission_checklist', 'mission_notes', 'mission_journal', 'checklist_item']) {
       assert.ok(!g.includes(ghost), `guide must not point at the unbuilt ${ghost}`);
     }
+    // B1's two journal clauses, re-expressed against the plans facility (a plan
+    // IS the ordered checklist that survives a closed chat): the checklist is
+    // worked one item at a time in a visible session, ticked off by rewriting
+    // the plan body, and read on arrival / written on decide.
+    assert.match(g, /one item at a time, in a visible session/, 'clause 1: the ordered checklist is worked one at a time, visibly');
+    assert.match(g, /Tick each item off by rewriting\s*\n?\s*the checklist in the plan body/, 'clause 1: ticking off happens in the plan body');
+    assert.match(g, /Read\s*\n?\s*the plan on arrival/, 'clause 2: memory discipline — read on arrival');
+    assert.match(g, /write\s*\n?\s*decisions back into it as you make them/, 'clause 2: memory discipline — write on decide');
   });
 
   it('the tool descriptions state the guarantee the code now keeps', () => {

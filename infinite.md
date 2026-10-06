@@ -74,19 +74,19 @@ conversation's own store (`busyForSessions`) instead of the web-server probe.
   you ever need text you can paste somewhere else.
 - **Rotate the 2 exposed MCP tokens** — plan 60 stopped the leak but cannot
   un-leak the credentials; operator action, §5. Tracked on its queue line below.
-- **Close out plan 52 (all remaining items are yours):** (1) **G1** — confirm the
-  docs absorb of keys/grants/conferral/playbook + `plans/52-orchestrator.md`
-  deletion (ordered after 53's absorb); (2) **G2** — decide whether to remove or
-  freeze `task-runner.js` + the `tasks` table (52 G2, separate on purpose);
-  (3) **53 §11 Q6** — cap/kill-switch for agent-started Mission sessions (E2's
-  minimum landed; the ceiling is the open half); (4) **B1's two journal clauses**
-  — need 53 Phase 9's `mission_checklist` / `mission_notes` tools built (a 53
-  item, not a 52 one); (5) **C2's model-independence proof** — needs a codex (or
-  claude) pad created, a spend.
+- **Close out plan 52 (resolved 2026-10-07, remainder is yours):** G2 decided
+  (FREEZE, not remove); 53 §11 Q6 resolved (badge only, no cap); B1's two
+  journal clauses done via the plans facility (plans/64 superseded 53 Phase 9's
+  unbuilt `mission_checklist`/`mission_notes`); G1's docs absorb is underway
+  (into `docs/reference/backend/services.md`). What is left is yours:
+  (1) **G1** — confirm the docs absorb of keys/grants/conferral/playbook +
+  `plans/52-orchestrator.md` deletion (ordered after 53's absorb);
+  (2) **C2's model-independence proof** — needs a codex (or claude) pad created,
+  a spend.
 
 ## Queue
 
-- [~] plans/52-orchestrator.md — started 2026-10-06. **All agent-actionable phases COMPLETE 2026-10-07** (commits e2ec24d, 238c512, ab2bb41): A (grant model, exec opt-in), C (C1 green twice on two projects; the "two models" clause filed as a gap — fleet has only opencode pads), D (conferral + key presets + namespace split, live-verified), E1 (audit attribution), E2 (spend counts — `N live · M sessions` on Mission col 1, browser-verified), E3 (dead-session recovery, proven), E4 (resume-cost, proven), B2 (guide onboarding audit — 4 gaps fixed). **Remaining, every item user-gated or another plan's**: B1's two journal clauses (53 Phase 9 tools don't exist), F (LATER), G1 (confirm docs absorb + delete file), G2 (task-runner freeze decision), 53 §11 Q6 cap/kill-switch. See `## Needs your call`.
+- [~] plans/52-orchestrator.md — started 2026-10-06. **All agent-actionable phases COMPLETE 2026-10-07** (commits e2ec24d, 238c512, ab2bb41): A (grant model, exec opt-in), C (C1 green twice on two projects), D (conferral + key presets + namespace split, live-verified), E1 (audit attribution), E2 (spend counts — `N live · M sessions` on Mission col 1, browser-verified), E3 (dead-session recovery, proven), E4 (resume-cost, proven), B2 (guide onboarding audit — 4 gaps fixed). **B1 COMPLETE 2026-10-07 (7/7)** — the two journal clauses taught against the plans facility (plans/64 superseded 53 Phase 9). **R1 CLOSED 2026-10-07** — 53 §11 Q6 resolved: badge only, no cap. **G2 DECIDED 2026-10-07: FREEZE** task-runner/`tasks` (kept for 69's foundation), header note + docs. Remaining: G1 (docs absorb of keys/grants/conferral/playbook → `docs/reference/backend/services.md`, file deletion ordered after 53's absorb), F (LATER), C2 codex proof (needs a codex credential — surfaced, not fabricated).
 - [ ] plans/60-mcp-secret-hygiene.md — build done + verified (mcp 79/79, vm-manager 108/108), `## Status:` reads Complete, but **not yet absorbed** (file still present) and one open item remains — **blocked: rotate the 2 exposed MCP tokens (operator action, plan §5 traced 2026-10-06)**. Concrete: `pad-opencode-proj` → `mcp.browser.headers` bearer for the navigator relay `http://10.69.1.164:1994/mcp` (`nvg_…`, server enabled) and `mcp.torrent.headers` `X-MCP-Key` for `http://10.69.1.164:8093/mcp` (`i-4Fw…`, server disabled). Rotate at the source services, then update the config via the web UI editor — first rotate, then config, or the pad loses a working server. Parked at the BOTTOM on purpose: it is not done, but leaving it at the top would head-block the loop on an action only the user can take.
 - [ ] plans/68-mission-page-ideas.md — **audited 2026-10-06, not built** (6 ideas re-checked against the built page: 4 open, Idea 2 partly already true, Idea 3's reported cause fixed by R7). **Blocked: user says "design it"** — the file is a gathering inbox by its own rule, and the audit raised two calls only the user can make: (a) whether a second start resuming an already-attached conversation is refused or deduped, (b) whether a persistent no-selection state is wanted at all (Ideas 1+5 assume one, and `fetchAll` currently auto-selects `projects[0]`). Parked at the BOTTOM on purpose, same reasoning as plan 60.
 

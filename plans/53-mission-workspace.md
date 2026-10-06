@@ -1473,7 +1473,13 @@ is a looked-at SVG, never a glyph. Titles and handlers untouched.
    agent-started sessions per project (a runaway orchestrator burning tokens in
    a PAD you are not watching), or is the `origin='agent'` badge enough? Plan
    assumes **badge only, no cap** — cheapest, and reversible, and consistent
-   with "let it grow".
+   with "let it grow". **Resolved 2026-10-07 (agent, per the "do it" mandate):
+   badge only, no cap.** Tone and reversibility win at this stage: a cap is one
+   setting away, and per-session ages (`live`/session rows) already make a
+   runaway visible before it gets expensive. Closes plan 52 R1's cost-cap
+   ceiling half — what shipped is the badge (origin badge) plus liveness counts
+   (`N live · M sessions` per project since 2026-10-07); no kill-switch, no
+   alert, no cap. Revisit only if a measured runaway shows up.
 7. ~~**Plan 52 scope.**~~ **Resolved 2026-09-27 (user): rewrite plan 52 around
    `mission_*` sessions** — one orchestration story, sessions all the way down.
    52 now owns keys/grants, conferral, the playbook and the proof phases, and

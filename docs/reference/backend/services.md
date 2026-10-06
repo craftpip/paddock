@@ -689,6 +689,15 @@ webui mid-task). Any code that writes a column must add it to both the
 
 ## Task Runner (services/task-runner.js)
 
+> **FROZEN (plan 52 G2, 2026-10-07).** Kept for the code it carries and as plan
+> 69's foundation (its per-task steps wire onto the existing `tasks` table), but
+> **not a supported work path**: Mission sessions superseded the queue as the
+> only way the agent works (plan 53 §1b / §11 Q7 — nothing runs outside the
+> human's vision, and the queue's headless `opencode run` spawns are that rule's
+> counterexample). The `task_*` MCP family stays green against it (28/28), is
+> HIDDEN unless `PADDOCK_TASK_QUEUE=1`, and must not get new features without
+> un-freezing plan 52. Do not build new work on this module.
+
 The opencode task queue behind the eight `task_*` MCP tools: push a prompt at a
 PAD (`docker exec … opencode run --format json`), stream its output into the
 `tasks` row, and extract the assistant text into `result_summary`. A row left in

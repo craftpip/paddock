@@ -1,5 +1,14 @@
 /** Task queue engine (plan 47).
  *
+ *  FROZEN (plan 52 G2, 2026-10-07): kept for the code it carries and for plan
+ *  69's foundation (it wires its per-task steps onto the existing `tasks`
+ *  table), but NOT a supported work path. Mission sessions supersede the queue
+ *  as the only way the agent works (plan 53 §1b / §11 Q7: nothing runs outside
+ *  the human's vision — the queue's headless `opencode run` spawns are exactly
+ *  what that rule retired). The `task_*` MCP family and the `task-mcp` suite
+ *  (28/28) stay green against it; do not build new features on this module
+ *  without un-freezing it in plan 52.
+ *
  *  Push: `submitTask` spawns `opencode run` inside an opencode PAD through a
  *  detached `docker exec -i … sh -lc 'exec opencode run …'`, streams the output
  *  into the `tasks` table (byte-capped), and kills on timeout or cancel. The

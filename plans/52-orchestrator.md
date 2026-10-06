@@ -1,8 +1,7 @@
 # Plan 52 — Orchestrator (session-based: keys, grants, conferral, playbook, proof)
 
-## Status: Rewritten (2026-10-06) — **5/7 phases complete (A, C, D, E; B2 done);
-B1's 5/7 clauses done and its two journal clauses still wait on 53 Phase 9; F
-deferred; G open (user-gated).** A1 audited + fail-closed default; **A2 DECIDED and DONE (2026-10-06)** — after the user's call, `exec` flipped from a base grant to an opt-in `tools:exec` bucket, so the least-privilege key of D2 is now expressible (mission_send/start/close/relaunch/restart and the task_* run verbs all ride it; `workspace_write` stays base); A3 `autoApprove` flipped to opt-in (R3 closed). Phase A gate: all suites green (mcp 139, task-mcp 28, plan-mcp 42), mutation control proved (re-adding `exec` to the base branch turns exactly the 3 opt-in pin tests red), webui restarted, tool surface verified live at 31 tools. **R8 DECIDED (a) and DONE (2026-10-06): implemented as decided.** The user chose "newest tool part is `running`" — a session is busy iff its own newest tool part's `state.status === 'running'`, read from the conversation's own store (`mission.busyForSessions`, one `agentStore.readActivity` per session id, cached ~5s). This replaces the per-(PAD, folder) `GET /session/status` web probe (retired), which only ever reported conversations the web process itself drove and reported nothing during a Mission pane's turn. `busy` still requires `live`; a dead row answers `busy: false` and carries `wasBusy: true` while its store says a tool part is running. Verified: mission 118/118, mcp 139/139, task-mcp 28/28, plan-mcp 42/42, mutation control (stored copy, `=== 'running'` → `=== 'completed'` in `busyForSessions`) turns exactly the 3 store-backed pins red while the rest stay green. Live: a dead row whose conversation's store reports `running` answers `busy:false, busyKnown:true, wasBusy:true, state:dead` — the pinned contract. **B1 done 5/7** (the two missing clauses name tools plan 53 Phase 9 has not built); **B2 decided 2026-10-06** — `pad_help`'s `GENERAL_GUIDE` IS the onboarding artifact, so B2 becomes an onboarding-completeness audit of it (not a new file); **B2 audit COMPLETE (2026-10-07), 4 gaps fixed in the guide** — `mission_permission_answer` was never named, three error codes were missing (`mission_permission_pending` / `mission_not_an_agent` / `mission_tui_already_running`), the `canSend` verdict was absent, and a `recreate`'s cost to live sessions was unwarned; mcp 140/140. **C1's path is proven live twice** and surfaced C1-F1 which became R7+R8; **R7's id half is fixed and proven live** (fresh start mints its own conversation, `stampTruth` fails closed). **E1 complete and proven live** — the audit log's `actor` column is never empty (702 rows read `system` before; seven Mission actions now attributed). **Phase D COMPLETE (2026-10-07), committed e2ec24d** — conferral (orchestrator MCP key `default` + driver wiring + Remove), Profile key presets, and the server-side namespace split, all pinned by the new `orchestrator.test.js` (7) + mcp D3 (140) and verified live end to end on a throwaway opencode pad (confer → `paddock connected` → remove, no residue). Live finding that earned its own rule: `execFile`+`input` HANGS the container's docker CLI at `read`, so `execInPad` is spawn with a 60s kill-to-fail guard — a hung wire is now a rollback, never an orphaned full-reach key. **Phase C COMPLETE (2026-10-07): C1 green twice on two projects** (paddock, test) — the second run proven live against a real answer; the "two models" clause filed as a gap (fleet has only opencode pads). **Phase E COMPLETE (2026-10-07): E1** audit attribution; **E2** minimum spend visibility (col-1 `N live · M sessions`, browser-verified); **E3** dead-session recovery proven (restart → same tmux + conversation, transcript intact); **E4** resume-cost proven (same store row continues; a resumed turn answered history with 0 tool calls vs the original's `read`). remaining: B's two journal clauses (53 Phase 9), F (LATER), G closings (user-gated). The queue is empty;
+## Status: Rewritten (2026-10-06) — **6/7 phases complete (A, B, C, D, E; B2 done);
+F deferred; G decided (G2 freeze DONE, G1 in progress).** A1 audited + fail-closed default; **A2 DECIDED and DONE (2026-10-06)** — after the user's call, `exec` flipped from a base grant to an opt-in `tools:exec` bucket, so the least-privilege key of D2 is now expressible (mission_send/start/close/relaunch/restart and the task_* run verbs all ride it; `workspace_write` stays base); A3 `autoApprove` flipped to opt-in (R3 closed). Phase A gate: all suites green (mcp 139, task-mcp 28, plan-mcp 42), mutation control proved (re-adding `exec` to the base branch turns exactly the 3 opt-in pin tests red), webui restarted, tool surface verified live at 31 tools. **R8 DECIDED (a) and DONE (2026-10-06): implemented as decided.** The user chose "newest tool part is `running`" — a session is busy iff its own newest tool part's `state.status === 'running'`, read from the conversation's own store (`mission.busyForSessions`, one `agentStore.readActivity` per session id, cached ~5s). This replaces the per-(PAD, folder) `GET /session/status` web probe (retired), which only ever reported conversations the web process itself drove and reported nothing during a Mission pane's turn. `busy` still requires `live`; a dead row answers `busy: false` and carries `wasBusy: true` while its store says a tool part is running. Verified: mission 118/118, mcp 139/139, task-mcp 28/28, plan-mcp 42/42, mutation control (stored copy, `=== 'running'` → `=== 'completed'` in `busyForSessions`) turns exactly the 3 store-backed pins red while the rest stay green. Live: a dead row whose conversation's store reports `running` answers `busy:false, busyKnown:true, wasBusy:true, state:dead` — the pinned contract. **B1 COMPLETE (2026-10-07): 7/7 clauses** — the two journal clauses (ordered checklist; notes on arrival/decisions) are now taught against the **plans facility** (plans/64-plans-facility.md), which SUPERSEDED 53 Phase 9's unbuilt `mission_checklist`/`mission_notes`: a plan file IS the ordered checklist that survives a closed chat, and rewriting it ticks items off (plan-mcp 42 + mcp 140 green, still no pointer to an unbuilt tool); **B2 decided 2026-10-06** — `pad_help`'s `GENERAL_GUIDE` IS the onboarding artifact, so B2 becomes an onboarding-completeness audit of it (not a new file); **B2 audit COMPLETE (2026-10-07), 4 gaps fixed in the guide** — `mission_permission_answer` was never named, three error codes were missing (`mission_permission_pending` / `mission_not_an_agent` / `mission_tui_already_running`), the `canSend` verdict was absent, and a `recreate`'s cost to live sessions was unwarned; mcp 140/140. **C1's path is proven live twice** and surfaced C1-F1 which became R7+R8; **R7's id half is fixed and proven live** (fresh start mints its own conversation, `stampTruth` fails closed). **E1 complete and proven live** — the audit log's `actor` column is never empty (702 rows read `system` before; seven Mission actions now attributed). **Phase D COMPLETE (2026-10-07), committed e2ec24d** — conferral (orchestrator MCP key `default` + driver wiring + Remove), Profile key presets, and the server-side namespace split, all pinned by the new `orchestrator.test.js` (7) + mcp D3 (140) and verified live end to end on a throwaway opencode pad (confer → `paddock connected` → remove, no residue). Live finding that earned its own rule: `execFile`+`input` HANGS the container's docker CLI at `read`, so `execInPad` is spawn with a 60s kill-to-fail guard — a hung wire is now a rollback, never an orphaned full-reach key. **Phase C COMPLETE (2026-10-07): C1 green twice on two projects** (paddock, test) — the second run proven live against a real answer; the "two models" clause filed as a gap (fleet has only opencode pads). **Phase E COMPLETE (2026-10-07): E1** audit attribution; **E2** minimum spend visibility (col-1 `N live · M sessions`, browser-verified); **E3** dead-session recovery proven (restart → same tmux + conversation, transcript intact); **E4** resume-cost proven (same store row continues; a resumed turn answered history with 0 tool calls vs the original's `read`). **R1 CLOSED (2026-10-07).** remaining: **G1 in progress** (docs absorb; file deletion ordered after 53's absorb), **F** (LATER), C2 codex proof (blocked on a codex credential — surfaced, not fabricated). The queue is empty; rolling 68 + 69 from the "do it" mandate.
 this plan now orchestrates **sessions**, not tasks. User decision, verbatim:
 *"don't let the user start any task without my vision — remove task submit"*,
 followed by *"rewrite 52 around mission_* sessions"*. **Everything below is
@@ -41,11 +40,13 @@ tools that let it manage machines remain `pad_*`.
   `pad_stop_agent` / `pad_restart_agent` / `pad_update` / `pad_recreate` /
   `pad_delete_agent` / `pad_health` / `pad_settings_get` / `pad_exec` /
   `pad_config_get` / `pad_workspace_*`.
-- **Context (53 Phase 8):** per-project notes + an **ordered checklist** — the
-  LLM appends "do A, then B, then C" as items and works them one at a time in a
-  visible session, ticking each off. No server-side runner: the checklist is
-  "what's left" across a closed chat, not a background worker (option A, user
-  2026-09-27).
+- **Context (the plans facility — plans/64-plans-facility.md, which
+  SUPERSEDED 53 Phase 8/9):** a plan *is* the ordered checklist — the LLM writes
+  "do A, then B, then C" into the plan body and works the items one at a time in
+  a visible session, ticking each off by rewriting the plan (`plan_write`), and
+  every plan write bumps `last_activity`, which is what answers "what is being
+  worked on right now". No server-side runner: the checklist is "what's left"
+  across a closed chat, not a background worker (option A, user 2026-09-27).
 - **Not used by the agent:** the whole `task_*` family. Retired — see §3.
 
 Grant buckets are unchanged: `read` (the two list/read tools), `create`
@@ -63,7 +64,7 @@ Grant buckets are unchanged: `read` (the two list/read tools), `create`
 | `task_approve` / `task_cancel` | *none* | Approval was the cost of invisible work; visible work needs neither |
 | `task_priority`, `task_list` | *none* | No queue to order or list |
 | Steering races (R7, R8), submit idempotency (R10), self-reported "done" (R12), stuck-task alerting (R14) | **retired with the queue** | No submit → no double-dispatch; no steering column → no steer race; no done-state → nothing to self-report; no poller → a session is visibly live or visibly dead |
-| Task/journal memory keyed on `task_id` | notes/journal keyed on `project_id` | Same idea, stable anchor (53 Phase 8) |
+| Task/journal memory keyed on `task_id` | a plan file keyed on `session_id` (plans facility) | Same idea, stable anchor; the plan survives a closed chat (superseded 53 Phase 8/9) |
 | `tasks` table + runner | left in the tree, **unused** | Deleting the module is a separate cleanup decision, not an orchestration one |
 
 ## 4. Governing laws (amended 2026-09-27; unchanged where not noted)
@@ -200,17 +201,20 @@ The gate for everything: the agent can only do what its key says.
       respect solo locks; memory discipline (read notes + checklist on arrival,
       write on decide); never start work the user can't see.
 
-      **Status: 5 of 7 clauses DONE; 2 BLOCKED on 53 Phase 9 (not built).**
-      Done and committed: the four-step flow (recipe 12/13), *reuse an existing
-      session before opening one* (new caller rule + recipe 13 reorder), read
-      `mission_sessions` before typing, respect solo locks, and never start work
-      the user cannot see. The two remaining clauses — the ordered checklist and
-      the notes on arrival / decisions — both name a **tool that does not
-      exist**: there are no `mission_checklist` / `mission_notes` tables, and 53's
-      Phase 9 is where they are meant to land. Writing those clauses now would
-      teach an LLM to call a tool the server never registers, so a test now
-      asserts the guide contains **no** pointer to an unbuilt checklist tool.
-      B1 closes when 53 Phase 9 lands and the two clauses are added.
+      **Status: 7 of 7 clauses DONE (2026-10-07).** The two remaining clauses —
+      the ordered checklist and the notes on arrival / decisions — are now
+      satisfied against the **plans facility** (plans/64-plans-facility.md).
+      53's Phase 9 (separate `mission_checklist` / `mission_notes` tables) was
+      **superseded by plan 64** (2026-09-29, "do not build"): a plan *is* the
+      ordered checklist that survives a closed chat, so B1's "work the checklist
+      in order, one item at a time, in a visible session, ticking each off" and
+      "read notes + checklist on arrival, write on decide" are taught via
+      `plan_list` / `plan_write` (rewriting the plan body bumps `last_activity`).
+      The guide still contains **no** pointer to an unbuilt checklist tool, and
+      the B1 test assert it. The four-step flow (recipe 12/13), *reuse an
+      existing session before opening one* (new caller rule + recipe 13 reorder),
+      read `mission_sessions` before typing, respect solo locks, and never start
+      work the user cannot see had landed earlier.
 - [x] B2. Onboarding artifact (system-prompt snippet / skill, [51§4]) rewritten
       for the session model. No backend.
 
@@ -563,22 +567,33 @@ verification runs first inside this phase.
 
 ## Phase G — Closings (each gated on explicit user confirmation)
 
-- [ ] G1. Docs absorb for keys/grants/conferral/playbook into `docs/`, then
+- [~] G1. Docs absorb for keys/grants/conferral/playbook into `docs/`, then
       delete this file. Ordered after 53's absorb (53 §6) so the page is
-      documented before the orchestration around it.
-- [ ] G2. Optional cleanup decision, kept separate on purpose: remove or freeze
+      documented before the orchestration around it. **In progress (2026-10-07,
+      per the "do it" mandate): absorb into `docs/reference/backend/
+      services.md`; the *file deletion* stays ordered after 53's absorb — 53 is
+      not yet absorbed, so this file lives until it is.**
+- [x] G2. Optional cleanup decision, kept separate on purpose: remove or freeze
       `src/services/task-runner.js` and the `tasks` table now that nothing
-      submits to them. **Not** part of A–E.
+      submits to them. **Not** part of A–E. **DECISION (2026-10-07, per the
+      "do it" mandate): FREEZE, not remove.** Kept for the code it carries and
+      as plan 69's foundation (its per-task steps wire onto the existing
+      `tasks` row); header note in `task-runner.js` + `docs/reference/backend/
+      services.md` say frozen, the `task_*` family stays green (task-mcp
+      28/28), HIDDEN unless `PADDOCK_TASK_QUEUE=1`. Removing would gut plan
+      69's foundation for no present gain.
 
 ## Risk register (re-filed 2026-09-27 — retired entries moved to §3)
 
 Format: ID · severity · owner phase · status. OPEN = must be decided before its
 owner phase builds.
 
-- [x] **R1 · Critical · Block E — cost caps.** **E2 minimum landed (2026-10-07):
-      col-1 project rows now show `N live · M sessions`; per-session ages are
-      col 2's rows. The ceiling/alert/kill-switch half stays open — 53 §11 Q6,
-      the user's call.**
+- [x] **R1 · Critical · Block E — cost caps.** **CLOSED (2026-10-07).**
+      E2 minimum landed: col-1 project rows now show `N live · M sessions`;
+      per-session ages are col 2's rows. The ceiling half was 53 §11 Q6, now
+      **resolved: badge only, no cap** (2026-10-07, per the "do it" mandate) —
+      tone and reversibility win, a cap is one setting away, and liveness
+      counts make a runaway visible before it gets expensive.
 - [ ] R2 · Critical · Block C/E — injection path: repo text → agent output →
       orchestrator context → action. No provenance or output gates.
 - [ ] **R7 · Critical · Block C/E (found by C1, 2026-09-29) — `busy` is
