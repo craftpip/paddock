@@ -21,28 +21,17 @@ Decisions only you can make. Deliberately **not** `- [ ]` lines and **not** in
 its own recognizance — the agent's job is to surface these, not to guess. Each
 one is a single reply away from done.
 
-- **A stray Mission session on the `paddock` project** — `msn_aac88d72b8f5b16c`,
-  label **"MCP tool orchestration suite"**, `origin=human`,
-  `created_by=user:admin_1784916138567` (the REST path — not an MCP key, so no
-  test key can be pointed at it), created 2026-09-29T07:49. The label says test
-  suite, but nothing can attribute it to one, and **Close tears down that
-  session's tmux session** — if it is a live conversation, that is a real kill.
-  Your click, not the agent's: close it, or leave it.
-- **Four leftover `pad-test-*` agent rows** — all kept, none deleted:
-  `pad-test-claude` and `pad-test-codex` have **real instance dirs**;
-  `pad-test-p25-clone` is DB-only with no history; `pad-test-p25` is DB-only but
-  has `activity_events` from **2026-08-08** (create + settings update), so
-  deleting it would destroy a real audit trail. Say the word if any should go.
-  (For contrast: the 5 DB-only `pad-msn-*` seed rows **were** removed — no
-  instance dir, no history, nothing to lose.)
-- **`project_id` on `task_submit` (plan 63, finding 1k-related — not built, asking
-  first).** The task queue reads a `name` (the PAD to run in) and has no way to say
-  *which project within that PAD* the work belongs to. Plan 63 built the resolver
-  that would carry it and stopped there, because plan 52 retired the headless task
-  path and the 9 `task_*` tools are currently **hidden from the MCP surface**
-  (`PADDOCK_TASK_QUEUE=1` re-enables them), so a `project_id` on a submit no caller
-  can reach is speculative. Your call: add it, or leave the queue as a PAD-level
-  concept. Nothing depends on the answer and nothing is blocked by it.
+**Decided 2026-10-06** (from "you called it" 2026-10-06): the stray Mission session
+`msn_aac88d72b8f5b16c` was **closed** (page Close path, row deleted); the four
+`pad-test-*` rows were **removed** (`pad-test-claude`, `pad-test-codex` via
+`pad_delete_agent`, `pad-test-p25`/`-clone` via `removeAgentFromDb`);
+`project_id` on `task_submit` is **deferred** ("later"); the
+`busy`-structurally-false fix (plan 52 C1-F1 / R7) is **already implemented**
+(`startSession` mints the conversation before the pane, `stampTruth` reports
+UNKNOWN for an id-less row) and needed no change; the B2 onboarding artifact
+defaulted to **(a)** — `pad_help`'s `GENERAL_GUIDE` IS the artifact, so B2
+becomes an onboarding-completeness audit of the guide rather than a new file.
+
 - **Should `exec` be an opt-in grant, or a base one? (plan 52 A2)** — today
   `exec` is `toolAllowed`'s BASE grant, so every fine-grained key holds it and
   **there is no key that can read and create without also being able to type
@@ -78,55 +67,29 @@ one is a single reply away from done.
   ~2 ms each) — cheap, but it inverts a rule AGENTS.md states deliberately.
   Your call: (a), (b), both, or leave `busy` off until R7's follow-up. Nothing is
   blocked on it except the "never talk over a live conversation" property.
-- **What form should the LLM onboarding artifact take? (plan 52 B2)** — B2 says
-  "onboarding artifact (system-prompt snippet / skill) **rewritten** for the
-  session model", and neither half holds: **no artifact exists to rewrite**
-  (`src/views/onboard.ejs` is a dead EJS view; the only live `onboard` is
-  `POST /api/agents/:name/onboard`, an agent-setup route), and the **form** is
-  still plan 51 §4's *"Open decisions (user calls these)"* — "system prompt
-  snippet? skill file? slash commands?" 51 is not in the queue, so that was
+- **What form should the LLM onboarding artifact take? (plan 52 B2)** — **decided
+  2026-10-06: (a), defaulted** — `pad_help`'s `GENERAL_GUIDE` IS the artifact, so
+  B2 becomes an onboarding-completeness audit of the guide (no new file, no
+  drift). Stated in full because the reasoning is the record: **no artifact exists
+  to rewrite** (`src/views/onboard.ejs` is a dead EJS view; the only live
+  `onboard` is `POST /api/agents/:name/onboard`, an agent-setup route), and the
+  **form** was still plan 51 §4's *"Open decisions (user calls these)"* — "system
+  prompt snippet? skill file? slash commands?" 51 is not in the queue, so that was
   never decided. Meanwhile **an onboarding artifact already exists and is the
   better one**: `pad_help` serves `GENERAL_GUIDE` over MCP, it is the same
   module plan 52 B1 just rewrote for the session model, it is **versioned with
   the code so it cannot drift**, and any LLM can fetch it as its first call. A
   separate hand-written snippet would be a **second copy** of the same
   instructions with no sync story — the drift the guide's design already avoids.
-  Pick: **(a)** `help` IS the artifact (then B2 becomes an
-  onboarding-completeness audit of the guide — no new file, no drift);
-  **(b)** a separate static snippet/skill, which needs a home and a sync owner;
-  or **(c)** generate the snippet *from* the guide so one source feeds both.
-  **Recommend (a), or (c) if you need text you can paste somewhere else.**
-  Nothing is blocked on it except B2 itself.
-- **`busy` is structurally `false` on every fresh Mission session — fix the lie
-  or fix the mechanism? (plan 52 C1-F1 / R7, found live 2026-09-29)** — a
-  session started fresh (page "+ New session", or `mission_session_start`
-  without `agent_session_id`) leaves `agent_session_id` `NULL` **forever**:
-  the only write is the INSERT at `mission.js:214` and nothing back-fills it.
-  So `stampTruth`'s `busy = !!(s.agent_session_id && probe.ids.has(…))` is
-  `!!(null && …)` = `false` **unconditionally**, while `busyKnown` reports the
-  folder probe's `true`. **Measured mid-turn**: the pane read
-  `esc interrupt` (opencode working) and the same response said
-  `busy:false, busyKnown:true, canSend:true`. The guide's own rule — *"only
-  treat a session as quiet when `busyKnown` is true"* — then tells the caller
-  it is safe to type, and `mission_send` does not check `busy`. It has been
-  masked because your rows were all **resumed from History**, the only caller
-  that ever supplies the id. Two answers to different questions: **(a) stop the
-  lie** — one line, return `busyKnown: false` when the id is null, so an
-  unidentifiable conversation is *unknown, never idle* (what plan 62 already
-  does for the cwd mismatch); it does not make `busy` work. **(b) make it
-  work** — resolve the conversation id for a fresh session (newest session in
-  the folder after the row's `created_at`), which also restores `title` and
-  true resume, but is ambiguous when two sessions start in one folder at once.
-  **Recommend (a) now and (b) as the real fix.** Note (b) gates **E4/R15**:
-  resume cost cannot be proven while fresh sessions have no conversation to
-  resume. Also costs `sessionTitle` (`''` forever) and orphans the conversation
-  on relaunch/restart. Full evidence in `plans/52-orchestrator.md` §C1-F1.
+  The alternatives were (b) a separate static snippet/skill (needs a home and a
+  sync owner) and (c) generate the snippet *from* the guide. Pick (c) instead if
+  you ever need text you can paste somewhere else.
 - **Rotate the 2 exposed MCP tokens** — plan 60 stopped the leak but cannot
   un-leak the credentials; operator action, §5. Tracked on its queue line below.
 
 ## Queue
 
-- [ ] plans/52-orchestrator.md — partial: Phase A + E1 done, C1's id fixed (R7). **Blocked: user calls** — R8 (`busy` semantics), `exec` grant, B2 onboarding; phases D–G gated on those or on C1 green-twice
+- [ ] plans/52-orchestrator.md — partial: Phase A + E1 done, C1's id fixed (R7), B2 form decided (a: `pad_help` guide is the artifact → B2 is an audit of it). **Blocked: user calls** — R8 (`busy` semantics) + `exec` grant (both below in Needs your call); phases D–G gated on those or on C1 green-twice
 - [ ] plans/60-mcp-secret-hygiene.md — build done + verified (mcp 79/79, vm-manager 108/108), `## Status:` reads Complete, but **not yet absorbed** (file still present) and one open item remains — **blocked: rotate the 2 exposed MCP tokens (operator action, plan §5)**, which no agent can perform. Parked at the BOTTOM on purpose: it is not done, but leaving it at the top would head-block the loop on an action only the user can take.
 - [ ] plans/68-mission-page-ideas.md — **audited 2026-10-06, not built** (6 ideas re-checked against the built page: 4 open, Idea 2 partly already true, Idea 3's reported cause fixed by R7). **Blocked: user says "design it"** — the file is a gathering inbox by its own rule, and the audit raised two calls only the user can make: (a) whether a second start resuming an already-attached conversation is refused or deduped, (b) whether a persistent no-selection state is wanted at all (Ideas 1+5 assume one, and `fetchAll` currently auto-selects `projects[0]`). Parked at the BOTTOM on purpose, same reasoning as plan 60.
 
