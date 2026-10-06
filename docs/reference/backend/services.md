@@ -833,6 +833,14 @@ Auth in `src/mcp.js`: `authenticateRequest(req)` reads `Authorization: Bearer`,
 Missing/invalid key → 401 JSON-RPC error (`-32001 Unauthorized`). Tools enforce
 the same owner-scoping as the REST API: admin → all agents, user → owned agents.
 
+## Key scopes / grants (plan 52)
+
+`apiKeys.validateScopes()` parses a comma-joined list (broad vs fine-grained). See `src/services/api-keys.js` for the grant map. MCP gates are **resolve → gate → act** (`targetAllowed()`/`toolAllowed()`), both using the resolved PAD name; `exec` requires `tools:exec`.
+
+## Orchestrator conferral (plan 52 Phase D)
+
+`services/orchestrator.js`: conferring makes an ordinary PAD the user's orchestrator — creates API key `orchestrator` (scopes `default`), wires the paddock MCP server into the running PAD via `docker exec -i ... sh -lc` with the key on stdin (uses `spawn` + 60s kill guard; `execFile {input}` can hang), and writes `orchestrator.json` next to the driver config (`{ role: 'orchestrator', since: ISO, folders: [] }`). One orchestrator per user, target must be running; wiring failure revokes the key. `removeConferral()` revokes the key and removes `orchestrator.json`. `getOrchestrator()` returns `{ conferred, ownedBy, keyId, keyName, prefix, folders }`.
+
 ## MCP Tools (mcp.js)
 
 `src/mcp.js` mounts the paddock's own MCP server at `/mcp` (Streamable HTTP). It
@@ -900,6 +908,7 @@ Rules:
   **resolve-then-gate-then-act** in one call and returns the agent, so no handler
   can skip the last step. Job keys
   resolve the same way, so a `display_name` finds its job.
+- **Governing laws (plan 52):** (1) only the orchestrator holds the `exec` bucket; (2) agents never self-authorize mutating actions against themselves; (3) human-in-the-loop for dangerous writes. Agent/actor is recorded (audit) so these are checkable.
 - A **non-PAD container is named as one.** When a name resolves to nothing,
   `notFoundMessage()` also probes `docker ps -a`; a real host container that
   Paddock does not manage is reported as such ("`schlorp` IS a container on this
@@ -1367,24 +1376,8 @@ Three additions let an LLM drive Paddock headlessly:
   via `drivers.getLlmCatalog(type)`; defaults to openclaw. Interactive-only
   commands that have no headless form sit in `notUsable` — the guidance tells
   the LLM to hand those to the human.
-- **`exec.stdin`** — optional text written verbatim to the container process
-  stdin. The only sanctioned channel for secrets (API keys, tokens): never
-  place a secret in `command`. `stdin` is never included in tool responses,
-  errors, or logs (see `dockerExec` in `mcp.js`). Commands whose catalog entry
-  has `credentialInput: "stdin"` expect the value there.
-- **`exec.cwd`** — an optional working directory *inside* the container, applied
-  by prefixing a quoted `cd`. The response carries the resolved `name`, the
-  **actual** `cwd` the command ran in, `requestedCwd` (what was asked for),
-  `exitCode`, `stdout`, and `stderr` — a bare `stdout` never says where it was
-  produced. Two contracts make the field trustworthy:
-  - The reported `cwd` is probed with the **same `cd`** the command received, not
-    a bare `pwd` in a second `docker exec`. A bare probe reports the container's
-    default directory, so the payload would say `cwd: "/www1"` next to
-    `stdout: "/www1/craftpip.com"` — a self-contradicting answer, which is worse
-    than reporting nothing at all. (This was caught only by the live test.)
-  - A `cwd` that does not exist **fails loudly** (exit 2, nothing run) rather than
-    falling through to another directory. The value is caller-controlled and
-    interpolated into `sh -lc`, so it is shell-quoted.
+- **`exec.stdin`** — optional text written verbatim to the container process stdin (sanctioned channel for secrets; never in responses/errors/logs).
+- **`exec.cwd`** — optional working directory *inside* the container; response includes `resolvedName`, `actual` `cwd`, `requestedCwd`, `exitCode`, `stdout`, `stderr`. Probed with the same `cd`; missing `cwd` fails loudly (exit 2).
 
 ### Design decisions (settled — do not add tools without re-checking the user)
 
