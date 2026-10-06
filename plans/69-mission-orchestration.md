@@ -1,9 +1,8 @@
 # Plan 69 — Mission orchestration via MCP (task lifecycle loop)
 
-## Status: Draft (2026-09-29; audited 2026-10-06) — 2 ideas captured and re-checked
-against the built surface. Still gathering: **no design, no build.** The audit is
-below; **Idea 2 is now largely BUILT** by plan 64, and Idea 1's premise is half
-stale — a full task lifecycle already exists.
+## Status: Proposed (2026-10-07) — design complete, not started. All design calls
+are decided below (§ Design proposal); the audit (2026-10-06) stands. Nothing is
+built; phases P1–P4 await the go to build.
 
 Scope: **MCP / orchestration only.** How an LLM driving Paddock over MCP runs
 work through agents and sessions: task model, lifecycle steps
@@ -224,3 +223,126 @@ whose worker has gone away — and the existing task tools are deliberately buil
 other way (`task_get_next` even mutates state so it cannot be used to look, and
 `task_list` exists precisely to observe without claiming). Worth naming that this is
 a real cost, so the choice is made knowingly.
+
+---
+
+## Design proposal (2026-10-07) — decided, awaiting the go to build
+
+Turns the audit into a proposal. Every open question from the Ideas inbox is
+decided here. Constraint the whole design obeys: **the `tasks` table and the
+existing eight `task_*` tools are frozen (plan 52 G2)** — this design adds a
+layer next to them, never a column or a semantic on `tasks`.
+
+### D1 — A task's steps are a new `task_steps` table, one row per step attempt
+
+`tasks` stays exactly as plan 63 defined it (facts only: `enqueue`, `timeout_ms`,
+`attempt`, `superseded_by`, …). The lifecycle lives in a sibling table
+`task_steps(task_id, step, attempt, state, status, session_id, reported_by,
+notes, artifact, occurred_at)`, FK to `tasks.id`, child-cleared before any parent
+delete (the audit-FK lesson). `step` is one of `review | build | test | hotfix |
+commit`; `state` is `pending | running | needs_review | failed | done | aborted`;
+`status` is `passed | failed | error` for finished attempts. A task's *current
+step* is derived: the newest `task_steps` row. `task_status` reads it, so "where
+is this task in the loop" is one call and one answer, and nothing on `tasks`
+changes.
+
+### D2 — A task binds to a Mission session; the session binding is the actual gap
+
+`task_submit` gains an optional `session_id`. With it, the task is **in-session**:
+every step runs in THAT Mission session's folder, and every step tool honors the
+session gates this project already built for `mission_send` — a locked session
+(`task_session_locked`), a dead pane, a shell pane, or a permission-parked pane
+parks/refuses the step exactly as a send would (`blockedOn: permission` is read,
+not guessed). That makes the user's sentence — "start a session, then put the
+task in the session" — expressible end to end. Without `session_id`, the task
+keeps today's PAD/push behavior untouched (back-compat, no forced migration).
+
+### D3 — Review runs in the same session by default; cross-review is opt-in
+
+`task_submit` (or the review step) accepts an optional `reviewer` session/PAD. A
+fleet usually has exactly one agent per folder, so **same-session review is the
+default** and `reviewer` is the explicit alternative — never the other way round.
+This answers the inbox's "same or different agent" as "same, unless told".
+
+### D4 — Done-ness is self-reported per step, with the claim guarantee kept
+
+The server has no universal "tests green" oracle, so it never guesses a step's
+verdict (the audit's caveat: a silent idle agent reads like a done one). Each
+step completes through a step-scoped report, and the report's actor must match
+the step's worker (reusing the existing `task_not_claimed`-style refusal). The
+timestamp/`lastToolCall` pair from plan 64 stays **supporting evidence**, never
+the verdict — the verdict is the report.
+
+### D5 — Bugs are structured when the reporter has them
+
+`task_steps.notes` is free text (a review/hotfix writeup); a failed `test` step
+may additionally record structured bugs — `{file, line, summary, repro}` — as
+extra rows on the same step attempt, so "send it back to development" carries
+what development needs instead of a wall of prose.
+
+### D6 — Commit is server-run, task-scoped, in the project folder
+
+`task_step_commit` runs the commit in the bound session's folder via the
+existing exec path and records the resulting sha in the step's `artifact`. "The
+commit that belongs to this task" becomes a name-able thing. Automatic per-task
+commit (the user's flow: test passes → commit → next task) is the default.
+
+### D7 — The loop lives INSIDE the MCP; the server drives it, with a stop
+
+This is the user's explicit design call and the expensive one (the audit named
+it). `task_pipeline_start {task_id}` hands a task to a server-side driver that
+advances steps by driving the bound session (through the same paths
+`mission_send` uses) and records each step in `task_steps`. The driver's rules,
+each a hard wall:
+
+- It never advances past a step whose report is missing, `error`, or parked —
+  it stops and reports, it does not guess.
+- Per-step timeout comes from `tasks.timeout_ms`; a step that overruns is
+  stamped `error` and the pipeline parks for a human.
+- `task_pipeline_stop` aborts at the next step boundary; a dead/locked session
+  or a removed task parks the pipeline rather than aborting silently.
+- Concurrency: one active pipeline step per task — `task_pipeline_start` on a
+  task whose newest step is `running` refuses (`task_pipeline_busy`).
+
+### Tool surface
+
+- `task_submit` (extended): `session_id` (optional), `reviewer` (optional).
+- New: `task_step_report`, `task_step_bug`, `task_step_commit` — the explicit
+  single-step tools (everything the driver does, only LLM-visible and
+  interruptible for the "keep the loop visible" path).
+- New: `task_pipeline_start` / `task_pipeline_status` / `task_pipeline_stop` —
+  the server-side loop.
+- `task_status` / `task_list`: extended to read the derived step (newest
+  `task_steps` row) without changing their `tasks`-only storage reads.
+- `task_retry` re-files a task and now re-creates its step chain (fresh
+  `task_steps`), not just the queue row.
+
+Every new tool goes through `registerTool` (the MCP wrapper that turns a
+throwing handler into `{ isError: true }`) and is resolve-then-gate on the
+session's pad, exactly like the `mission_*` tools.
+
+### Phases / checklist
+
+- [ ] **P1 — schema + session binding.** `task_steps` table (derived from the
+      real schema, migration suite with the absent-columns control), `task_submit
+      { session_id, reviewer }` validation (session exists on the pad, folder
+      matches project), `task_status`/`task_list` read the derived step. Tests:
+      db-migration control, mcp suite, act-gate tests.
+- [ ] **P2 — single-step tools.** `task_step_report`, `task_step_bug`,
+      `task_step_commit`, all with the session gates from D2 and the actor-claim
+      check from D4. Tests: refusal matrix (locked/dead/shell/permission-parked),
+      commit-sha recording.
+- [ ] **P3 — the pipeline driver.** `task_pipeline_start/status/stop` with the
+      four hard walls from D7, task step records, timeout from `tasks.timeout_ms`.
+      Proved END TO END live (a task walked review→build→test→hotfix→commit in a
+      real session), not by a green unit suite — the driver is the one place a
+      unit test cannot see (the same shape as the default-runner lesson).
+- [ ] **P4 — guide + absorb.** `pad_help` recipes name the loop and the stop;
+      docs + AGENTS.md capture D1–D7; plan absorbed and deleted like 68.
+
+### What this deliberately does NOT do
+
+- No change to `tasks` or the existing eight tools (G2 freeze).
+- No Mission-page UI (plan 68's province).
+- No machine lifecycle (`pad_*`) — orchestration only.
+- No "server decides tests are green" — D4 is explicit on who writes a verdict.
