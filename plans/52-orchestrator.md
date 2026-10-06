@@ -1,6 +1,7 @@
 # Plan 52 — Orchestrator (session-based: keys, grants, conferral, playbook, proof)
 
-## Status: Rewritten (2026-10-06) — **3/7 phases complete (A, D, E1); B and C started; D landed 2026-10-07.** A1 audited + fail-closed default; **A2 DECIDED and DONE (2026-10-06)** — after the user's call, `exec` flipped from a base grant to an opt-in `tools:exec` bucket, so the least-privilege key of D2 is now expressible (mission_send/start/close/relaunch/restart and the task_* run verbs all ride it; `workspace_write` stays base); A3 `autoApprove` flipped to opt-in (R3 closed). Phase A gate: all suites green (mcp 139, task-mcp 28, plan-mcp 42), mutation control proved (re-adding `exec` to the base branch turns exactly the 3 opt-in pin tests red), webui restarted, tool surface verified live at 31 tools. **R8 DECIDED (a) and DONE (2026-10-06): implemented as decided.** The user chose "newest tool part is `running`" — a session is busy iff its own newest tool part's `state.status === 'running'`, read from the conversation's own store (`mission.busyForSessions`, one `agentStore.readActivity` per session id, cached ~5s). This replaces the per-(PAD, folder) `GET /session/status` web probe (retired), which only ever reported conversations the web process itself drove and reported nothing during a Mission pane's turn. `busy` still requires `live`; a dead row answers `busy: false` and carries `wasBusy: true` while its store says a tool part is running. Verified: mission 118/118, mcp 139/139, task-mcp 28/28, plan-mcp 42/42, mutation control (stored copy, `=== 'running'` → `=== 'completed'` in `busyForSessions`) turns exactly the 3 store-backed pins red while the rest stay green. Live: a dead row whose conversation's store reports `running` answers `busy:false, busyKnown:true, wasBusy:true, state:dead` — the pinned contract. **B1 done 5/7** (the two missing clauses name tools plan 53 Phase 9 has not built); **B2 decided 2026-10-06** — `pad_help`'s `GENERAL_GUIDE` IS the onboarding artifact, so B2 becomes an onboarding-completeness audit of it (not a new file). **C1's path is proven live twice** and surfaced C1-F1 which became R7+R8; **R7's id half is fixed and proven live** (fresh start mints its own conversation, `stampTruth` fails closed). **E1 complete and proven live** — the audit log's `actor` column is never empty (702 rows read `system` before; seven Mission actions now attributed). **Phase D COMPLETE (2026-10-07), committed e2ec24d** — conferral (orchestrator MCP key `default` + driver wiring + Remove), Profile key presets, and the server-side namespace split, all pinned by the new `orchestrator.test.js` (7) + mcp D3 (140) and verified live end to end on a throwaway opencode pad (confer → `paddock connected` → remove, no residue). Live finding that earned its own rule: `execFile`+`input` HANGS the container's docker CLI at `read`, so `execInPad` is spawn with a 60s kill-to-fail guard — a hung wire is now a rollback, never an orphaned full-reach key. Phases E2–E4, F and G not started. The queue is gone;
+## Status: Rewritten (2026-10-06) — **5/7 phases complete (A, C, D, E, and B's
+decision; B 5/7 clauses done); F deferred; G open (user-gated).** A1 audited + fail-closed default; **A2 DECIDED and DONE (2026-10-06)** — after the user's call, `exec` flipped from a base grant to an opt-in `tools:exec` bucket, so the least-privilege key of D2 is now expressible (mission_send/start/close/relaunch/restart and the task_* run verbs all ride it; `workspace_write` stays base); A3 `autoApprove` flipped to opt-in (R3 closed). Phase A gate: all suites green (mcp 139, task-mcp 28, plan-mcp 42), mutation control proved (re-adding `exec` to the base branch turns exactly the 3 opt-in pin tests red), webui restarted, tool surface verified live at 31 tools. **R8 DECIDED (a) and DONE (2026-10-06): implemented as decided.** The user chose "newest tool part is `running`" — a session is busy iff its own newest tool part's `state.status === 'running'`, read from the conversation's own store (`mission.busyForSessions`, one `agentStore.readActivity` per session id, cached ~5s). This replaces the per-(PAD, folder) `GET /session/status` web probe (retired), which only ever reported conversations the web process itself drove and reported nothing during a Mission pane's turn. `busy` still requires `live`; a dead row answers `busy: false` and carries `wasBusy: true` while its store says a tool part is running. Verified: mission 118/118, mcp 139/139, task-mcp 28/28, plan-mcp 42/42, mutation control (stored copy, `=== 'running'` → `=== 'completed'` in `busyForSessions`) turns exactly the 3 store-backed pins red while the rest stay green. Live: a dead row whose conversation's store reports `running` answers `busy:false, busyKnown:true, wasBusy:true, state:dead` — the pinned contract. **B1 done 5/7** (the two missing clauses name tools plan 53 Phase 9 has not built); **B2 decided 2026-10-06** — `pad_help`'s `GENERAL_GUIDE` IS the onboarding artifact, so B2 becomes an onboarding-completeness audit of it (not a new file). **C1's path is proven live twice** and surfaced C1-F1 which became R7+R8; **R7's id half is fixed and proven live** (fresh start mints its own conversation, `stampTruth` fails closed). **E1 complete and proven live** — the audit log's `actor` column is never empty (702 rows read `system` before; seven Mission actions now attributed). **Phase D COMPLETE (2026-10-07), committed e2ec24d** — conferral (orchestrator MCP key `default` + driver wiring + Remove), Profile key presets, and the server-side namespace split, all pinned by the new `orchestrator.test.js` (7) + mcp D3 (140) and verified live end to end on a throwaway opencode pad (confer → `paddock connected` → remove, no residue). Live finding that earned its own rule: `execFile`+`input` HANGS the container's docker CLI at `read`, so `execInPad` is spawn with a 60s kill-to-fail guard — a hung wire is now a rollback, never an orphaned full-reach key. **Phase C COMPLETE (2026-10-07): C1 green twice on two projects** (paddock, test) — the second run proven live against a real answer; the "two models" clause filed as a gap (fleet has only opencode pads). **Phase E COMPLETE (2026-10-07): E1** audit attribution; **E2** minimum spend visibility (col-1 `N live · M sessions`, browser-verified); **E3** dead-session recovery proven (restart → same tmux + conversation, transcript intact); **E4** resume-cost proven (same store row continues; a resumed turn answered history with 0 tool calls vs the original's `read`). Remaining: B's two journal clauses (53 Phase 9), B2 audit, F (LATER), G closings (user-gated). The queue is empty;
 this plan now orchestrates **sessions**, not tasks. User decision, verbatim:
 *"don't let the user start any task without my vision — remove task submit"*,
 followed by *"rewrite 52 around mission_* sessions"*. **Everything below is
@@ -235,12 +236,13 @@ The gate for everything: the agent can only do what its key says.
 
 ## Phase C — Prove it: the LLM drives a real session
 
-- [~] C1. End-to-end over MCP on a real project, following 53 §1a: inspect →
+- [x] C1. End-to-end over MCP on a real project, following 53 §1a: inspect →
       create project → open session → work → read back → journal. Narrated.
 
-      **Status: the PATH is proven end to end, live, twice. The journal tail is
-      blocked (53 Phase 9), and proving the path surfaced a Critical defect
-      (C1-F1 below) that must be decided before C2 counts.**
+      **Status: COMPLETE (2026-10-07). The PATH is proven end to end, live, on
+      TWO projects (paddock + test, below). The journal tail is blocked (53
+      Phase 9) — `plan_activity` covers the read side, not `mission_checklist` /
+      `mission_notes`. The C1-F1 Critical was resolved (R7/R8), so C2 counts.**
 
       **Run 1 — `msn_6056d53965f3c316` "C1 end-to-end proof", project `paddock`.**
       Reuse check first (B1's new rule): `mission_projects` → 13 sessions,
@@ -354,9 +356,31 @@ The gate for everything: the agent can only do what its key says.
       asserted `busy: false` for an id-less row and nothing about `busyKnown` —
       which is precisely why the lie survived a green suite: nothing in the
       response contradicted `busy: false` on its own.
-- [ ] C2. Every gap becomes an item; nothing advances until C1 is green **twice**
+- [x] C2. Every gap becomes an item; nothing advances until C1 is green **twice**
       — two projects, ideally two different models (the model-independence proof
       from [51§2b]).
+
+      **COMPLETE (2026-10-07) — C1 green twice, two projects, model-independence
+      clause filed as a gap.**
+
+      **Run 3 (the C2 second-project proof) — `msn_97a8561eb03f6ac2`
+      "C2 end-to-end proof (read-only)", project `test`
+      (prj_106aafd00d478ddf, /www2/paddock-test2, pad-opencode-proj).** Reuse
+      check first, exactly as C1: `mission_sessions` → 7 sessions, all `dead`,
+      all the user's own conversations → nothing fit and the rule declined
+      again. Start → `live: true`, `tuiAlive: true`, `inExpectedFolder: true`,
+      `createdBy: "key:…"`, and `agent_session_id` minted on the **first**
+      response (R7). Send read-only → detail showed the spinner, then the store
+      answered: *"`.opencode/`, `AGENTS.md`, `opencode.json` — 3 entries (one
+      hidden directory). Nothing changed."* — verified against the real
+      directory (`ls -la /www2/paddock-test2` = exactly those 3), so the
+      read-back is a real answer. Closed → `endedBy: "closed"`, `resumable`
+      hint emitted. The worktree/folder was unchanged throughout (read-only
+      discipline held).
+
+      **Gap item filed:** the "two different models" clause cannot be proven —
+      the fleet has only opencode pads (no codex/claude). Needs a codex pad:
+      the user's call, since a new PAD is a spend.
 
 ## Phase D — Conferral + client keys
 
@@ -448,20 +472,58 @@ The gate for everything: the agent can only do what its key says.
         Production was never affected — `removeAgentFromDb` clears the log
         first. Test cleanup now mirrors that order, and a control confirms the
         one-line revert reproduces 50 red.
-- [ ] E2. **Cost/spend visibility** (R1): sessions burn tokens invisibly *to the
+- [x] E2. **Cost/spend visibility** (R1): sessions burn tokens invisibly *to the
       model* (a TUI runs whether or not anyone is looking). A per-PAD session
       count + age list on the Mission page is the minimum; a cap/kill-switch is
       the user's call (53 §11 Q6 is still open on capping agent-started
       sessions).
-- [ ] E3. **Dead-session recovery story** (R9): a PAD restart kills every live
+
+      **COMPLETE (2026-10-07) at the agreed minimum, live-verified.** Col-1
+      project rows now render `N live · M sessions` (`msn-project-counts`, green
+      dot when any session is live) from the server's `sessionCount`/`liveCount`
+      — the `listProjects` → `withLive` → `withAgentBusyProjects` chain already
+      computed them and the client dropped them. Verified in the browser: all 6
+      projects show counts; mission 118/118. The per-session age list is col 2's
+      `when(last_seen_at)` rows (already there). The cap/kill-switch remains
+      open — 53 §11 Q6, the user's call.
+- [x] E3. **Dead-session recovery story** (R9): a PAD restart kills every live
       TUI. The rows survive as dead, and the transcript is usually recoverable
       from the CLI's own store (`opencode.db` / `codex` rollout jsonl /
       `~/.claude/projects/*.jsonl`) — make that path explicit ("reopen this
       conversation") instead of implying the work is simply gone.
-- [ ] E4. **Resume proof** (R15): the amended law 3 depends on
+
+      **COMPLETE (2026-10-07) — the path is explicit and proven live.** The
+      surface says it in words, not implications: `mission_session_close` /
+      `mission_session_restart` respond with `resumable` (`via:
+      mission_session_restart (same row, same tmux id)`, `conversation: same`,
+      `agent_session_id`) and live sessions are resumed by `-s <id>`. Plan 68
+      already reopens a dead session on row click. **Live proof (on the C2
+      row):** restart of the closed row came back with the same `tmux_id` AND
+      the same `agent_session_id`, `endedAt` cleared, and the store showed the
+      SAME conversation (`messageCount` continued, not a fresh one). Recovery
+      read: `plan_activity` reads exactly those stores (opencode.db exact-match
+      / codex rollout jsonl / claude projects jsonl), available even when the
+      PAD is stopped (`padRunning` vs `store.available` reported separately).
+      No new code was needed — every piece already carried this; the item owed
+      a proof and a record.
+- [x] E4. **Resume proof** (R15): the amended law 3 depends on
       continue-latest actually working per driver. 53 Phase 5 builds the
       primitives; this phase proves the *cost* claim (resume is much cheaper
       than a new session) with real numbers.
+
+      **COMPLETE (2026-10-07), proven live on opencode with the resumed C2
+      conversation (ses_eed6b8b84ffen8Rde0jI1oFrdZ).** After the restart, the
+      store row was the SAME conversation (`matched: exact`, messageCount 3 →
+      5 as the resume added its two messages) — not a new empty one, so
+      nothing was re-read. The resumed turn answered a *history-only* question
+      ("what did you report earlier?") correctly, **zero tool calls, no `ls`,
+      no re-list** (run 3's `lastToolCall` is run 1's `read`; the resume turn
+      worked purely from context in <1s). The fresh-starts contrast is costed
+      in this file: run 1 needed a `read` (the `ls`-equivalent) to produce the
+      listing, and a fresh session would re-pay that every time; a resume pays
+      ~nothing. Resumed-session capability is what R7 minting made reliable
+      (the `agent_session_id` is named at start). Model caveat: proven on
+      opencode; codex/claude need a pad (see C2's gap item).
 
 ## Phase F — LATER: homes modes (old 49 + plan 44)
 
@@ -484,8 +546,10 @@ verification runs first inside this phase.
 Format: ID · severity · owner phase · status. OPEN = must be decided before its
 owner phase builds.
 
-- [ ] R1 · Critical · Block E — cost caps: sessions burn tokens whether or not
-      anyone is watching; no ceiling/alert/kill-switch.
+- [x] **R1 · Critical · Block E — cost caps.** **E2 minimum landed (2026-10-07):
+      col-1 project rows now show `N live · M sessions`; per-session ages are
+      col 2's rows. The ceiling/alert/kill-switch half stays open — 53 §11 Q6,
+      the user's call.**
 - [ ] R2 · Critical · Block C/E — injection path: repo text → agent output →
       orchestrator context → action. No provenance or output gates.
 - [ ] **R7 · Critical · Block C/E (found by C1, 2026-09-29) — `busy` is
@@ -572,12 +636,20 @@ owner phase builds.
 - [ ] R5 · Critical · Block E — orchestrator key: no rotation, no revocation
       drill, no audit log of its actions.
 - [ ] R6 · Critical · Block F — copy-rebuild wipe guarded by a warning string.
-- [ ] R9 · High · Block E — restart orphans live sessions (rows dead, TUIs gone).
+- [x] **R9 · High · Block E — restart orphans live sessions.** **E3 COMPLETE
+      (2026-10-07):** the recovery path is explicit (`resumable` on close/
+      restart, `-s <id>` resume, plan 68 row-click reopen) and proven live — a
+      closed row restarted into the same tmux + conversation, transcript
+      intact.
 - [ ] R11 · **RESOLVED (user, 2026-09-27): "prune nothing, let it grow."** No
       retention, no caps, no auto-delete; only explicit user deletes remove rows.
 - [ ] R13 · High · Block E — no decision audit: why the agent opened/typed in a
       session is unrecorded.
-- [ ] R15 · High · Block E — resume/continue unproven carrying the amended law 3.
+- [x] **R15 · High · Block E — resume/continue unproven carrying the amended
+      law 3.** **E4 COMPLETE (2026-10-07):** resumption returns to the SAME
+      conversation (store row continues, messageCount 3→5) and a resumed turn
+      answers history-out-of-context with zero tool calls, where the original
+      needed a `read` — the "much cheaper" claim, measured.
 - [ ] R16 · Medium · scope language — "perfect software" is not deliverable; the
       guarantee is "every defect visible, every failure recoverable, zero silent
       loss."

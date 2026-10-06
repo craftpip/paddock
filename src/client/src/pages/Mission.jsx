@@ -302,6 +302,14 @@ function ProjectRow({ project, selected, onSelect, onEdit, onDelete }) {
       <span className="msn-project-meta truncate font-mono text-[10px] text-ink-faint" title={project.folder}>
         {project.agent_name} · {project.folder}
       </span>
+      {project.sessionCount !== undefined && (
+        <span className="msn-project-counts flex items-center gap-1 text-[10px]">
+          <span className={`msn-live-dot h-1 w-1 rounded-full ${(project.liveCount || 0) > 0 ? 'bg-success' : 'bg-ink-faint'}`} />
+          <span className={project.liveCount ? 'text-ink-dim' : 'text-ink-faint'}>
+            {project.liveCount || 0} live · {project.sessionCount} session{project.sessionCount === 1 ? '' : 's'}
+          </span>
+        </span>
+      )}
     </div>
   )
 }
