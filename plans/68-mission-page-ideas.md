@@ -1,12 +1,52 @@
 # Plan 68 — Mission page UI vision (user's redesign ideas — UI ONLY)
 
-## Status: Draft (2026-09-29; audited 2026-10-06) — 6 ideas captured and re-checked
-against the built page. Still gathering: **no design, no build.** The audit is
-below; it changed two of the ideas and found one live bug next to Idea 3.
+## Status: Complete (2026-10-07) — Phases 1–3 built, tested, browser-verified, committed.
 
-Per this file's own rule ("nothing is decided or built until the user says so"),
-the audit stops here. Two of the six need a user decision before they can become
-a proposal at all — see the audit's two blockers.
+Design decisions (each resolved against the audit and the agencies in AGENTS.md):
+
+- **Idea 1 builds with the store, not a UI toggle.** The `scope`/`setScope`
+  state that powered the `This project` / `All projects` buttons is REMOVED
+  (`stores/mission.js`). Scope becomes *derived*: `selectedProjectId` is the
+  only knob — `''` = all projects (the aggregate), a project id = that
+  project. `fetchAll` is the all-view read; `fetchSessions`/`fetchHistory`
+  are the one-project read. **This is Finding A's decision**: the no-selection
+  state is now real and reachable — the store no longer auto-selects
+  `projects[0]` after every load, so "I'm looking at everything" is honest.
+- **`followSessionPatch` / `selectSession` STOP moving `selectedProjectId`**
+  (plan 53 §6's "any change → move the highlight" rule). Col 3 renders from
+  the `openSession` snapshot — its own `projectId`/`agentName` — not from
+  `selectedProjectId`, so the old reason for the move is gone, and in the new
+  model the move would flip col 2's scope on every poll/aggregate-refresh,
+  undoing the user's selection. Col 1 highlight follows the user's click only.
+- **Clicking the selected project again deselects back to "all"** (Idea 1 open
+  question, answered). No always-one-selected invariant.
+- **`+ New session` is disabled until a project is selected** (Finding A's
+  "new-session target needs an answer for no project chosen": the target IS
+  the selection, and with none there is nowhere to start it — disabled, not
+  guessed).
+- **Badge hidden when filtered**: already automatic — only `fetchAll`
+  aggregate rows carry `.project`; project-scoped rows have none. No code.
+- **Idea 2 builds the remaining half** (the re-attach + validation). Column
+  widths/fold already persist. New: `selectedProjectId`,
+  `selectedSessionId`, `openSession` persist to `localStorage`
+  (`pad-mission-view`) and restore on load — Terminal **re-attaches silently**,
+  it does NOT auto-reopen (persist + validate live here; the reopen guard's
+  `autoReopen` stays false on every mount path). Deleted-while-away answers
+  (Idea 2 open question): a selected project that no longer exists → `''`
+  (all view); an open session whose project no longer exists → `openSession`
+  cleared (col 3 empty state).
+- **Idea 6 builds**: `historyErrors` move OUT of the scroller into the `msn-error-bar`
+  band above it (`msn-history-errors`, same band as `sessionsError`/`allError`),
+  each line translated to human words; raw `Command failed: …` text one hover
+  away (`title`). Silent next-poll retry is free — `fetchAll` re-runs every 15s.
+- **Idea 3**: root cause fixed by plan 52 R7; the sibling Finding B is a
+  **REFUSE** decision (one pane per conversation — a second start that resumes
+  an already-attached conversation must be refused). That is a BACKEND guard,
+  out of this UI-only plan's scope: **noted here, implemented in a backend
+  plan**.
+- **Ideas 4 & 5 (split panes, multi-select) are DEFERRED** — Idea 5 is a type
+  change (`selectedProjectId: string` → set), explicitly out of this build.
+  Kept as ideas below; the design notes stand.
 
 Scope: **UI / user-interface changes only.** Layout, columns, rows, buttons,
 dialogs, colours, spacing, responsiveness, empty states, loading states. No
@@ -21,6 +61,36 @@ is decided or built until the user says so.
 Related: plans/53-mission-workspace.md (the built 3-column page — the thing
 being redesigned), plans/62-mission-liveness-truth.md, 63, 64, 65 (open Mission
 work that this vision may confirm, change, or supersede).
+
+---
+
+## Build checklist
+
+UI-only, per the scope rule. Everything below lives in
+`src/client/src/stores/mission.js`, `SessionList.jsx`, `Mission.jsx` (+ a fresh
+pure test in `src/test/mission-view.test.js`).
+
+- [x] **Phase 1 — selection drives col 2; the toggle and the dead scope die (Idea 1 + Finding A).**
+  - [x] Store: drop `scope` field + `setScope` action; comment block rewritten.
+  - [x] Store: `fetchProjects` no longer auto-selects `projects[0]` — selection survives only if still present, else `''` (Finding A).
+  - [x] Store: route every scope branch off `selectedProjectId` (`fetchProjects`, `select`, `setSubfolders`, `refreshActive`, `createProject`, `updateProject`, `deleteProject`).
+  - [x] Store: `select(id)` toggles — same project clicked → deselect to `''` (all view).
+  - [x] Store: `followSessionPatch` / `selectSession` no longer move `selectedProjectId`.
+  - [x] SessionList: remove `msn-scope-row` + `msn-scope-toggle` block; `isAll = !selectedProjectId`; toolbar / folder / empty-state driven by that.
+  - [x] Mission: poll tick drops the scope conditional; col 1 passes `select` straight through (it already did).
+- [x] **Phase 2 — refresh keeps the page state (Idea 2).**
+  - [x] Store: persist `selectedProjectId` / `selectedSessionId` / `openSession` to `localStorage['pad-mission-view']` on every change (guarded for node).
+  - [x] Store: hydrate those three from storage at store init (node-safe).
+  - [x] Store: validate on `fetchProjects` — missing project → `''`; missing open-session project → `openSession: null, sessionState: null`.
+  - [x] SessionList/Mission: unchanged render paths re-attach the terminal from the restored `openSession`; `autoReopen` stays false on mount.
+- [x] **Phase 3 — probe errors out of the list, into the error bar (Idea 6).**
+  - [x] SessionList: move `historyErrors` out of the scroller into the `msn-error-bar` band above it.
+  - [x] New `src/client/src/lib/error-text.js`: pure `translateHistoryError(raw)` — machine reasons (`Command failed:…`, `no-store`, `empty-store`, `unreadable`, `sqlite-failed`, `not running`) get human words; raw stays one `title` hover away.
+- [x] **Tests + verify.** New `src/test/mission-view.test.js` (no-selection fallback, select toggles, followSessionPatch never moves selection, persistence hydrate/validate); `mission-reopen.test.js` still green after the store's `scope` removal; `node --test` for the two files; SPA build + live browser check (toggle gone, click-to-deselect, refresh keeps state, stopped-PAD error in the bar not in the list).
+- [x] Commit the whole build; tick the `infinite.md` line.
+
+Deferred / out of scope (decided above): Ideas 4 & 5; Finding B's backend REFUSE
+guard.
 
 ---
 

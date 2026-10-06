@@ -23,25 +23,72 @@ function errText(e, fallback = 'Something went wrong') {
   return e?.message || e?.error || fallback
 }
 
-/** "Which session is open" as ONE rule, used by every path that changes it —
- *  a click, a refresh that follows the first live row, the aggregate read.
+/* Idea 2 (plan 68): a refresh keeps the page state. Column widths and the
+ * folded state already persist; what reset were the three things that LIVE in
+ * this store — the selected project, the highlighted session, and the open
+ * conversation. So they persist here, as one JSON blob under a key of their
+ * own, written on every change and read back when the store is created.
  *
- *  A row in the 'all' scope also carries the project it belongs to, and col 1
- *  highlights that project. So following a row has to move both. Setting only
- *  `selectedSessionId` — which is what the project-scoped code did, correctly,
- *  because those rows have no project — makes col 1 highlight one project
- *  while the highlighted row is from another. In the project scope
- *  `next.project` is undefined, so this is the old behaviour unchanged.
+ * Node (the test runner) has no localStorage; every touch is guarded. The
+ * guard is `typeof`, not a `try` alone: the WRITE path also needs the catch
+ * because localStorage can throw in privacy modes, but the READ path must not
+ * abort the store over a corrupt blob either. */
+const PERSIST_KEY = 'pad-mission-view'
+
+function readPersistedView() {
+  if (typeof localStorage === 'undefined') {
+    // Same SHAPE regardless of environment: the store's initial `openSession`
+    // must be `null`, never `undefined` — the persist writer serializes
+    // `undefined` as an ABSENT key, and an absent key round-trips to
+    // `undefined` again, so the blob would never carry `openSession`.
+    return { selectedProjectId: '', selectedSessionId: '', openSession: null }
+  }
+  try {
+    const raw = localStorage.getItem(PERSIST_KEY)
+    if (!raw) return { selectedProjectId: '', selectedSessionId: '', openSession: null }
+    const v = JSON.parse(raw)
+    return {
+      selectedProjectId: typeof v.selectedProjectId === 'string' ? v.selectedProjectId : '',
+      selectedSessionId: typeof v.selectedSessionId === 'string' ? v.selectedSessionId : '',
+      openSession: v.openSession || null,
+    }
+  } catch {
+    return { selectedProjectId: '', selectedSessionId: '', openSession: null }
+  }
+}
+
+function writePersistedView(s) {
+  if (typeof localStorage === 'undefined') return
+  try {
+    localStorage.setItem(
+      PERSIST_KEY,
+      JSON.stringify({
+        selectedProjectId: s.selectedProjectId,
+        selectedSessionId: s.selectedSessionId,
+        openSession: s.openSession,
+      })
+    )
+  } catch {
+    /* privacy mode / quota — persistence is best-effort */
+  }
+}
+
+/** "Which session is highlighted" as ONE rule, used by every path that follows
+ *  the first live row — a refresh in either view, the aggregate read.
  *
- *  This moves the HIGHLIGHT only. Which conversation col 3 shows is
- *  `openSession` (see `snapshotOf`), and a refresh must never touch it: the
- *  list is refetched, emptied and re-pointed for reasons that have nothing to
- *  do with the conversation the user is sitting in. */
+ *  This moves the ROW HIGHLIGHT only, and only that. It deliberately never
+ *  touches `selectedProjectId` (plan 68): since plan 68 made the selection the
+ *  source of col 2's scope, following an aggregate row to its project would
+ *  flip the very list that just loaded — a user showing "all projects" would
+ *  be yanked to one. Col 1 highlight follows the user's click and nothing else.
+ *
+ *  Which conversation col 3 shows is `openSession` (see `snapshotOf`), and a
+ *  refresh must never touch it either: the list is refetched, emptied and
+ *  re-pointed for reasons that have nothing to do with the conversation the
+ *  user is sitting in. */
 function followSessionPatch(rows, currentId) {
   const pick = rows.find((s) => s.id === currentId) || rows.find((s) => s.live) || rows[0] || null
-  const patch = { selectedSessionId: pick?.id || '' }
-  if (pick?.project?.id) patch.selectedProjectId = pick.project.id
-  return patch
+  return { selectedSessionId: pick?.id || '' }
 }
 
 /** A frozen copy of the row that was opened, plus enough of its project for col
@@ -82,11 +129,19 @@ function snapshotOf(row, projects) {
 // state alone. Module scope on purpose: it is per page load, not per component.
 let startToken = 0
 
-export const useMission = create((set, get) => ({
+export const useMission = create((set, get) => {
+  // Idea 2 (plan 68) hydrate: read the persisted view ONCE at store creation.
+  // Empty in node (no localStorage) and on a first visit.
+  const restored = readPersistedView()
+  return {
   projects: [],
   loading: true,
   error: '',
-  selectedProjectId: '',
+  // `''` = no selection = the ALL-projects view. A project id = that project's
+  // view. There is no third state (plan 68 removed `scope`): what col 2 shows
+  // is derived from this one field, so a selection change can never leave the
+  // column showing a list from the other scope.
+  selectedProjectId: restored.selectedProjectId,
   // Live tmux sessions of the selected project, and the agent's own history in
   // its folder.
   sessions: [],
@@ -96,25 +151,23 @@ export const useMission = create((set, get) => ({
   historyLoading: false,
   historyError: '',
   includeSubfolders: false,
-  // Which list col 2 is showing (plan 53 Phase 6): 'project' = only the
-  // selected project (the original behaviour), 'all' = every project at once.
-  // ONE pair of arrays backs both scopes — `sessions` / `history` are whatever
-  // the active scope resolved to — so the column has a single render path and
-  // cannot show a stale list from the other scope.
-  scope: 'project',
-  allLoading: false,
-  allError: '',
   // True once the aggregate read succeeded — the placeholder must not show on a
   // refresh, and must still show on a first load (same rule as `loadedFor`).
+  allLoading: false,
+  allError: '',
   allLoaded: false,
-  // Which projects the aggregated history read failed for. Reported inline
-  // instead of replacing the list: one stopped PAD must not hide the others.
+  // Which projects the aggregated history read failed for. Reported in the
+  // column's error BAR, never as rows inside the list (plan 68 Idea 6): one
+  // stopped PAD must not hide the others, and a probe failure is not a
+  // conversation.
   historyErrors: [],
-  selectedSessionId: '',
+  selectedSessionId: restored.selectedSessionId,
   // The conversation col 3 is showing — a snapshot taken when it was opened, NOT
   // derived from `sessions`. See `snapshotOf`: this is what keeps a scope switch
-  // or a poll from tearing the terminal down.
-  openSession: null,
+  // or a poll from tearing the terminal down. Restored from localStorage on
+  // load (plan 68 Idea 2) so a refresh re-attaches instead of dropping you on
+  // the empty state.
+  openSession: restored.openSession,
   // Pane state of the open session (live / tuiAlive / cwd), see fetchSessionState.
   sessionState: null,
   // The session currently being auto-reopened (plan 68), keyed by id so only
@@ -135,23 +188,37 @@ export const useMission = create((set, get) => ({
     try {
       const data = await api('/api/mission/projects')
       const projects = data.projects || []
-      set((s) => ({
-        projects,
-        loading: false,
-        error: '',
-        // Keep the selection if it survived the refresh, else fall back to the
-        // first project — an empty col 2 is a dead end.
-        selectedProjectId: projects.some((p) => p.id === s.selectedProjectId)
-          ? s.selectedProjectId
-          : projects[0]?.id || '',
-      }))
-      // A different project means the old sessions and history are wrong. In
-      // 'all' scope the project list is still the trigger for re-reading, but
-      // the list to re-read is the aggregate one.
+      set((s) => {
+        const patch = {
+          projects,
+          loading: false,
+          error: '',
+          // Keep the selection only if the project is still there. If it is
+          // gone (deleted elsewhere), THAT becomes the no-selection / all view —
+          // plan 68 did away with the "always one selected" fallback (Finding A),
+          // and restoring it would be the same dead-end the finding named.
+          selectedProjectId: projects.some((p) => p.id === s.selectedProjectId)
+            ? s.selectedProjectId
+            : '',
+        }
+        // An open session whose project has vanished cannot render, and worse,
+        // would attach a terminal against a deleted row: drop it back to the
+        // empty state. The session row itself is whatever col 3 says it is once
+        // its own read runs — this only clears the SNAPSHOT.
+        if (s.openSession?.projectId && !projects.some((p) => p.id === s.openSession.projectId)) {
+          patch.openSession = null
+          patch.sessionState = null
+        }
+        return patch
+      })
+      // No selection = the all view — and with it the column's entire read. A
+      // selection change below never leaves the list pointing at the other
+      // scope, so there is exactly one "re-read what the selection resolves to":
+      // the aggregate when there is none, the project's own rows when there is.
       const sel = get().selectedProjectId
-      if (get().scope === 'all') {
+      if (!sel) {
         if (!get().allLoaded) get().fetchAll()
-      } else if (sel && get().loadedFor !== sel) {
+      } else if (get().loadedFor !== sel) {
         get().fetchSessions(sel)
         get().fetchHistory(sel, get().includeSubfolders)
       }
@@ -160,66 +227,47 @@ export const useMission = create((set, get) => ({
     }
   },
 
-  /** Selecting a project loads its sessions AND its history — the history is
-   *  what makes the column useful on arrival. In 'all' scope the aggregate list
-   *  is already showing every project, so switching the col-1 selection only
-   *  changes what a NEW session would belong to — re-reading the same rows
-   *  would just cost a round trip.
+  /** Selecting a project makes it the col 2 scope: its sessions AND its history
+   *  load, and the empty col-2 state becomes "this project". Clicking the SAME
+   *  project again DESELECTS it back to the all view (plan 68 Idea 1) — the
+   *  no-selection state is real, and the lists are swapped for the aggregate.
+   *  `scope` is gone; this one field IS the scope.
    *
-   *  It deliberately does NOT close the open conversation. It used to, and that
-   *  was the same defect as the scope switch one level up: col 3 belongs to the
+   *  It deliberately does NOT close the open conversation. Col 3 belongs to the
    *  session you opened, not to the listing you are looking at, and a project
    *  click is not "close what I am working in". Col 3 keeps its terminal and
    *  names the open session's own project in its header, so col 1/col 2 and
    *  col 3 pointing at different projects is legible rather than confusing. */
   select: (projectId) => {
-    if (get().selectedProjectId === projectId) return
-    set({ selectedProjectId: projectId, selectedSessionId: '' })
-    if (get().scope === 'all') {
-      if (!get().allLoaded) get().fetchAll()
+    if (get().selectedProjectId === projectId) {
+      set({ selectedProjectId: '', selectedSessionId: '', sessions: [], history: null, loadedFor: '' })
+      get().fetchAll()
       return
     }
-    set({ sessions: [], history: null, loadedFor: '' })
+    set({ selectedProjectId: projectId, selectedSessionId: '', sessions: [], history: null, loadedFor: '' })
     if (projectId) {
       get().fetchSessions(projectId)
       get().fetchHistory(projectId, get().includeSubfolders)
     }
   },
 
-  /** Switch col 2 between "this project" and "all projects". The arrays are
-   *  dropped first, deliberately: a list that keeps showing the other scope's
-   *  rows for a moment reads as "the switch did nothing". The open conversation
-   *  is not in those arrays and is not touched — only a click on a row changes
-   *  what col 3 shows. */
-  setScope: (scope) => {
-    const next = scope === 'all' ? 'all' : 'project'
-    if (get().scope === next) return
-    set({ scope: next, sessions: [], history: null, loadedFor: '', allLoaded: false })
-    if (next === 'all') return get().fetchAll()
-    const sel = get().selectedProjectId
-    if (sel) {
-      get().fetchSessions(sel)
-      get().fetchHistory(sel, get().includeSubfolders)
-    }
-  },
-
-  /** The "N more in subfolders" expander. Scope-aware for the same reason the
-   *  list itself is: in 'all' it re-reads EVERY project, not the one in col 1 —
-   *  expanding must not quietly show one project's subfolders under a heading
-   *  that claims to cover all of them. */
+  /** The "N more in subfolders" expander. Read against the current view: no
+   *  selection means EVERY project's aggregated history, a selection means that
+   *  project's own — expanding must not quietly show one project's subfolders
+   *  under a heading that claims to cover all of them. */
   setSubfolders: (on) => {
     set({ includeSubfolders: on })
-    if (get().scope === 'all') return get().fetchAll()
+    if (!get().selectedProjectId) return get().fetchAll()
     return get().fetchHistory(get().selectedProjectId, on)
   },
 
-  /** Re-read whatever the active scope is showing. Every mutation (start, close,
-   *  relaunch, restart, lock) and the 15s poll go through this instead of
+  /** Re-read whatever the current selection resolves to. Every mutation (start,
+   *  close, relaunch, restart, lock) and the 15s poll go through this instead of
    *  `fetchSessions`, which is hard-wired to the col-1 project — refreshing
    *  that while the user is looking at the aggregate list would leave the
    *  visible list stale after every action. */
   refreshActive: () => {
-    if (get().scope === 'all') return get().fetchAll()
+    if (!get().selectedProjectId) return get().fetchAll()
     return get().fetchSessions()
   },
 
@@ -245,9 +293,10 @@ export const useMission = create((set, get) => ({
         sessionsLoading: false,
         allLoaded: true,
         // Same rule as the project scope: keep the open session, else follow a
-        // live one. Going through the shared helper is what also moves col 1 to
-        // that row's project — the aggregated list can hand us a session from a
-        // project the user did not have selected.
+        // live one. The shared helper highlights the row only — it cannot move
+        // the col-1 selection here, because this IS the no-selection view and
+        // a followed row's project must not turn it into a one-project view
+        // (plan 68 Idea 1).
         ...followSessionPatch(sessions, s.selectedSessionId),
       }))
     } else {
@@ -375,7 +424,7 @@ export const useMission = create((set, get) => ({
       })
       await get().refreshActive()
       // The re-read above puts the new row in `sessions` with its `live` flag
-      // and (in the 'all' scope) its project, so the snapshot is built from
+      // and (in the all view) its project, so the snapshot is built from
       // that row rather than from the POST response, which carries none of it.
       // Falls back to the response when the list has not caught up yet.
       if (data?.session?.id && token === startToken) {
@@ -401,11 +450,14 @@ export const useMission = create((set, get) => ({
     }
   },
 
-  /** Open a row. In the 'all' scope the row also carries the project it belongs
-   *  to, and col 3 renders the terminal against that project — so a click has to
-   *  move col 1 too, or opening a row from another project would show that
-   *  session's pane in the wrong container. Project-scoped rows have no
-   *  `.project`, so this is a no-op in that scope.
+  /** Open a row. The row carries its project (aggregate view) or the selection
+   *  says which project it belongs to (project view) — either way the snapshot
+   *  below captures the agent and folder the session runs against, so col 3
+   *  renders the terminal for that project. It deliberately does NOT move col
+   *  1's selection (`selectedProjectId`): the selection is the scope now, and
+   *  opening a row in the all view must not yank the list off it (plan 68).
+   *  The snapshot is what col 3 renders from, which covers the need the old
+   *  move served — the right container for the session's own project.
    *
    *  This is one of the two things that write `openSession` (the other is
    *  `startSession`). Nothing else does, which is what makes col 3 immune to
@@ -415,7 +467,6 @@ export const useMission = create((set, get) => ({
     set({
       selectedSessionId: sessionId,
       openSession: snapshotOf(row, get().projects),
-      ...(row?.project?.id ? { selectedProjectId: row.project.id } : {}),
       sessionState: null,
       reopenError: '',
     })
@@ -516,15 +567,13 @@ export const useMission = create((set, get) => ({
     const data = await api('/api/mission/projects', { method: 'POST', body: payload })
     await get().fetchProjects()
     if (data?.project?.id) {
-      // Selecting the new project makes it the col-1 selection, which is also
-      // what `+ New session` targets in the 'all' scope — so a new project is
-      // immediately usable there without switching scopes first.
+      // Selecting the new project makes it the col-1 selection — and since the
+      // selection IS the scope (plan 68), that also makes col 2 show it and
+      // gives `+ New session` a target. A new project is immediately usable
+      // without re-navigating.
       set({ selectedProjectId: data.project.id, selectedSessionId: '', sessions: [], history: null, loadedFor: '' })
-      if (get().scope === 'all') get().fetchAll()
-      else {
-        get().fetchSessions(data.project.id)
-        get().fetchHistory(data.project.id, get().includeSubfolders)
-      }
+      get().fetchSessions(data.project.id)
+      get().fetchHistory(data.project.id, get().includeSubfolders)
     }
     return data.project
   },
@@ -538,8 +587,8 @@ export const useMission = create((set, get) => ({
     await get().fetchProjects()
     if (folderChanged) {
       set({ history: null, loadedFor: '' })
-      if (get().scope === 'all') get().fetchAll()
-      else {
+      if (!get().selectedProjectId) get().fetchAll()
+      else if (get().selectedProjectId === id) {
         get().fetchSessions(id)
         get().fetchHistory(id, get().includeSubfolders)
       }
@@ -558,9 +607,10 @@ export const useMission = create((set, get) => ({
     set({ selectedSessionId: '', sessions: [], history: null, loadedFor: '' })
     await get().fetchProjects()
     // The aggregate list held rows from the project that is now gone; the
-    // project list re-read above re-selects whatever exists, so re-read the
-    // visible list too or col 2 would keep showing a project that is not there.
-    if (get().scope === 'all') get().fetchAll()
+    // project list re-read above already reset the selection to whatever
+    // exists (possibly `''`), so re-read the visible list too or col 2 would
+    // keep showing a project that is not there.
+    if (!get().selectedProjectId) get().fetchAll()
   },
 
   /** Probe a container folder inside the PAD. Never throws: a missing folder is
@@ -591,4 +641,12 @@ export const useMission = create((set, get) => ({
   },
 
   clearFolder: () => set({ folder: null }),
-}))
+  }
+})
+
+// Idea 2 (plan 68): persist the three view fields on every change. `subscribe`
+// fires when any state changes, so write the JSON blob always — cheap, and the
+// hydrate side only reads back what it shaped. This is the ONLY touch point:
+// `selectedProjectId` changes in dozens of places and none of them should have
+// to remember to persist.
+useMission.subscribe((s) => writePersistedView(s))

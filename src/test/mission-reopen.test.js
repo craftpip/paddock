@@ -124,7 +124,6 @@ beforeEach(async () => {
   // a carried-over `reopenFor` would make the ordering assertions pass for free.
   ({ useMission: store } = await import(`${STORE_URL}?t=${process.hrtime.bigint()}`));
   store.setState({
-    scope: 'all',
     sessions: [{ id: SESSION_ID, live: false, project: { id: 'prj_test' } }],
     projects: [{ id: 'prj_test', name: 'paddock', folder: '/www2/paddock' }],
     // ALREADY OPEN. Without this every direct fetchSessionState call takes the

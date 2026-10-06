@@ -362,7 +362,7 @@ export default function Mission() {
   )
   const {
     projects, loading, error, selectedProjectId,
-    openSession, sessionState, scope,
+    openSession, sessionState,
     reopenFor, reopenError,
     fetchProjects, select, deleteProject, refreshActive,
     relaunch, restart,
@@ -385,7 +385,7 @@ export default function Mission() {
    *  which is why the header carries the open session's own project name.
    *
    *  The project is looked up by the snapshot's own id, and the agent/folder
-   *  fall back to the snapshot's copies, so a session opened in the 'all' scope
+   *  fall back to the snapshot's copies, so a session opened in the all view
    *  keeps rendering against ITS project even if col 1 has moved on — and even
    *  after that project is deleted from the list (col 3 then correctly shows the
    *  closed state, because its sessions really are). */
@@ -414,8 +414,10 @@ export default function Mission() {
   // keeps showing the last frame, so the pane state is the only truth.
   //
   // `refreshActive` re-reads whatever col 2 is actually showing: the poll used to
-  // call fetchSessions(projectId) directly, which in the 'all' scope would refresh
-  // a list nobody is looking at and leave the visible one frozen.
+  // call fetchSessions(projectId) directly, which in the all view would refresh
+  // a list nobody is looking at and leave the visible one frozen. Since plan 68
+  // the selection IS the scope, so the call is simply unconditional — the store
+  // branches on `selectedProjectId` itself (`''` → the aggregate re-read).
   useEffect(() => {
     const tick = () => {
       if (document.hidden) return
@@ -424,7 +426,7 @@ export default function Mission() {
       // project selected has no other way to notice one. The list refresh
       // already re-reads the pane state of whatever session ends up open.
       fetchProjects()
-      if (scope === 'all' || selectedProjectId) refreshActive()
+      refreshActive()
     }
     const t = setInterval(tick, 15000)
     document.addEventListener('visibilitychange', tick)
@@ -432,7 +434,7 @@ export default function Mission() {
       clearInterval(t)
       document.removeEventListener('visibilitychange', tick)
     }
-  }, [selectedProjectId, scope, fetchProjects, refreshActive])
+  }, [fetchProjects, refreshActive])
 
   const act = (fn, msg) => async () => {
     setActionError('')

@@ -3,6 +3,7 @@ import OverlayScroll from './OverlayScroll'
 import Button from './ui/Button'
 import { useConfirm } from '../lib/confirm'
 import { useMission } from '../stores/mission'
+import { translateHistoryError } from '../lib/error-text'
 
 // Col 2 — every conversation in this project, in ONE list.
 //
@@ -111,11 +112,10 @@ function LiveRow({ session, selected, onSelect, onClose, onLock }) {
         {open && (
           <span className="msn-session-dot h-1.5 w-1.5 shrink-0 rounded-full bg-success" title={dotTitle} />
         )}
-        {/* Only in the 'all' scope, where rows from different projects sit in
-            one list and a session label cannot say which folder it is in. The
-            store sets `.project` only on the aggregated rows, so this never
-            duplicates the project name the scope toggle already shows. This is
-            an IDENTITY label, not a state marker: without it two rows from
+        {/* Only when the list spans multiple projects — the store sets `.project`
+            only on the aggregated rows, so this never duplicates the project
+            name a single-project view already shows elsewhere. This is an
+            IDENTITY label, not a state marker: without it two rows from
             different folders are indistinguishable in one list. */}
         {session.project && (
           <span
@@ -325,14 +325,16 @@ export default function SessionList() {
   const {
     sessions, sessionsLoading, sessionsError,
     history, historyLoading, historyError, historyErrors, includeSubfolders, loadedFor,
-    scope, allLoaded, allError, selectedSessionId, startingKey, projects,
-    selectSession, startSession, closeSession, toggleSessionLock, setSubfolders, setScope,
+    selectedProjectId, allLoaded, allError, selectedSessionId, startingKey, projects,
+    selectSession, startSession, closeSession, toggleSessionLock, setSubfolders,
   } = useMission()
 
   const [actionError, setActionError] = useState('')
   const project = useMission((s) => s.projects.find((p) => p.id === s.selectedProjectId))
   const confirm = useConfirm()
-  const isAll = scope === 'all'
+  // Plan 68: there is no `scope` — the selection IS the scope. `''` = the
+  // ALL-projects view; a project id = that project's view.
+  const isAll = !selectedProjectId
 
   // In 'all' the column still needs a project for `+ New session` and for
   // resuming a history row that predates the aggregate, but there is nothing to
@@ -454,7 +456,7 @@ export default function SessionList() {
           className="msn-btn-new-session py-1 text-[11px]"
           title={project ? `New session in ${project.name}` : 'Pick a project first'}
         >
-          {newBusy ? 'Opening…' : isAll ? `+ New in ${project?.name || '…'}` : '+ New session'}
+          {newBusy ? 'Opening…' : '+ New session'}
         </Button>
         <span
           className="msn-project-folder ml-auto truncate font-mono text-[10px] text-ink-faint"
@@ -464,54 +466,11 @@ export default function SessionList() {
         </span>
       </div>
 
-      {/* The scope switch (plan 53 Phase 6). Its own row rather than sharing the
-          toolbar with the new-session button: at the default 220px column width
-          both would truncate, and a control that changes what the whole column
-          means deserves to be readable, not squeezed. Two buttons, not a select —
-          the answer to "which list am I looking at" must be visible without
-          opening anything.
-
-          It is the app's OWN segmented switcher, the one in
-          `pages/agent/WorkspaceToolbar.jsx` (`rounded-control bg-sunken/60
-          p-0.5` + two real `Button`s, selected = `primary`): one rounded group,
-          one surface, the selected fill coming from the primitive so it can never
-          drift from every other primary button in the app. It used to be a
-          hand-rolled strip — full-bleed, un-rounded, a `gap-px` stripe of
-          container colour between the halves, and colours written out by hand —
-          which is why it read as a tinted band with two text links in it rather
-          than as one control. The `mx-3` inset is the column's 12px inset, so
-          the control's edge lines up with the rows below it, and the wrapper
-          keeps the column's `border-b` continuous (a border on the control
-          itself would be the full column width under an inset box, which reads
-          as a band again). */}
-      <div className="msn-scope-row flex shrink-0 items-center border-b border-line-faint py-1.5">
-        <div
-          className="msn-scope-toggle mx-3 flex min-w-0 flex-1 items-center rounded-control bg-sunken/60 p-0.5"
-          role="group"
-          aria-label="Which projects to list"
-        >
-          <Button
-            variant={!isAll ? 'primary' : 'ghost'}
-            size="sm"
-            onClick={() => setScope('project')}
-            aria-pressed={!isAll}
-            className="msn-scope-project min-w-0 flex-1"
-            title="Only the project selected on the left"
-          >
-            This project
-          </Button>
-          <Button
-            variant={isAll ? 'primary' : 'ghost'}
-            size="sm"
-            onClick={() => setScope('all')}
-            aria-pressed={isAll}
-            className="msn-scope-all min-w-0 flex-1"
-            title="Every project's sessions and conversations, with the project shown on each row"
-          >
-            All projects
-          </Button>
-        </div>
-      </div>
+      {/* No scope switch (plan 68): the col-1 selection IS the scope, so the
+          choice lives in the rail — click a project avatar for that project's
+          view, click it again (or pick nothing) for all projects. A second,
+          independent switch inside the column was where the two scopes could
+          disagree with each other. */}
 
       {actionError && (
         <div className="msn-error-bar border-b border-danger/30 bg-danger/10 px-3 py-1.5 text-[11px] text-danger">{actionError}</div>
@@ -521,6 +480,22 @@ export default function SessionList() {
       )}
       {allError && (
         <div className="msn-error-bar border-b border-danger/30 bg-danger/10 px-3 py-1.5 text-[11px] text-danger">{allError}</div>
+      )}
+      {/* Per-project probe failures (plan 68 Idea 6), moved OUT of the scroller
+          into the column's error band: they are not rows and never were, and a
+          stopped PAD's line must not ride the scroll of the listing above it.
+          The raw reason stays one `title` hover away — the machine string a
+          caller can act on, exactly the phrase the backend sent. */}
+      {historyErrors.length > 0 && (
+        <div className="msn-history-errors border-b border-line-faint px-3 py-1.5 text-[10px] text-ink-faint">
+          {historyErrors.map((e) => (
+            <div key={e.project?.id || e.project?.name || e.error} className="msn-history-error truncate" title={e.error}>
+              <span className="msn-history-error-project text-ink-dim">{e.project?.name || 'a project'}</span>
+              {' — '}
+              {translateHistoryError(e.error)}
+            </div>
+          ))}
+        </div>
       )}
 
       {/* OverlayScroll for the same reason as col 1: a native scrollbar would
@@ -548,23 +523,9 @@ export default function SessionList() {
         {!listLoaded && !hist && rows.length === 0 && <Empty>{isAll ? 'Loading every project…' : 'Loading…'}</Empty>}
         {historyLoading && !hist && <Empty>Reading the agent's history…</Empty>}
         {historyError && <Empty>{historyError}</Empty>}
-        {/* Per-project failures, listed and NOT replacing the rows above them: a
-            stopped PAD or an agent with no store must not make it look like you
-            have no conversations anywhere. */}
-        {historyErrors.length > 0 && (
-          <div className="msn-history-errors border-b border-line-faint px-3 py-1.5 text-[10px] text-ink-faint">
-            {historyErrors.map((e) => (
-              <div key={e.project?.id || e.project?.name || e.error} className="msn-history-error truncate">
-                <span className="msn-history-error-project text-ink-dim">{e.project?.name || 'a project'}</span>
-                {' — '}
-                {e.error}
-              </div>
-            ))}
-          </div>
-        )}
         {/* One empty state for the whole column, and it only claims "nothing
             anywhere" when nothing FAILED — if every project was unreadable the
-            errors above are the story, and an empty-state line would blame the
+            error band above is the story, and an empty-state line would blame the
             agent for a stopped PAD. */}
         {rows.length === 0 && (listLoaded || hist) && historyErrors.length === 0 && (
           <Empty>
