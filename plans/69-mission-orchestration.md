@@ -2,7 +2,7 @@
 
 ## Status: Proposed (2026-10-07) — design complete, not started. All design calls
 are decided below (§ Design proposal); the audit (2026-10-06) stands. Nothing is
-built; phases P1–P4 await the go to build.
+In progress — building (started 2026-10-07). P1–P4 in checklist below.
 
 Scope: **MCP / orchestration only.** How an LLM driving Paddock over MCP runs
 work through agents and sessions: task model, lifecycle steps
