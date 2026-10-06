@@ -323,7 +323,7 @@ session's pad, exactly like the `mission_*` tools.
 
 ### Phases / checklist
 
-- [~] **P1 — schema + session binding.** (schema added; session binding pending) `task_steps` table (derived from the
+- [~] **P1 — schema + session binding.** (schema added; session binding pending). `task_steps` table (derived from the
       real schema, migration suite with the absent-columns control), `task_submit
       { session_id, reviewer }` validation (session exists on the pad, folder
       matches project), `task_status`/`task_list` read the derived step. Tests:
