@@ -1,6 +1,6 @@
 # Pages
 
-> Last updated: 2026-08-17
+> Last updated: 2026-10-07
 
 All pages are React components served from `src/client/src/pages/`. The built SPA lives at `src/public/` and is served by Express at the root path.
 
@@ -366,6 +366,55 @@ Wizard for setting up a running PAD: Telegram bot token, channel user ID, and a
 model-provider API key. Submits to `POST /api/agents/:name/onboard` (the flow
 that was formerly `scripts/onboard-bot.sh`, absorbed into app.js route handlers
 and `vm-manager.js` config patching). Secrets live in the Vault, not a JSON file.
+
+## Mission (`/mission`)
+
+File: `Mission.jsx` + `stores/mission.js` (zustand) + `components/SessionList.jsx`.
+
+Three-column workspace for the coding agents (opencode/codex/claude): col 1 lists
+the projects (a project is a PAD + folder pair), col 2 lists that project's
+sessions (or, in the all view, every session across projects), col 3 is the open
+session's terminal. Every element carries a stable `msn-*` class for points-at —
+the full selector map lives in `plans/53-mission-workspace.md` §6.
+
+**Selection is the scope — there is no toggle (plan 68).** The old
+`scope`/`setScope` ("This project" / "All projects" buttons) is gone. Scope is
+derived from `selectedProjectId`: `''` = all projects (the aggregate read
+`fetchAll`), a project id = that project (`fetchSessions`/`fetchHistory`). The
+list is **never** auto-narrowed to `projects[0]`, and clicking the already
+selected project again **deselects** to the all view. Two store consequences
+worth keeping: `followSessionPatch` and `selectSession` never move
+`selectedProjectId` (col 3 renders from the `openSession` snapshot's own
+`projectId`, so session highlights track their own project, deliberately) and
+every refetch path branches on `!selectedProjectId` — the selected project's
+list refresh must never route into the all-view read, or a poll would drop the
+selected column back to the aggregate (the old `refreshActive` froze
+all-projects after any selected-project mutation).
+
+**The view persists across a refresh (plan 68).** `selectedProjectId`,
+`selectedSessionId` and the whole `openSession` snapshot persist to
+`localStorage['pad-mission-view']` on every state change and hydrate once at
+store creation. On load each field is validated: a project that no longer
+exists → `''`, an `openSession` whose project is gone → `null`. A refresh
+therefore re-attaches the open terminal to the same conversation with **no
+click and no autoReopen** (the opt-in stays the user's open action). Two
+implementation facts: `openSession` round-trips as `null`, never an **absent
+key**, because `JSON.stringify` drops `undefined` and an absent key rehydrates
+to `undefined` again (first-visit store state must be `null`); and a corrupt
+blob is ignored (`''`/`''`/`null`), never thrown.
+
+**`"+ New session"` is disabled until a project is selected** — in the all view
+it shows the tooltip "Pick a project first" and the label never varies ("+ New
+session", not "+ New in \<project\>"). New sessions are created per selected
+project.
+
+**History probe errors live in the error band, not the list (plan 68).**
+Per-project history reads that fail (e.g. "agent is not running") surface as a
+band above the session scroller so they cannot push rows around. `SessionList`
+runs each `error` through `lib/error-text.translateHistoryError` (a pure
+function) for a human sentence and carries the raw reason in the row's `title`
+— the raw string stays reachable on hover. The same translation can be reused
+anywhere a backend error string needs to become UI prose.
 
 ## Frontend Conventions and Gotchas
 
