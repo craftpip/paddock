@@ -457,8 +457,7 @@ async function withSessionState(agent, rows) {
     );
     sessions = await mission.withAgentBusy(
       sessions,
-      () => agent.name,
-      (s) => s.project?.folder || s.directory || s.cwd || null
+      () => agent.name
     );
   } catch {
     // The plans folder is on disk and the store is the answer about WORK; a

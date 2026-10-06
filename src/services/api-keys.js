@@ -15,16 +15,18 @@ const VM_NAME_RE = new RegExp('^' + VM_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\
 //       `default` / `control` — full access to everything the owner can reach.
 //       `read`               — read/inspect only (no exec, no workspace writes,
 //                              no lifecycle). May be combined with `target:*`.
-//   * Fine-grained grants (default base = read + workspace + exec):
+//   * Fine-grained grants (default base = read + workspace):
 //       `target:owned`              — target = every agent the owner owns.
 //       `target:agent:<pad-name>`   — target = a single PAD only.
+//       `tools:exec`                — + exec, mission_send, mission_session_start
+//                                     and the other session-driving verbs.
 //       `tools:lifecycle`           — + start / stop / restart.
 //       `tools:recreate`            — + recreate / update.
 //       `tools:create`              — + create_agent.
 //       `tools:delete`              — + delete_agent.
 //       `tools:reset`               — + recreate with reset:true (wipes data).
 // The MCP server enforces these before the owner/admin checks (see mcp.js). */
-const TOOL_GRANTS = ['lifecycle', 'recreate', 'create', 'delete', 'reset'];
+const TOOL_GRANTS = ['exec', 'lifecycle', 'recreate', 'create', 'delete', 'reset'];
 
 /** Validate a scope list (array or comma-string). Throws Error on the first
  *  problem; returns the normalized, de-duplicated comma-joined string. */

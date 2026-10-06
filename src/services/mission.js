@@ -6,6 +6,7 @@ const drivers = require('./drivers');
 const padTmux = require('./pad-tmux');
 const registry = require('./agent-registry');
 const workspace = require('./workspace');
+const agentStore = require('./agent-store');
 
 // Mission (plan 53): projects are (agent, folder) pairs, and a session is the
 // only unit of work — one live tmux session per row, running the agent's TUI in
@@ -1026,7 +1027,7 @@ async function screen(sessionId, lines = 40) {
       cwd: state.cwd,
       folder: project.folder,
     },
-    await agentWorkingSessions(project.agent_name, project.folder)
+    await busyForSessions([{ agent_name: project.agent_name, agent_session_id: session.agent_session_id }])
   );
   if (advanced) row.last_output_at = advanced;
   // The detail read PROBED the pane, so it is a liveness observation exactly
@@ -1110,41 +1111,38 @@ async function statesFor(vmsAndSessions) {
   return out;
 }
 
-/** One truth for (live, busy, busyKnown, open) — plan 62 1a+1e.
- *  `busy` requires `live`: a dead row never reports busy, and `open` never
- *  counts a row `mission_send` will refuse (dead, or a live shell pane).
- *  `wasBusy` preserves the forensics (the server still claims the conversation)
- *  without lying on `busy`. `state: "dead"` makes the corpse explicit. */
+/** One truth for (live, busy, busyKnown, open) — plan 62 1a+1e, as amended by
+ *  plan 52 R8. The `busy` half is now answered by each conversation's OWN store
+ *  (see busyForSessions) rather than the opencode web server's `?directory=`
+ *  probe, so the probe is per conversation: `probe.busyOf` / `probe.knownOf` map
+ *  an `agent_session_id` to whether its newest tool part is running and whether
+ *  the store could be read at all. That retires plan 62 1e's cwd-vs-folder
+ *  UNKNOWN branch — it existed because a folder-scoped probe could not answer
+ *  for a pane running elsewhere, and an id-keyed store read has no such blind
+ *  spot.
+ *
+ *  The plan 62 guarantees all survive: `busy` requires `live` (a dead row never
+ *  reports busy, and `open` never counts a row `mission_send` will refuse);
+ *  `wasBusy` preserves the forensics (the store's last claim) without lying on
+ *  `busy`; `state: "dead"` makes the corpse explicit; and a row that was never
+ *  looked at is UNKNOWN (busyKnown false), never idle (C1-F1). A row with no
+ *  `agent_session_id` CANNOT be intersected with anything, so it is UNKNOWN no
+ *  matter how healthy the probe was. */
 function stampTruth(s, probe) {
   const live = s.live === true;
-  // A row with no `agent_session_id` CANNOT be intersected with the agent's
-  // live-work map, so we did not look at this conversation at all. Reporting
-  // `probe.known` here is the plan 52 C1-F1 defect: "the probe worked" is not
-  // "this session is idle" when there is no id to intersect with it, so the row
-  // read as a confident false while the pane was visibly mid-turn. A fresh
-  // start now mints its conversation up front (see startSession), so a NULL id
-  // means the agent type could not tell us — and UNKNOWN is the only honest
-  // answer. Same rule as the cwd mismatch below, for the same reason.
-  const known = probe.known && !!s.agent_session_id;
+  const id = s.agent_session_id;
+  const looked = !!(id && probe.knownOf && probe.knownOf.get(id));
   if (!live) {
-    const wasBusy = !!(s.agent_session_id && probe.ids.has(s.agent_session_id));
-    return { ...s, busy: false, busyKnown: known, open: false, state: 'dead', ...(wasBusy ? { wasBusy: true } : {}) };
+    const wasBusy = !!(id && probe.busyOf && probe.busyOf.get(id));
+    return { ...s, busy: false, busyKnown: looked, open: false, state: 'dead', ...(wasBusy ? { wasBusy: true } : {}) };
   }
   // Live: a shell pane is reachable as a shell but `mission_send` refuses it,
-  // so it is not `open` as an agent session. Unknown kind (no pane map, e.g. a
-  // mocked PAD in tests) keeps the old `open = live` behaviour.
+  // so it is not `open` as an agent session.
   if (s.tuiAlive === false) {
-    return { ...s, busy: false, busyKnown: known, open: false };
+    return { ...s, busy: false, busyKnown: looked, open: false };
   }
-  // Pane cwd is ground truth for the folder-scoped probe: when the pane runs
-  // elsewhere, the probe scoped to the project folder cannot answer, so stamp
-  // UNKNOWN, never idle (plan 62 1e).
-  const folder = s.folder;
-  if (known && folder && s.cwd && s.cwd !== folder) {
-    return { ...s, busy: false, busyKnown: false, open: s.tuiAlive !== false };
-  }
-  const busy = !!(s.agent_session_id && probe.ids.has(s.agent_session_id));
-  return { ...s, busy, busyKnown: known, open: s.tuiAlive !== false };
+  const busy = !!(id && probe.busyOf && probe.busyOf.get(id));
+  return { ...s, busy, busyKnown: looked, open: s.tuiAlive !== false };
 }
 
 /** Live + pane map for one PAD in two execs (still O(PADs), never O(sessions)).
@@ -1289,160 +1287,100 @@ async function withLiveSessionsByAgent(sessions, agentOf) {
   return out;
 }
 
-/* Which of a PAD's own opencode conversations are WORKING right now, keyed by
- * the agent's session id (`ses_…`) rather than by our tmux id.
+/* What "busy" means, and where it comes from — plan 52 R8(a).
  *
- *  `live` can only see our own terminal: it is a tmux session id, so a
- *  conversation the user is driving from the opencode **web UI** — chatting,
- *  thinking — has no tmux session at all and reads as closed. The opencode
- *  server already knows the truth for every client at once and publishes it at
- *  `GET /session/status` as `{ [sessionID]: { type: 'busy' | 'idle' | 'retry' } }`
- *  (schema `components.schemas.SessionStatus`, verified live). `retry` counts as
- *  working: the agent is still on that session, waiting to retry a provider
- *  call, so the dot belongs on.
+ *  Busy used to be answered by the opencode web server's `GET /session/status`
+ *  `?directory=` probe — and that probe answered a DIFFERENT PROCESS than the
+ *  one being described. The web server publishes only the conversations its OWN
+ *  process drives, while a Mission pane is a separate `opencode` TUI with no
+ *  sockets of its own: measured, a visible `esc interrupt` across 42 seconds
+ *  with our id absent from the map while the user's web-UI session was reported
+ *  busy throughout. The shared sqlite made the read LOOK wired up (same id
+ *  resolved) exactly while it answered the wrong question.
  *
- *  Best effort BY DESIGN. No server, an unknown port, auth we cannot satisfy, a
- *  timeout, unparseable output — every one of those yields an empty set and
- *  `known: false`, and the listing renders exactly as it did before. This page
- *  is the one people keep open all day; it must never fail because a probe did.
- *  `known` is what lets the row's tooltip say "could not ask" instead of
- *  implying "idle", which is a lie the probe has no way to express.
+ *  The store is the SHARED truth: the TUI's sqlite and the web UI's sqlite are
+ *  the same file, so a conversation's own newest tool part carrying
+ *  `state.status: 'running'` is a turn happening in WHICHEVER client drives it.
+ *  That is decision (a): a session is busy iff its own newest tool part is
+ *  running. Two consequences, both intended:
  *
- *  The port is the PAD's own published `web.containerPort`, NEVER the driver
- *  default: the driver says 8080 while the server actually running in this PAD
- *  is on 7890, and the wrong port answers `{}` — "nothing is working" — forever,
- *  which looks exactly like the bug this was written to fix.
+ *  - Busy now reads per conversation, not per (PAD, folder). Plan 62 1e's
+ *    cwd-vs-folder UNKNOWN branch existed because the folder probe could not
+ *    answer for a pane elsewhere; an id-keyed store read has no such blind
+ *    spot, so the branch is gone (see stampTruth).
+ *  - A frozen `running` (a process killed mid-call never writes `completed`)
+ *    is the honest upper-bound note on a DEAD row (`wasBusy`), the same
+ *    "endedAt is an upper bound" precedent as plan 65. It can never lie about
+ *    `busy`, because busy requires `live`, and a killed process does not hold
+ *    a live pane.
  *
- *  The call is scoped with `?directory=`, and that is not a filter we added for
- *  tidiness — it is the whole mechanism. Unscoped, the server answers `{}` even
- *  while a turn is streaming (verified: a 8.2s turn, 25 polls, `{}` throughout);
- *  scoped to the folder the turn is running in, the same poll returns
- *  `{"ses_…":{"type":"busy"}}` on the first try. A project row is scoped to a
- *  folder anyway, so this also keeps the probe at one call per project.
- *
- *  What the map does NOT contain: a session that is merely OPEN somewhere and
- *  idle. It is a live-work registry, not a presence list — it empties the moment
- *  the turn completes — and the server exposes no client/connection registry to
- *  ask instead. So the dot means "working now, or live in our own terminal",
- *  and an idle tab open in the web UI is not something the server can tell us.
- *
- *  The web password is read from INSIDE the container (`$OPENCODE_SERVER_PASSWORD`,
- *  the Web tab's "Server password", username always `opencode`) so the secret
- *  never appears on the host command line. Cached for a few seconds because the
- *  sessions and history endpoints are separate requests over the same 15s poll.
+ *  Cost: one store read per id. opencode is one indexed sqlite walk (~2 ms) —
+ *  the same read plan_activity uses; codex and claude parse that one
+ *  conversation's rollout file, so the cost scales with transcript length, the
+ *  same model plan_activity documents (mission pads are mostly opencode). A
+ *  short TTL coalesces the list + detail + projects passes of one poll and
+ *  stops repeated jsonl parses. A failed read is `known: false`, never
+ *  `busy: false`-as-a-claim (C1-F1).
  */
-const WORKING_TTL = 5000;
-const WORKING_CACHE = new Map();
+const BUSY_TTL = 5000;
+const BUSY_CACHE = new Map();
 
-async function agentWorkingSessions(vmName, folder) {
-  const none = { ids: new Set(), known: false };
-  if (!vmName || !folder) return none;
-  const key = `${vmName}::${folder}`;
-  const hit = WORKING_CACHE.get(key);
-  if (hit && Date.now() - hit.at < WORKING_TTL) return hit.value;
-
-  let port = 0;
-  let type = '';
-  try {
-    const agent = registry.getAgent(vmName);
-    type = String(agent?.agent_type || agent?.type || '');
-    port = parseInt(agent?.web?.containerPort, 10) || 0;
-  } catch {
-    /* fall through to the soft failure below */
-  }
-  // Only opencode publishes this. Every other agent type keeps mission liveness
-  // alone, which is a real gap rather than a bug — hence `known: false`, never
-  // a guess that the conversation is idle.
-  if (!port || type !== 'opencode') {
-    WORKING_CACHE.set(key, { at: Date.now(), value: none });
-    return none;
-  }
-
-  // Percent-encoded in JS so a folder with a space or an `&` cannot smuggle
-  // itself into the query string, and so the value that reaches the container's
-  // shell is inert (only %XX, alphanumerics and . - _ ~ survive).
-  const dir = encodeURIComponent(folder);
-  let body = '';
-  try {
-    const r = await padTmux.padExec(
-      vmName,
-      [
-        `p=${port}`,
-        'u="http://127.0.0.1:$p/session/status?directory=' + dir + '"',
-        'out=$(curl -s -m 5 "$u" 2>/dev/null)',
-        'case "$out" in',
-        `  '{'*) printf '%s' "$out" ;;`,
-        '  *) if [ -n "$OPENCODE_SERVER_PASSWORD" ]; then',
-        '       curl -s -m 5 -u "opencode:$OPENCODE_SERVER_PASSWORD" "$u" 2>/dev/null',
-        '     fi ;;',
-        'esac',
-      ].join('\n'),
-      { timeout: 9000, check: false }
-    );
-    body = String(r?.stdout || '');
-  } catch {
-    /* soft: the listing is not worth failing over a probe */
-  }
-
-  let parsed = null;
-  try {
-    parsed = JSON.parse(body || 'null');
-  } catch {
-    parsed = null;
-  }
-  const value =
-    parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? {
-          ids: new Set(
-            Object.entries(parsed)
-              .filter(([, v]) => v && (v.type === 'busy' || v.type === 'retry'))
-              .map(([k]) => k)
-          ),
-          known: true,
-        }
-      : none;
-  WORKING_CACHE.set(key, { at: Date.now(), value });
-  return value;
+/** Probe `rows` (flat session rows carrying `agent_name` and
+ *  `agent_session_id`) through each conversation's own store. Returns
+ *  `{ busyOf, knownOf }`: `busyOf` maps an id whose store says its newest tool
+ *  part is running; `knownOf` maps an id whose store could actually be read.
+ *  An id we were not asked about is absent from both — stampTruth turns that
+ *  into UNKNOWN, and that absence is exactly what stops "the probe worked"
+ *  from reading as "this row is idle" (C1-F1). */
+async function busyForSessions(rows) {
+  const busyOf = new Map();
+  const knownOf = new Map();
+  await Promise.all((rows || []).map(async (s) => {
+    const id = s && s.agent_session_id;
+    const vm = s && s.agent_name;
+    if (!id || !vm) return;
+    const key = `${vm}::${id}`;
+    const hit = BUSY_CACHE.get(key);
+    if (hit && Date.now() - hit.at < BUSY_TTL) {
+      busyOf.set(id, hit.value.busy);
+      knownOf.set(id, hit.value.known);
+      return;
+    }
+    let value = { busy: false, known: false };
+    try {
+      const row = await agentStore.readActivity(vm, id);
+      const ok = !!(row && row.store && row.store.available);
+      value = {
+        busy: !!(ok && row.lastToolCall && row.lastToolCall.status === 'running'),
+        known: ok,
+      };
+    } catch {
+      value = { busy: false, known: false };
+    }
+    BUSY_CACHE.set(key, { at: Date.now(), value });
+    busyOf.set(id, value.busy);
+    knownOf.set(id, value.known);
+  }));
+  return { busyOf, knownOf };
 }
 
-/** Stamp the agent's own view of "is this conversation working" onto a flat
- *  list of rows, keyed by `agent_session_id`. One probe per (PAD, folder) pair.
+/** Stamp each row from its OWN conversation's store: `busy` = its newest tool
+ *  part is running, `busyKnown` = we could read that store (plan 52 R8(a)). One
+ *  store read per row instead of one web probe per (PAD, folder), so several
+ *  projects sharing one PAD each get the truth for their own conversation — and
+ *  a folder-scoping mistake is impossible, because there is no folder in the
+ *  key. `folderOf` was the web probe's scoping input and no longer exists.
  *
- *  `open` is the marker the user actually asked for, and it is deliberately not
+ *  `open` is the marker the user actually asked for, but it is deliberately not
  *  a rename of `live`: `live` still means "we have a tmux session on this", and
  *  it still drives the terminal's Relaunch-vs-Restart and "session is gone"
  *  states. `open` is `live OR busy` — the dot — so nothing downstream changes
- *  meaning when the server is unreachable. */
-async function withAgentBusy(sessions, agentOf, folderOf) {
+ *  meaning when a store cannot be read. */
+async function withAgentBusy(sessions, agentOf) {
   if (!sessions || !sessions.length) return sessions || [];
-  // Grouped by (PAD, folder), NOT by PAD: several projects routinely share one
-  // PAD — `paddock`, `schlorp` and `craftpip` all ran on `pad-opencode-proj` —
-  // and the probe is scoped to a directory, so keying on the PAD alone would ask
-  // about the first folder and stamp that answer on rows belonging to the
-  // others. That failure is silent and reads as "nothing is working anywhere".
-  const groups = new Map();
-  const keyOf = sessions.map((s) => {
-    const vm = agentOf(s);
-    const folder = folderOf ? folderOf(s) : s.folder;
-    if (!vm || !folder) return null;
-    const key = JSON.stringify([vm, folder]);
-    if (!groups.has(key)) groups.set(key, { vm, folder, value: null });
-    return key;
-  });
-  await Promise.all(
-    [...groups.values()].map(async (g) => {
-      g.value = await agentWorkingSessions(g.vm, g.folder);
-    })
-  );
-  return sessions.map((s, i) => {
-    const g = groups.get(keyOf[i]);
-    const p = (g && g.value) || { ids: new Set(), known: false };
-    // Plan 62 1a+1e: one truth — busy requires live, cwd mismatch is unknown.
-    // Carry the project folder on the row when the caller resolved it via
-    // folderOf, so the cwd-vs-folder check has both sides.
-    const folder = folderOf ? folderOf(s) : s.folder;
-    return stampTruth({ ...s, folder: folder || s.folder }, p);
-  });
+  const rows = sessions.map((s, i) => ({ ...s, agent_name: agentOf(s, i) }));
+  const probe = await busyForSessions(rows);
+  return rows.map((s, i) => stampTruth(s, probe));
 }
 
 /** The agent's OWN conversations (`agentHistory` rows) get the same dot, from the
@@ -1457,7 +1395,7 @@ async function withHistoryActivity(rows, project) {
   if (!rows || !rows.length) return rows || [];
   const vm = project.agent_name;
   const [probe, liveRows] = await Promise.all([
-    agentWorkingSessions(vm, project.folder),
+    busyForSessions(rows.map((r) => ({ agent_name: vm, agent_session_id: r.id }))),
     padTmux.listSessions(vm).catch(() => []),
   ]);
   const liveNames = new Set((liveRows || []).map((r) => r.name));
@@ -1469,14 +1407,15 @@ async function withHistoryActivity(rows, project) {
       .map((r) => r.agent_session_id)
   );
   return rows.map((r) => {
-    const busy = probe.ids.has(r.id);
-    return { ...r, busy, busyKnown: probe.known, open: busy || resumedOpen.has(r.id) };
+    const busy = probe.busyOf.get(r.id) === true;
+    return { ...r, busy, busyKnown: probe.knownOf.get(r.id) === true, open: busy || resumedOpen.has(r.id) };
   });
 }
 
 /** The same, for the nested project shape (`listProjects`). Projects own the PAD
- *  name AND the folder, so both are carried on for the flat call — the probe is
- *  scoped to a folder, and asking the wrong one answers `{}`. */
+ *  name AND the folder, but under plan 52 R8 busy is keyed by the conversation's
+ *  own id — a project row never re-scopes anything, so only the PAD is carried
+ *  on for the flat call. */
 async function withAgentBusyProjects(projects) {
   if (!projects || !projects.length) return projects || [];
   const rows = [];
@@ -1489,8 +1428,7 @@ async function withAgentBusyProjects(projects) {
   if (rows.length) {
     const stamped = await withAgentBusy(
       rows.map((r) => ({ ...r.s, agent_name: r.vm, folder: projects[r.pi].folder })),
-      (r) => r.agent_name,
-      (r) => r.folder
+      (r) => r.agent_name
     );
     rows.forEach((r, i) => at.set(`${r.pi}:${r.si}`, stamped[i]));
   }
@@ -1707,7 +1645,7 @@ module.exports = {
   withLive,
   withLiveSessions,
   withLiveSessionsByAgent,
-  agentWorkingSessions,
+  busyForSessions,
   withAgentBusy,
   withAgentBusyProjects,
   closeSession,

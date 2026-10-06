@@ -896,51 +896,68 @@ describe('Mission - openCount is a count, not a maybe', () => {
 // two places, so they could disagree — most dangerously, a DEAD row reporting
 // `busy: true, open: true` while `mission_send` refused it. These pin the one
 // truth function both the list and detail paths now share.
-describe('Mission - liveness must not lie (plan 62)', () => {
-  const stamp = (s, probe) => mission.stampTruth(s, { ids: new Set(), known: true, ...probe });
-  const busySet = (id) => ({ ids: new Set([id]), known: true });
+describe('Mission - liveness must not lie (plan 62, as amended by plan 52 R8)', () => {
+  // Plan 52 R8 moved the busy half from the opencode web server's folder-scoped
+  // `?directory=` probe to each conversation's OWN store. The probe shape is now
+  // `{ busyOf, knownOf }` Maps keyed by `agent_session_id` — `busyOf` holds ids
+  // whose newest tool part is running, `knownOf` ids whose store we could read.
+  // A probe is only as good as what it was probed WITH: a row whose id is absent
+  // from `knownOf` was never looked at and is UNKNOWN, never idle (C1-F1).
+  const mkProbe = ({ busy = [], known = [] } = {}) => ({
+    busyOf: new Map(busy.map((id) => [id, true])),
+    knownOf: new Map(known.map((id) => [id, true])),
+  });
+  const stamp = (s, probe) =>
+    mission.stampTruth(s, {
+      busyOf: new Map(),
+      knownOf: new Map(),
+      ...probe,
+    });
 
-  it('a dead row is never busy and never open, however hard the server claims', () => {
-    const dead = stamp({ id: 'msn_a', live: false, agent_session_id: 'ses_x' }, busySet('ses_x'));
+  it('a dead row is never busy and never open, however hard the store claims', () => {
+    const dead = stamp({ id: 'msn_a', live: false, agent_session_id: 'ses_x' }, mkProbe({ busy: ['ses_x'], known: ['ses_x'] }));
     assert.strictEqual(dead.busy, false, 'a corpse cannot be working');
     assert.strictEqual(dead.open, false, 'and open must not count a row send refuses');
     assert.strictEqual(dead.state, 'dead', 'the corpse says so');
-    // The forensics survive without contaminating `busy`.
-    assert.strictEqual(dead.wasBusy, true, 'the server still claims the conversation');
+    // The forensics survive without contaminating `busy`: a frozen `running`
+    // (a process killed mid-call never writes `completed`) counsels "do not
+    // act" on the dead row only (plan 65's upper-bound precedent).
+    assert.strictEqual(dead.wasBusy, true, 'the store still claims the conversation');
   });
 
-  it('a live row the server calls busy is busy and open', () => {
-    const row = stamp({ id: 'msn_b', live: true, agent_session_id: 'ses_y', cwd: '/w' }, busySet('ses_y'));
+  it('a live row whose store says running is busy and open', () => {
+    const row = stamp({ id: 'msn_b', live: true, agent_session_id: 'ses_y', cwd: '/w' }, mkProbe({ busy: ['ses_y'], known: ['ses_y'] }));
     assert.strictEqual(row.busy, true);
     assert.strictEqual(row.open, true);
     assert.strictEqual(row.busyKnown, true);
   });
 
   it('a live SHELL pane is not open, because a send there runs commands', () => {
-    const row = stamp({ id: 'msn_c', live: true, tuiAlive: false, kind: 'shell', agent_session_id: 'ses_z' }, busySet('ses_z'));
+    const row = stamp({ id: 'msn_c', live: true, tuiAlive: false, kind: 'shell', agent_session_id: 'ses_z' }, mkProbe({ busy: ['ses_z'], known: ['ses_z'] }));
     assert.strictEqual(row.open, false, 'open means "a send would be accepted"');
     assert.strictEqual(row.busy, false, 'a shell is not working on anything');
   });
 
-  it('a pane running in ANOTHER folder is UNKNOWN, never idle', () => {
-    // The probe is scoped to the project folder; this pane is not in it, so the
-    // answer describes a different conversation. `busyKnown: true` here would
-    // read as "genuinely idle" and become licence to type.
-    const row = stamp({ id: 'msn_d', live: true, folder: '/proj', cwd: '/elsewhere', agent_session_id: 'ses_w' }, busySet('ses_w'));
-    assert.strictEqual(row.busyKnown, false, 'a mismatched cwd cannot answer for this folder');
-    assert.strictEqual(row.busy, false);
+  it('a pane running in ANOTHER folder is still answered by its own store (plan 52 R8)', () => {
+    // Plan 62 1e's cwd-vs-folder UNKNOWN branch is GONE: it existed because the
+    // folder-scoped web probe could not answer for a pane running elsewhere, and
+    // an id-keyed store read has no such blind spot. A conversation's store IS
+    // the conversation, wherever the pane sits.
+    const row = stamp({ id: 'msn_d', live: true, folder: '/proj', cwd: '/elsewhere', agent_session_id: 'ses_w' }, mkProbe({ busy: ['ses_w'], known: ['ses_w'] }));
+    assert.strictEqual(row.busy, true, 'the store says the session itself is mid-turn');
+    assert.strictEqual(row.busyKnown, true, 'and we did look at that conversation');
   });
 
-  it('an unanswerable probe never yields busyKnown: true', () => {
+  it('an unreadable store never yields busyKnown: true', () => {
     const row = mission.stampTruth(
       { id: 'msn_e', live: true, folder: '/proj', cwd: '/proj', agent_session_id: 'ses_v' },
-      { ids: new Set(), known: false }
+      { busyOf: new Map(), knownOf: new Map() }
     );
     assert.strictEqual(row.busyKnown, false, 'unknown, not idle');
   });
 
   it('a row with no agent conversation is never busy, whatever the probe holds', () => {
-    const row = stamp({ id: 'msn_f', live: true, agent_session_id: null, cwd: '/p' }, busySet('ses_u'));
+    const row = stamp({ id: 'msn_f', live: true, agent_session_id: null, cwd: '/p' }, mkProbe({ busy: ['ses_u'], known: ['ses_u'] }));
     assert.strictEqual(row.busy, false, 'no id to match means no claim to make');
     // Plan 52 C1-F1. This is the assertion that was MISSING, and its absence is
     // why the defect survived a green suite: the row above proves we refuse to
@@ -958,16 +975,107 @@ describe('Mission - liveness must not lie (plan 62)', () => {
     // an extra step: a corpse with no id reported `busyKnown: true`, so a caller
     // polling a dead row would read a positive statement about a conversation
     // nobody ever checked.
-    const row = stamp({ id: 'msn_g', live: false, agent_session_id: null }, busySet('ses_t'));
+    const row = stamp({ id: 'msn_g', live: false, agent_session_id: null }, mkProbe({ busy: ['ses_t'], known: ['ses_t'] }));
     assert.strictEqual(row.state, 'dead');
     assert.strictEqual(row.busyKnown, false, 'a corpse with no id is unknown, not idle');
     assert.strictEqual(row.wasBusy, undefined, 'and carries no busy forensics to suggest otherwise');
   });
 
   it('a SHELL pane with no id is unknown, not idle', () => {
-    const row = stamp({ id: 'msn_h', live: true, tuiAlive: false, kind: 'shell', agent_session_id: null }, busySet('ses_s'));
+    const row = stamp({ id: 'msn_h', live: true, tuiAlive: false, kind: 'shell', agent_session_id: null }, mkProbe({ busy: ['ses_s'], known: ['ses_s'] }));
     assert.strictEqual(row.open, false);
     assert.strictEqual(row.busyKnown, false, 'same rule on the shell branch');
+  });
+});
+
+// Plan 52 R8(a): `busy` is answered by each conversation's OWN store, not by the
+// opencode web server's `/session/status` — the server only reports conversations
+// ITS process drives, and a Mission pane is a separate TUI with no sockets, so
+// its turns never appeared there (measured: an idle web-UI session reported busy
+// across 42s of a visible `esc interrupt` on a Mission pane). The store is the
+// shared sqlite, so its newest tool-part status is the truth for WHICHEVER
+// client drives the conversation. These tests stub `agentStore.readActivity` and
+// assert through the real `busyForSessions` / `withAgentBusy` /
+// `withAgentBusyProjects` seams, exactly as production calls them. Distinct
+// `agent_session_id`s per subtest so the 5s `BUSY_CACHE` never answers the next
+// test from this one's reads.
+describe('Mission - busy reads each conversation\u2019s own store (plan 52 R8)', () => {
+  const agentStore = require('../services/agent-store');
+  const realRead = agentStore.readActivity;
+  const running = { store: { available: true }, lastToolCall: { status: 'running' } };
+  const done = { store: { available: true }, lastToolCall: { status: 'completed' } };
+
+  afterEach(() => {
+    agentStore.readActivity = realRead;
+  });
+
+  it('busyOf names exactly the sessions whose newest tool part is running', async () => {
+    agentStore.readActivity = async (vm, id) => (id === 'run_1' ? running : done);
+    const { busyOf, knownOf } = await mission.busyForSessions([
+      { agent_name: 'pad-msn-oc', agent_session_id: 'run_1' },
+      { agent_name: 'pad-msn-oc', agent_session_id: 'idle_1' },
+    ]);
+    assert.strictEqual(busyOf.get('run_1'), true);
+    assert.strictEqual(busyOf.get('idle_1'), false);
+    assert.strictEqual(knownOf.get('run_1'), true, 'the running store was readable');
+    assert.strictEqual(knownOf.get('idle_1'), true);
+  });
+
+  it('an unreadable or throwing store is known:false, never a claim', async () => {
+    agentStore.readActivity = async () => {
+      throw new Error('boom');
+    };
+    const { busyOf, knownOf } = await mission.busyForSessions([{ agent_name: 'pad-msn-oc', agent_session_id: 'dead_1' }]);
+    assert.strictEqual(busyOf.get('dead_1'), false);
+    assert.strictEqual(knownOf.get('dead_1'), false, 'a read we could not make is UNKNOWN, not idle');
+  });
+
+  it('a row with no conversation id is not even asked', async () => {
+    let asked = 0;
+    agentStore.readActivity = async () => {
+      asked++;
+      return done;
+    };
+    await mission.busyForSessions([{ agent_name: 'pad-msn-oc', agent_session_id: null }]);
+    assert.strictEqual(asked, 0, 'no id means there is nothing to intersect');
+  });
+
+  it('withAgentBusy stamps a session busy from its OWN store, even with a drifted cwd', async () => {
+    const p = mission.createProject({ name: 'r8-busy', agent: 'pad-msn-oc', folder: '/www1/r8' });
+    const s = mission.createSession(p.id, { tmuxId: 'msn-a1111111' });
+    agentStore.readActivity = async (vm, id) => (id === 'run_2' ? running : done);
+    const [row] = await mission.withAgentBusy(
+      [{ ...s, live: true, tuiAlive: true, cwd: '/elsewhere', folder: '/www1/r8', agent_session_id: 'run_2' }],
+      () => p.agent_name
+    );
+    // Plan 62 1e's cwd-vs-folder UNKNOWN branch is retired: the id-keyed store
+    // answers the conversation itself, so WHERE the pane sits is irrelevant.
+    assert.strictEqual(row.busy, true, 'the store says this conversation is mid-turn');
+    assert.strictEqual(row.busyKnown, true);
+    assert.strictEqual(row.open, true);
+  });
+
+  it('withAgentBusyProjects aggregates the store-backed busy into openCount', async () => {
+    const p = mission.createProject({ name: 'r8-aggr', agent: 'pad-msn-oc', folder: '/www1/r8' });
+    const a = mission.createSession(p.id, { tmuxId: 'msn-b2222222' });
+    const b = mission.createSession(p.id, { tmuxId: 'msn-c3333333' });
+    agentStore.readActivity = async (vm, id) => (id === 'run_3' ? running : done);
+    const [proj] = await mission.withAgentBusyProjects([
+      {
+        id: p.id,
+        agent_name: p.agent_name,
+        folder: p.folder,
+        sessions: [
+          { ...a, live: true, tuiAlive: true, agent_session_id: 'run_3' },
+          { ...b, live: false, agent_session_id: 'idle_3' },
+        ],
+      },
+    ]);
+    assert.strictEqual(proj.sessions[0].busy, true, 'the running tool part lights the row');
+    assert.strictEqual(proj.sessions[0].open, true);
+    assert.strictEqual(proj.sessions[1].busy, false, 'a dead row is never busy, however the store reads');
+    assert.strictEqual(proj.sessions[1].state, 'dead');
+    assert.strictEqual(proj.openCount, 1, 'only the live running session counts open');
   });
 });
 
@@ -1286,7 +1394,7 @@ describe('Mission - detail and list tell the same story (plan 62 1d)', () => {
     // `withLiveSessions` alone would compare a missing field against a real one
     // and prove nothing about parity.
     const liven = await mission.withLiveSessions([s], p.agent_name);
-    const [listed] = await mission.withAgentBusy(liven, () => p.agent_name, () => p.folder);
+    const [listed] = await mission.withAgentBusy(liven, () => p.agent_name);
     const detail = await mission.screen(s.id);
     for (const f of ['live', 'open', 'kind', 'tuiAlive', 'busy', 'busyKnown']) {
       assert.deepStrictEqual(detail.session[f], listed[f], `${f} must not depend on how it was read`);

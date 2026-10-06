@@ -1,6 +1,6 @@
 # Plan 52 — Orchestrator (session-based: keys, grants, conferral, playbook, proof)
 
-## Status: Rewritten (2026-09-29) — **2/7 phases complete (A, E1); B and C started.** A1 audited + fail-closed default; A2 verified — it surfaced that `exec` is a base grant, so the least-privilege key of D2 cannot be expressed (user decision, recorded in infinite.md); A3 `autoApprove` flipped to opt-in (R3 closed). Phase A gate: all suites green, webui restarted, tool surface verified live at 31 tools. **B1 done 5/7** (the two missing clauses name tools plan 53 Phase 9 has not built); **B2 blocked** on a user call — no onboarding artifact exists to rewrite and its form is plan 51 §4's undecided question, while `pad_help` already serves a better one. **C1's path is proven live twice** (two sessions, both answers verified from outside the session) and **surfaced C1-F1, Critical: a fresh session can never report `busy`**, measured mid-turn as `busy:false, busyKnown:true, canSend:true` while the pane read `esc interrupt`. **R7's id half is now fixed and proven live** — a fresh start mints its own conversation with `POST /session?directory=…` and launches the TUI into it with `-s <id>`, so the row carries the id from its first response (verified in `ps`), which restores `title` and real resume; `stampTruth` also fails closed on all three branches so an id-less row is UNKNOWN, never idle (mission 105 → 113, two mutation controls). **But `busy` is still inert, and R7 was only half the defect: R8 (new, Critical) is that the busy probe is answered by the `opencode web` process, which never sees a TUI pane's live turn** — 42 consecutive seconds of a visible `esc interrupt` with our id absent from `/session/status`, while the user's own web-UI session was reported busy the whole time. The agent's own store does see the turn, so the fix exists, but choosing between "newest tool part is `running`" and "activity within N seconds" changes what `busy` means product-wide and moves the liveness cost from per-(PAD, folder) to per-session — **user's call, recorded as `## Needs your call` in infinite.md.** **E1 is complete and proven live** — the audit log's `actor` column had never been set by anything (all 702 rows read `system`), so it recorded *what* but never *who*; `recordActivity` now takes an actor, and seven Mission actions are attributed in the same `key:<id>` / `user:<id>` / `system` vocabulary the rows already use for `created_by`. Phases D, E2–E4, F and G not started. The queue is gone;
+## Status: Rewritten (2026-10-06) — **2/7 phases complete (A, E1); B and C started.** A1 audited + fail-closed default; **A2 DECIDED and DONE (2026-10-06)** — after the user's call, `exec` flipped from a base grant to an opt-in `tools:exec` bucket, so the least-privilege key of D2 is now expressible (mission_send/start/close/relaunch/restart and the task_* run verbs all ride it; `workspace_write` stays base); A3 `autoApprove` flipped to opt-in (R3 closed). Phase A gate: all suites green (mcp 139, task-mcp 28, plan-mcp 42), mutation control proved (re-adding `exec` to the base branch turns exactly the 3 opt-in pin tests red), webui restarted, tool surface verified live at 31 tools. **R8 DECIDED (a) and DONE (2026-10-06): implemented as decided.** The user chose "newest tool part is `running`" — a session is busy iff its own newest tool part's `state.status === 'running'`, read from the conversation's own store (`mission.busyForSessions`, one `agentStore.readActivity` per session id, cached ~5s). This replaces the per-(PAD, folder) `GET /session/status` web probe (retired), which only ever reported conversations the web process itself drove and reported nothing during a Mission pane's turn. `busy` still requires `live`; a dead row answers `busy: false` and carries `wasBusy: true` while its store says a tool part is running. Verified: mission 118/118, mcp 139/139, task-mcp 28/28, plan-mcp 42/42, mutation control (stored copy, `=== 'running'` → `=== 'completed'` in `busyForSessions`) turns exactly the 3 store-backed pins red while the rest stay green. Live: a dead row whose conversation's store reports `running` answers `busy:false, busyKnown:true, wasBusy:true, state:dead` — the pinned contract. **B1 done 5/7** (the two missing clauses name tools plan 53 Phase 9 has not built); **B2 decided 2026-10-06** — `pad_help`'s `GENERAL_GUIDE` IS the onboarding artifact, so B2 becomes an onboarding-completeness audit of it (not a new file). **C1's path is proven live twice** and surfaced C1-F1 which became R7+R8; **R7's id half is fixed and proven live** (fresh start mints its own conversation, `stampTruth` fails closed). **E1 complete and proven live** — the audit log's `actor` column is never empty (702 rows read `system` before; seven Mission actions now attributed). Phases D, E2–E4, F and G not started. The queue is gone;
 this plan now orchestrates **sessions**, not tasks. User decision, verbatim:
 *"don't let the user start any task without my vision — remove task submit"*,
 followed by *"rewrite 52 around mission_* sessions"*. **Everything below is
@@ -142,27 +142,27 @@ The gate for everything: the agent can only do what its key says.
       restoring the fail-open default turns **1** test red; dropping
       `task_cancel`'s map entry turns **2** red. mcp 136/136, task-mcp 28/28,
       plan-mcp 42/42, mission 97/97, auth 3/3.
-- [x] A2. Mission grants **verified (2026-09-29) — and the requested proof turned out
-      to be impossible.** The item asks for a fail-closed proof that "a key
-      without `exec` gets `Not permitted by API key tool grant: mission_send`".
-      Writing it showed there is no such key: **`exec` is a BASE grant, not an
-      opt-in bucket** (`toolAllowed` returns early for `READ_TOOLS`, `exec`,
-      `workspace_write`, and anything the map routes to `exec`), so every
-      fine-grained key holds it. The only keys without `exec` are `read` keys,
-      which have nothing else either. The mission grants themselves are correct
-      (`mission_projects`/`mission_sessions` read, `mission_project_create`
-      `create`, the rest `exec`) and per-PAD scoping holds; **what is wrong is
-      that the least-privilege key D2 describes cannot be expressed.** Measured
-      matrix: a key scoped to **nothing but `target:owned`** — no `tools:` grant
-      at all — can `mission_send`, `mission_session_start` and `exec`, i.e. type
-      into the human's live conversations and spawn token-burning TUIs. That
-      contradicts law 2, §5 direct mode and D2, all of which assume `exec` is
-      something a key holds or does not. **Not changed here**: making `exec`
-      opt-in is a breaking change to what a key means and is the user's call
-      (no live key is affected — all 9 are `control`/`default`, which return
-      before the map is read). Pinned by a test that asserts today's matrix, so
-      the change cannot happen by accident. Decision in `infinite.md` § Needs
-      your call. Control: making `exec` opt-in turns **6** tests red.
+- [x] A2. Mission grants **DECIDED + IMPLEMENTED (2026-10-06).** The item asked
+      for a fail-closed proof that "a key without `exec` gets `Not permitted by
+      API key tool grant: mission_send`". Writing it showed there is no such
+      key: **`exec` was a BASE grant** (`toolAllowed` returned early for
+      `READ_TOOLS`, `exec`, `workspace_write`, and anything the map routes to
+      `exec`), so every fine-grained key held it and the least-privilege key D2
+      describes could not be expressed. The user's call (infinite.md § Needs
+      your call, "make exec an opt-in grant") was ASKED and ANSWERED. Now:
+      **`exec`, `mission_send`, `mission_session_start`, `mission_session_close`,
+      `mission_session_relaunch`, `mission_session_restart`, `mission_permission_answer`,
+      `plan_write` and the task_* mutators all require the `tools:exec` bucket** —
+      a brand-new key starts with read + `workspace_write` + its `target:` scope
+      and nothing that runs work or types into a session. No live key is
+      affected (all are `control`/`default`, which return before the map is
+      read). Pin: the "PINS exec as an OPT-IN grant" test asserts the
+      fail-closed matrix (no `tools:` grant → all three session verbs refused;
+      `tools:exec` → all three granted). Controls: re-adding `exec` to the base
+      branch turns exactly the 3 opt-in pins red (exec opt-in, base
+      fine-grained, task exec bucket) while the other 136 stay green. `git log`
+      note: this is one of two 2026-10-06 decisions that unblock plan 52 from
+      R8's cost question (the other is the busy semantics choice, below).
 - [x] A3. `autoApprove` default decided and documented (2026-09-29) — **flipped
       from `true` to `false`** (R3 closed). The drivers were *already*
       fail-closed (`--auto` / `--sandbox danger-full-access` only when

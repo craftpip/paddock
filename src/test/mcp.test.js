@@ -201,10 +201,13 @@ describe('MCP Server - Mission grants (plan 55)', () => {
     for (const t of [...EXEC, ...CREATE]) assert.strictEqual(toolAllowed(read, t, 'pad-x'), false, `read blocks ${t}`);
   });
 
-  it('base fine-grained keys may start a session and send (the exec bucket)', () => {
+  it('mission_send and mission_session_start ride the tools:exec opt-in (plan 52 A2)', () => {
     const base = user(['target:agent:pad-x']);
-    for (const t of EXEC) assert.strictEqual(toolAllowed(base, t, 'pad-x'), true, `base ${t}`);
+    for (const t of EXEC) assert.strictEqual(toolAllowed(base, t, 'pad-x'), false, `base without exec ${t}`);
+    const exec = user(['target:agent:pad-x', 'tools:exec']);
+    for (const t of EXEC) assert.strictEqual(toolAllowed(exec, t, 'pad-x'), true, `tools:exec ${t}`);
     assert.strictEqual(toolAllowed(base, 'mission_project_create', 'pad-x'), false, 'a project is a create');
+    assert.strictEqual(toolAllowed(exec, 'mission_project_create', 'pad-x'), false, 'exec is not create');
   });
 
   it('mission_project_create rides the same create bucket as create_agent', () => {
@@ -223,51 +226,48 @@ describe('MCP Server - Mission grants (plan 55)', () => {
     }
   });
 
-  it('PINS the exec base grant — every fine-grained key can drive sessions (plan 52 A2)', () => {
+  it('PINS exec as an OPT-IN grant — a key without tools:exec cannot drive sessions (plan 52 A2)', () => {
     // A2 asked for a fail-closed proof that "a key without `exec` gets Not
-    // permitted by API key tool grant: mission_send". Writing that test is
-    // what showed the proof CANNOT be given, because there is no such key:
-    // `exec` is a BASE grant (see toolAllowed), not an opt-in bucket, so every
-    // fine-grained key holds it. Only a `read` key lacks it, and a read key
-    // has nothing else either.
+    // permitted by API key tool grant: mission_send". The pin that existed
+    // before this one recorded that the proof COULD NOT be given: `exec` was a
+    // BASE grant (see toolAllowed), so every fine-grained key held it and only
+    // a `read` key lacked it. That contradicted plan 52 law 2 ("only the
+    // orchestrator PAD ... holds the `exec` bucket"), §5 direct mode, and D2 —
+    // the worst case being a key scoped to NOTHING but its own fleet
+    // (`target:owned` alone) that could still type into the human's live
+    // conversations and spawn token-burning TUIs.
     //
-    // This matters because it contradicts three separate places in the plan:
-    // law 2 ("only the orchestrator PAD ... holds the `exec` bucket that can
-    // open and type into sessions"), §5 direct mode ("a key with the
-    // read/create/exec buckets"), and D2 ("read-only by default, `exec` only
-    // when the user grants it"). Today the worst case is a key scoped to
-    // NOTHING but its own fleet: `target:owned` alone, no tools: grants at
-    // all, and it can still type into the human's live conversations and spawn
-    // token-burning TUIs.
-    //
-    // Pinned deliberately rather than changed: making `exec` opt-in is a
-    // BREAKING change to what a fine-grained key means, and it is the user's
-    // call. Recorded in plans/52 § A2 and in infinite.md's "Needs your call".
+    // Decided 2026-10-06: `exec` (and the session-driving verbs that ride it —
+    // mission_send, mission_session_start, and the task_* run tools) became an
+    // opt-in bucket, `tools:exec`. This test now pins the FAIL-CLOSED matrix:
+    // no tools: grant = no session control, and only `tools:exec` unlocks it.
     const execFor = (scopes) => ['mission_send', 'mission_session_start', 'exec']
       .map((t) => toolAllowed(user(scopes), t, 'pad-x'));
-    assert.deepStrictEqual(execFor(['target:owned']), [true, true, true],
-      'a key with no tools: grants can drive sessions — if this starts failing, exec became opt-in');
-    assert.deepStrictEqual(execFor(['tools:create']), [true, true, true]);
-    assert.deepStrictEqual(execFor(['tools:lifecycle']), [true, true, true],
-      'lifecycle says nothing about sessions, yet it can send and start');
-    // The one thing that IS separable today: read keys cannot drive sessions,
-    // and a fine-grained key cannot create without `tools:create`.
+    assert.deepStrictEqual(execFor(['target:owned']), [false, false, false],
+      'a key with no tools: grants can NO LONGER drive sessions — if this starts failing, exec silently became base again');
+    assert.deepStrictEqual(execFor(['tools:create']), [false, false, false]);
+    assert.deepStrictEqual(execFor(['tools:lifecycle']), [false, false, false],
+      'lifecycle says nothing about sessions');
+    assert.deepStrictEqual(execFor(['tools:exec']), [true, true, true],
+      'tools:exec is the single grant that unlocks session driving');
+    // Read keys still cannot drive sessions, and a fine-grained key still
+    // cannot create without `tools:create`.
     assert.deepStrictEqual(execFor(['read']), [false, false, false]);
     assert.strictEqual(toolAllowed(user(['target:owned']), 'mission_project_create', 'pad-x'), false);
     assert.strictEqual(toolAllowed(user(['tools:create']), 'mission_project_create', 'pad-x'), true);
-    // workspace_write is base too, so a key with no tools: grants can write
-    // files into any PAD it owns. Same family of surprise as exec; pinned so a
-    // change to either is deliberate.
+    // workspace_write stays BASE — a key with no tools: grants can still write
+    // files into any PAD it owns. That is a separate decision (a file write is
+    // not session control); pinned so it changes only deliberately.
     assert.strictEqual(toolAllowed(user(['target:owned']), 'workspace_write', 'pad-x'), true);
   });
 
   it('target grants confine the Mission tools to their PAD', () => {
-    const scoped = user(['target:agent:pad-x']);
+    const scoped = user(['target:agent:pad-x', 'tools:exec']);
     assert.strictEqual(toolAllowed(scoped, 'mission_sessions', 'pad-y'), false);
     assert.strictEqual(toolAllowed(scoped, 'mission_send', 'pad-y'), false);
     assert.strictEqual(toolAllowed(scoped, 'mission_send', 'pad-x'), true);
     // And the gate refuses before the service is reached, admin or not.
-    const admin = { userId: 'u1', role: 'admin', scopes: ['target:agent:pad-x'] };
+    const admin = { userId: 'u1', role: 'admin', scopes: ['target:agent:pad-x', 'tools:exec'] };
     assert.throws(() => requireTool(admin, 'mission_send', 'pad-y'), /target grant/);
   });
 
@@ -372,16 +372,19 @@ describe('MCP Server - API key grants (plan 35b)', () => {
     const gr = src.slice(src.indexOf('const TOOL_GRANT_FOR'), src.indexOf('function keyGrants'));
     const read = new Set([...rd.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]));
     const map = new Map([...gr.matchAll(/^\s{2}([a-z_]+):\s*'([a-z]+)'/gm)].map((m) => [m[1], m[2]]));
-    const baseGrants = new Set(['exec', 'workspace_write']); // the documented base verbs
+    // Verbs handled directly in toolAllowed rather than via the map:
+    // workspace_write is BASE; exec is the opt-in `tools:exec` grant but is
+    // still a named grant path (tool === 'exec'), so neither is "unclassified".
+    const handled = new Set(['exec', 'workspace_write']);
     const execRouted = new Set([...map].filter(([, b]) => b === 'exec').map(([t]) => t));
 
-    // The invariant: a tool that is NEITHER read, NOR a base verb, NOR
+    // The invariant: a tool that is NEITHER read, NOR a handled verb, NOR
     // exec-routed, NOR in the map is unclassified — so it would be REFUSED for
     // every fine-grained key (the fail-closed default). That is the failure
     // this test exists to surface: the tool exists, is advertised in the tool
     // list, and cannot be called by anyone but a full-scope key.
     const unclassified = on.filter(
-      (t) => !read.has(t) && !baseGrants.has(t) && !execRouted.has(t) && !map.has(t),
+      (t) => !read.has(t) && !handled.has(t) && !execRouted.has(t) && !map.has(t),
     );
     assert.deepStrictEqual(unclassified, [],
       `registered but unclassified — these would be refused for every fine-grained key: ${unclassified.join(', ')}`);
@@ -410,7 +413,7 @@ describe('MCP Server - API key grants (plan 35b)', () => {
 
     // Every bucket the map names must be one a key can actually hold, or the
     // tool becomes permanently unreachable (a typo like 'exce' never matches).
-    // `exec` is the documented base grant, the rest come from api-keys.
+    // `exec` is a real opt-in grant since 2026-10-06 (tools:exec).
     for (const [t, b] of map) {
       if (b === 'exec') continue;
       assert.ok(apiKeys.TOOL_GRANTS.includes(b), `${t} routes to bucket '${b}', which no key can hold`);
@@ -422,16 +425,18 @@ describe('MCP Server - API key grants (plan 35b)', () => {
     assert.deepStrictEqual(orphans, [], `grants nothing maps to: ${orphans.join(', ')}`);
   });
 
-  it('base fine-grained keys get read + workspace + exec, not mutations', () => {
+  it('base fine-grained keys get read + workspace, not exec or mutations', () => {
     const base = user(['target:agent:pad-test-agents']);
     assert.strictEqual(toolAllowed(base, 'list_agents', 'pad-test-agents'), true);
     assert.strictEqual(toolAllowed(base, 'get_agent', 'pad-test-agents'), true);
     assert.strictEqual(toolAllowed(base, 'workspace_write', 'pad-test-agents'), true);
-    assert.strictEqual(toolAllowed(base, 'exec', 'pad-test-agents'), true);
+    assert.strictEqual(toolAllowed(base, 'exec', 'pad-test-agents'), false, 'exec is opt-in via tools:exec');
     assert.strictEqual(toolAllowed(base, 'start_agent', 'pad-test-agents'), false);
     assert.strictEqual(toolAllowed(base, 'recreate', 'pad-test-agents'), false);
     assert.strictEqual(toolAllowed(base, 'create_agent', 'pad-test-agents'), false);
     assert.strictEqual(toolAllowed(base, 'delete_agent', 'pad-test-agents'), false);
+    const exec = user(['tools:exec']);
+    assert.strictEqual(toolAllowed(exec, 'exec', 'pad-x'), true);
   });
 
   it('opt-in tool grants unlock the matching mutations', () => {
@@ -538,10 +543,12 @@ describe('MCP Server - task queue grants (plan 47)', () => {
     for (const t of EXEC) assert.strictEqual(toolAllowed(read, t, 'pad-x'), false, `read blocks ${t}`);
   });
 
-  it('base fine-grained keys may self-serve work through the exec bucket', () => {
+  it('self-serving work needs the tools:exec grant — the base key no longer has it', () => {
     const base = user(['target:agent:pad-x']);
-    for (const t of EXEC) assert.strictEqual(toolAllowed(base, t, 'pad-x'), true, `base ${t}`);
+    for (const t of EXEC) assert.strictEqual(toolAllowed(base, t, 'pad-x'), false, `base blocks ${t}`);
     for (const t of READ) assert.strictEqual(toolAllowed(base, t, 'pad-x'), true, `base ${t}`);
+    const exec = user(['target:agent:pad-x', 'tools:exec']);
+    for (const t of EXEC) assert.strictEqual(toolAllowed(exec, t, 'pad-x'), true, `tools:exec ${t}`);
   });
 
   it('task_get_next is not a read tool — claiming mutates state', () => {
@@ -550,9 +557,11 @@ describe('MCP Server - task queue grants (plan 47)', () => {
   });
 
   it('task tools share the exec grant bucket', () => {
+    const exec = user(['tools:exec']);
+    assert.strictEqual(toolAllowed(exec, 'exec', 'pad-x'), true);
+    assert.strictEqual(toolAllowed(exec, 'task_submit', 'pad-x'), true, 'same bucket as exec');
     const lifecycle = user(['tools:lifecycle']);
-    assert.strictEqual(toolAllowed(lifecycle, 'exec', 'pad-x'), true);
-    assert.strictEqual(toolAllowed(lifecycle, 'task_submit', 'pad-x'), true, 'same bucket as exec');
+    assert.strictEqual(toolAllowed(lifecycle, 'exec', 'pad-x'), false, 'lifecycle no longer grants exec');
   });
 
   it('default and control keys get the whole task surface', () => {
@@ -674,7 +683,7 @@ describe('MCP Server - Mission tools (plan 55)', () => {
     ['pad-mm-pc', 'picoclaw', 'user-1'],
   ];
   const OWNER = { userId: 'user-1', role: 'user', scopes: ['default'] };
-  const OWNER_EXEC = { userId: 'user-1', role: 'user', scopes: ['tools:create'] };
+  const OWNER_EXEC = { userId: 'user-1', role: 'user', scopes: ['tools:create', 'tools:exec'] };
   const READER = { userId: 'user-1', role: 'user', scopes: ['read'] };
   const STRANGER = { userId: 'user-9', role: 'user', scopes: ['default'] };
 
@@ -1299,8 +1308,8 @@ describe('MCP Server - Mission tools (plan 55)', () => {
     // The DECORATION (stampTruth) is pinned in mission.test.js, where it is
     // called directly. What has to be proven HERE is the other half: a store
     // that already stamped `wasBusy` must have that fact survive the MCP
-    // projection. `agentWorkingSessions` is a module-local call inside
-    // withAgentBusy, so reassigning the export would not intercept it — the
+    // projection. `busyForSessions` is a module-local call inside
+    // `withAgentBusy`, so reassigning the export would not intercept it — the
     // decoration seam is the one this file already stubs.
     const p = mission.createProject({ name: 'claims', agent: 'pad-mm-oc', folder: '/www1/a' });
     const dead = mission.createSession(p.id, { tmuxId: 'msn-aaaabbbb', agentSessionId: 'ses_claimed' });

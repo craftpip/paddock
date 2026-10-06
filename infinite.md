@@ -31,42 +31,30 @@ one is a single reply away from done.
 UNKNOWN for an id-less row) and needed no change; the B2 onboarding artifact
 defaulted to **(a)** — `pad_help`'s `GENERAL_GUIDE` IS the artifact, so B2
 becomes an onboarding-completeness audit of the guide rather than a new file.
+Also decided and **implemented, committed as part of the plan 52 close**:
+`exec` is **opt-in** (`tools:exec` grant, fail-closed, 6 test pins flipped —
+verified live with two throwaway keys, then deleted) and busy is **(a)** — a
+session is busy iff its own newest tool part is `running`, read from the
+conversation's own store (`busyForSessions`) instead of the web-server probe.
 
-- **Should `exec` be an opt-in grant, or a base one? (plan 52 A2)** — today
-  `exec` is `toolAllowed`'s BASE grant, so every fine-grained key holds it and
-  **there is no key that can read and create without also being able to type
-  into the human's live conversations and spawn token-burning TUIs**. A key
-  scoped to nothing but `target:owned` — no `tools:` grant at all — can
-  `mission_send`, `mission_session_start` and `exec`. That contradicts plan 52 law 2
-  ("only the orchestrator PAD holds the exec bucket"), §5 direct mode ("a key with
-  the read/create/exec buckets") and D2 ("read-only by default, exec only when
-  the user grants it") — all three assume exec is a thing a key holds or does
-  not. **Nothing live is affected**: all 9 API keys are `control`/`default`, which
-  return before the map is read, so this changes what a *future* key means and
-  nothing else. Your call: make `exec` an opt-in bucket (add `tools:exec` to
-  `TOOL_GRANTS`; a new fine-grained key then gets no session control until you
-  grant it), or keep it as the base and accept that a scoped key can drive
-  sessions. A test pins today's matrix either way, so it cannot change by
-  accident. Plan 52 § A2; flipping it turns 6 tests red.
+- **Should `exec` be an opt-in grant, or a base one? (plan 52 A2)** — **decided
+  2026-10-06 and implemented**: `exec` is an **opt-in** bucket (`tools:exec` in
+  `TOOL_GRANTS`); a new fine-grained key now gets no session control until
+  granted it. A test pins the matrix either way, and flipping it turns 6 tests
+  red.
 - **What should `busy` mean, now that the busy probe is answering about the
-  wrong process? (plan 52 R8, found 2026-09-29)** — `busy` is inert for **every**
-  opencode session, not just fresh ones, and the id fix did not change that. The
-  probe reads `GET /session/status` from the published `opencode web` process
-  (pid 16, port 7890), but a Mission session's TUI is a **separate** `opencode`
-  process (pid 6458) that holds no sockets and never publishes its live turn
-  there. Measured: 42 straight seconds of a pane reading `esc interrupt` with
-  our id absent from the map, while your own web-UI session was reported busy
-  the whole time. The agent's own **store** does see the turn (already the
-  `plan_activity` reader; tracked `bash/error → read/completed` with live
-  timestamps across 15 polls). Two honest semantics, and they are not
-  equivalent: (a) **newest tool part's own `state.status === 'running'`** —
-  precise for tool work, blind to the agent streaming prose; (b) **`lastActivityAt`
-  within N seconds** — covers prose too, but N is a judgement call and a finished
-  turn looks "busy" for N seconds. Either also moves liveness from **one probe
-  per (PAD, folder)** to **one store read per session** (17 on `pad-opencode-proj`,
-  ~2 ms each) — cheap, but it inverts a rule AGENTS.md states deliberately.
-  Your call: (a), (b), both, or leave `busy` off until R7's follow-up. Nothing is
-  blocked on it except the "never talk over a live conversation" property.
+  wrong process? (plan 52 R8, found 2026-09-29)** — **decided 2026-10-06:
+  (a)**, and implemented. A session is busy iff its own newest tool part is
+  `running` (`state.status: 'running'`), read per conversation from the agent's
+  own store (`busyForSessions`, one `agentStore.readActivity` per id, cached
+  ~5 s). That is decision (a) — precise for tool work, blind to the agent
+  streaming prose — and it moves liveness from one web probe per (PAD, folder)
+  to one store read per session, which ALSO fixes the process mismatch: the web
+  probe only reported the web process's own sessions, while a Mission pane TUI
+  holds no sockets and never appeared there (measured 42s `esc interrupt` with
+  our id absent). The store is the shared sqlite, so it answers for whatever
+  client drives the conversation. A store that cannot be read (or a row with no
+  id) stays `busyKnown: false` — UNKNOWN, never idle.
 - **What form should the LLM onboarding artifact take? (plan 52 B2)** — **decided
   2026-10-06: (a), defaulted** — `pad_help`'s `GENERAL_GUIDE` IS the artifact, so
   B2 becomes an onboarding-completeness audit of the guide (no new file, no
@@ -89,8 +77,8 @@ becomes an onboarding-completeness audit of the guide rather than a new file.
 
 ## Queue
 
-- [ ] plans/52-orchestrator.md — partial: Phase A + E1 done, C1's id fixed (R7), B2 form decided (a: `pad_help` guide is the artifact → B2 is an audit of it). **Blocked: user calls** — R8 (`busy` semantics) + `exec` grant (both below in Needs your call); phases D–G gated on those or on C1 green-twice
-- [ ] plans/60-mcp-secret-hygiene.md — build done + verified (mcp 79/79, vm-manager 108/108), `## Status:` reads Complete, but **not yet absorbed** (file still present) and one open item remains — **blocked: rotate the 2 exposed MCP tokens (operator action, plan §5)**, which no agent can perform. Parked at the BOTTOM on purpose: it is not done, but leaving it at the top would head-block the loop on an action only the user can take.
+- [~] plans/52-orchestrator.md — started 2026-10-06, being closed now: Phase A + E1 done, C1's id fixed (R7), B2 form decided (a: `pad_help` guide is the artifact → B2 is an audit of it), A2 (`exec` opt-in) decided + implemented + test-pinned, R8 (`busy` semantics) decided (a) + implemented (`busyForSessions` reads each conversation's own store; web-server probe retired). Phases D–G remain gated on C1 green-twice as before.
+- [ ] plans/60-mcp-secret-hygiene.md — build done + verified (mcp 79/79, vm-manager 108/108), `## Status:` reads Complete, but **not yet absorbed** (file still present) and one open item remains — **blocked: rotate the 2 exposed MCP tokens (operator action, plan §5 traced 2026-10-06)**. Concrete: `pad-opencode-proj` → `mcp.browser.headers` bearer for the navigator relay `http://10.69.1.164:1994/mcp` (`nvg_…`, server enabled) and `mcp.torrent.headers` `X-MCP-Key` for `http://10.69.1.164:8093/mcp` (`i-4Fw…`, server disabled). Rotate at the source services, then update the config via the web UI editor — first rotate, then config, or the pad loses a working server. Parked at the BOTTOM on purpose: it is not done, but leaving it at the top would head-block the loop on an action only the user can take.
 - [ ] plans/68-mission-page-ideas.md — **audited 2026-10-06, not built** (6 ideas re-checked against the built page: 4 open, Idea 2 partly already true, Idea 3's reported cause fixed by R7). **Blocked: user says "design it"** — the file is a gathering inbox by its own rule, and the audit raised two calls only the user can make: (a) whether a second start resuming an already-attached conversation is refused or deduped, (b) whether a persistent no-selection state is wanted at all (Ideas 1+5 assume one, and `fetchAll` currently auto-selects `projects[0]`). Parked at the BOTTOM on purpose, same reasoning as plan 60.
 
 - [ ] plans/69-mission-orchestration.md — **audited 2026-10-06, not built**. **Blocked: user says "design it"**. The audit changed both ideas: **Idea 2 is largely BUILT** by plan 64 (`plan_activity` returns the last message as a user/assistant PAIR with timestamps + `lastToolCall.status` + `lastActivityAt`, and since R7 `row.agent_session_id` is the join key, so it is one call) — but only for the *detail* case, because a listing would need one call per row and codex/claude parse the whole rollout file. **Idea 1's premise is half stale**: eight `task_*` tools already give submit → claim → `task_complete` (done/failed, refused unless a worker claimed it) → `task_retry`, so completion and redo exist; what is missing is the per-task STEP model (review has nowhere to live), the commit step, the binding of a task to a Mission SESSION (the task worker is a PAD and push mode is headless `opencode run`), and the user's actual key call — a server-side loop, which today is deliberately the opposite (every hop is an explicit LLM call). Parked at the BOTTOM on purpose, same reasoning as plan 60.

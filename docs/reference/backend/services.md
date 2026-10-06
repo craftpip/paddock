@@ -997,12 +997,14 @@ Rules:
   - **"Mid-turn" is a separate, cached pass** — after liveness, the tools chain
     the same `withAgentBusy` / `withAgentBusyProjects` step the REST routes use,
     so `busy` / `busyKnown` / `open` reach the LLM on the same row as `live`.
-    It is grouped and cached per (PAD, folder) by the store, so it is one probe
-    per project and never one per row. `busyKnown: false` is **unknown, not
-    idle** — the server exposes no idle-presence registry — so the tool projects
-    the field only when the store stamped it, and the guide tells the LLM never
-    to read it as licence to type. Without this the agent could only see "live"
-    and would talk over a session the human was actively driving.
+    Since plan 52 R8(a) it is read per conversation from that conversation's own
+    store (`busyForSessions`, one store read per id, cached ~5 s — a web probe
+    grouped per (PAD, folder) could not see a Mission TUI's turns at all).
+    `busyKnown: false` is **unknown, not idle** — an unreadable or absent store,
+    or a row with no `agent_session_id` — so the tool projects the field only
+    when the store stamped it, and the guide tells the LLM never to read it as
+    licence to type. Without this the agent could only see "live" and would talk
+    over a session the human was actively driving.
   - `mission_send` goes through `mission.sendText`, the single writer path the
     page's terminal uses, so the per-session solo lock is honoured in one place.
 
@@ -1114,14 +1116,22 @@ an agent you were invited to type into.
   used to answer differently from the row in the list, so a caller that checked
   before typing got two different verdicts from the same session.
   - `busy` **requires** `live`. A dead row reports `busy: false`, carries a
-    terminal `state: "dead"`, and preserves `wasBusy: true` when the server still
-    claims the conversation — the forensics without the lie.
+    terminal `state: "dead"`, and preserves `wasBusy: true` when the row's
+    conversation is still working somewhere we hold no pane (a TUI turn in the
+    opencode web UI, or a process killed mid-call whose frozen `running` is the
+    honest upper-bound note) — the forensics without the lie.
   - `open` means **a live TUI is attached**: never a dead row, never a bare
     shell. It is deliberately *not* the send verdict; see `canSend` below.
-  - `busyKnown: false` means the probe **could not answer**. The opencode status
-    probe is folder-scoped, so when the pane's cwd differs from the project
-    folder the answer is stamped UNKNOWN rather than idle (1e) — an unanswerable
-  probe never yields `busyKnown: true`.
+  - `busyKnown: false` means the store **could not be read**. Since plan 52 R8(a)
+    the busy half is read from each conversation's **own store** (its newest tool
+    part carrying `state.status: "running"`) instead of the opencode web server's
+    folder-scoped `/session/status` — that probe only reported conversations its
+    own process drove, while a Mission pane is a separate TUI with no sockets, so
+    its turns never appeared there. The store is the shared sqlite, so it answers
+    for whatever client drives the conversation. That retires the 1e
+    cwd-vs-folder UNKNOWN branch (an id-keyed read has no folder to mismatch).
+    An unreadable/absent store, or a row with no `agent_session_id`, is stamped
+    UNKNOWN — an unanswerable probe never yields `busyKnown: true`.
   - `kind: "agent" | "shell"` is on every row, so the destructive trap is
     visible *before* the write. The shell test fails **closed**: an unknown or
     empty `pane_current_command` is treated as a shell, never as an agent.

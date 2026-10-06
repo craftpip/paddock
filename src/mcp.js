@@ -197,17 +197,17 @@ function targetAllowed(user, agentName) {
 }
 
 /** Tool grant admits this tool for this agent? The base for fine-grained keys
- *  is read + workspace + exec; mutating tools need their opt-in grant. */
+ *  is read + workspace; `exec` and the session-driving verbs are opt-in
+ *  (`tools:exec`), mutating tools need their own opt-in grant. */
 function toolAllowed(user, tool, agentName) {
   if (!user) return true;
   const g = keyGrants(user);
   if (g.full) return targetAllowed(user, agentName);
   if (g.readOnly) return READ_TOOLS.has(tool) && targetAllowed(user, agentName);
-  if (READ_TOOLS.has(tool) || tool === 'exec' || tool === 'workspace_write'
-      || TOOL_GRANT_FOR[tool] === 'exec') {
+  if (READ_TOOLS.has(tool) || tool === 'workspace_write') {
     return targetAllowed(user, agentName);
   }
-  const grant = TOOL_GRANT_FOR[tool];
+  const grant = tool === 'exec' ? 'exec' : TOOL_GRANT_FOR[tool];
   // Fail CLOSED on a tool that is in neither the read bucket nor the map. It
   // used to `return targetAllowed(...)` here, which made forgetting a map
   // entry silently ALLOW the tool for every fine-grained key — that is how
@@ -1848,14 +1848,11 @@ function registerTools(server) {
           : mission.withLiveSessionsByAgent(sessions, (s) => s.project?.agent_name)
       )) || sessions;
       // Same second step the REST route takes: stamp busy/open so the LLM can
-      // see that the human is mid-turn before it types. Grouped and cached per
-      // (PAD, folder) by the store; a failure here costs the stamp, not the list.
+      // see that the human is mid-turn before it types. Read per conversation
+      // from its own store (plan 52 R8); a failure here costs the stamp, not
+      // the list.
       const marked = (await missionWithLive(() =>
-        mission.withAgentBusy(
-          live,
-          (s) => byId.get(s.project_id)?.agent_name,
-          (s) => byId.get(s.project_id)?.folder
-        )
+        mission.withAgentBusy(live, (s) => byId.get(s.project_id)?.agent_name)
       )) || live;
       const capped = marked.slice(0, limit || 50);
       return textResult({

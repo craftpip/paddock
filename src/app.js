@@ -2533,11 +2533,10 @@ app.get('/api/mission/projects/:id', (req, res) => {
   try {
     mission
       .withLiveSessions(mission.listSessions({ projectId: project.id }), project.agent_name)
-      // The folder is REQUIRED here, not optional: the agent's status probe is
-      // scoped to a directory, and a live row carries no folder of its own. Left
-      // off, every row silently reports `busy: false` — which reads as "nothing
-      // is working" and is exactly the wrong answer this probe exists to avoid.
-      .then((sessions) => mission.withAgentBusy(sessions, () => project.agent_name, () => project.folder))
+      // The per-session busy probe reads each row's OWN conversation in the
+      // agent's store (plan 52 R8(a)) — no folder is involved, because the id
+      // is the key and the process that drives it is irrelevant.
+      .then((sessions) => mission.withAgentBusy(sessions, () => project.agent_name))
       .then(
         (sessions) => res.json({ project, sessions }),
         () => res.json({ project, sessions: mission.listSessions({ projectId: project.id }) })
@@ -2596,10 +2595,10 @@ app.get('/api/mission/sessions', (req, res) => {
   }
   mission
     .withLiveSessionsByAgent(all.sessions, (s) => s.project?.agent_name)
-    // Each row is asked about in ITS OWN project's folder — in this scope a
-    // single list spans folders, and a session's status only exists in the
-    // directory it is running in.
-    .then((sessions) => mission.withAgentBusy(sessions, (s) => s.project?.agent_name, (s) => s.project?.folder))
+    // Each row is asked about in ITS OWN conversation (the store read keys on
+    // the row's agent_session_id, so a one-list-spans-folders scope needs no
+    // folder) — plan 52 R8(a).
+    .then((sessions) => mission.withAgentBusy(sessions, (s) => s.project?.agent_name))
     .then((sessions) => res.json({ sessions, projects: all.projects }),
       () => res.json({ sessions: all.sessions, projects: all.projects }));
 });
@@ -2624,7 +2623,7 @@ app.get('/api/mission/projects/:id/sessions', (req, res) => {
   try {
     mission
       .withLiveSessions(mission.listSessions({ projectId: project.id }), project.agent_name)
-      .then((sessions) => mission.withAgentBusy(sessions, () => project.agent_name, () => project.folder))
+      .then((sessions) => mission.withAgentBusy(sessions, () => project.agent_name))
       .then(
         (sessions) => res.json({ sessions }),
         () => res.json({ sessions: mission.listSessions({ projectId: project.id }) })

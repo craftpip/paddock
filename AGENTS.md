@@ -122,20 +122,24 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   contradicts `busy: false` on its own** — assert the field that makes the claim
   checkable, not the one that is already false.
 - **A live-work probe can be answering about a DIFFERENT PROCESS than the one you
-  are describing, and a shared database is not shared liveness.** `busy` reads
+  are describing, and a shared database is not shared liveness — so probe the
+  STORE, not the server (resolved by plan 52 R8).** `busy` used to read
   `GET /session/status` from the PAD's published `opencode web` (pid 16, :7890) —
   but a Mission session's TUI is a *separate* `opencode` process (pid 6458) that
   holds **no sockets** and never publishes its turn there. Measured: 42
   consecutive seconds of `esc interrupt` on the pane with our id absent from the
   map, while the user's own web-UI session was reported busy throughout. The two
   processes **do** share the sqlite store (a `GET /session/{id}` returns our
-  conversation in full), which is exactly what makes the bug survive review: every
-  read of the same *id* succeeds, so the id looks like it is wired up. **Prove a
-  liveness probe by watching it go TRUE for the specific thing you are measuring**,
-  not by confirming the endpoint answers and the id resolves. And when a fix makes
-  a probe "work" without ever producing a `true`, suspect a second root cause
-  rather than declaring victory — here the id fix made the lookup succeed and
-  find nothing, which reads identically to a fix.
+  conversation in full), which is exactly what made the bug survive review: every
+  read of the same *id* succeeds, so the id looks like it is wired up. The fix is
+  to read **each conversation's own store** (`busyForSessions`, newest tool part
+  `state.status: "running"`) — the store is the shared truth, so it answers for
+  whichever client drives the conversation. Two lessons survive the fix: **prove
+  a liveness probe by watching it go TRUE for the specific thing you are
+  measuring**, not by confirming the endpoint answers and the id resolves, and
+  when a fix makes a probe "work" without ever producing a `true`, suspect a
+  second root cause rather than declaring victory — the id fix made the lookup
+  succeed and find nothing, which reads identically to a fix.
 - **`USER_MODE=user` puts the pad's tmux in `/tmp/tmux-1000`, so a plain root
   `docker exec … tmux ls` reads a DIFFERENT, EMPTY server.** The Mission
   evidence-gathering that produced the 42-second measurement above was first run
@@ -795,41 +799,31 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   — it BOOTS the app** (binds 6789, opens the DB, runs migrations) and leaves a
   second server plus root-owned DB files behind. Use `node --check src/app.js`
   for syntax, `docker restart paddock` to load.
-- **opencode's `/session/status` answers `{}` unless you pass `?directory=` — and
-  `{}` is indistinguishable from "nothing is working".** This is the only
-  server-side way to see a conversation the agent is working on from ANY client
-  (web UI, SDK script, a second TUI) rather than only from our own tmux, so it
-  backs the session-list dot. Called unscoped it returns `{}` *even while a turn
-  is streaming* — measured: an 8.2s turn, 25 polls during it, `{}` every time.
-  Scoped to the folder the turn runs in it returns
-  `{"ses_…":{"type":"busy"}}` immediately. The other two ways to get the same
-  silent `{}`: the wrong **port** (use the PAD's own `web.containerPort` — the
-  driver default says 8080 while the running server here is 7890) and a missing
-  **folder** (a `mission_sessions` row carries no folder, so the call site must
-  pass the project's). Also: group such probes by **(PAD, folder)**, never by
-  PAD alone — `paddock`, `schlorp` and `craftpip` all run on
-  `pad-opencode-proj`, and a PAD-keyed group stamps the first folder's answer on
-  the other projects' rows. The map is a live-work registry, not a presence list:
-  it empties when the turn ends, and there is no client/connection endpoint, so
-  an idle tab open in the web UI is NOT detectable.
-  **CRITICAL SCOPE LIMIT (measured 2026-09-29): this only ever reports
-  conversations THAT WEB PROCESS IS DRIVING.** A Mission pane is a separate
-  `opencode` TUI process holding no sockets, so its turn never appears here at
-  all — 42 straight seconds of a visible `esc interrupt` with our id absent, while
-  the user's own web-UI session was reported busy the whole time. So the wording
-  above ("the only server-side way to see a conversation from ANY client") is
-  **false for tmux-driven sessions** and the probe is a **complement** to the pane
-  state, never a substitute for it. See "a live-work probe can be answering
-  about a DIFFERENT PROCESS" above.
+- **`opencode /session/status` no longer backs the Mission dot (retired by plan 52
+  R8) — but the endpoint's traps are still a live warning if you use it directly.**
+  Busy on `mission_*` now reads each conversation's OWN store (`busyForSessions`:
+  newest tool part `state.status: "running"`), so none of this applies to it. For
+  anyone debugging the endpoint itself: it answers `{}` unless you pass
+  `?directory=` (even mid-turn — measured, an 8.2s turn answered `{}` for 25
+  polls; scoped, `{"ses_…":{"type":"busy"}}`), it needs the PAD's own
+  `web.containerPort` (driver default 8080, live server here 7890), and it ONLY
+  reports conversations its own process drives — a Mission TUI is a separate
+  process with no sockets, so its turns never appear (42s of visible `esc
+  interrupt` with our id absent). The store read has none of those gaps, which is
+  why it replaced the probe. The map is a live-work registry, not a presence
+  list; an idle tab open in the web UI is NOT detectable by either mechanism.
 - **A "dead" row is not a dead conversation.** A mission session whose tmux pane
   died while the user is chatting with that same conversation in the opencode web
-  UI is open and working. The two questions are separated by **`busy`**, not by a
-  client-side pane flag: a row's `open` is the server's `live || busy`, so the
-  web-UI conversation lights its dot with no session of ours on it, while a
-  genuinely idle row with no pane reads as simply *not open*. The client no
-  longer computes a "gone" state at all (plan 58) — so if you are tempted to add
-  one back, remember it is what made the listing say "the pane is no longer
-  there" in a language the user never asked for.
+  UI is closed here but still working. The two questions are separated by
+  **`busy`**, not by a client-side pane flag: `busy` requires `live`, so a dead
+  row answers `busy: false, open: false` and carries **`wasBusy: true`** while
+  its conversation's store says the newest tool part is running — "still working
+  somewhere we hold no pane", the opposite of a licence to type. That forensics
+  comes from the shared sqlite (plan 52 R8(a)), which sees the web UI's turns and
+  our own TUIs alike, where the old web-server probe only ever saw its own
+  process. The client no longer computes a "gone" state at all (plan 58) — so if
+  you are tempted to add one back, remember it is what made the listing say "the
+  pane is no longer there" in a language the user never asked for.
 - **Mission sessions (`msn-*`) are multi-client; a second tab must not kick the
   first.** Three places in the terminal WS in `app.js` implement that, and all
   three must agree or you get the reconnect-fight loop back: (1) connect skips
@@ -1100,13 +1094,13 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
 - **"Is the human mid-turn?" is a SECOND pass, not part of liveness — and an
   MCP list that skips it silently lies to the LLM.** `withLive*` only stamps
   `live` (a tmux session exists). `busy` / `busyKnown` / `open` are stamped by
-  the separate `withAgentBusy` / `withAgentBusyProjects` (the opencode server's
-  `/session/status`, which needs `?directory=`, cached per (PAD, folder)), so
-  every list/detail path must chain both — exactly like `/api/mission/*` at
-  `app.js:2488/2526/2584`. `withAgentBusy(sessions, agentOf, folderOf)` resolves
-  the PAD and folder through the *row's project*, so a row with no project
-  (rare) simply gets no stamp. `busyKnown: false` means UNKNOWN, never idle,
-  and an MCP projection must emit the field only when the store stamped it
+  the separate `withAgentBusy` / `withAgentBusyProjects` (each conversation's
+  OWN store via `busyForSessions` — one `agentStore.readActivity` per id, cached
+  ~5s — plan 52 R8(a)), so every list/detail path must chain both — exactly like
+  `/api/mission/*` at `app.js:2540/2602/2627`. `withAgentBusy(sessions,
+  agentOf)` resolves the PAD through the *row's project*, so a row with no
+  project (rare) simply gets no stamp. `busyKnown: false` means UNKNOWN, never
+  idle, and an MCP projection must emit the field only when the store stamped it
   rather than defaulting it to `false`.
 - **An MCP handler that stops at the first enrichment pass is a parity bug, not
   a shortcut.** When a parallel agent adds a second decoration to the Mission
