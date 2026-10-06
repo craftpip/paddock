@@ -52,8 +52,13 @@ interrupting. \`mission_project_create\` (create bucket) adds a project row; \`m
 and \`mission_send\` (exec bucket) open a session and type into one. A dead session is not a
 dead end: \`mission_session_restart\` (pane gone) and \`mission_session_relaunch\` (pane
 alive, TUI exited) bring it back on the SAME row and the same conversation, and
-\`mission_session_close\` ends one deliberately. All are scoped to the PADs your key
-may see.
+\`mission_session_close\` ends one deliberately. A session parked on a
+\`△ Permission required\` dialog is BLOCKED, not idle: detail mode reports
+\`blockedOn: "permission"\`, and you answer it with \`mission_permission_answer\` (\`once\`
+or \`reject\`) instead of trying to type. All are scoped to the PADs your key
+may see. One cost to know before \`recreate\`: it kills every live Mission session on
+that PAD (rows survive as dead; \`mission_session_restart\` brings each back on the same
+conversation).
 
 ## Caller rules — read this before mutating anything
 
@@ -115,8 +120,11 @@ may see.
   the screen. \`busy: false\` WITH \`busyKnown: true\` means genuinely idle. \`busyKnown:
   false\` means the probe could not answer — **that is unknown, not idle**, and it is not
   permission to type. \`open\` is the union (live OR busy) and \`openCount\` is its per-
-  project total. So "is anyone driving right now?" is a read, not a guess: check \`busy\`
-  first and only treat a session as quiet when \`busyKnown\` is true. One honest limit:
+  project total. The word that matters before typing is \`canSend\` (detail mode), which
+  is the SAME check the write path applies — a solo-locked row and a permission-parked
+  row are both still \`open\`, but neither may be typed into. So "is anyone driving right
+  now?" is a read, not a guess: check \`busy\` first and only treat a session as quiet
+  when \`busyKnown\` is true. One honest limit:
   the probe asks about the *project folder*, and a session's human can be working in a
   different directory (detail mode's \`state.cwd\` is the ground truth). If that is the
   case, treat \`busy: false\` as "idle in the project folder", not as "idle".
@@ -124,7 +132,11 @@ may see.
   driving alone), \`mission_session_dead\` (the tmux session is gone), \`mission_agent_stopped\`
   (start the PAD first), \`mission_folder_missing\` (the folder vanished inside the PAD —
   fix the project), \`mission_unsupported_agent\` (that type has no Mission projects),
-  \`mission_project_forbidden\` (not your PAD).
+  \`mission_project_forbidden\` (not your PAD), \`mission_permission_pending\` (a tool
+  call is parked on a \`△\` dialog — answer it with \`mission_permission_answer\`, do not
+  retype), \`mission_not_an_agent\` (a \`mission_send\` there would run as shell — relaunch
+  the TUI first), \`mission_tui_already_running\` (the TUI is up — retyping the launch
+  would start a second conversation in the pane).
 
 ## Plans — the durable record of a piece of work
 
