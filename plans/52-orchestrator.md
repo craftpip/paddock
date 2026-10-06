@@ -1,6 +1,6 @@
 # Plan 52 — Orchestrator (session-based: keys, grants, conferral, playbook, proof)
 
-## Status: Rewritten (2026-10-06) — **2/7 phases complete (A, E1); B and C started.** A1 audited + fail-closed default; **A2 DECIDED and DONE (2026-10-06)** — after the user's call, `exec` flipped from a base grant to an opt-in `tools:exec` bucket, so the least-privilege key of D2 is now expressible (mission_send/start/close/relaunch/restart and the task_* run verbs all ride it; `workspace_write` stays base); A3 `autoApprove` flipped to opt-in (R3 closed). Phase A gate: all suites green (mcp 139, task-mcp 28, plan-mcp 42), mutation control proved (re-adding `exec` to the base branch turns exactly the 3 opt-in pin tests red), webui restarted, tool surface verified live at 31 tools. **R8 DECIDED (a) and DONE (2026-10-06): implemented as decided.** The user chose "newest tool part is `running`" — a session is busy iff its own newest tool part's `state.status === 'running'`, read from the conversation's own store (`mission.busyForSessions`, one `agentStore.readActivity` per session id, cached ~5s). This replaces the per-(PAD, folder) `GET /session/status` web probe (retired), which only ever reported conversations the web process itself drove and reported nothing during a Mission pane's turn. `busy` still requires `live`; a dead row answers `busy: false` and carries `wasBusy: true` while its store says a tool part is running. Verified: mission 118/118, mcp 139/139, task-mcp 28/28, plan-mcp 42/42, mutation control (stored copy, `=== 'running'` → `=== 'completed'` in `busyForSessions`) turns exactly the 3 store-backed pins red while the rest stay green. Live: a dead row whose conversation's store reports `running` answers `busy:false, busyKnown:true, wasBusy:true, state:dead` — the pinned contract. **B1 done 5/7** (the two missing clauses name tools plan 53 Phase 9 has not built); **B2 decided 2026-10-06** — `pad_help`'s `GENERAL_GUIDE` IS the onboarding artifact, so B2 becomes an onboarding-completeness audit of it (not a new file). **C1's path is proven live twice** and surfaced C1-F1 which became R7+R8; **R7's id half is fixed and proven live** (fresh start mints its own conversation, `stampTruth` fails closed). **E1 complete and proven live** — the audit log's `actor` column is never empty (702 rows read `system` before; seven Mission actions now attributed). Phases D, E2–E4, F and G not started. The queue is gone;
+## Status: Rewritten (2026-10-06) — **3/7 phases complete (A, D, E1); B and C started; D landed 2026-10-07.** A1 audited + fail-closed default; **A2 DECIDED and DONE (2026-10-06)** — after the user's call, `exec` flipped from a base grant to an opt-in `tools:exec` bucket, so the least-privilege key of D2 is now expressible (mission_send/start/close/relaunch/restart and the task_* run verbs all ride it; `workspace_write` stays base); A3 `autoApprove` flipped to opt-in (R3 closed). Phase A gate: all suites green (mcp 139, task-mcp 28, plan-mcp 42), mutation control proved (re-adding `exec` to the base branch turns exactly the 3 opt-in pin tests red), webui restarted, tool surface verified live at 31 tools. **R8 DECIDED (a) and DONE (2026-10-06): implemented as decided.** The user chose "newest tool part is `running`" — a session is busy iff its own newest tool part's `state.status === 'running'`, read from the conversation's own store (`mission.busyForSessions`, one `agentStore.readActivity` per session id, cached ~5s). This replaces the per-(PAD, folder) `GET /session/status` web probe (retired), which only ever reported conversations the web process itself drove and reported nothing during a Mission pane's turn. `busy` still requires `live`; a dead row answers `busy: false` and carries `wasBusy: true` while its store says a tool part is running. Verified: mission 118/118, mcp 139/139, task-mcp 28/28, plan-mcp 42/42, mutation control (stored copy, `=== 'running'` → `=== 'completed'` in `busyForSessions`) turns exactly the 3 store-backed pins red while the rest stay green. Live: a dead row whose conversation's store reports `running` answers `busy:false, busyKnown:true, wasBusy:true, state:dead` — the pinned contract. **B1 done 5/7** (the two missing clauses name tools plan 53 Phase 9 has not built); **B2 decided 2026-10-06** — `pad_help`'s `GENERAL_GUIDE` IS the onboarding artifact, so B2 becomes an onboarding-completeness audit of it (not a new file). **C1's path is proven live twice** and surfaced C1-F1 which became R7+R8; **R7's id half is fixed and proven live** (fresh start mints its own conversation, `stampTruth` fails closed). **E1 complete and proven live** — the audit log's `actor` column is never empty (702 rows read `system` before; seven Mission actions now attributed). **Phase D COMPLETE (2026-10-07), committed e2ec24d** — conferral (orchestrator MCP key `default` + driver wiring + Remove), Profile key presets, and the server-side namespace split, all pinned by the new `orchestrator.test.js` (7) + mcp D3 (140) and verified live end to end on a throwaway opencode pad (confer → `paddock connected` → remove, no residue). Live finding that earned its own rule: `execFile`+`input` HANGS the container's docker CLI at `read`, so `execInPad` is spawn with a 60s kill-to-fail guard — a hung wire is now a rollback, never an orphaned full-reach key. Phases E2–E4, F and G not started. The queue is gone;
 this plan now orchestrates **sessions**, not tasks. User decision, verbatim:
 *"don't let the user start any task without my vision — remove task submit"*,
 followed by *"rewrite 52 around mission_* sessions"*. **Everything below is
@@ -360,14 +360,54 @@ The gate for everything: the agent can only do what its key says.
 
 ## Phase D — Conferral + client keys
 
-- [ ] D1. Conferral: fleet-MCP wiring with the orchestrator grant on an ordinary
+- [x] D1. Conferral: fleet-MCP wiring with the orchestrator grant on an ordinary
       PAD + folder-assignment config ([51§1b]). No new agent type. UI: the "Make
       orchestrator" button does it in one click; "Remove" reverses it.
-- [ ] D2. Client keys: least-privilege keys for outside clients (phone,
+      **Done (2026-10-07).** `services/orchestrator.js` confers/removes: it
+      mints an `orchestrator` api key (`scopes: 'default'` — the user's call:
+      the key that drives the fleet must be able to use every tool), wires the
+      driver's connect builder into the pad (`docker exec -i … sh -lc` running
+      the opencode builder, key on stdin → `paddock` MCP server with a bearer
+      header), stamps `ORCHESTRATOR=1` + `orchestrator.json` (the folders-array
+      file stays at `[]`; the folders EDITOR is deferred to Phase E2 as decided),
+      one-pad-per-user exclusivity, and rolls back the key on a failed wire.
+      Routes `GET|POST|DELETE /api/agents/:name/orchestrator` behind
+      `requireOwnedAgent`; AgentHeader shows an Orchestrator brand badge +
+      Remove when conferred, Make orchestrator otherwise. **Two live findings:
+      (1)** the container's docker CLI HANGS a piped stdin under `execFile`
+      `{input}` even for a trivial `read` — `spawn` + `child.stdin.write/end`
+      works, which is also the "use spawn, not execFile" watch item already in
+      AGENTS.md for openclaw auth; the hung exec left a full-reach key that no
+      rollback could remove, so `execInPad` is spawn with a 60s kill-and-fail
+      guard, and a hang now becomes `orchestrator_wiring_failed` + rollback
+      instead of an orphaned key. **(2)** verified live end to end on a
+      throwaway opencode pad: POST → pad's `opencode.jsonc` holds the paddock
+      server and `opencode mcp list` reports `paddock connected`, GET reads
+      `conferred:true`, DELETE revokes the key, clears the config entry and
+      meta and returns `wiringLeftInContainer:false`; pad + key removed
+      afterwards, no residue.
+- [x] D2. Client keys: least-privilege keys for outside clients (phone,
       Telegram, a second LLM) — read-only by default, `exec` only when the user
       grants it. Listed where keys live today + per-key revoke.
-- [ ] D3. Namespace/grant split enforced server-side: a client key can never
+      **Done (2026-10-07).** The Profile page's five scope boxes became six
+      named presets — Full access / Full access (control) / Read-only / Client
+      — read-only / Client — with terminal / Operator — exec + lifecycle —
+      where `exec` rides `tools:exec` (A2's opt-in) and the lifecycle verbs ride
+      `tools:lifecycle`, so "client with terminal" is expressible as
+      `target:owned,tools:exec` without the base `read` (validateScopes refuses
+      `read` + any `tools:*`). The form posts the scope STRING, not an array.
+      Per-key revoke already exists (the keys UI); this phase made the grant
+      expressible one-click.
+- [x] D3. Namespace/grant split enforced server-side: a client key can never
       reach a session on a PAD it does not own.
+      **Done (2026-10-07).** `missionVisibleAgents` narrows by
+      `targetAllowed(user, n)` and the D3 negative test pins it across every
+      plane: a `target:agent`-scoped key answers `mission_project_forbidden`
+      for both the project_id and session_id reads on a foreign PAD, is refused
+      `target grant` by `plan_list` and `exec` on that PAD, and still reads its
+      own pad. The mutation control (dropping `&& targetAllowed` in
+      `missionVisibleAgents`) turns exactly the D3 test red while the other 139
+      stay green.
 
 ## Phase E — Guardrails (the surviving Criticals, pulled forward)
 

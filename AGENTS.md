@@ -1007,6 +1007,15 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
 - **`openclaw models auth paste-api-key` destroys the whole `openclaw.json`**
   (rewrites it with auth info only). Save the config first and merge it back
   after. It reads the key from stdin — use `spawn`, not `execFile` (hangs).
+- **Any `docker exec -i … sh -lc` harness that then `read`s the stdin needs
+  `spawn` + `child.stdin.write/end`, never `execFile` with `{input}` — the
+  paddock container's docker CLI keeps a Node-piped stdin open and the `read`
+  blocks forever** (measured live in plan 52 D1: a trivial
+  `IFS= read -r X; echo got:$X` hung under `execFile`+`input` while `spawn`
+  and `printf | docker exec -i` both completed instantly). The hang is worse
+  than a crash: an orphaned full-reach key survives a request that never
+  returned, so conferral's `execInPad` also carries a 60s kill-to-fail guard
+  that turns a hung attach into a normal rejection → rollback.
 - **Published openclaw refuses Control UI over plain HTTP unless device
   identity is skipped.** The WS handshake fails with
   `cause: control-ui-insecure-auth`; `gateway.controlUi.allowInsecureAuth`
