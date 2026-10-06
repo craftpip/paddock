@@ -59,6 +59,23 @@ for a session that was there all along.
   terminal `state: "dead"` with `endedAt` + `endedBy: "recreate" | "exit" |
   "unknown"`. A caller can then ask "what did that recreate cost me?" in one call
   instead of reconstructing it by diffing 29 rows.
+- **Resolution (2026-09-29, plan 65 — both halves shipped):** `recreate`'s
+  description now leads with *"**A recreate ends every Mission session on that
+  PAD.** The tmux sessions live inside the container, so they die with it —
+  including live conversations the human is watching"*, and it names
+  `sessionsEnded` ([{id, tmux_id, label, project, lastScreen, lastScreenAt}]) and
+  `sessionsEndedHidden` as what the response reports. The rows it stamps are
+  real: every dead session on `paddock` now reads `state: "dead"`, `endedAt`,
+  `endedBy: "gone"`, and one carries `wasBusy: true` so a cut-short turn is
+  visible. `mission_session_restart` recovers one on the same row and the same
+  `agent_session_id`, and its description says so. **One honest limit, visible
+  in the data:** four dead rows share `endedAt:
+  "2026-09-29T13:03:00.665Z"` to the millisecond, because that is when they were
+  first *looked at* — which is exactly what `endedBy: "gone"` documents (*"the
+  first time we LOOKED and it was already gone … `endedAt` is an upper bound"*).
+  So `endedBy: "recreate"` only lands on the sessions the recreating caller
+  already had open; a mass death is recorded as `gone` for everyone else, and
+  the attribution this fix asks for is only partly recoverable after the fact.
 
 ### `last_seen_at` is frozen on a session that is alive and busy right now, so it cannot be used to judge life or death
 
@@ -92,6 +109,18 @@ for a session that was there all along.
   which is the number a caller actually wants. If the field genuinely only
   advances when something asks, say so in the description, because a field that
   looks like a heartbeat and is not will be read as one.
+- **Resolution (2026-09-29 — fixed, with the control experiment this entry said
+  was the only way to reveal it):** `last_seen_at` advances. Three reads of the
+  same live, working session returned `13:43:47.144Z`, then `13:45:13.253Z`, then
+  `13:45:23.568Z` — and the screen differed on the first and third. The
+  `project-progress.md` entry's four-read control (identical `last_seen_at` across
+  four different screens) no longer reproduces. It is also no longer frozen at
+  birth: rows created at `08:45:59` and `07:49:04` carry `last_seen_at` of
+  `11:16:43`, hours past create. The "either a session that died seconds after
+  starting or a session nobody ever looked at again" ambiguity this entry
+  complained about is gone with it. `lastActivityAt` now also comes from
+  `plan_activity`, which is a *different* field with a different meaning (agent
+  activity from the driver's store) — so the two are finally distinguishable.
 
 ### Correction: `mission_sessions` and `mission_projects` **do** return `total` — yesterday's finding that they don't is wrong
 
@@ -245,6 +274,21 @@ for a session that was there all along.
   `mission_session_start` should echo back a short summary of what it resumed
   (`resumedFrom: {agent_session_id, lastSeenAt, messageCount}`) so the caller can
   tell a restored context from a fresh one without reading the agent's self-report.
+- **Resolution (2026-09-29, plan 65 + plan 64 — closed, and by two mechanisms):**
+  **the pane is now retained**, so the first fix landed: detail mode reports
+  `screenFrom: "live-pane" | "last-captured" | "none"` alongside `lastScreenAt`,
+  and a dead row keeps its last capture, so `screen: ""` is no longer ambiguous.
+  `mission_session_close` captures the screen before killing the pane and says
+  the row survives. **And the conversation itself is now readable**, which is the
+  deeper half: `plan_activity {agent, session_id}` reads the agent's own store
+  and returned `messageCount: 135`, `matched: "exact"`, the real last
+  user/assistant pair with timestamps, `lastToolCall: {tool: "bash", status:
+  "completed"}` and `lastActivityAt` — for a live session, and it answers for a
+  **stopped** pad too because the store is on the host. A manager can now pick up
+  a colleague's conversation. One caveat filed as a new finding, because
+  "the last user message" is not always the human's:
+  [`2026-09-29-recheck-friction-log.md`](2026-09-29-recheck-friction-log.md)
+  finding 6.
 
 ### Nothing in the surface dates a session's death, and `get_agent` returns three null timestamps on a running pad
 
@@ -289,6 +333,13 @@ for a session that was there all along.
   buffer), and populate `created_at` / `last_activity_at` on `get_agent` — a
   running container with three null timestamps is a bug in its own right,
   independent of sessions.
+- **Resolution (2026-09-29, plan 65 — all three fields landed):** `get_agent
+  {name: "opencode-proj"}` (note the bare name, which now resolves) on a
+  **running** pad returns `created_at: "2026-08-09 17:06:08"`, `updated_at:
+  "2026-09-29 13:49:18"`, `last_activity_at: "2026-09-29 13:30:21"` — three real
+  values where there were three nulls. `endedAt` + `endedBy` are on every dead
+  row (see the `recreate` entry above for the one honest limit in them). Four
+  escalating attempts now answer in one read.
 
 ## Extensions to existing findings
 

@@ -3,6 +3,12 @@
 ## Status: Proposed (not started, 2026-08-09) — 0% implemented. Full-SPA
 responsive survey done (2026-08-09); no CSS/class changes landed yet.
 
+> **Update (2026-09-27):** the machines page (Dashboard) is now split out to
+> **plan 54**, which supersedes this plan's §A (nav) and §B (page header)
+> treatments — the nav is 596px of content now, not 4 short links. Everything
+> else in this plan (terminal, commands pane, vault, create, settings, detail
+> gutters) still stands as written.
+
 > **Note (2026-08-09):** this plan now owns the responsive workstream from
 > plan 02 (UI Enhancements, absorbed into docs and removed). Plan 02 had
 > gotten as far as hiding table columns on mobile; forms, terminal, and the
@@ -259,8 +265,10 @@ py-1.5 sm:px-4` (remove the outer `justify-between` two-group split):
 
 - xterm internals (FitAddon handles the pane size).
 - `GlobalBackups` real content (rebuilt in plan 26; shell already responsive).
-- A hamburger/drawer nav — `flex-wrap` on the nav row is sufficient at 360px
-  for 4 short links; revisit only if a 5th nav item is added.
+- A hamburger/drawer nav. **Superseded by plan 54** (2026-09-27): the nav now has
+  6 links + 3 controls = a measured 596px cluster, so `flex-wrap` makes the
+  sticky bar 128px tall on a phone. Plan 54 replaces §A's treatment with a
+  single-line horizontally scrollable nav; keep §A/§B here for reference only.
 - Old EJS views / `/api` legacy routes (dead code, plan 09).
 
 ## Implementation approach & risk mitigation

@@ -88,17 +88,61 @@ function usedPadSubnetOctets() {
       const r = execFileSync('docker', ['network', 'inspect', id, '--format', '{{range .IPAM.Config}}{{.Subnet}} {{end}}'], { stdio: 'pipe', timeout: 10000 });
       let m;
       while ((m = re.exec(r.toString())) !== null) {
-        const a = +m[1], b = +m[2], c = +m[3], prefix = +m[5];
-        if (a === 10 && b === 200 && prefix === PAD_SUBNET_PREFIX) used.add(c);
+        const oct = padPoolOctet(m[0]);
+        if (oct !== null) used.add(oct);
       }
     } catch {}
   }
   return used;
 }
 
-/** The lowest free /24 in the pad pool, or '' when the pool is full. */
-function pickFreePadSubnet() {
+/** The pool octet a subnet string occupies (`10.200.7.0/24` → 7), or null when
+ *  the value is outside the pad pool (a legacy network's own subnet — a value
+ *  this pool never hands out and never re-picks). */
+function padPoolOctet(subnet) {
+  const m = /^(\d+)\.(\d+)\.(\d+)\.(\d+)\/(\d+)$/.exec(String(subnet || '').trim());
+  if (!m) return null;
+  if (+m[1] !== 10 || +m[2] !== 200 || +m[5] !== PAD_SUBNET_PREFIX) return null;
+  return +m[3];
+}
+
+/** Third octets reserved by OTHER instance dirs' persisted `SUBNET`. A
+ *  reservation is NOT a live network: a pad that has never been started on the
+ *  default network (a peer-networked pad, or one whose network was never
+ *  created) holds a /24 on paper only. Counting live Docker networks alone
+ *  therefore hands the same octet out twice, and the second pad only discovers
+ *  it when compose finally tries to create the network —
+ *  `Pool overlaps with other one on this address space`. Union both sources so
+ *  an octet is unique whether or not its network exists yet. */
+function reservedPadSubnetOctets(exclude) {
+  const used = new Set();
+  let entries = [];
+  try {
+    entries = fs.readdirSync(INSTANCES_DIR, { withFileTypes: true });
+  } catch {
+    return used;
+  }
+  for (const e of entries) {
+    if (!e.isDirectory() || e.name === exclude) continue;
+    // A hidden dir is not a pad — `STALE_DOOR_DIR` (the stale-door sweep's
+    // parking lot) lives here, and a reservation parked in it must never count.
+    if (e.name.startsWith('.')) continue;
+    const oct = padPoolOctet(readMeta(path.join(INSTANCES_DIR, e.name)).SUBNET);
+    if (oct !== null) used.add(oct);
+  }
+  return used;
+}
+
+/** Pool octets claimed by anything other than `name` — both sources at once. */
+function claimedPadSubnetOctets(name) {
   const used = usedPadSubnetOctets();
+  for (const oct of reservedPadSubnetOctets(name)) used.add(oct);
+  return used;
+}
+
+/** The lowest free /24 in the pad pool, or '' when the pool is full. */
+function pickFreePadSubnet(exclude) {
+  const used = claimedPadSubnetOctets(exclude);
   for (let oct = 0; oct < 256; oct++) {
     if (!used.has(oct)) return `10.200.${oct}.0/${PAD_SUBNET_PREFIX}`;
   }
@@ -106,23 +150,57 @@ function pickFreePadSubnet() {
 }
 
 /** Ensure this pad's compose declares a concrete subnet for its `default`
- *  bridge network. Existing networks (older pads) are left untouched —
- *  declaring a different subnet would force a disruptive network recreate.
- *  For a network that doesn't exist yet, carve a fresh /24 out of the pad pool
- *  and persist it (meta SUBNET) so every later regen keeps the same subnet.
- *  Returns the subnet, or '' when the compose should stay subnet-less. */
-function ensurePadSubnet(name) {
+ *  bridge network, and return the subnet (or '' when the compose should stay
+ *  subnet-less).
+ *
+ *  Only a pad with a service on the project default network needs one — a
+ *  peer-networked pad's service is `network_mode: container:<peer>` and its socat
+ *  door rides the peer's own network, so nothing joins `default` and no
+ *  reservation should be taken (that unused reservation is what used to collide
+ *  when such a pad switched TO the default network). `releasePadSubnet`
+ *  drops the stale value.
+ *
+ *  A pad that DOES need one keeps its value when it is still free, and a
+ *  colliding reservation is re-picked — but never while a live
+ *  `<name>_default` network pins it, because declaring a different subnet for
+ *  an existing network forces a disruptive network recreate.
+ *
+ *  `networkExists` is injected so the unit tests never need a real Docker
+ *  network; production always uses the real probe. */
+function ensurePadSubnet(name, { networkExists = dockerNetworkExists } = {}) {
   const instDir = path.join(INSTANCES_DIR, name);
   if (!fs.existsSync(instDir)) return '';
   const meta = readMeta(instDir);
-  if (meta.SUBNET) return meta.SUBNET;
-  if (dockerNetworkExists(`${name}_default`)) return '';
-  const subnet = pickFreePadSubnet();
+  const hasLiveNetwork = networkExists(`${name}_default`);
+  if (meta.SUBNET) {
+    if (hasLiveNetwork) return meta.SUBNET;
+    const oct = padPoolOctet(meta.SUBNET);
+    if (oct === null || !claimedPadSubnetOctets(name).has(oct)) return meta.SUBNET;
+    // A stale duplicate (another pad holds it on paper, or a live network
+    // already owns it): fall through and re-pick.
+  } else if (hasLiveNetwork) {
+    // A legacy pad whose default network Docker already owns (created before
+    // the pool existed) — leave the compose subnet-less rather than force a
+    // change on a live network.
+    return '';
+  }
+  const subnet = pickFreePadSubnet(name);
   if (!subnet) {
     throw new Error(`The pad subnet pool (${PAD_SUBNET_POOL}) is exhausted — every /24 is taken. Delete a pad to free one, or extend the pool.`);
   }
   setMetaFlag(name, 'SUBNET', subnet);
   return subnet;
+}
+
+/** Drop this pad's /24 reservation — for a compose whose services join no
+ *  project default network, so it can never be handed to somebody else and
+ *  collide later. Refuses while a live `<name>_default` network still uses the
+ *  subnet (the value stays the pad's, it just isn't re-declared). */
+function releasePadSubnet(name, { networkExists = dockerNetworkExists } = {}) {
+  if (networkExists(`${name}_default`)) return false;
+  if (!readMeta(path.join(INSTANCES_DIR, name)).SUBNET) return false;
+  setMetaFlag(name, 'SUBNET', '');
+  return true;
 }
 
 function readMeta(vmDir) {
@@ -651,10 +729,15 @@ async function getNetworkHealth(name, { declaredPeer = '', run = runCmd } = {}) 
 }
 
 /** Read the persisted custom workspace mount (meta.env WORKSPACE_HOST/WORKSPACE_DIR)
- *  and return its normalized info, or null when not configured. Never throws:
- *  a corrupt/stale pair is ignored by compose generation (the Settings tab
- *  validates before writing, and writeInstanceCompose uses the already-validated
- *  value). */
+ *  and return its normalized info, or null when not configured. A corrupt/stale
+ *  stored PAIR is ignored by compose generation (the Settings tab validates
+ *  before writing, and writeInstanceCompose uses the already-validated value).
+ *
+ *  The agent TYPE is resolved OUTSIDE that tolerance on purpose. It is the
+ *  function's input contract, not part of the stored pair: swallowing an
+ *  unresolvable type here would answer null — "this pad has no workspace mount"
+ *  — and the pad would come up on the driver's default workspace, which is
+ *  exactly the silent substitution this resolution is meant to prevent. */
 function readWorkspaceMount(name, agent) {
   const meta = readMeta(path.join(INSTANCES_DIR, name)) || {};
   if (!meta.WORKSPACE_HOST || !meta.WORKSPACE_DIR) return null;
@@ -1331,7 +1414,31 @@ function autoSshPort() {
   return String(p);
 }
 
-function generateInstanceCompose(name, agent, password, port, opts = {}) {
+/** Whether any service in a GENERATED compose rides the project default
+ *  network — i.e. it declares neither `network_mode` (a peer-networked pad's
+ *  service is `network_mode: container:<peer>`, a host-network door is
+ *  `network_mode: host`) nor an explicit `networks` list (a socat door joins
+ *  the peer's external `webbridge`).
+ *
+ *  This is the gate for the pad subnet pool (plan 59): a project `default`
+ *  network — and therefore a reserved /24 — exists only when something joins
+ *  it. Gating on the generated services rather than on `NETWORK` being unset
+ *  means a peer pad with no ports at all (no door service) is judged the same
+ *  way, and a future service that does join `default` is picked up for free. */
+function usesProjectDefaultNetwork(services) {
+  for (const s of Object.values(services || {})) {
+    if (!s || typeof s !== 'object') continue;
+    if (s.network_mode) continue;
+    if (Array.isArray(s.networks) && s.networks.length) continue;
+    return true;
+  }
+  return false;
+}
+
+/** The compose model (plain object) for an instance — the single source both
+ *  `generateInstanceCompose` (read-only, for previews/tests) and
+ *  `writeInstanceCompose` (which then resolves the pad subnet) build on. */
+function buildInstanceCompose(name, agent, password, port, opts = {}) {
   const { allowDocker = false, network = '', webService = null, webPeerNetwork = '' } = opts;
   const driver = getDriver(agent);
   const wsMount = readWorkspaceMount(name, agent);
@@ -1478,29 +1585,54 @@ function generateInstanceCompose(name, agent, password, port, opts = {}) {
     }
   }
 
-  // The persisted SUBNET (written by ensurePadSubnet on first write) anchors
-  // the pad's `default` network to a fixed /24 in the pad pool — see the pool
-  // constants above. Without it, compose leaves the subnet unspecified and the
-  // daemon allocates from its finite default-address-pools, which exhaust.
-  let allNetworks = networks;
-  const subnet = (readMeta(path.join(INSTANCES_DIR, name)).SUBNET || '').trim();
-  if (subnet) {
-    allNetworks = { default: { ipam: { config: [{ subnet }] } }, ...(networks || {}) };
-  }
-
   // JSON is valid YAML. Serializing the structured compose model avoids fragile
   // hand-built YAML where a Compose interpolation such as `${VAR:-default}`
   // can be parsed as YAML syntax.
-  return JSON.stringify({
+  return {
     services,
-    ...(allNetworks ? { networks: allNetworks } : {}),
+    ...(networks ? { networks } : {}),
     ...(Object.keys(namedVolumes).length ? { volumes: namedVolumes } : {}),
-  }, null, 2) + '\n';
+  };
 }
 
+/** Serialize an instance compose to disk-ready text. Read-only: it declares the
+ *  pad's persisted `SUBNET` when one is on file and a service actually rides
+ *  the project default network, but never reserves one. `writeInstanceCompose`
+ *  is the path that carves a subnet. */
+function generateInstanceCompose(name, agent, password, port, opts = {}) {
+  const model = buildInstanceCompose(name, agent, password, port, opts);
+  if (usesProjectDefaultNetwork(model.services)) {
+    const subnet = (readMeta(path.join(INSTANCES_DIR, name)).SUBNET || '').trim();
+    if (subnet) {
+      model.networks = { default: { ipam: { config: [{ subnet }] } }, ...(model.networks || {}) };
+    }
+  }
+  return JSON.stringify(model, null, 2) + '\n';
+}
+
+/** Generate + write an instance compose file.
+ *
+ *  The pad subnet pool (see `ensurePadSubnet`) is resolved HERE, once the
+ *  services are known, because only a pad with a service on the project
+ *  `default` network needs a /24: a peer-networked pad's service shares the
+ *  peer's network namespace and its socat door rides the peer's own network,
+ *  so nothing joins `default` — reserving for it just parked a /24 on the pad's
+ *  books that collided the moment such a pad was switched TO the default
+ *  network (`Pool overlaps with other one on this address space`). Such a pad
+ *  releases a stale reservation instead. */
 function writeInstanceCompose(name, agent, password, port, opts = {}) {
-  ensurePadSubnet(name);
-  const yaml = generateInstanceCompose(name, agent, password, port, opts);
+  const model = buildInstanceCompose(name, agent, password, port, opts);
+  if (usesProjectDefaultNetwork(model.services)) {
+    // Carves a fresh /24 (or re-picks a colliding one) on first write; a pad
+    // whose default network is already live keeps whatever it has.
+    const subnet = ensurePadSubnet(name);
+    if (subnet) {
+      model.networks = { default: { ipam: { config: [{ subnet }] } }, ...(model.networks || {}) };
+    }
+  } else {
+    releasePadSubnet(name);
+  }
+  const yaml = JSON.stringify(model, null, 2) + '\n';
   const composePath = instanceComposePath(name);
   fs.mkdirSync(path.dirname(composePath), { recursive: true });
   fs.writeFileSync(composePath, yaml);
@@ -3145,6 +3277,131 @@ async function cleanOrphanDoors() {
   }
 }
 
+/** Where a stale door dir is parked instead of deleted. A hidden subdirectory of
+ *  `instances/`, so every existing reader (the agents list, the subnet-pool
+ *  reservation scan, the port-conflict scan, the build migration) skips it —
+ *  none of them match a name outside the `pad-*` / `VM_NAME_RE` shape. */
+const STALE_DOOR_DIR = '.stale-door-dirs';
+
+/** Classify every instance dir that looks like a legacy socat door and say what
+ *  to do with it: `{ action: 'quarantine' | 'skip', reason }`.
+ *
+ *  Doors used to be created as real PADs, so `instances/<pad>-door` directories
+ *  survive their retirement. They are excluded from the agent list (no `AGENT=`
+ *  line) but NOT harmless: each one carries a `docker-compose.yml` that the
+ *  host-port scan reads and, worse, a `SUBNET=` reservation in `meta.env` that
+ *  nothing frees — the same /24 then sits on two pads' books and the second
+ *  one to actually create its `default` network fails with
+ *  `Pool overlaps with other one on this address space`.
+ *
+ *  Every condition must hold, and anything ambiguous is skipped rather than
+ *  guessed at:
+ *   1. the name is `<parent>-door` / `<parent>-web` and `<parent>` is a REAL pad
+ *      (its meta has an `AGENT=` line) — so a user pad that merely ends in
+ *      `-door` is never touched;
+ *   2. the dir's own meta has no `AGENT=` line;
+ *   3. it holds NO agent data dir (a real pad always has its bind-mounted
+ *      `<agent>/` data dir), so no user data is quarantined;
+ *   4. the agents table has no row for it (`isRegisteredAgent`);
+ *   5. if a CONTAINER of that name exists it is a managed socat door (its
+ *      parent exists) running the socat image — that container is the parent
+ *      pad's live door and stays; only the directory is swept.
+ *
+ *  `containerImages` is a { name: image } map so the decision is testable
+ *  without Docker. */
+function staleDoorDirActions({ instancesDir = INSTANCES_DIR, containerImages = {}, isRegisteredAgent = () => false, agentTypes = Object.keys(drivers) } = {}) {
+  const out = [];
+  let entries = [];
+  try {
+    entries = fs.readdirSync(instancesDir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const name = e.name;
+    if (!VM_NAME_RE.test(name)) continue;
+    const m = /^(.*)-(door|web)$/.exec(name);
+    if (!m) continue;
+    const parent = m[1];
+    if (!VM_NAME_RE.test(parent)) continue;
+    if (!readMeta(path.join(instancesDir, parent)).AGENT) {
+      out.push({ name, action: 'skip', reason: 'no real parent pad' });
+      continue;
+    }
+    const instDir = path.join(instancesDir, name);
+    if (readMeta(instDir).AGENT) {
+      out.push({ name, action: 'skip', reason: 'meta has an AGENT= line' });
+      continue;
+    }
+    const dataDir = agentTypes.find((t) => fs.existsSync(path.join(instDir, t)));
+    if (dataDir) {
+      out.push({ name, action: 'skip', reason: `holds agent data dir ${dataDir}/` });
+      continue;
+    }
+    if (isRegisteredAgent(name)) {
+      out.push({ name, action: 'skip', reason: 'present in the agents table' });
+      continue;
+    }
+    const image = containerImages[name];
+    if (image && !isSocatDoorContainer(name, image)) {
+      out.push({ name, action: 'skip', reason: `container of that name is not a socat door (${image})` });
+      continue;
+    }
+    out.push({ name, action: 'quarantine', reason: image ? 'legacy door dir; container kept' : 'legacy door dir' });
+  }
+  return out;
+}
+
+/** A container named `<pad>-door` / `<pad>-web` is a forwarding sidecar when its
+ *  parent PAD still exists and it runs the socat image. Anything else under that
+ *  name is somebody's real container and must not be assumed disposable. */
+function isSocatDoorContainer(name, image) {
+  if (!isManagedDoorContainer(name)) return false;
+  return /socat/i.test(String(image || ''));
+}
+
+/** Boot-time sweep: quarantine the legacy `<pad>-door` / `<pad>-web` instance
+ *  dirs left over from when the forwarding door was created as a real PAD (see
+ *  `staleDoorDirActions` for the guards). Quarantine, not `rm -rf`: the pad
+ *  subnet reservation is released either way, and the dir can be inspected or
+ *  put back. The socat CONTAINER of the same name is the parent pad's live door
+ *  and is left alone.
+ *
+ *  Runs right after the orphan-door container sweep in app.js's boot block.
+ *  `isRegisteredAgent` is injected so this service stays db-free. */
+async function cleanStaleDoorDirs({ isRegisteredAgent = () => false, log = (m) => console.log(m) } = {}) {
+  let containerImages = {};
+  try {
+    const r = await runCmd('docker', ['ps', '-a', '--format', '{{.Names}}\t{{.Image}}'], { timeout: 15000 });
+    for (const line of (r.stdout || '').split('\n')) {
+      const [n, img] = line.split('\t');
+      if (n) containerImages[n.trim()] = (img || '').trim();
+    }
+  } catch {}
+  const actions = staleDoorDirActions({ containerImages, isRegisteredAgent });
+  const moved = [];
+  for (const a of actions) {
+    if (a.action === 'skip') {
+      log(`[stale-door-dir] keeping instances/${a.name} (${a.reason})`);
+      continue;
+    }
+    const from = path.join(INSTANCES_DIR, a.name);
+    const to = path.join(INSTANCES_DIR, STALE_DOOR_DIR, a.name);
+    try {
+      fs.mkdirSync(path.join(INSTANCES_DIR, STALE_DOOR_DIR), { recursive: true });
+      fs.rmSync(to, { recursive: true, force: true });
+      fs.renameSync(from, to);
+      ensureOwned(to);
+      moved.push(a.name);
+      log(`[stale-door-dir] quarantined instances/${a.name} → instances/${STALE_DOOR_DIR}/${a.name} (${a.reason})`);
+    } catch (err) {
+      log(`[stale-door-dir] could not quarantine instances/${a.name}: ${err.message}`);
+    }
+  }
+  return moved;
+}
+
 /** All containers (name, image, state) — the network-peer dropdown source
  *  (shared by `GET /api/containers` and the MCP `list_networks` tool). */
 async function listContainers() {
@@ -3181,8 +3438,8 @@ async function listContainers() {
  *  testable without a live `docker ps` and without depending on where the real
  *  instance dirs happen to live. `isFleetPad(name)` says "a PAD this project
  *  manages"; doors and the webui are always dropped. */
-function selectNetworkPeers(containers, { limit = 10, currentPeer = '', isFleetPad = () => false, webuiContainer = WEBUI_CONTAINER } = {}) {
-  const peers = [];
+function selectNetworkPeers(containers, { limit = 10, currentPeer = '', isFleetPad = () => false, webuiContainer = WEBUI_CONTAINER, filter = '' } = {}) {
+  const all = [];
   for (const c of containers) {
     if (!c) continue;
     const name = Array.isArray(c.Names) ? String(c.Names[0] || '') : String(c.Names || c.ID || '');
@@ -3194,9 +3451,15 @@ function selectNetworkPeers(containers, { limit = 10, currentPeer = '', isFleetP
     // A fleet pad is only a sensible peer if it publishes something; a bare
     // pad container is not a network anyone routes through.
     if (isFleetPad(clean) && !String(c.Ports || '').trim()) continue;
-    peers.push({ name: clean, image: c.Image || '', state: (c.State || '').toLowerCase(), isCurrent: clean === currentPeer });
+    // Filter on the FULL candidate list, before any cap is applied. Filtering
+    // a truncated list and then reporting `searchedAll` is the same silent
+    // maybe the 10-cap caused, just with a bigger number in front of it
+    // (plan 61, 1c).
+    if (filter && !clean.toLowerCase().includes(filter)) continue;
+    all.push({ name: clean, image: c.Image || '', state: (c.State || '').toLowerCase(), isCurrent: clean === currentPeer });
   }
-  return { peers: peers.slice(0, limit), total: peers.length, truncated: peers.length > limit };
+  if (filter) return { peers: all, total: all.length, truncated: false, searchedAll: true };
+  return { peers: all.slice(0, limit), total: all.length, truncated: all.length > limit };
 }
 
 /** `<pad>-door` / `<pad>-web` belong to a PAD, not to the peer list. */
@@ -3204,14 +3467,21 @@ function isManagedDoorName(name) {
   return /-(door|web)$/.test(name);
 }
 
-async function listNetworkPeers({ limit = 10, currentPeer = '' } = {}) {
+async function listNetworkPeers({ limit = 10, currentPeer = '', filter = '' } = {}) {
   const r = await runCmd('docker', ['ps', '--format', '{{json .}}'], { timeout: 15000 });
   const containers = (r.stdout || '').trim().split('\n').filter(Boolean).map((line) => {
     try { return JSON.parse(line); } catch { return null; }
   });
+  // A caller who already knows the container's name is asking "is THIS one a
+  // valid peer?", not "show me ten". Truncating that answer turns a question
+  // with a yes/no answer into a silent maybe (plan 61, 1c), so a filter searches
+  // the WHOLE candidate list and skips the cap entirely. The filter is applied
+  // inside `selectNetworkPeers`, before any limit — widening the limit instead
+  // would still be a cap, and `searchedAll` would be a lie past it.
   return selectNetworkPeers(containers, {
     limit,
     currentPeer,
+    filter: String(filter || '').toLowerCase(),
     isFleetPad: (n) => fs.existsSync(path.join(INSTANCES_DIR, n, 'meta.env')),
   });
 }
@@ -3220,7 +3490,7 @@ async function listNetworkPeers({ limit = 10, currentPeer = '' } = {}) {
  *  /api/agents/:name/settings` and the MCP `settings_get` tool. The web
  *  binding rides along so a single read reconstructs the whole picture before
  *  a consolidated `recreate`. */
-async function readSettings(name) {
+async function readSettings(name, { redact = false } = {}) {
   const meta = readMeta(path.join(INSTANCES_DIR, name));
   const agentType = meta.AGENT || 'openclaw';
   // Lenient ONLY for a pad with no AGENT line (no type to look up); a line
@@ -3242,12 +3512,11 @@ async function readSettings(name) {
     // peer is unreachable). An unreadable answer must never read as a healthy one.
     networkHealth = { state: 'none', checked: false, reason: `network health probe failed: ${(e && e.message) || e}` };
   }
-
   let workspaceMount = null;
   try {
     workspaceMount = readWorkspaceMount(name, agentType);
   } catch {}
-  const web = await readWebState(name);
+  const web = await readWebState(name, { redact });
   return {
     allowDocker: meta.DOCKER === '1',
     userMode: meta.USER_MODE === 'user' ? 'user' : 'root',
@@ -3284,8 +3553,16 @@ function readDrafts(name) {
 }
 
 /** Published-web state, shared by `GET /api/agents/:name/web`, `readSettings`
- *  (which embeds it) and the MCP `settings_get` tool. */
-async function readWebState(name) {
+ *  (which embeds it) and the MCP `settings_get` tool.
+ *
+ *  `redact: true` (what the MCP tool passes) drops the two fields that carry the
+ *  live web password: `authToken` (the bearer credential for a tokenized
+ *  console URL) and `startCommand` (the driver's command with the password baked
+ *  in). Both are legitimate for the operator's own dashboard — the Web tab needs
+ *  `authToken` to build the `#token=…` link and `startCommand` for the Start
+ *  button — so `GET /api/agents/:name/web` and the settings REST route are
+ *  unchanged. `passwordConfigured` already answers "is there one". */
+async function readWebState(name, { redact = false } = {}) {
   const meta = readMeta(path.join(INSTANCES_DIR, name));
   const agentType = meta.AGENT || 'openclaw';
   // Lenient ONLY for a pad with no AGENT line (no type to look up); a line
@@ -3323,8 +3600,14 @@ async function readWebState(name) {
     networkMode: netPeer,
     webService: active ? webService : null,
     passwordConfigured: active && !!password,
-    authToken: active && driver.webApp.auth && driver.webApp.auth.urlToken ? password : '',
-    startCommand: active ? driver.webApp.startCommand({ password, containerPort: webService.containerPort }) : '',
+    authToken: redact ? '' : (active && driver.webApp.auth && driver.webApp.auth.urlToken ? password : ''),
+    tokenConfigured: !!(active && driver.webApp.auth && driver.webApp.auth.urlToken && password),
+    // The start command is built from the password, so it is a second copy of
+    // the credential and is redacted with it. The MCP caller gets the port
+    // instead, which is the part that is not a secret.
+    startCommand: redact
+      ? (active ? `[redacted: web start command for port ${webService.containerPort}]` : '')
+      : (active ? driver.webApp.startCommand({ password, containerPort: webService.containerPort }) : ''),
     actualPorts,
     extraPorts,
     sshPort,
@@ -4232,6 +4515,15 @@ async function ensureInstanceBuilds({ onLog = () => {} } = {}) {
   for (const entry of fs.readdirSync(INSTANCES_DIR, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const name = entry.name;
+    // Only real PAD dirs. A legacy `<pad>-door` dir is a forwarding sidecar,
+    // not an agent — seeding it an image tag, a build dir and a compose (and
+    // with it a subnet-pool reservation) is pure waste, and it races the
+    // stale-door sweep that quarantines it. `STALE_DOOR_DIR` is the sweep's own
+    // parking lot, which matches neither shape.
+    if (!VM_NAME_RE.test(name) || isManagedDoorContainer(name)) {
+      results.skipped.push(`${name} (not a pad)`);
+      continue;
+    }
     const instDir = path.join(INSTANCES_DIR, name);
     const meta = readMeta(instDir);
     const agent = meta.AGENT || 'openclaw';
@@ -4286,7 +4578,13 @@ async function ensureInstanceBuilds({ onLog = () => {} } = {}) {
 
 module.exports = {
   createVm, removeVm, resetVm, readMeta,
-  generateInstanceCompose, writeInstanceCompose,
+  generateInstanceCompose, buildInstanceCompose, writeInstanceCompose,
+  // plan 59: the pad subnet pool (peer pads reserve nothing; a colliding
+  // reservation is re-picked) + the legacy door-dir boot sweep
+  usesProjectDefaultNetwork,
+  ensurePadSubnet, releasePadSubnet, pickFreePadSubnet, padPoolOctet,
+  usedPadSubnetOctets, reservedPadSubnetOctets, claimedPadSubnetOctets,
+  cleanStaleDoorDirs, staleDoorDirActions, isSocatDoorContainer, STALE_DOOR_DIR,
   applySettings, updateAgent, recreateAgent, setMetaFlag,
   instanceComposePath, getComposePath,
   getNetworkHealth,

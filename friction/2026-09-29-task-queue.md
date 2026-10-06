@@ -17,6 +17,21 @@ I did **not** drain the pool I created, on purpose — the only tool that can pu
 from the pool is the same tool that claims from it. Findings 2 and 3 are that
 sentence, written down.
 
+**Resolution since (2026-09-29 — every finding in this file is RETIRED, not
+fixed):** all eight `task_*` tools — `task_submit`, `task_status`, `task_result`,
+`task_list`, `task_get_next`, `task_complete`, `task_priority`, `task_cancel` —
+are gone from the MCP surface. The retirement is deliberate: plan 52's
+`## Status:` line, read through `plan_list`, says *"**The queue is gone;**"* and
+plan 74 (`74-task-lifecycle-and-done-detection.md`) is a design for a different,
+issue-shaped task record. So findings 1-7 below and the three extensions are
+kept for history and should not be re-filed as open defects. **What is still
+missing is a note in `help`** — the string "task" does not appear in the guide
+once, so a caller arriving from this file finds eight tools absent and no way to
+learn whether they were retired, renamed or gated. That gap is filed as a new
+blocker in [`2026-09-29-recheck-friction-log.md`](2026-09-29-recheck-friction-log.md)
+finding 1, along with the one related fix that did land: `exec` now has a `cwd`
+parameter.
+
 ## Findings
 
 ### `task_get_next {name}` and `task_submit {name}` write two different fields under one parameter name

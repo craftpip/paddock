@@ -137,18 +137,18 @@ describe('vm-manager - pad default-network subnet (pool exhaustion fix)', () => 
     });
   });
 
-  it('keeps the door webbridge network alongside the default subnet', () => {
+  it('keeps a NON-peer pad on the door-shaped webbridge too', () => {
+    // A pad that publishes its own ports can still declare an external network
+    // of its own (e.g. a future shared bridge), and then the default network it
+    // rides on must still be declared — the gate is "does anything join
+    // default", not "is there a webbridge".
     withTmp((TMP, vm) => {
       const instDir = path.join(TMP, 'instances', 'pad-sub');
       fs.mkdirSync(instDir, { recursive: true });
       fs.writeFileSync(path.join(instDir, 'meta.env'), 'AGENT=opencode\nROOT_PASSWORD=pw\nSUBNET=10.200.42.0/24\n');
-      const yaml = vm.generateInstanceCompose('pad-sub', 'opencode', 'pw', '22001', {
-        network: 'gluetun-global',
-        webPeerNetwork: 'gluetun_default',
-      });
+      const yaml = vm.generateInstanceCompose('pad-sub', 'opencode', 'pw', '22001', {});
       const compose = JSON.parse(yaml);
       assert.strictEqual(compose.networks.default.ipam.config[0].subnet, '10.200.42.0/24');
-      assert.strictEqual(compose.networks.webbridge.name, 'gluetun_default');
     });
   });
 
@@ -172,6 +172,234 @@ describe('vm-manager - pad default-network subnet (pool exhaustion fix)', () => 
       assert.ok(/^10\.200\.\d{1,3}\.0\/24$/.test(subnet), `subnet in the pad pool, got ${subnet}`);
       const compose = JSON.parse(fs.readFileSync(path.join(instDir, 'docker-compose.yml'), 'utf8'));
       assert.strictEqual(compose.networks.default.ipam.config[0].subnet, subnet, 'compose and meta agree');
+    });
+  });
+});
+
+// plan 59 — the pool-exhaustion bug this covers: a PEER-networked pad used to
+// reserve (and declare) a `default` subnet it never joined, so two pads ended up
+// holding the same /24 and the first one to actually create that network failed
+// with `Pool overlaps with other one on this address space`.
+describe('vm-manager - pad subnet pool: peer mode, reservations, collisions (plan 59)', () => {
+  function withTmp(fn) {
+    const TMP = '/tmp/pool59-' + Date.now() + '-' + Math.floor(Math.random() * 1e6);
+    const prevWs = process.env.WORKSPACE_ROOT;
+    const prevHost = process.env.HOST_WORKSPACE_ROOT;
+    process.env.WORKSPACE_ROOT = TMP;
+    process.env.HOST_WORKSPACE_ROOT = TMP;
+    delete require.cache[require.resolve('../services/vm-manager')];
+    const vm = require('../services/vm-manager');
+    try {
+      fn(TMP, vm);
+    } finally {
+      fs.rmSync(TMP, { recursive: true, force: true });
+      process.env.WORKSPACE_ROOT = prevWs;
+      process.env.HOST_WORKSPACE_ROOT = prevHost;
+      delete require.cache[require.resolve('../services/vm-manager')];
+    }
+  }
+
+  function mkPad(TMP, name, extra = '') {
+    const instDir = path.join(TMP, 'instances', name);
+    fs.mkdirSync(instDir, { recursive: true });
+    fs.writeFileSync(path.join(instDir, 'meta.env'), `AGENT=opencode\nROOT_PASSWORD=pw\n${extra}`);
+    return instDir;
+  }
+
+  it('a peer-networked pad declares no default network and reserves no subnet', () => {
+    withTmp((TMP, vm) => {
+      const instDir = mkPad(TMP, 'pad-peer');
+      vm.writeInstanceCompose('pad-peer', 'opencode', 'pw', '22001', {
+        network: 'gluetun-global',
+        webPeerNetwork: 'gluetun_default',
+      });
+      const compose = JSON.parse(fs.readFileSync(path.join(instDir, 'docker-compose.yml'), 'utf8'));
+      assert.strictEqual(compose.networks.default, undefined, 'no project default network for a peer pad');
+      assert.strictEqual(compose.networks.webbridge.name, 'gluetun_default', 'the door still rides the peer');
+      assert.strictEqual(vm.readMeta(instDir).SUBNET, undefined, 'no /24 reserved for a pad that joins no default network');
+    });
+  });
+
+  it('releases a stale reservation when a peer pad is regenerated', () => {
+    withTmp((TMP, vm) => {
+      const instDir = mkPad(TMP, 'pad-peer2', 'NETWORK=gluetun-global\nSUBNET=10.200.9.0/24\n');
+      vm.writeInstanceCompose('pad-peer2', 'opencode', 'pw', '', { network: 'gluetun-global' });
+      assert.strictEqual(vm.readMeta(instDir).SUBNET, undefined, 'the unused reservation is freed');
+    });
+  });
+
+  it('keeps the reservation of a peer pad whose default network is live', () => {
+    // A live `<name>_default` network owns its subnet, so the reservation is
+    // NOT released even though a peer pad joins no default network: the value
+    // is what a later switch-to-default declares against, and re-picking it
+    // would force a disruptive network recreate.
+    withTmp((TMP, vm) => {
+      const instDir = mkPad(TMP, 'pad-peer3', 'SUBNET=10.200.9.0/24\n');
+      const live = { networkExists: (n) => n === 'pad-peer3_default' };
+      assert.strictEqual(vm.releasePadSubnet('pad-peer3', live), false, 'refused: a live network pins it');
+      assert.strictEqual(vm.readMeta(instDir).SUBNET, '10.200.9.0/24', 'value untouched');
+      assert.strictEqual(vm.ensurePadSubnet('pad-peer3', live), '10.200.9.0/24', 'and never re-picked');
+    });
+  });
+
+  it('two pads never hold the same /24 — a reservation counts even with no network behind it', () => {
+    withTmp((TMP, vm) => {
+      // The pool scanner must see a reservation with no network behind it, or
+      // the next pad is handed an octet that is already spoken for. (The
+      // collision then surfaces much later, as a compose failure, because only
+      // the pad that actually creates a `default` network asks Docker for it.)
+      mkPad(TMP, 'pad-a', 'SUBNET=10.200.0.0/24\n');
+      mkPad(TMP, 'pad-b', 'SUBNET=10.200.1.0/24\n');
+      mkPad(TMP, 'pad-c');
+      vm.writeInstanceCompose('pad-c', 'opencode', 'pw', '');
+      const c = vm.readMeta(path.join(TMP, 'instances', 'pad-c')).SUBNET;
+      assert.ok(c, 'a fresh pad gets a subnet');
+      assert.ok(c !== '10.200.0.0/24' && c !== '10.200.1.0/24',
+        `pad-c must skip the reserved octets, got ${c}`);
+    });
+  });
+
+  it('a persisted-but-claimed SUBNET is re-picked for a pad with no live network', () => {
+    withTmp((TMP, vm) => {
+      // pad-collide keeps a stale 10.200.0.0/24; pad-holder is a second pad
+      // holding the same octet on paper. The colliding value must be replaced.
+      mkPad(TMP, 'pad-collide', 'SUBNET=10.200.0.0/24\n');
+      mkPad(TMP, 'pad-holder', 'SUBNET=10.200.0.0/24\n');
+      const instDir = path.join(TMP, 'instances', 'pad-collide');
+      const next = vm.ensurePadSubnet('pad-collide');
+      assert.notStrictEqual(next, '10.200.0.0/24', 'a claimed octet is re-picked');
+      assert.ok(/^10\.200\.\d{1,3}\.0\/24$/.test(next), `re-picked inside the pool, got ${next}`);
+      assert.strictEqual(vm.readMeta(instDir).SUBNET, next, 'the re-pick is persisted');
+    });
+  });
+
+  it('keeps a SUBNET that is still free', () => {
+    withTmp((TMP, vm) => {
+      mkPad(TMP, 'pad-ok', 'SUBNET=10.200.7.0/24\n');
+      assert.strictEqual(vm.ensurePadSubnet('pad-ok'), '10.200.7.0/24', 'a free reservation is left alone');
+    });
+  });
+
+  it('leaves a legacy out-of-pool subnet alone (live network, pre-pool pad)', () => {
+    withTmp((TMP, vm) => {
+      mkPad(TMP, 'pad-legacy', 'SUBNET=172.23.0.0/16\n');
+      assert.strictEqual(vm.ensurePadSubnet('pad-legacy'), '172.23.0.0/16', 'never re-pick a value the pool never handed out');
+      assert.strictEqual(vm.padPoolOctet('172.23.0.0/16'), null);
+    });
+  });
+
+  it('throws when the pool is exhausted rather than handing out a duplicate', () => {
+    withTmp((TMP, vm) => {
+      // Claim all 256 octets on paper; the next pad must fail loudly.
+      const lines = [];
+      for (let oct = 0; oct < 256; oct++) lines.push(`SUBNET=10.200.${oct}.0/24`);
+      lines.forEach((l, i) => mkPad(TMP, `pad-full-${i}`, `${l}\n`));
+      mkPad(TMP, 'pad-nope');
+      assert.throws(() => vm.ensurePadSubnet('pad-nope'), /exhausted/);
+    });
+  });
+
+  it('usesProjectDefaultNetwork reads the generated services, not the NETWORK flag', () => {
+    withTmp((TMP, vm) => {
+      assert.strictEqual(vm.usesProjectDefaultNetwork({ 'p': { image: 'x' } }), true, 'a plain service rides default');
+      assert.strictEqual(vm.usesProjectDefaultNetwork({ 'p': { network_mode: 'container:peer' } }), false);
+      assert.strictEqual(vm.usesProjectDefaultNetwork({ 'p': { network_mode: 'host' } }), false);
+      assert.strictEqual(vm.usesProjectDefaultNetwork({ 'p': { networks: ['webbridge'] } }), false);
+      assert.strictEqual(vm.usesProjectDefaultNetwork({ 'p': { networks: [] } }), true, 'an empty list still means default');
+      assert.strictEqual(vm.usesProjectDefaultNetwork({ 'p': { network_mode: 'container:peer' }, 'p-door': { networks: ['webbridge'] } }), false,
+        'a peer pad with a door joins no default network');
+      assert.strictEqual(vm.usesProjectDefaultNetwork({}), false);
+    });
+  });
+});
+
+describe('vm-manager - legacy door-dir sweep (plan 59)', () => {
+  function withTmp(fn) {
+    const TMP = '/tmp/door59-' + Date.now() + '-' + Math.floor(Math.random() * 1e6);
+    const prevWs = process.env.WORKSPACE_ROOT;
+    const prevHost = process.env.HOST_WORKSPACE_ROOT;
+    process.env.WORKSPACE_ROOT = TMP;
+    process.env.HOST_WORKSPACE_ROOT = TMP;
+    delete require.cache[require.resolve('../services/vm-manager')];
+    const vm = require('../services/vm-manager');
+    try {
+      fn(TMP, vm);
+    } finally {
+      fs.rmSync(TMP, { recursive: true, force: true });
+      process.env.WORKSPACE_ROOT = prevWs;
+      process.env.HOST_WORKSPACE_ROOT = prevHost;
+      delete require.cache[require.resolve('../services/vm-manager')];
+    }
+  }
+
+  function mk(TMP, name, extra = '') {
+    const dir = path.join(TMP, 'instances', name);
+    fs.mkdirSync(dir, { recursive: true });
+    if (extra !== null) fs.writeFileSync(path.join(dir, 'meta.env'), extra);
+    return dir;
+  }
+
+  it('quarantines a legacy door dir of a real pad and keeps the socat container', () => {
+    withTmp((TMP, vm) => {
+      mk(TMP, 'pad-parent', 'AGENT=opencode\n');
+      const door = mk(TMP, 'pad-parent-door', 'SUBNET=10.200.5.0/24\n');
+      const actions = vm.staleDoorDirActions({
+        containerImages: { 'pad-parent-door': 'alpine/socat' },
+      });
+      assert.deepStrictEqual(actions, [{ name: 'pad-parent-door', action: 'quarantine', reason: 'legacy door dir; container kept' }]);
+      // The reservation is what made the sweep worth doing: it is gone from the
+      // pad's own dir once swept, and the parent is untouched.
+      assert.ok(fs.existsSync(door));
+    });
+  });
+
+  it('skips a real PAD whose name merely ends in -door', () => {
+    withTmp((TMP, vm) => {
+      mk(TMP, 'pad-real', 'AGENT=opencode\n');
+      // `pad-real-door` is its own agent (has AGENT=), so nothing may be swept.
+      mk(TMP, 'pad-real-door', 'AGENT=opencode\n');
+      const actions = vm.staleDoorDirActions({});
+      assert.deepStrictEqual(actions, [{ name: 'pad-real-door', action: 'skip', reason: 'meta has an AGENT= line' }]);
+    });
+  });
+
+  it('skips a door dir that still holds agent data', () => {
+    withTmp((TMP, vm) => {
+      mk(TMP, 'pad-parent', 'AGENT=opencode\n');
+      const door = mk(TMP, 'pad-parent-door', 'SUBNET=10.200.5.0/24\n');
+      fs.mkdirSync(path.join(door, 'opencode'), { recursive: true });
+      const actions = vm.staleDoorDirActions({});
+      assert.strictEqual(actions[0].action, 'skip');
+      assert.match(actions[0].reason, /agent data dir opencode/);
+    });
+  });
+
+  it('skips a dir registered as an agent in the db', () => {
+    withTmp((TMP, vm) => {
+      mk(TMP, 'pad-parent', 'AGENT=opencode\n');
+      mk(TMP, 'pad-parent-door', '');
+      const actions = vm.staleDoorDirActions({ isRegisteredAgent: (n) => n === 'pad-parent-door' });
+      assert.strictEqual(actions[0].action, 'skip');
+      assert.match(actions[0].reason, /agents table/);
+    });
+  });
+
+  it('skips a door dir whose container is NOT a socat door', () => {
+    withTmp((TMP, vm) => {
+      mk(TMP, 'pad-parent', 'AGENT=opencode\n');
+      mk(TMP, 'pad-parent-door', '');
+      const actions = vm.staleDoorDirActions({ containerImages: { 'pad-parent-door': 'some/app:1' } });
+      assert.strictEqual(actions[0].action, 'skip');
+      assert.match(actions[0].reason, /not a socat door/);
+    });
+  });
+
+  it('ignores a -door dir with no real parent pad and non-pad dirs entirely', () => {
+    withTmp((TMP, vm) => {
+      mk(TMP, 'pad-parent-door', '');           // parent `pad-parent` does not exist
+      mk(TMP, '.stale-door-dirs', null);         // the quarantine dir itself
+      const actions = vm.staleDoorDirActions({});
+      assert.deepStrictEqual(actions, [{ name: 'pad-parent-door', action: 'skip', reason: 'no real parent pad' }]);
     });
   });
 });
@@ -1555,6 +1783,36 @@ describe('vm-manager - network peers for settings_get', () => {
     assert.strictEqual(res.peers.length, 10, 'page is capped');
     assert.strictEqual(res.total, 46, 'total is the unfiltered count');
     assert.strictEqual(res.truncated, true, 'truncated warns the caller more exist');
+  });
+
+  it('a filter searches the WHOLE list, not the first page (plan 61, 1c)', () => {
+    // The match sits at position 30, well past the 10-item page. Filtering a
+    // truncated list and then claiming `searchedAll` is the same silent maybe
+    // the cap caused, just with a bigger number in front of it.
+    const many = [...Array.from({ length: 30 }, (_, i) => c(`peer-${i}`)), c('gluetun-b')];
+    const res = vm.selectNetworkPeers(many, { limit: 10, filter: 'gluetun' });
+    assert.deepStrictEqual(res.peers.map((p) => p.name), ['gluetun-b'], 'found past the cap');
+    assert.strictEqual(res.total, 1, 'total counts the matches, not the candidates');
+    assert.strictEqual(res.truncated, false, 'a filtered answer is not truncated');
+    assert.strictEqual(res.searchedAll, true, 'and it says it searched everything');
+  });
+
+  it('a filter that matches nothing is a real "no", not a truncated maybe', () => {
+    const many = Array.from({ length: 46 }, (_, i) => c(`peer-${i}`));
+    const res = vm.selectNetworkPeers(many, { limit: 10, filter: 'nosuchthing' });
+    assert.deepStrictEqual(res.peers, [], 'no matches');
+    assert.strictEqual(res.total, 0);
+    assert.strictEqual(res.truncated, false);
+    assert.strictEqual(res.searchedAll, true);
+  });
+
+  it('the filter is case-insensitive and leaves the unfiltered page capped', () => {
+    const res = vm.selectNetworkPeers([c('GLUETUN-a'), c('b')], { limit: 10, filter: 'gluetun' });
+    assert.deepStrictEqual(res.peers.map((p) => p.name), ['GLUETUN-a']);
+    const page = vm.selectNetworkPeers([c('GLUETUN-a'), c('b')], { limit: 1 });
+    assert.strictEqual(page.peers.length, 1, 'unfiltered still caps');
+    assert.strictEqual(page.truncated, true);
+    assert.strictEqual(page.searchedAll, undefined, 'an unfiltered page makes no such claim');
   });
 
   it('marks only the currently selected peer', () => {

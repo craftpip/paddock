@@ -93,6 +93,12 @@ on the solid fill.
 - **No raw Tailwind color utilities** (`slate-*`, `cyan-*`, `red-*`,
   `emerald-*`, …) in components. The old raw-class pass (~618 occurrences in
   23 files) was the whole problem. If a needed shade is missing, add a token.
+- **One deliberate exception: `Switch`'s knob is `bg-white`.** Every
+  light-looking surface token goes dark in dark mode, and a dark knob on the
+  dark `bg-raised` off-track nearly vanishes — `bg-panel` had exactly that bug
+  in `CreateAgent`. `--t-accent-ink` is white in light mode and near-black in
+  dark, so it fails the other way. A physical toggle cap stays light in both
+  modes. See [UI primitives](ui-primitives.md).
 - **Never re-theme the terminal.** xterm keeps its DEFAULT colors — it does
   NOT follow the theme toggle. The themed `xtermTheme()` and the
   `paddock:theme` listener were removed from `Terminal.jsx` by request; the

@@ -53,6 +53,22 @@ itself.
   `plan_list {agent, path}` and a `plan_write`, since a directory an LLM is
   expected to manage on every session cannot be one it can only reach through a
   broken file tool.
+- **Resolution (2026-09-29, plan 64 — built, and it works, on a minority of the
+  fleet):** the facility exists and does what the requirement asked. `plan_list
+  {agent}` on `pad-opencode-paddock-dev` returns **44 plans**, each with its
+  `## Status:` line lifted onto the row — `In progress — 8/10 phases built`,
+  `Draft — 0/4 items done`, `Complete — 5/5, verified live` — which is the
+  progress record this log said did not exist. `plan_write` creates the folder on
+  first use and stamps machine-managed frontmatter (`created`, `last_activity`,
+  `ageMs` / `idleMs`); `plan_list {path}` reads one body back;
+  `plan_activity` reads a conversation's last exchange out of the agent's own
+  store. Verified end to end, write → list → read. **But the facility is refused
+  on every opencode pad whose workspace is a bind mount** (4 of 6, including
+  `pad-opencode-proj`), so on the pads that carry the real projects the blocker
+  is renamed rather than lifted — see
+  [`2026-09-29-recheck-friction-log.md`](2026-09-29-recheck-friction-log.md)
+  finding 2, and finding 3 there for why `plan_list {folder}` returns zero on
+  the one pad where it works.
 - **Requirement, as stated by the user (2026-09-29, verbatim intent):** plans
   are to become a standard method for the LLM to manage. They live in the
   project's set folder `/plans`; in `plans` are `.md` files; they are managed in
@@ -97,6 +113,18 @@ itself.
   unknown. One consequence of bundling them is recorded as the finding below:
   the two changes interact, and doing them in the stated order would ship the
   plans tools with no working writer underneath them.
+- **Resolution (2026-09-29, plan 64 — the writer landed, and it writes):** both
+  halves shipped. `plan_list` / `plan_write` / `plan_activity` exist, and
+  `workspace_write` now returns a real confirmation (`ok`, `size`, `modified`)
+  with the file genuinely on disk — verified by reading it back inside the pad.
+  `help` gained a whole **Plans** section and recipe 14. **The sequencing trap
+  this entry warned about did fire**, but in the other direction and with a
+  cleaner failure: the plans tools are gated on the *host* file browser, so they
+  refuse on every opencode pad with a bind-mounted workspace. See
+  [`2026-09-29-recheck-friction-log.md`](2026-09-29-recheck-friction-log.md)
+  finding 2. The remaining sharp edge of the writer is that `workspace_write`
+  resolves a relative `path` against the agent's data dir, not the workspace —
+  same file, finding 4 there.
 - **Fix, as stated by the user (2026-09-29, after a live reproduction — not a
   Resolution, nothing is fixed or verified yet):** *"`workspace_*` should behave
   like the `write` command in opencode behaves."* The user is the target of
@@ -120,6 +148,21 @@ itself.
   plans facility has a second, sharper dependency on the writer: today the log
   is the only artifact this surface can produce, and a live agent could not
   write even that through `workspace_write`.
+- **Resolution (2026-09-29 — the silent no-op is fixed; the refusal now
+  reaches the caller; the base directory does not):** `workspace_write` on
+  `pad-openclaw-work-pls` returned `{"ok": true, "name":
+  "friction-verify-probe.txt", "path": "friction-verify-probe.txt", "size": 30,
+  "modified": "2026-09-29T13:45:44.177Z"}` and the file was on disk — the
+  `await` fix, applied, with an honest write-confirmation. On
+  `pad-opencode-proj` the refusal now **reaches the caller** instead of being
+  swallowed, which is the second half of the sweep's fix and the thing this
+  entry's sequencing trap depended on. Two things are still wrong with it, both
+  new and both filed in
+  [`2026-09-29-recheck-friction-log.md`](2026-09-29-recheck-friction-log.md): a
+  relative `path` resolves against the agent's data dir
+  (`/root/.openclaw`) rather than the workspace (`/root/.openclaw/workspace`),
+  so the tool named for the workspace does not write it — finding 4 there; and
+  the refusal message prints its own explanation twice — finding 7 there.
 
 ### "The workspace" has no single referent across a 13-pad fleet, so `/plans` is ambiguous before it is unreachable
 
@@ -204,6 +247,13 @@ itself.
   done — so if the trio is retired rather than fixed, say so in `help` instead
   of leaving callers to discover it. The residual gap that decision creates is
   the next finding.
+- **Resolution (2026-09-29 — the decision was carried out, and `help` says so):**
+  `workspace_list` and `workspace_read` are gone from the surface, and `help` now
+  states the policy rather than leaving callers to discover it: *"There is
+  deliberately NO browse tool."* The residual gap this entry predicted — browsing
+  a stopped pad, which `exec` cannot do — is now the *only* thing the plans
+  facility offers instead, which matters more than it did when written because
+  `plan_list` is the surface's sole directory reader.
 
 ### Retiring `workspace_list` leaves the guide pointing at it, and the pwd is only on rows that exist
 
@@ -248,6 +298,21 @@ itself.
   an optional `cwd` to `exec` so the `cd` cannot be forgotten; failing that, have
   the Mission row's `folder` be the one thing a caller needs and say so in the
   `mission_projects` description.
+- **Resolution (2026-09-29 — fully fixed, including the `cwd` suggestion):**
+  recipe 7 is rewritten and no longer mentions the trio — it now reads *"Write a
+  workspace file: `workspace_write`. There is deliberately NO browse tool:
+  listing a whole tree into your context is a large, usually unwanted read, and
+  the plans facility is the browsable surface. A refusal here is a POLICY
+  decision about this PAD, not a missing capability — `settings_get` returns
+  `workspaceMount.hostBrowseReason` saying which, and `exec` on a running agent
+  is the fallback."* The Read/inspect line in the tool surface section is
+  likewise rewritten to name `workspace_write` and the plan trio. And the
+  better fix was taken: `exec` gained a `cwd` parameter, so the forgotten `cd` is
+  no longer possible — `exec {name: "pad-opencode-proj", cwd: "/www2/paddock",
+  command: "pwd && ls plans"}` returned `cwd: "/www2/paddock"`,
+  `requestedCwd: "/www2/paddock"`, `stdout: "/www2/paddock\n01-ideas.md\n…"`.
+  The response echoes both the container cwd it used and the one I asked for,
+  which is what the old `no cwd` finding asked for by name.
 
 ### Every pad I sampled is `hostBrowsable: false`, so the agreed fix makes `workspace_write` refuse fleet-wide
 
@@ -292,6 +357,22 @@ itself.
   is. Expose the reason in `settings_get` (e.g. `hostBrowsable: false,
   hostBrowseReason: "workspace mounted from outside the agent folder"`) so the
   refusal is predictable instead of surprising.
+- **Resolution (2026-09-29 — the reason is exposed; the trap fired, on the plans
+  tools):** the last sentence of the fix landed exactly: `settings_get` now
+  returns `workspaceMount.hostBrowseReason` on every pad, carrying the sentence
+  this entry could previously only quote from the sweep, and `get_agent` carries
+  it too. So the refusal is predictable, as asked. **The trap fired anyway, and
+  in the predicted place.** `plan_list` / `plan_write` / `plan_activity` are
+  gated on the same `hostBrowsable` flag, so they refuse on
+  `pad-opencode-proj`, `pad-proj2`, `pad-opencode-user1` and
+  `pad-opencode-jake-man` with `plan_workspace_not_host_visible`, and work only
+  on the 4 pads whose workspace is the driver default inside the instance
+  directory. That is this entry's *"the plans feature ships, passes a smoke test
+  against a fixture, and is dead on every real pad"*, delivered as a clean
+  refusal rather than a silent no-op — the better failure, which is what this
+  entry said would make it likelier to ship. Full reproduction in
+  [`2026-09-29-recheck-friction-log.md`](2026-09-29-recheck-friction-log.md)
+  finding 2. `hostBrowsable` itself was **not** cleared for any pad.
 
 ## Context: the pads that matter here
 

@@ -101,6 +101,14 @@ sound, which is where the sharper findings came from.
   than `busy: false, busyKnown: true`.
 - **Status: open — owned by plan 62** (`plans/62-mission-liveness-truth.md`).
   Plan 67 explicitly does not touch liveness, so this entry stays unresolved here.
+- **Not re-tested (2026-09-29):** the one live session on the fleet is idle
+  (`busy: false, busyKnown: true`, TUI up, `canSend: true`) and the four sessions
+  this entry was written about are all `state: "dead"` now, so the contradiction
+  could not be reproduced. The cheap half of this finding *has* improved: the
+  session this entry could not make sense of, `msn_dc493ea9d87313e7`, now reads
+  `state: "dead"`, `endedAt`, `endedBy: "gone"`, and — new —
+  `wasBusy: true`, which is the field that would have settled the question after
+  the fact.
 
 ### `last_seen_at` held identical across four reads with four different screens, so it is not a liveness or staleness signal
 
@@ -172,6 +180,18 @@ sound, which is where the sharper findings came from.
   question instead of showing me a picture of a terminal.
 - **Status: open — owned by plan 65** (`plans/65-session-lifecycle.md`), which
   covers reading a conversation rather than viewing a pane.
+- **Resolution (2026-09-29, plan 65 — half fixed, and the half that mattered is
+  the other tool):** `lines` is honoured now. `lines: 30` and `lines: 200` on
+  the same live session returned **different** screens — the 200-line read
+  reached further up the pane, showing rows the 30-line read cut off — so the
+  byte-identical pair this entry recorded no longer reproduces. **Still open:**
+  there is no `screenTruncated` flag on `screen`, and the read is still a tail
+  rather than a scrollback *window*, so a caller cannot ask for the lines above
+  what it already has. The finding's deeper fix did not land as a session tool —
+  it landed as **`plan_activity`**, which answers the actual question (*"what is
+  this session concluding"*) from the agent's own store instead of from a picture
+  of a terminal, works on a **stopped** pad, and is wired into recipe 14 of
+  `help`.
 
 ### "The paddock project" is unresolvable by name — a project and a pad carry the same word and nothing cross-references them
 
@@ -331,6 +351,14 @@ sound, which is where the sharper findings came from.
     reads `createdBy: absent`, and that is the honest answer.
   - **The REST route stamps `user:<id>` too**, so a session opened in the UI is
     auditable on the same axis rather than only API-created ones.
+- **Re-verified (2026-09-29):** live on the fleet, and the design choice holds up
+  — `createdBy: "user:admin_1784916138567"` on the newest rows, **no `createdBy`
+  key at all** on rows from the previous day, in one response. That is exactly the
+  behaviour this Resolution describes, and it is honest. One gap it left: the
+  field is in **no tool description**, so the "absent means unrecorded, not
+  `human`" contract is not stated anywhere a caller reads. New finding in
+  [`2026-09-29-recheck-friction-log.md`](2026-09-29-recheck-friction-log.md)
+  (finding 5).
 
 ## What held up well
 

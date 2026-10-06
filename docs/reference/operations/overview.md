@@ -29,10 +29,29 @@ A create that dies at the **up** step with this error means the host daemon's
 network subnet unspecified, so the daemon tried to allocate one from its finite
 pools (`192.168.0.0/16` at `/20`). New pads no longer hit this: the compose
 generator carves a fixed `/24` out of `10.200.0.0/16` (persisted as `SUBNET` in
-`meta.env`) and declares it explicitly. See `docs/backend/services.md` (pad
-subnet pool). Delete the leftover instance dir + its image (`docker rmi
-paddock-vm-&lt;name&gt;:latest`) if the failed create left state behind, then retry
-from the form.
+`meta.env`) and declares it explicitly — **but only when a service actually
+joins the project `default` network**. A peer-networked pad's service shares the
+peer's network namespace and its door rides the peer's own network, so
+`writeInstanceCompose` reserves nothing for it (`releasePadSubnet` drops any
+stale reservation) and the compose carries no `networks.default` block. See
+`docs/backend/services.md` (pad subnet pool). Delete the leftover instance dir +
+its image (`docker rmi paddock-vm-&lt;name&gt;:latest`) if the failed create left
+state behind, then retry from the form.
+
+### Troubleshooting: "Pool overlaps with other one on this address space"
+
+A settings apply that switches a pad **to** the default network and dies at the
+`up` step with this error means the pad's `meta.env` carries a `SUBNET` that
+Docker already has: either another pad's `_default` network is that exact `/24`,
+or two pads' `meta.env` files claim it. The first is normal and must be won
+around, the second is a stale reservation from before the pool counted other
+pads' claims. `ensurePadSubnet` now validates a persisted `SUBNET` against both
+sources (`claimedPadSubnetOctets` = live networks ∪ other pads' reservations) and
+re-picks the lowest free octet, so the switch succeeds instead of rolling back.
+If a pad still carries a stale `SUBNET` after this fix, it simply has not been
+rewritten since — the next settings apply, recreate-from-reset, or delete
+resolves it. Do not hand-edit the file to "free" an octet, and never
+force-remove a live `<name>_default` network to release one.
 
 ### Start / Stop / Restart
 
