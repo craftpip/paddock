@@ -1370,6 +1370,59 @@ describe('MCP Server - Mission tools (plan 55)', () => {
     assert.strictEqual(missionRequireProject(OWNER, 'mission_sessions', mine.id).id, mine.id);
   });
 
+  it('a target-scoped key cannot reach another PAD at any plane (plan 52 D3)', async () => {
+    // D3 is the namespace half of conferral: the orchestrator pad is full-
+    // reach, so every OTHER key's reach must be proven to stop at its target.
+    // The pure grant matrix is already pinned elsewhere; this pins the four
+    // PLURAL surfaces (mission list, mission by-id, plans, exec) through the
+    // real tool path, so a future widening of the handlers re-asserts it.
+    const scoped = { userId: 'user-1', role: 'user', scopes: ['target:agent:pad-mm-oc', 'tools:exec'] };
+    const theirs = mission.createProject({ name: 'theirs-oc2', agent: 'pad-mm-oc2', folder: '/www1/b' });
+    const theirSesh = mission.createSession(theirs.id, { tmuxId: 'msn-d3a1b2c3', agentSessionId: 'ses_d3' });
+    const mine = mission.createProject({ name: 'mine-oc', agent: 'pad-mm-oc', folder: '/www1/a' });
+    try {
+      // Liveness/visibility narrows to the target pad ALONE — including a
+      // row the same user owns on a DIFFERENT pad (both rows are user-1's).
+      const visible = missionVisibleAgents(scoped);
+      assert.ok(visible.includes('pad-mm-oc'), 'own pad stays visible');
+      assert.ok(!visible.includes('pad-mm-oc2'), 'a same-owner pad outside the target is NOT visible');
+      assert.ok(!visible.includes('pad-mm-cl') && !visible.includes('pad-mm-pc'));
+
+      // A project_id filter reaching another pad's project is FORBIDDEN — the
+      // handler resolves the project and requires visibility, so it refuses
+      // with the same code as the by-id path instead of returning a leaky or
+      // empty list.
+      const list = await call('mission_sessions', { project_id: theirs.id }, scoped);
+      assert.ok(list.isError, 'a foreign project is refused, not silently emptied');
+      assert.match(list.text, /mission_project_forbidden/);
+
+      // A direct session_id on another pad's conversation is FORBIDDEN — the
+      // by-id path must not fall back to "matches nothing", because a caller
+      // who already holds someone else's session id is being handed a fact.
+      const byId = await call('mission_sessions', { session_id: theirSesh.id }, scoped);
+      assert.ok(byId.isError, 'foreign session by id is refused');
+      assert.match(byId.text, /mission_project_forbidden/);
+
+      // Plans and exec refuse at the grant gate (requireTool on the RESOLVED
+      // name), so a key cannot use the resolver to probe pads outside its
+      // target either.
+      const plans = await call('plan_list', { agent: 'pad-mm-oc2' }, scoped);
+      assert.ok(plans.isError, 'plan_list on a foreign pad is refused');
+      assert.match(plans.text, /target grant/);
+      const ex = await call('exec', { name: 'pad-mm-oc2', command: 'echo hi' }, scoped);
+      assert.ok(ex.isError, 'exec on a foreign pad is refused');
+      assert.match(ex.text, /target grant/);
+
+      // The same key still works on its OWN target: the refusals are
+      // isolation, not a broken key. Its own project lists fine.
+      const own = await call('mission_sessions', { project_id: mine.id }, scoped);
+      assert.ok(!own.isError, own.text);
+      assert.ok(Array.isArray(own.data.sessions));
+    } finally {
+      cleanup();
+    }
+  });
+
   // ── Plan 65 ──────────────────────────────────────────────────────────────
   // The lifecycle surface: a start that survives a timeout, a dead session you
   // can still READ, a row that says how it died, and a recreate that accounts

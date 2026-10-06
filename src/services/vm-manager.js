@@ -4291,6 +4291,7 @@ module.exports = {
   instanceComposePath, getComposePath,
   getNetworkHealth,
   inspectPeer,
+  isContainerRunning, driverConfigPath,
   existingServices, startAgent, stopAgent, restartAgent,
   readAgentConfig, redactSecrets, listDoors, startDoors, stopDoors,
    readWebService, applyWebServices, webHookPath, buildWebHook,

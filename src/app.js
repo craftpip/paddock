@@ -32,6 +32,7 @@ const registry = require('./services/agent-registry');
 const vm = require('./services/vm-manager');
 const drivers = require('./services/drivers');
 const { getPaddockMcpUrl } = require('./services/paddock-mcp');
+const orchestrator = require('./services/orchestrator');
 const jobLog = require('./services/job-log');
 const apiKeys = require('./services/api-keys');
 const containerHealth = require('./services/container-health');
@@ -2489,6 +2490,53 @@ app.get('/api/agents/:name/mission-folders', async (req, res) => {
     res.json(await mission.projectFolders(req.params.name, req.query.path || ''));
   } catch (e) {
     missionFail(res, e);
+  }
+});
+
+// ─── Routes: Orchestrator conferral (plan 52 Phase D) ─────────
+
+/** Ownership gate for orchestra routes: 404 when the pad does not exist, 403
+ *  when the caller neither owns it nor is an admin. */
+function requireOwnedAgent(req, res) {
+  const row = getDb().prepare('SELECT owner_id FROM agents WHERE name = ?').get(req.params.name);
+  if (!row) {
+    res.status(404).json({ error: `Agent not found: ${req.params.name}` });
+    return false;
+  }
+  if (req.session.role === 'admin') return true;
+  if (row.owner_id === req.session.userId) return true;
+  res.status(403).json({ error: 'Access denied' });
+  return false;
+}
+
+function orchestratorFail(res, e) {
+  res.status(e.status || 500).json({ error: e.message, code: e.code || 'orchestrator_error' });
+}
+
+app.get('/api/agents/:name/orchestrator', (req, res) => {
+  if (!requireOwnedAgent(req, res)) return;
+  try {
+    res.json(orchestrator.getOrchestrator(req.params.name, req.session.userId));
+  } catch (e) {
+    orchestratorFail(res, e);
+  }
+});
+
+app.post('/api/agents/:name/orchestrator', csrfCheck, async (req, res) => {
+  if (!requireOwnedAgent(req, res)) return;
+  try {
+    res.json(await orchestrator.confer(req.params.name, req.session.userId));
+  } catch (e) {
+    orchestratorFail(res, e);
+  }
+});
+
+app.delete('/api/agents/:name/orchestrator', csrfCheck, async (req, res) => {
+  if (!requireOwnedAgent(req, res)) return;
+  try {
+    res.json(await orchestrator.removeConferral(req.params.name, req.session.userId));
+  } catch (e) {
+    orchestratorFail(res, e);
   }
 });
 

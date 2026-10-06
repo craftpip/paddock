@@ -5,6 +5,7 @@ import { api, getCsrfToken } from '../lib/api'
 import { statusMeta } from '../lib/status'
 import { webUrlForAgent } from '../lib/web'
 import { useConfirm } from '../lib/confirm'
+import { useAlert } from '../lib/alert'
 import Terminal from '../components/Terminal'
 import CommandsPane from './agent/CommandsPane'
 import SettingsTab from './agent/SettingsTab'
@@ -31,8 +32,47 @@ function AgentHeader({ agent }) {
   const startAgent = useAgents((s) => s.startAgent)
   const stopAgent = useAgents((s) => s.stopAgent)
   const restartAgent = useAgents((s) => s.restartAgent)
+  const confirm = useConfirm()
+  const alert = useAlert()
   const [stats, setStats] = useState(null)
   const intervalRef = useRef(null)
+  const [orch, setOrch] = useState(null) // null = not yet loaded
+  const [orchBusy, setOrchBusy] = useState(false)
+
+  const loadOrch = useCallback(async () => {
+    try { setOrch(await api(`/api/agents/${agent.name}/orchestrator`)) } catch { setOrch(null) }
+  }, [agent.name])
+
+  useEffect(() => { loadOrch() }, [loadOrch])
+
+  async function makeOrchestrator() {
+    setOrchBusy(true)
+    try {
+      await api(`/api/agents/${agent.name}/orchestrator`, { method: 'POST' })
+      await loadOrch()
+    } catch (err) {
+      alert({ title: 'Failed to confer orchestrator', message: err?.error || 'Failed to confer', danger: true })
+    }
+    setOrchBusy(false)
+  }
+
+  async function removeOrchestrator() {
+    const ok = await confirm({
+      title: 'Remove orchestrator',
+      message: `${agent.name} becomes an ordinary agent. Its orchestrator key is revoked and the paddock MCP server is un-wired.`,
+      danger: true,
+      confirmText: 'Remove',
+    })
+    if (!ok) return
+    setOrchBusy(true)
+    try {
+      await api(`/api/agents/${agent.name}/orchestrator`, { method: 'DELETE' })
+      await loadOrch()
+    } catch (err) {
+      alert({ title: 'Failed to remove orchestrator', message: err?.error || 'Failed to remove', danger: true })
+    }
+    setOrchBusy(false)
+  }
 
   useEffect(() => {
     if (agent.status !== 'running') { setStats(null); return }
@@ -81,6 +121,22 @@ function AgentHeader({ agent }) {
         <span className="text-ink-dim">MEM <span className="text-ink font-mono ml-1">{agent.status === 'running' && stats ? memUsage : '—'}</span></span>
       </div>
       <div className="flex-1" />
+      {/* Orchestrator conferral (plan 52 Phase D). One click makes this ordinary
+          pad an orchestrator; a conferred pad shows the badge + Remove. */}
+      <div className="flex items-center gap-2" title={orch?.conferred ? 'This pad can manage your fleet' : 'Confer the orchestrator role'}>
+        {!orch ? null : orch.conferred ? (
+          <>
+            <Badge tone="brand">Orchestrator</Badge>
+            <Button variant="ghost" size="md" onClick={removeOrchestrator} disabled={orchBusy}>
+              Remove
+            </Button>
+          </>
+        ) : (
+          <Button variant="secondary" size="md" onClick={makeOrchestrator} disabled={orchBusy}>
+            {orchBusy ? 'Conferring…' : 'Make orchestrator'}
+          </Button>
+        )}
+      </div>
       {/* Stop is a solid warning fill and Start a solid success fill. Neither is
           a Button variant, so both ride on `primary` with the tone overridden —
           and the disabled look comes from the primitive, not per-button. */}

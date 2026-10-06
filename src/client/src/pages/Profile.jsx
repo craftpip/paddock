@@ -13,7 +13,19 @@ import Modal from '../components/ui/Modal'
 import { TONES } from '../components/ui/tone'
 import { cx } from '../lib/cx'
 
-const SCOPES = ['default', 'read', 'control']
+// Key scope presets (plan 52 Phase D). The API asks for a scope STRING, so each
+// value is the exact comma-joined grant the key gets. Fine-grained presets are
+// the least-privilege options for external clients (phone / second LLM / a
+// status dashboard): the read bucket plus an opt-in `tools:exec` grant, never a
+// broad `default`.
+const SCOPES = [
+  { value: 'default', label: 'Full access' },
+  { value: 'control', label: 'Full access (control)' },
+  { value: 'read', label: 'Read-only' },
+  { value: 'read,target:owned', label: 'Client — read-only' },
+  { value: 'target:owned,tools:exec', label: 'Client — with terminal' },
+  { value: 'target:owned,tools:exec,tools:lifecycle', label: 'Operator — exec + lifecycle' },
+]
 const USERNAME_RE = /^[A-Za-z0-9]{3,32}$/
 const KEY_NAME_RE = /^[A-Za-z0-9]{3,64}$/
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
@@ -163,7 +175,7 @@ export default function Profile() {
     if (!KEY_NAME_RE.test(n)) { setKeyMsg('Key name must be 3-64 letters or numbers'); return }
     setCreating(true)
     try {
-      const d = await api('/api/profile/keys', { method: 'POST', body: { name: n, scopes: [scope] } })
+      const d = await api('/api/profile/keys', { method: 'POST', body: { name: n, scopes: scope } })
       setRevealed({ key: d.key, name: d.name })
       setName('')
       setKeyNameNote('')
@@ -395,7 +407,7 @@ export default function Profile() {
               </div>
               <div className="sm:w-40">
                 <Select value={scope} onChange={(e) => setScope(e.target.value)}>
-                  {SCOPES.map((s) => <option key={s} value={s}>{s}</option>)}
+                  {SCOPES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
                 </Select>
               </div>
               <Button type="submit" variant="primary" size="md" disabled={creating || !canCreateKey} className="whitespace-nowrap">{creating ? 'Creating…' : 'Create Key'}</Button>
