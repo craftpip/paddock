@@ -21,7 +21,7 @@ Decisions only you can make. Deliberately **not** `- [ ]` lines and **not** in
 its own recognizance — the agent's job is to surface these, not to guess. Each
 one is a single reply away from done.
 
-**Decided 2026-10-07** (from "you called it" 2026-10-06): the stray Mission session
+**Decided 2026-10-07** (from "you called it" 2026-10-07): the stray Mission session
 `msn_aac88d72b8f5b16c` was **closed** (page Close path, row deleted); the four
 `pad-test-*` rows were **removed** (`pad-test-claude`, `pad-test-codex` via
 `pad_delete_agent`, `pad-test-p25`/`-clone` via `removeAgentFromDb`);
