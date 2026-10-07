@@ -5,7 +5,7 @@ const { getDb } = require('./db');
 const PREFIX = 'pk_live_';
 const KEY_PREFIX_RE = /^pk_live_[A-Za-z0-9_-]{20,}$/;
 
-const VM_PREFIX = process.env.CONTAINER_PREFIX || 'vm';
+const VM_PREFIX = process.env.CONTAINER_PREFIX || 'pad';
 const VM_NAME_RE = new RegExp('^' + VM_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-[a-zA-Z0-9][a-zA-Z0-9_-]*$');
 
 // ─── API-key scopes / grants (plan 35b) ─────────────────────────
