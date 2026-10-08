@@ -1,0 +1,41 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "snapshot": false,
+  "permission": {
+    "edit": "allow",
+    "external_directory": "allow"
+  },
+  "mcp": {
+    "jellyfin": {
+      "type": "remote",
+      "url": "http://10.69.1.164:18328/mcp",
+      "enabled": false
+    },
+    "torrent_search": {
+      "type": "remote",
+      "url": "http://10.69.1.164:48674/mcp",
+      "enabled": false
+    },
+    "browser": {
+      "type": "remote",
+      "url": "http://10.69.1.164:1994/mcp",
+      "enabled": true,
+      "headers": {
+        "authorization": "Bearer nvg_XNOyB4aqgSbkRnwvH0cNUNfX8aZ2qLAI"
+      }
+    },
+    "torrent": {
+      "type": "remote",
+      "url": "http://10.69.1.164:8093/mcp",
+      "enabled": false,
+      "headers": {
+        "X-MCP-Key": "IlEa7rpCwQDWxCGKCRy2sf27kXTDDsPm"
+      }
+    },
+    "kitchen": {
+      "type": "remote",
+      "url": "http://10.69.1.164:3100/mcp",
+      "enabled": false
+    }
+  }
+}
