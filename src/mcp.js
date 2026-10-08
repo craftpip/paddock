@@ -17,6 +17,7 @@ const { getDb } = require('./services/db');
 const taskRunner = require('./services/task-runner');
 const jobLog = require('./services/job-log');
 const mission = require('./services/mission');
+const taskPipeline = require('./services/task-pipeline');
 const plans = require('./services/plans');
 const agentStore = require('./services/agent-store');
 
@@ -122,6 +123,9 @@ const READ_TOOLS = new Set([
   'list_agents', 'get_agent', 'agent_logs', 'config_get', 'settings_get',
   'health', 'help', 'agent_commands',
   'task_status', 'task_result', 'task_list',
+  // The pipeline's own reader: watching a driver is watching work, not doing
+  // it — a read-only key may poll where the loop is while it may not steer it.
+  'task_pipeline_status',
   // Job readers are pure reads on the in-memory job store, so a read-only key
   // may poll the progress of a create/recreate it is not allowed to start.
   'job_status', 'job_log',
@@ -158,6 +162,12 @@ const TOOL_GRANT_FOR = {
   task_step_report: 'exec',
   task_step_bug: 'exec',
   task_step_commit: 'exec',
+  // The server-side driver (plan 69 D7) steers a live session through a whole
+  // loop and runs git at the end — starting it and stopping it are the most
+  // consequential exec verbs on the surface. Its STATUS is a read and is in
+  // READ_TOOLS, never here.
+  task_pipeline_start: 'exec',
+  task_pipeline_stop: 'exec',
   // Mission writers (plan 55). A project is a row, so it rides the same `create`
   // bucket as create_agent. Starting a session spawns a real TUI that burns
   // tokens, and mission_send types into a live conversation — both are work in
@@ -550,6 +560,28 @@ async function missionCall(fn) {
     return await fn();
   } catch (e) {
     missionFail(e);
+  }
+}
+
+/** The pipeline surface's errors are either the driver's own `PipelineError`
+ *  or a MissionError from the session gate — both carry a machine `code`, and
+ *  the SDK's error path prints only `message`, so the code goes in front. An
+ *  McpError (a grant refusal) already has the shape the caller expects. */
+function pipelineFail(e) {
+  if (e instanceof McpError) throw e;
+  if (e && typeof e.code === 'string'
+      && (e instanceof taskPipeline.PipelineError || e instanceof mission.MissionError)) {
+    throw new McpError(ErrorCode.InvalidRequest, `${e.code}: ${e.message}`);
+  }
+  console.error('[mcp] pipeline tool failed:', e?.message || e);
+  throw new McpError(ErrorCode.InvalidRequest, String(e?.message || e));
+}
+
+async function pipelineCall(fn) {
+  try {
+    return await fn();
+  } catch (e) {
+    pipelineFail(e);
   }
 }
 
@@ -2002,6 +2034,92 @@ function registerTools(server) {
       return textResult(out2);
     }
   );
+  // ─── The pipeline driver (plan 69 P3 / D7) ───────────────────────────────
+  // The server-side loop: it drives the bound session through review → build →
+  // test (→ hotfix ⇄ test) → commit, writing every stage to task_steps and
+  // parking on each of D7's four walls instead of guessing. Resolve-then-gate
+  // like every other session tool: the TASK's pad first, then the SESSION's.
+
+  async function pipelineGate(tool, task) {
+    requireTaskGrant(currentUser(), tool, task);
+    const binding = taskRunner.taskBinding(task.id);
+    if (binding.session_id) missionRequireSession(currentUser(), tool, binding.session_id);
+    return binding;
+  }
+
+  registerToolBound(
+    'task_pipeline_start',
+    {
+      title: "Run a task's whole loop on the server",
+      description: 'Hand a SESSION-BOUND task to a server-side driver that advances it through review → build → test (a failed test earns a hotfix, then the test runs again) → commit, sending each step into the bound session and writing every stage to task_steps. Refuses: `task_pipeline_no_session` (bind it with task_submit { session_id }), `task_pipeline_busy` (one active step per task — a newest row already running, or a driver already alive), `task_pipeline_closed` (the task is done/cancelled), and any session gate (locked → `task_session_locked`, dead → `mission_session_dead`, shell → `mission_not_an_agent`, permission-parked → `mission_permission_pending`). FOUR HARD WALLS, each of which parks with a readable reason instead of guessing: it never advances past a step whose report is missing, failed, error or needs_review; a step that overruns the task\'s timeout_ms is stamped failed/error; a dead/locked session or a removed task parks; and task_pipeline_stop lands on the next tick. The driver runs git ITSELF at the commit stage (D6), but every other step advances only on a task_step_report — usually from the agent in that session. The driver lives in MEMORY: a webui restart drops it and task_pipeline_status says so. It does NOT set the task\'s own status — that stays task_complete\'s.',
+      inputSchema: {
+        task_id: z.string().describe('Task id — must be bound to a Mission session'),
+      },
+    },
+    async ({ task_id }) => pipelineCall(async () => {
+      const task = taskRunner.getTask(task_id);
+      await pipelineGate('task_pipeline_start', task);
+      const rec = await taskPipeline.start(task_id, { actor: missionActor(currentUser()) });
+      return textResult({
+        ok: true,
+        pipeline: taskPipeline.snapshot(rec),
+        current_step: stepRow(taskRunner.getCurrentTaskStep(task_id)),
+        binding: taskRunner.taskBinding(task_id),
+        note: 'The driver is in-memory and waits for reports: watch with task_pipeline_status, stop with task_pipeline_stop, and let the session\'s agent report each step with task_step_report (task_step_bug for defects).',
+      });
+    })
+  );
+
+  registerToolBound(
+    'task_pipeline_status',
+    {
+      title: "Where is a task's server-side loop?",
+      description: 'Read the driver (if one is alive), the task\'s derived current_step, its next_step exactly as the driver\'s own planner would pick it, and the FULL task_steps history. `active` distinguishes a live driver from a finished one; when nothing is running the `note` says why (a driver lives in MEMORY, so a webui restart ends it) — it never reads a stale step as a running loop. Pure read: a read-only key may poll it. The steps are the record (plan 69 D1), so `pipeline.reason` / `pipeline.detail` name exactly which wall a parked run hit (timeout, report_failed, needs_review, max_hotfix, mission_session_dead, task_gone, commit_nothing, …).',
+      inputSchema: {
+        task_id: z.string().describe('Task id'),
+      },
+    },
+    async ({ task_id }) => pipelineCall(async () => {
+      const task = taskRunner.getTask(task_id);
+      await pipelineGate('task_pipeline_status', task);
+      const out = taskPipeline.status(task_id);
+      return textResult({
+        ok: true,
+        active: out.active,
+        pipeline: out.pipeline,
+        binding: out.binding,
+        current_step: out.current_step ? stepRow(out.current_step) : null,
+        next_step: out.next_step,
+        steps: out.steps.map(stepRow),
+        task_status: out.task_status,
+        ...(out.note ? { note: out.note } : {}),
+      });
+    })
+  );
+
+  registerToolBound(
+    'task_pipeline_stop',
+    {
+      title: 'Stop a running task loop',
+      description: 'Abort the driver: the flag lands on its next tick (≤ the poll interval) and the step it is waiting on is stamped `aborted` immediately, so the newest row stops claiming work right away. Nothing after the current step starts. Refuses with `task_pipeline_idle` when there is neither a driver nor a running step — a stop that pretended to stop something would be worse than no stop. A run that already ended leaves `pipeline.reason` readable (parked / done / stopped), so the stop never has to guess what it stopped.',
+      inputSchema: {
+        task_id: z.string().describe('Task id'),
+      },
+    },
+    async ({ task_id }) => pipelineCall(async () => {
+      const task = taskRunner.getTask(task_id);
+      await pipelineGate('task_pipeline_stop', task);
+      const res = taskPipeline.stop(task_id, { actor: missionActor(currentUser()) });
+      const row = res.aborted_step ? taskRunner.getTaskStep(res.aborted_step) : null;
+      return textResult({
+        ok: true,
+        pipeline: res.rec ? taskPipeline.snapshot(res.rec) : null,
+        aborted_step: row ? stepRow(row) : null,
+        current_step: stepRow(taskRunner.getCurrentTaskStep(task_id)),
+      });
+    })
+  );
+
   } // end PADDOCK_TASK_QUEUE gate — service below stays loaded
 
   // ─── Mission (plan 55) ───────────────────────────────────────────────────

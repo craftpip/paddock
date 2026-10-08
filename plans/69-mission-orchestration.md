@@ -1,12 +1,15 @@
 # Plan 69 — Mission orchestration via MCP (task lifecycle loop)
 
-## Status: In progress (2026-10-08) — 2/4 phases done. P1 (task_steps schema)
-and P2 (single-step tools `task_step_report` / `task_step_bug` /
-`task_step_commit`, session binding + gates, actor-claim, commit SHA) are
-built, tested (450/450 across the targeted suites, +16 in the new
-`task-steps.test.js`, mutation control red on both guards) and committed.
-Remaining: P3 (pipeline driver, proved live end to end) and P4 (pad_help
-recipes, docs/AGENTS absorb, delete this file). Design calls are all decided
+## Status: In progress (2026-10-08) — 3/4 phases done. P1 (task_steps schema),
+P2 (single-step tools `task_step_report` / `task_step_bug` /
+`task_step_commit`, session binding + gates, actor-claim, commit SHA) and P3
+(`task_pipeline_start/status/stop`, the server-side driver) are built, tested
+(472/472 across 12 suites; P3's own suite 22/22; five mutation controls each
+turn red exactly the guard they disable) and **proved live end to end** — an
+autonomous review→build→test→commit walk and a test→bug→hotfix→retest→commit
+walk, both with server-run commit SHAs that match `git log`, plus live
+refusals and parks. P3 code committed; remaining: P4 (pad_help recipes,
+docs/AGENTS absorb, delete this file). Design calls are all decided
 below (§ Design proposal); the audit (2026-10-06) stands.
 
 Scope: **MCP / orchestration only.** How an LLM driving Paddock over MCP runs
@@ -352,11 +355,36 @@ session's pad, exactly like the `mission_*` tools.
       Control: removing the lock mapping + the claim guard turns exactly those
       2 red while the other 14 stay green. Note: `tasks` still frozen — every
       fact lives on `task_steps` (G2).
-- [ ] **P3 — the pipeline driver.** `task_pipeline_start/status/stop` with the
-      four hard walls from D7, task step records, timeout from `tasks.timeout_ms`.
-      Proved END TO END live (a task walked review→build→test→hotfix→commit in a
-      real session), not by a green unit suite — the driver is the one place a
-      unit test cannot see (the same shape as the default-runner lesson).
+- [x] **P3 — the pipeline driver (done 2026-10-08, live-proved).**
+      `task_pipeline_start/status/stop` with the four hard walls from D7
+      (`src/services/task-pipeline.js`, seam `_setForTests`; the three tools sit
+      inside the `PADDOCK_TASK_QUEUE` gate in `src/mcp.js`), step rows written
+      through the P2 path, per-step timeout from `tasks.timeout_ms`.
+      Tests: `src/test/task-pipeline.test.js` — 22/22 (advance only on a
+      report, busy refusal, timeout park, dead-session park, stop aborts with
+      the row stamped immediately, stop returns in <1 s). Controls, each run in
+      a `/tmp/mut` copy of `/app` (never the worktree) with `rm -rf` after and
+      `MUTANT` grepped to 0: advance-without-report → 19/3; `assertIdle`
+      removed → 20/2; timeout comparison blunted → 21/1; liveness probe forced
+      false → 21/1; the three stop checks removed → 21/1.
+      **Live proof** (gate on via `.env` + webui recreate, key
+      `key_748ebbc430e90484`, session on `pad-opencode-proj`):
+      task `8cf82312…` walked review→build→test→commit **autonomously** — the
+      agent self-reported all three steps (rows `reported_by key:key_748…`),
+      the driver ran git and recorded `ebfb04ace2dcba2544fe021ae6e2519f4fa26b7a`,
+      which matches `git log`; task `a190fd44…` walked
+      test **failed + bug row** (`artifact {file,line,summary,repro}`) →
+      **hotfix** → test attempt 2 passed → commit
+      `cf112153a9a69af75947fcea807e1ad773a4ea44`. Refusals/parks seen live:
+      `task_pipeline_busy` on a double start, `timeout` park at 600967 ms,
+      `mission_tui_not_ready` when the session was killed mid-send, and — with
+      the prompt confirmed on the pane first — `mission_session_dead` from the
+      liveness probe 2 s after the close. Gate restored afterwards (tools/list
+      31 visible / 15 `task_*` hidden) and the scratch repo removed.
+      **One environment finding** (recorded, not a driver bug): a session minted
+      while opencode's state dir was unwritable keeps **zero MCP tools** even
+      after the cause is fixed, so its step prompts park at timeout —
+      `friction/2026-10-08-plan69-pipeline-proof.md`.
 - [ ] **P4 — guide + absorb.** `pad_help` recipes name the loop and the stop;
       docs + AGENTS.md capture D1–D7; plan absorbed and deleted like 68.
 

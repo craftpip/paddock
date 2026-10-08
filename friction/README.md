@@ -92,6 +92,12 @@ entries were retired rather than fixed.
   retired, 7 new findings.** The sharpest new one: the plans facility refuses on
   every opencode pad with a bind-mounted workspace, which is the failure
   `list-plans.md` predicted before it shipped.
+- `2026-10-08-plan69-pipeline-proof.md` — running plan 69's server-side
+  pipeline against a real session. **3 new findings, all open:** a session
+  minted while opencode's state dir was unwritable keeps zero MCP tools even
+  after the cause is fixed (the step prompt then parks at timeout);
+  `friction/` is `root:root` so uid-1000 sessions cannot file into it; and
+  `pad_workspace_write`'s refusal does not point at `exec`, which works.
 
 ## Still open as of 2026-09-29
 
