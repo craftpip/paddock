@@ -1872,6 +1872,40 @@ describe('MCP secret hygiene (plan 60)', () => {
     assert.match(g, /write\s*\n?\s*decisions back into it as you make them/, 'clause 2: memory discipline — write on decide');
   });
 
+  it("the guide's recipe 15 teaches the plan 69 loop, in the order a caller runs it", () => {
+    // The recipe is the LLM's manual: a caller who cannot see the loop in the
+    // guide has to infer it from six tool descriptions and get the ORDER wrong
+    // (start before binding, or watch a pipeline that refused at the door).
+    const { getGuide } = require('../services/llm-guide');
+    const g = getGuide();
+    const at = g.indexOf('15. **Run a task as a loop');
+    assert.ok(at !== -1, 'recipe 15 is in the guide');
+    const recipe = g.slice(at);
+    // Every assert on an index checks !== -1 FIRST: indexOf returns -1 when the
+    // text is gone, and -1 sorts before anything, so an ordering assert on a
+    // deleted string passes on the broken build (plan 52 B1's own lesson).
+    const bindAt = recipe.indexOf('task_submit { …, session_id }');
+    const startAt = recipe.indexOf('task_pipeline_start { task_id }');
+    assert.ok(bindAt !== -1, 'it names the binding submit');
+    assert.ok(startAt !== -1, 'it names the driver start');
+    assert.ok(bindAt < startAt, 'it binds the task BEFORE starting the driver');
+    for (const [what, name] of [
+      ['the watch tool', 'task_pipeline_status'],
+      ['the stop tool', 'task_pipeline_stop'],
+      ['the step report', 'task_step_report'],
+      ['the bug row', 'task_step_bug'],
+      ['the refusal for an unbound task', 'task_pipeline_no_session'],
+      ['the refusal for a second actor', 'task_step_claimed'],
+      ['the boundary with the task status', 'task_complete'],
+    ]) {
+      assert.ok(recipe.includes(name), `${what} is named (${name})`);
+    }
+    // The contract that matters most: the verdict comes from a report, never
+    // from the pane looking quiet — the whole reason D4 exists.
+    assert.match(recipe, /never from a quiet pane/);
+    assert.match(recipe, /a step report never sets it/, 'a step report does not set the task status');
+  });
+
   it('the tool descriptions state the guarantee the code now keeps', () => {
     // A promise the guide makes and the tools do not keep is the finding itself.
     const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION }, { capabilities: { tools: {} } });

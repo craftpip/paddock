@@ -238,6 +238,28 @@ decisions back into it as you make them.
     conversation a plan is bound to. Skip this when the question is only "is anyone
     driving right now" — that is \`mission_sessions\`, and it is cheaper.
 
+15. **Run a task as a loop (the \`task_*\` tools, when they are listed):** the loop is
+    \`review → build → test → (a failed test earns a hotfix) → commit\`. Bind the task
+    first — \`task_submit { …, session_id }\` — because a task with no binding cannot be
+    pipelined (\`task_pipeline_start\` refuses it with \`task_pipeline_no_session\` rather
+    than guessing where to drive). Then \`task_pipeline_start { task_id }\` drives it:
+    the server types each step into that session and waits for a report, and each step
+    is finished by \`task_step_report { task_id, step, state, status }\` — the verdict
+    comes from a report, never from a quiet pane. File defects with \`task_step_bug
+    { task_id, file, line, summary, repro }\` (the hotfix prompt quotes them back), and
+    take the task's own commit with \`task_step_commit\` (the driver runs git itself and
+    records the SHA). Watch it with \`task_pipeline_status { task_id }\` —
+    \`{active, state, current_step, next_step, reason}\`; a parked run names its reason
+    (\`timeout\`, \`mission_session_dead\`, \`commit_nothing\`, \`needs_review\`, …), and a
+    webui restart drops the driver, which \`task_pipeline_status\` says in words ("no
+    driver" is not "nothing is happening"). \`task_pipeline_stop { task_id }\` ends a run
+    at the next boundary. Refusals are reasons, not errors to work around:
+    \`task_pipeline_busy\` (one active step per task), \`task_step_claimed\` (another
+    identity already holds that attempt), and the session gates (\`task_session_locked\`,
+    \`mission_session_dead\`, \`mission_not_an_agent\`, \`mission_permission_pending\`) —
+    each one says the session is not usable right now. The task's own status is still
+    set by \`task_complete\`; a step report never sets it.
+
 ## The command catalog
 
 Call \`agent_commands\` with the PAD's \`agent_type\` to get the non-interactive command

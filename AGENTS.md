@@ -772,6 +772,25 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   through that wrapper. `app.js` also installs `unhandledRejection` /
   `uncaughtException` handlers that log and stay up — a control plane must not
   die because one agent's tool call threw.
+- **The 15 `task_*` MCP tools (plan 69's steps + the `task_pipeline_*` driver
+  included) are GATED by `PADDOCK_TASK_QUEUE=1` in `.env`** — 31 registered
+  tools without it, 46 with it, and `mcp.test.js` pins both counts. The env var
+  is read at **boot**, so toggling it needs `docker restart paddock`. Two
+  consequences: a suite run in a container that has the flag set reports the
+  task tools as *not hidden* and fails its "hidden from the surface" test —
+  run `docker exec paddock env -u PADDOCK_TASK_QUEUE node --test
+  test/mcp.test.js` when you want the default surface; and with the flag off
+  the tools are simply absent from `tools/list`, which is a gate, not a bug.
+- **A mission session that lists ZERO MCP tools is an opencode state-dir
+  ownership problem — and the absence is STICKY to that conversation.** The
+  TUI runs as uid 1000, so `/root/.local/state/opencode` must be owned by
+  uid 1000; when it was `root:root 755` the session started with no tools at
+  all, and fixing the ownership does **not** repair that conversation —
+  relaunching the TUI keeps `NONE`, `opencode run -s <same id>` also answers
+  `NONE`, only a **fresh** session gets the tools. Miss it and plan 69's step
+  prompts land in a tool-less session, so the driver parks at `timeout` (read
+  as a pipeline bug). Diagnose with `ls -ld /root/.local/state/opencode`
+  inside the PAD, and confirm on a live session by asking it to list its tools.
 - **A redactor that reads like it normalizes, but doesn't, ships the secret it
   was written to stop (plan 60).** Three of the four bugs in the MCP config
   redactor were found by *testing*, not by re-reading it: `isSecretKey` had a

@@ -697,6 +697,14 @@ webui mid-task). Any code that writes a column must add it to both the
 > counterexample). The `task_*` MCP family stays green against it (28/28), is
 > HIDDEN unless `PADDOCK_TASK_QUEUE=1`, and must not get new features without
 > un-freezing plan 52. Do not build new work on this module.
+>
+> **Plan 69 is the sanctioned sibling, not an un-freeze.** Its lifecycle lives in
+> a separate `task_steps` table and `services/task-pipeline.js` (§ *Task steps
+> and the server-side loop* under MCP Tools): the eight tools below gained only
+> **optional** reads and bindings (`session_id` / `reviewer` on submit, the
+> derived `current_step` on `task_status` / `task_list`, a step-chain rebuild on
+> retry), and **no fact moved into `tasks`** — that is the whole point of the
+> freeze.
 
 The opencode task queue behind the eight `task_*` MCP tools: push a prompt at a
 PAD (`docker exec … opencode run --format json`), stream its output into the
@@ -844,9 +852,10 @@ the same owner-scoping as the REST API: admin → all agents, user → owned age
 ## MCP Tools (mcp.js)
 
 `src/mcp.js` mounts the paddock's own MCP server at `/mcp` (Streamable HTTP). It
-exposes 28 tools. Every tool is a thin adapter over the same `src/services/`
-functions the REST API uses — behavior lives in the services, never in the tool
-handlers (no duplication between REST and MCP).
+registers **31 tools by default and 46 with `PADDOCK_TASK_QUEUE=1`** — the
+difference is the 15 gated `task_*` tools below. Every tool is a thin adapter
+over the same `src/services/` functions the REST API uses — behavior lives in
+the services, never in the tool handlers (no duplication between REST and MCP).
 
 | Tool | Purpose | Backed by |
 |------|---------|-----------|
@@ -872,6 +881,8 @@ handlers (no duplication between REST and MCP).
 | `help` | The "how to use Paddock through MCP" guide (§§1–4, plan 35a) | `llm-guide.js` |
 | `agent_commands` | Set B — non-interactive command catalog for an agent type | `llm-guide.js` → `drivers` `llmCommands` |
 | `task_submit` … `task_cancel` (9 tools, incl. `task_retry`) | HIDDEN from the MCP surface (user decision 2026-09-29; re-enable with `PADDOCK_TASK_QUEUE=1`) — service kept, vocabulary per §Task Runner | `services/task-runner.js` |
+| `task_step_report` / `task_step_bug` / `task_step_commit` | The explicit single-step tools of plan 69's lifecycle: report one step's verdict, file a structured defect against it, or run the task's own commit. Same gate as the row above | `services/task-runner.js` + `services/mission.js` |
+| `task_pipeline_start` / `task_pipeline_status` / `task_pipeline_stop` | The server-side loop (plan 69): start it, read `{state, step, current_step, hotfix_runs}`, or stop at the next boundary. Same gate | `services/task-pipeline.js` |
 | `mission_projects` | The Mission projects (PAD + folder) the key may see, with session/live/open counts, the PAD's status, and per-session `busy`; narrow it with `project_id` / `name` / `folder`, and ask for nested sessions with `include_sessions` | `mission.listProjects` + `withLive` + `withAgentBusyProjects` |
 | `mission_sessions` | Sessions list (filter by `project_id` / `agent`), or one session's metadata + pane state + screen tail; every row carries `busy` / `busyKnown` / `open` / `kind`, rows whose death has been observed carry `endedAt` / `endedBy`, and detail mode also returns `canSend` (+ `sendRefusal`), `screenFrom` and `lastScreenAt` | `mission.listSessions` / `listAllSessions` / `screen` + `withAgentBusy` |
 | `mission_project_create` | Create a project row (folder probed inside the PAD) | `mission.projectFolders` + `mission.createProject` |
@@ -1327,6 +1338,107 @@ never mistaken for the whole fleet.
 **not** built. The near-miss hint covers the "you named a real container" case;
 discovering containers by list is a new read tool and needs the user's approval
 first (see [Design decisions](#design-decisions-settled--do-not-add-tools-without-re-checking-the-user)).
+
+### Task steps and the server-side loop (plan 69)
+
+The queue is frozen and Mission sessions are how work actually runs, so plan 69
+does not extend `tasks`: the lifecycle is a **sibling layer** — a `task_steps`
+table plus `services/task-pipeline.js` — and the eight frozen tools gain only
+optional reads and bindings. Every fact this layer writes lands in
+`task_steps`; `tasks` stays plan 63's fact table and a task's own `status`
+remains `task_complete`'s to set (the task outcome and the step verdicts are
+different questions).
+
+**D1 — steps are rows, the current step is derived.**
+`task_steps(task_id, step, attempt, state, status, session_id, reported_by,
+notes, artifact, occurred_at)`, FK to `tasks.id`, child-cleared before any
+parent delete (the audit-FK lesson). `step` ∈ `review | build | test | hotfix |
+commit`; `state` ∈ `pending | running | needs_review | failed | done |
+aborted`; `status` ∈ `passed | failed | error` for finished attempts. The
+task's **current step is the newest `task_steps` row** — never a column on
+`tasks` — so `task_status` / `task_list` answer "where is it in the loop" in
+one read, and `task_pipeline_status` returns the whole history beside
+`current_step`.
+
+**D2 — a task binds to a Mission session, and the session gates apply.**
+`task_submit { session_id }` makes the task *in-session*: every step runs in
+that session's folder, and the step tools run the same
+`mission.assertStepSession` gate a send does, so a locked, dead, shell or
+permission-parked pane refuses the step with the tool the caller can act on
+(`task_session_locked` for the locked case, otherwise `mission_session_dead` /
+`mission_not_an_agent` / `mission_permission_pending`). Submit **without**
+`session_id` and the task keeps the old PAD/push behaviour — but it cannot be
+pipelined: `task_pipeline_start` refuses it with `task_pipeline_no_session`
+rather than guessing where to drive. `reviewer` (D3) names a second session on
+the **same PAD** for cross-review; the default is the task's own session,
+because a fleet usually has one agent per folder.
+
+**D4 — the report is the verdict.** The server has no "tests green" oracle, so
+it never infers a step's outcome from a quiet pane. Each step finishes through
+`task_step_report { task_id, step, state, status, notes, artifact? }`, and one
+attempt is **one actor's to report**: a second identity gets `task_step_claimed`
+naming who holds it. An unreported row stays `running` — that is the driver's
+own claim, and it is what makes "no advance without a report" enforceable.
+`needs_review` parks the pipeline instead of routing, because that is the one
+state that is a human's call.
+
+**D5 — a bug is a row, not prose.** `task_step_bug` writes an EXTRA
+`task_steps` row on the same attempt as the step it belongs to (`state:
+failed`), so it sits under `current_step` without replacing that step's own
+report. `artifact` carries `{file, line, summary, repro}` as JSON and `notes`
+the one-line summary — that JSON is what the hotfix prompt quotes back. A bug
+is evidence, never a verdict on the task.
+
+**D6 — commit is server-run and task-scoped.** The commit stage is the one
+step no agent cooperation is asked for: the driver runs git in the bound
+session's project folder (`task-runner.runGitCommit`, a `gitExec` seam with
+quoting + sentinels) and stores the SHA in the step's `artifact`, so "the
+commit that belongs to this task" is nameable. A clean tree parks with
+`commit_nothing` rather than reporting success with no SHA, and a pool task
+with no PAD is refused `task_commit_no_pad`.
+
+**D7 — the driver, and its walls.** `task_pipeline_start { task_id }` hands
+the task to an in-memory driver (`services/task-pipeline.js`) that derives the
+next step from the history, types the prompt into the session through the same
+path `mission_send` uses, and waits. The prompt itself says *how* to report,
+because that is the contract. Constants: a 1s poll, the session gates probed
+every 5th tick, at most `MAX_HOTFIX = 3` hotfix runs per task.
+
+| Wall | Behaviour |
+|---|---|
+| No advance without a report | the driver waits; it never reads success off a silent pane |
+| Per-step timeout (`tasks.timeout_ms`) | the step is stamped `failed`/`error` and the pipeline parks with `timeout` |
+| A failed **test** is the one routed case | `failed` + `failed` → `hotfix` (carrying the bug rows), then `test` again as a new attempt |
+| Every other failure | parks (`report_failed` / `report_error` / `needs_review` / `max_hotfix` / `task_gone` / `commit_*`) instead of advancing |
+| One active step per task | a second `task_pipeline_start`, or a newest row already `running`, refuses `task_pipeline_busy` |
+| Stop | `task_pipeline_stop` sets the flag, settles the running row as `aborted` **now**, and returns — refuses `task_pipeline_idle` when there is nothing to stop |
+| Session dies mid-run | the liveness probe parks with `mission_session_dead` (measured: ~2s after `mission_session_close`) |
+
+**The driver lives in memory on purpose** — a job loop is not a fact about a
+task — so a webui restart drops it and leaves the newest step where it was.
+`task_pipeline_status` says so in words when no driver is present: "no driver"
+is not "nothing is happening". Its payload is
+`{ active, pipeline, binding, current_step, next_step, steps, task_status,
+note? }`, where `pipeline.reason` / `pipeline.detail` carry the park's reason
+and sentence.
+
+**Gate.** All six tools (`task_step_report` / `task_step_bug` /
+`task_step_commit` / `task_pipeline_start` / `_status` / `_stop`) sit inside
+the same `PADDOCK_TASK_QUEUE` gate as the rest of the `task_*` family, and
+`src/test/mcp.test.js` pins that flipping the gate adds exactly 15 tools (31 →
+46).
+
+**Proof.** `src/test/task-pipeline.test.js` (22 cases: advance only on a
+report, busy, timeout, dead session, stop, stop-elapsed) with five mutation
+controls, each run in a copy of the tree and each turning red exactly the
+guard it disables. The driver is the one place a unit test cannot see, so the
+walk itself was proved live over `/mcp`: a bound session ran
+review → build → test → commit with the agent self-reporting and the server
+recording a SHA that matched `git log`, and a second task ran
+test(failed + bug row) → hotfix → test → commit. One environment finding from
+that run is in `friction/2026-10-08-plan69-pipeline-proof.md`: a session minted
+while opencode's state dir was unwritable keeps **zero MCP tools** even after
+the cause is fixed, so its step prompts park at `timeout`.
 
 ### Jobs (`job-log.js`)
 
