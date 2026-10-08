@@ -51,9 +51,9 @@ test('workspace-guards: home and scratch SUBDIRECTORIES are accepted', () => {
   }
 });
 
-test('workspace-guards: the BARE home / scratch root is still refused, with a reason', () => {
+test('workspace-guards: the BARE scratch / app root is still refused, with a reason', () => {
   const { hostSourceIssue } = require('../services/workspace-guards');
-  for (const p of ['/root', '/home', '/opt', '/tmp', '/mnt', '/srv', '/data']) {
+  for (const p of ['/opt', '/tmp', '/srv', '/data']) {
     const issue = hostSourceIssue(p);
     assert.ok(issue, `${p} should be refused`);
     assert.equal(issue.code, 'workspace_source_home_root');
@@ -61,6 +61,22 @@ test('workspace-guards: the BARE home / scratch root is still refused, with a re
     // fix, or the user is back to "why is this not allowed?" with no answer.
     assert.match(issue.message, /pick a project folder inside it/);
     assert.ok(issue.message.includes(p), `message should name ${p}`);
+  }
+});
+
+test('workspace-guards: /home, /root and /mnt are allowed BARE (plan 77)', () => {
+  const { hostSourceIssue, HOST_USER_DATA } = require('../services/workspace-guards');
+  // These are data / home roots the operator mounts whole on this host, so the
+  // bare root is a legitimate source. Refusing them broke a recreate of a
+  // working pad: `pad-opencode-proj` carries a stored /mnt extra volume, and a
+  // network-only settings apply re-validated it against this guard.
+  for (const p of ['/home', '/root', '/mnt']) {
+    assert.equal(hostSourceIssue(p), null, `${p} should be accepted bare`);
+    assert.ok(!HOST_USER_DATA.includes(p), `${p} must not be in the bare-root-refused list`);
+  }
+  // Their subdirectories obviously stay accepted too.
+  for (const p of ['/home/u/proj', '/root/craftpip.com', '/mnt/data/x']) {
+    assert.equal(hostSourceIssue(p), null, `${p} should be accepted`);
   }
 });
 
@@ -97,10 +113,10 @@ test('workspace-guards: the host root is refused regardless of either guard', ()
 
 test('workspace-guards: slash normalisation cannot be used to slip past', () => {
   const { hostSourceIssue } = require('../services/workspace-guards');
-  assert.equal(hostSourceIssue('/root/proj'), null);
-  assert.equal(hostSourceIssue('/root//proj//'), null, 'collapsed + trailing slash is a subdir');
-  assert.equal(hostSourceIssue('/root/').code, 'workspace_source_home_root', 'trailing slash is still bare');
-  assert.equal(hostSourceIssue('//root').code, 'workspace_source_home_root');
+  assert.equal(hostSourceIssue('/opt/proj'), null);
+  assert.equal(hostSourceIssue('/opt//proj//'), null, 'collapsed + trailing slash is a subdir');
+  assert.equal(hostSourceIssue('/opt/').code, 'workspace_source_home_root', 'trailing slash is still bare');
+  assert.equal(hostSourceIssue('//opt').code, 'workspace_source_home_root');
   assert.equal(hostSourceIssue('/etc//passwd').code, 'workspace_source_system_dir');
 });
 
@@ -116,48 +132,49 @@ test('workspace-guards: the two guards are INDEPENDENT', () => {
   const { hostSourceIssue } = require('../services/workspace-guards');
   const code = (p, env) => withEnv(env, () => (hostSourceIssue(p) || {}).code || 'ok');
 
-  assert.equal(code('/root', {}), 'workspace_source_home_root');
+  assert.equal(code('/opt', {}), 'workspace_source_home_root');
   assert.equal(code('/etc', {}), 'workspace_source_system_dir');
 
   // GUARD_USER_DIRS relaxes ONLY the bare-root half.
-  assert.equal(code('/root', { GUARD_USER_DIRS: '0' }), 'ok');
+  assert.equal(code('/opt', { GUARD_USER_DIRS: '0' }), 'ok');
   assert.equal(code('/etc', { GUARD_USER_DIRS: '0' }), 'workspace_source_system_dir');
 
   // GUARD_SYSTEM_DIRS is the pre-existing all-or-nothing hatch. It must not
-  // silently become a way in to the bare home folders, or the plan's second
+  // silently become a way in to the bare user-data roots, or the plan's second
   // half would be undoable with one unrelated .env line.
   assert.equal(code('/etc', { GUARD_SYSTEM_DIRS: '0' }), 'ok');
-  assert.equal(code('/root', { GUARD_SYSTEM_DIRS: '0' }), 'workspace_source_home_root');
+  assert.equal(code('/opt', { GUARD_SYSTEM_DIRS: '0' }), 'workspace_source_home_root');
 
   // Both off = the old permissive behaviour, deliberately reachable.
-  assert.equal(code('/root', { GUARD_SYSTEM_DIRS: '0', GUARD_USER_DIRS: '0' }), 'ok');
+  assert.equal(code('/opt', { GUARD_SYSTEM_DIRS: '0', GUARD_USER_DIRS: '0' }), 'ok');
   assert.equal(code('/etc', { GUARD_SYSTEM_DIRS: '0', GUARD_USER_DIRS: '0' }), 'ok');
 });
 
 test('workspace-guards: off-switch spellings all work', () => {
   const { hostSourceIssue } = require('../services/workspace-guards');
   for (const v of ['0', 'false', 'no', 'off', 'disabled', 'disable', 'OFF', ' False ']) {
-    assert.equal(withEnv({ GUARD_USER_DIRS: v }, () => hostSourceIssue('/root')), null, `GUARD_USER_DIRS=${v} should relax`);
+    assert.equal(withEnv({ GUARD_USER_DIRS: v }, () => hostSourceIssue('/opt')), null, `GUARD_USER_DIRS=${v} should relax`);
   }
-  assert.ok(hostSourceIssue('/root'), 'unset means ON');
+  assert.ok(hostSourceIssue('/opt'), 'unset means ON');
 });
 
 test('workspace-guards: the probe agrees with the policy (autocomplete un-hides them)', () => {
   const probe = require('../services/path-probe');
   // The probe has its own consumers — autocomplete filtering, volume discovery
-  // — and if it still treated /root/* as forbidden the form would offer a path
-  // the create path then refuses. That is the client/server disagreement this
-  // plan exists to close, so assert both halves of it.
-  assert.equal(probe.isForbidden('/root'), true);
-  assert.equal(probe.isForbidden('/root/proj'), false);
+  // — and if it still treated a user-data root as forbidden the form would offer
+  // a path the create path then refuses. That is the client/server disagreement
+  // this plan exists to close, so assert both halves of it.
+  assert.equal(probe.isForbidden('/opt'), true);
+  assert.equal(probe.isForbidden('/opt/app'), false);
   assert.equal(probe.isForbidden('/home/u/proj'), false);
+  assert.equal(probe.isForbidden('/home'), false, 'plan 77: allowed bare');
   assert.equal(probe.isForbidden('/etc/passwd'), true);
   assert.equal(probe.isForbidden('/app'), true, 'paddock own dirs still blocked');
   assert.equal(probe.isForbidden('/workspace'), true);
 
-  // Inherited compose volumes: a subdirectory of a home dir is inheritiable.
-  assert.equal(probe.isDangerousSource('/root/proj/node_modules'), false);
-  assert.equal(probe.isDangerousSource('/root'), true);
+  // Inherited compose volumes: a subdirectory of a user-data dir is inheritiable.
+  assert.equal(probe.isDangerousSource('/opt/proj/node_modules'), false);
+  assert.equal(probe.isDangerousSource('/opt'), true);
   assert.equal(probe.isDangerousSource('/etc'), true);
   assert.equal(probe.isDangerousSource('/var/run/docker.sock'), true);
 });
@@ -167,7 +184,7 @@ test('workspace-guards: the probe REPORTS the human reason, so the form stops in
   // The form rendered its own sentence ("System directory — cannot be a
   // workspace source.") beside the inline one. Now the reason comes from where
   // the policy lives, so the two cannot disagree about what is wrong.
-  const bad = probe.probe('/root');
+  const bad = probe.probe('/opt');
   assert.equal(bad.forbidden, true);
   assert.ok(bad.reason, 'a forbidden path must carry a reason');
   assert.match(bad.reason, /pick a project folder inside it/);
@@ -176,7 +193,7 @@ test('workspace-guards: the probe REPORTS the human reason, so the form stops in
   assert.equal(sys.forbidden, true);
   assert.match(sys.reason, /system directory \(\/etc\)/);
 
-  const ok = probe.probe('/root/proj');
+  const ok = probe.probe('/home/u');
   assert.equal(ok.issue, null);
   assert.equal(ok.forbidden, false);
 });
@@ -204,7 +221,7 @@ test('workspace-guards: the CLIENT mirror returns the same verdict as the server
   // shared module that said "workspace source" there would be wrong in the one
   // place a user reads it about a volume.
   assert.match(clientFn('/etc', { noun: 'host source' }).message, /host source cannot be a system directory/);
-  assert.match(clientFn('/root', { noun: 'host source' }).message, /whole home folder \(\/root\) as a host source/);
+  assert.match(clientFn('/opt', { noun: 'host source' }).message, /whole home folder \(\/opt\) as a host source/);
 });
 
 test('workspace-guards: the client mirror also uses the same LISTS (a drift control)', async () => {

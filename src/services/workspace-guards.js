@@ -9,11 +9,18 @@
 //
 //   hard-block — never a source, exact OR under. These hold no user projects.
 //   user-data  — the BARE root is refused, any subdirectory is fine. These are
-//                home and scratch directories, where the sensitive content sits
-//                one level down anyway: refusing `/root/proj` protects nothing
+//                scratch / application roots, where the sensitive content sits
+//                one level down anyway: refusing the subpath protects nothing
 //                while refusing the legitimate project, and the only thing the
-//                bare-root refusal actually buys is "don't hand an agent the
-//                whole home folder".
+//                bare-root refusal actually buys is "don't hand an agent a whole
+//                root".
+//
+// `/home`, `/root` and `/mnt` were in the user-data list and were REMOVED
+// (plan 77): they are data / home roots the operator mounts whole on this host,
+// and refusing them bare broke a recreate of a working pad — `pad-opencode-proj`
+// carries a stored `{"host":"/mnt","container":"/mnt"}` extra volume, so a
+// network-only settings apply re-validated it and failed on a guard that had
+// nothing to do with the change. Exactly the failure plan 72 avoided for /www1.
 //
 // `/www1` is deliberately NOT in either list. It is a projects root, not a home,
 // and it is allowed today including bare — listing it here would silently
@@ -21,7 +28,7 @@
 // be protected from.
 
 const HOST_HARD_BLOCK = ['/etc', '/proc', '/sys', '/dev', '/boot', '/bin', '/sbin', '/usr', '/lib', '/var/run'];
-const HOST_USER_DATA = ['/home', '/root', '/opt', '/tmp', '/mnt', '/srv', '/data'];
+const HOST_USER_DATA = ['/opt', '/tmp', '/srv', '/data'];
 
 const OFF_VALUES = ['0', 'false', 'no', 'off', 'disabled', 'disable'];
 

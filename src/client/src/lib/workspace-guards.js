@@ -17,7 +17,7 @@
 // both, and run that test.
 
 export const HOST_HARD_BLOCK = ['/etc', '/proc', '/sys', '/dev', '/boot', '/bin', '/sbin', '/usr', '/lib', '/var/run']
-export const HOST_USER_DATA = ['/home', '/root', '/opt', '/tmp', '/mnt', '/srv', '/data']
+export const HOST_USER_DATA = ['/opt', '/tmp', '/srv', '/data']
 
 /** Same rule, same order, same codes as the server's `hostSourceIssue`.
  *  Returns `null` when fine, else `{ code, message }`. */
