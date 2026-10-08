@@ -315,13 +315,24 @@ The rule is **two lists, because they are two different decisions**:
 | List | Paths | Rule | Why |
 |---|---|---|---|
 | hard-block | `/etc`, `/proc`, `/sys`, `/dev`, `/boot`, `/bin`, `/sbin`, `/usr`, `/lib`, `/var/run` | refused exact **or under** | holds no user projects |
-| user-data | `/home`, `/root`, `/opt`, `/tmp`, `/mnt`, `/srv`, `/data` | **bare root** refused, any subdirectory accepted | home and scratch space |
+| user-data | `/opt`, `/tmp`, `/srv`, `/data` | **bare root** refused, any subdirectory accepted | scratch / app roots |
 | — | `/` | refused regardless of either guard | "pick a subdirectory" is not actionable here |
 
-So `/root/my-project` and `/home/alice/proj` are accepted and `/root` is not. The
-split exists because refusing the *subpath* protected nothing — the sensitive
-content in a home directory is one level down either way — while refusing the
-bare root still blocks handing an agent somebody's entire home folder.
+So `/opt/app` and `/tmp/build` are accepted and `/opt` is not. The split exists
+because refusing the *subpath* protected nothing — the sensitive content is one
+level down either way — while refusing the bare root still blocks handing an
+agent a whole scratch root.
+
+**`/home`, `/root` and `/mnt` are allowed bare (plan 77).** They used to sit in
+the user-data list, which broke a recreate of a working pad: `pad-opencode-proj`
+carries a stored `{"host":"/mnt","container":"/mnt"}` extra volume, and a
+network-only settings apply (the form resubmits the whole volume list) re-ran
+`validateExtraVolumes` on it and failed with *"Cannot use a whole home folder
+(/mnt) as a host source"* — a change unrelated to volumes blocked by a guard
+that now refused an existing mount. That is exactly the failure plan 72 avoided
+for `/www1`. These are data / home roots the operator mounts whole on this host,
+so the bare path is a legitimate source; the `GUARD_USER_DIRS=0` switch still
+relaxes the remaining four if needed.
 
 `/www1` is deliberately in **neither** list. It is a projects root rather than a
 home, it is allowed today including bare, and listing it would silently narrow a
