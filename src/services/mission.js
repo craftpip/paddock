@@ -1604,6 +1604,42 @@ async function allAgentHistory({ limit = 50, includeSubfolders = false, allow = 
   };
 }
 
+
+/** The gate every in-session TASK step honors (plan 69 D2). Same facts as
+ *  `sendText`'s gate — live pane, an agent (not a shell), not solo-locked, not
+ *  parked on a permission dialog — read WITHOUT typing anything, so a step
+ *  report/commit refuses exactly where a send would and before any step row is
+ *  written. Read-only: one pane-state probe plus one screen capture for the
+ *  permission arm, the same costs sendText pays up front.
+ *
+ *  The locked refusal is spelled `task_session_locked` here rather than
+ *  `mission_session_locked`: the caller is being refused by the TASK surface and
+ *  D2 names that code, while the other three refusals keep their send-side
+ *  spelling so one vocabulary covers both. */
+async function assertStepSession(sessionId) {
+  const { session, project, vmName } = sessionTarget(sessionId);
+  const where = ` [project:${project.name} (${project.id}) session:${session.id}]`;
+  if (!(await padTmux.hasSession(vmName, session.tmux_id))) {
+    throw new MissionError('mission_session_dead',
+      `This session is gone — mission_session_restart brings it back (this step needs a LIVE pane)${where}`, 409);
+  }
+  const pre = await padTmux.paneState(vmName, session.tmux_id);
+  if (!pre.live) {
+    throw new MissionError('mission_session_dead',
+      `This session is gone — mission_session_restart brings it back (this step needs a LIVE pane)${where}`, 409);
+  }
+  const before = await padTmux.captureScreen(vmName, session.tmux_id, 20);
+  const perm = detectPermission(before.text);
+  const verdict = sendVerdict({ ...session, live: pre.live, tuiAlive: pre.tuiAlive, command: pre.command }, perm);
+  if (!verdict.canSend) {
+    const cut = verdict.refusal.indexOf(': ');
+    let code = verdict.refusal.slice(0, cut);
+    if (code === 'mission_session_locked') code = 'task_session_locked';
+    throw new MissionError(code, `${verdict.refusal.slice(cut + 2)}${where}`, 409);
+  }
+  return { session, project, vmName, pane: pre };
+}
+
 module.exports = {
   MissionError,
   supportedTypes,
@@ -1636,6 +1672,7 @@ module.exports = {
   relaunchTui,
   restartSession,
   sendText,
+  assertStepSession,
   answerPermission,
   detectPermission,
   screen,

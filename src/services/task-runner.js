@@ -43,6 +43,11 @@ let spawnFn = realSpawn;
 let lookupAgent = defaultLookupAgent;
 let containerIsRunning = defaultIsRunning;
 let containerExecFn = defaultContainerExec;
+// The in-PAD git commit behind task_step_commit (plan 69 D6), its own promise
+// seam rather than the callback-shaped containerExec above: a commit runs for
+// up to a minute, the exec's exit code is the answer, and a test needs to hand
+// back a SYNTHETIC sha without a container existing anywhere.
+let gitExecFn = defaultGitExec;
 // The in-PAD `test -d` behind the 1k workspace gate. A seam rather than a
 // direct require of pad-tmux: task-runner is a service that must not drag the
 // docker/tmux layer into every test that touches bookkeeping, and the seam is
@@ -59,6 +64,18 @@ function defaultIsRunning(ref) {
 
 function defaultContainerExec(ref, script, cb) {
   execFile('docker', ['exec', '-i', ref, 'sh', '-lc', script], { timeout: 15000 }, (err) => cb && cb(err));
+}
+
+function defaultGitExec(ref, script, timeout) {
+  return new Promise((resolve) => {
+    execFile('docker', ['exec', '-i', ref, 'sh', '-lc', script], { timeout },
+      (err, stdout, stderr) => {
+        // A nonzero exit is still an ANSWER (git said "nothing to commit"), so
+        // this never rejects: the caller reads the code, not an exception.
+        const code = err ? (typeof err.code === 'number' ? err.code : 1) : 0;
+        resolve({ stdout: stdout || '', stderr: stderr || '', code });
+      });
+  });
 }
 
 const running = new Map();
@@ -417,8 +434,35 @@ async function resolveTaskWorkspace(pad) {
   return workspaceDir;
 }
 
-async function submitTask({ name, prompt, model, agent, priority = 0, timeout, autoApprove = false, enqueue = false, user } = {}) {
+async function submitTask({ name, prompt, model, agent, priority = 0, timeout, autoApprove = false, enqueue = false, user, session_id, reviewer } = {}) {
   if (!prompt || !String(prompt).trim()) throw new Error('task prompt is required');
+  if (reviewer && !session_id) throw new Error('reviewer requires session_id (a reviewer is another session bound to the same task)');
+
+  // P2: session binding is resolved FIRST, because it can supply the pad (a
+  // caller who started a session and now puts a task "in the session" need only
+  // name the session) and it must be validated before anything is written.
+  let boundSession = null;
+  let boundProject = null;
+  let sessionFolder = null;
+  if (session_id) {
+    const mission = require('./mission');
+    boundSession = mission.getSession(String(session_id));            // throws mission_session_not_found
+    boundProject = mission.getProject(boundSession.project_id);       // throws mission_project_not_found
+    sessionFolder = boundProject.folder;
+    if (name && String(name).trim() && String(name).trim() !== boundProject.agent_name) {
+      throw new Error(`task_session_pad_mismatch: session ${session_id} runs on ${boundProject.agent_name}, not ${name} — pass the same pad as the session or omit name`);
+    }
+    // Bind reviewer to a session too when given (D3: cross-review is opt-in).
+    if (reviewer) {
+      const rev = mission.getSession(String(reviewer));
+      const revProj = mission.getProject(rev.project_id);
+      if (revProj.agent_name !== boundProject.agent_name) {
+        throw new Error(`task_reviewer_pad_mismatch: reviewer session ${reviewer} runs on ${revProj.agent_name}, not ${boundProject.agent_name}`);
+      }
+    }
+    if (!name) name = boundProject.agent_name;   // in-session task runs on the session's pad
+  }
+
   const isPool = !name || !String(name).trim();
 
   let runtimeRef = null;
@@ -457,6 +501,26 @@ async function submitTask({ name, prompt, model, agent, priority = 0, timeout, a
     isPool ? 0 : (enqueue ? 1 : 0),
     limit
   );
+
+  // P2: the session binding is written as the task's FIRST task_steps row
+  // (tasks is frozen, so the binding has to live on the sibling table) and it
+  // doubles as the opening `review` step — "where is this in the loop" then has
+  // an answer from the moment the task is filed. `reported_by` is deliberately
+  // NULL: nobody has claimed the review step yet, and the FIRST report claims it
+  // (the actor-claim rule), so the submitter does not pre-own it.
+  if (boundSession) {
+    insertTaskStep({
+      task_id: id,
+      step: 'review',
+      attempt: 1,
+      state: 'pending',
+      status: null,
+      session_id: boundSession.id,
+      reported_by: null,
+      notes: reviewer ? `reviewer:${reviewer}` : '',
+      artifact: '',
+    });
+  }
 
   if (!isPool && !enqueue) {
     const script = buildExecCommand(cap, prompt, { workspaceDir, model, agent, autoApprove }, id);
@@ -635,18 +699,46 @@ function cancelTask(id) {
   return getTask(id);
 }
 
-function _setForTests({ spawn, getAgent, isRunning, containerExec, folderExists, resetRunning, resetSeams } = {}) {
+/** Commit a folder's work inside a container (plan 69 D6) and return the
+ *  parsed facts: `code`, `sha` (null unless git produced one), `output`,
+ *  `clean` (nothing to commit). The script's trailing printf sentinel is what
+ *  makes BOTH readable — execFile hands back stdout and a code, and parsing the
+ *  sentinel is how "which SHA belongs to this task" survives the trip. A clean
+ *  tree exits 1 with no new sha, which the caller must never mistake for a
+ *  commit it made. */
+async function runGitCommit(ref, folder, message, timeout = 60000) {
+  const msg = String(message || '').slice(0, 500);
+  const script = 'cd ' + shq(folder)
+    + ' && git add -A 2>&1 && git commit -m ' + shq(msg)
+    + ' 2>&1; ec=$?; sha=$(git rev-parse HEAD 2>/dev/null);'
+    + " printf '\\n__EC__=%s\\n__SHA__=%s\\n' \"$ec\" \"$sha\"";
+  const r = await gitExecFn(ref, script, timeout);
+  const out = String(r.stdout || '');
+  const ec = /__EC__=(\d+)/.exec(out);
+  const sha = /__SHA__=([0-9a-f]{7,64})/.exec(out);
+  const body = out.replace(/\n__EC__=[\s\S]*$/, '').trim();
+  return {
+    code: ec ? Number(ec[1]) : (typeof r.code === 'number' ? r.code : 1),
+    sha: sha ? sha[1] : null,
+    output: body,
+    clean: /nothing to commit/i.test(out),
+  };
+}
+
+function _setForTests({ spawn, getAgent, isRunning, containerExec, folderExists, gitExec, resetRunning, resetSeams } = {}) {
   if (resetSeams) {
     spawnFn = realSpawn;
     lookupAgent = defaultLookupAgent;
     containerIsRunning = defaultIsRunning;
     containerExecFn = defaultContainerExec;
+    gitExecFn = defaultGitExec;
     folderExistsFn = require('./pad-tmux').folderExists;
   }
   if (spawn) spawnFn = spawn;
   if (getAgent) lookupAgent = getAgent;
   if (isRunning) containerIsRunning = isRunning;
   if (containerExec) containerExecFn = containerExec;
+  if (gitExec) gitExecFn = gitExec;
   if (folderExists) folderExistsFn = folderExists;
   if (resetRunning) {
     for (const entry of running.values()) {
@@ -685,4 +777,132 @@ module.exports = {
   DEFAULT_TIMEOUT_MS,
   MAX_TIMEOUT_MS,
   _setForTests,
+  insertTaskStep,
+  getTaskStep,
+  getCurrentTaskStep,
+  listTaskSteps,
+  currentStepsFor,
+  openStepRow,
+  nextStepAttempt,
+  taskBinding,
+  updateTaskStep,
+  runGitCommit,
 };
+
+// ── task_steps (plan 69 D1) ────────────────────────────────────────────────
+// One row per step ATTEMPT. A task's current step is the NEWEST row, and
+// "newest" is `rowid`: `id` is a uuid (it orders nowhere) and `occurred_at`
+// only resolves to the second, so two reports inside one second would tie.
+//
+// Nothing here swallows a failure. A step row that silently failed to write is
+// the whole step missing from the lifecycle while every caller reads a task
+// with no current step — the "unreadable answer and a negative answer are the
+// same shape" trap. The table exists from the moment db.js boots.
+
+function insertTaskStep({ task_id, step = 'review', attempt = 1, state = 'pending',
+  status = null, session_id = null, reported_by = null, notes = '', artifact = '' } = {}) {
+  const id = crypto.randomUUID();
+  getDb().prepare(
+    `INSERT INTO task_steps (id, task_id, step, attempt, state, status, session_id, reported_by, notes, artifact, occurred_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))`
+  ).run(
+    id,
+    String(task_id),
+    String(step),
+    Math.max(1, Number(attempt) || 1),
+    String(state),
+    status == null ? null : String(status),
+    session_id || null,
+    reported_by || null,
+    notes == null ? '' : String(notes),
+    artifact == null ? '' : String(artifact)
+  );
+  return getTaskStep(id);
+}
+
+function getTaskStep(id) {
+  return getDb().prepare('SELECT * FROM task_steps WHERE id = ?').get(String(id)) || null;
+}
+
+/** Where is this task in the loop (D1): the newest row, by insertion order. */
+function getCurrentTaskStep(task_id) {
+  return getDb().prepare('SELECT * FROM task_steps WHERE task_id = ? ORDER BY rowid DESC LIMIT 1')
+    .get(String(task_id)) || null;
+}
+
+function listTaskSteps(task_id, limit = 50) {
+  const max = Math.max(1, Math.min(Number(limit) || 50, 200));
+  return getDb().prepare('SELECT * FROM task_steps WHERE task_id = ? ORDER BY rowid ASC LIMIT ?')
+    .all(String(task_id), max);
+}
+
+/** Batched current step for a LIST (task_list): one query for N tasks instead
+ *  of N indexed reads — a listing that fans out per row is how a page becomes
+ *  a probe storm. Ascending + overwrite keeps the last row per task. */
+function currentStepsFor(taskIds) {
+  const ids = (taskIds || []).filter(Boolean).map(String);
+  if (!ids.length) return {};
+  const marks = ids.map(() => '?').join(',');
+  const rows = getDb().prepare(
+    `SELECT * FROM task_steps WHERE task_id IN (${marks}) ORDER BY rowid ASC`
+  ).all(...ids);
+  const out = {};
+  for (const r of rows) out[r.task_id] = r;
+  return out;
+}
+
+/** The step attempt that is still open (not yet finished): the binding row a
+ *  task starts with, or a report left in flight. This is what a new report
+ *  AMENDS instead of adding a competing row for the same attempt. */
+function openStepRow(task_id, step) {
+  return getDb().prepare(
+    `SELECT * FROM task_steps
+     WHERE task_id = ? AND step = ? AND state IN ('pending','running','needs_review')
+     ORDER BY rowid DESC LIMIT 1`
+  ).get(String(task_id), String(step)) || null;
+}
+
+/** Next attempt number for a step — attempts count UP, so a test that failed
+ *  and was re-run is attempt 2 rather than a second row silently competing. */
+function nextStepAttempt(task_id, step) {
+  const r = getDb().prepare(
+    'SELECT MAX(attempt) AS m FROM task_steps WHERE task_id = ? AND step = ?'
+  ).get(String(task_id), String(step));
+  return (Number(r && r.m) || 0) + 1;
+}
+
+/** The session binding written by submitTask (D2/D3). The FIRST row of a task
+ *  is its binding row: `session_id` is the session the task lives in, and
+ *  `notes` carries `reviewer:<id>` when cross-review was requested — a task
+ *  with no rows has no binding, and neither is an error. */
+function taskBinding(task_id) {
+  const row = getDb().prepare('SELECT * FROM task_steps WHERE task_id = ? ORDER BY rowid ASC LIMIT 1')
+    .get(String(task_id));
+  if (!row) return { session_id: null, reviewer: null };
+  const m = /^reviewer:(\S+)$/.exec(String(row.notes || '').trim());
+  return { session_id: row.session_id || null, reviewer: m ? m[1] : null };
+}
+
+function updateTaskStep(id, { state, status, session_id, notes, artifact, reported_by } = {}) {
+  const cur = getTaskStep(id);
+  if (!cur) return null;
+  getDb().prepare(
+    `UPDATE task_steps
+     SET state = ?, status = ?, session_id = ?, notes = ?, artifact = ?, occurred_at = datetime('now')
+     WHERE id = ?`
+  ).run(
+    state == null ? cur.state : String(state),
+    status === undefined ? cur.status : (status == null ? null : String(status)),
+    session_id === undefined ? cur.session_id : (session_id || null),
+    notes === undefined ? cur.notes : (notes == null ? '' : String(notes)),
+    artifact === undefined ? cur.artifact : (artifact == null ? '' : String(artifact)),
+    String(id)
+  );
+  if (reported_by) {
+    // Claim only when the row has no holder yet — writeStep already refused a
+    // second identity, so this stamp is "who first reported this attempt".
+    getDb().prepare('UPDATE task_steps SET reported_by = ? WHERE id = ? AND (reported_by IS NULL OR reported_by = ?)')
+      .run(String(reported_by), String(id), String(reported_by));
+  }
+  return getTaskStep(id);
+}

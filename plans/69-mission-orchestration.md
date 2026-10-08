@@ -1,8 +1,13 @@
 # Plan 69 — Mission orchestration via MCP (task lifecycle loop)
 
-## Status: Proposed (2026-10-07) — design complete, not started. All design calls
-are decided below (§ Design proposal); the audit (2026-10-06) stands. Nothing is
-In progress — building (started 2026-10-07). P1–P4 in checklist below.
+## Status: In progress (2026-10-08) — 2/4 phases done. P1 (task_steps schema)
+and P2 (single-step tools `task_step_report` / `task_step_bug` /
+`task_step_commit`, session binding + gates, actor-claim, commit SHA) are
+built, tested (450/450 across the targeted suites, +16 in the new
+`task-steps.test.js`, mutation control red on both guards) and committed.
+Remaining: P3 (pipeline driver, proved live end to end) and P4 (pad_help
+recipes, docs/AGENTS absorb, delete this file). Design calls are all decided
+below (§ Design proposal); the audit (2026-10-06) stands.
 
 Scope: **MCP / orchestration only.** How an LLM driving Paddock over MCP runs
 work through agents and sessions: task model, lifecycle steps
@@ -328,10 +333,25 @@ session's pad, exactly like the `mission_*` tools.
       { session_id, reviewer }` validation (session exists on the pad, folder
       matches project), `task_status`/`task_list` read the derived step. Tests:
       db-migration control, mcp suite, act-gate tests.
-- [ ] **P2 — single-step tools.** `task_step_report`, `task_step_bug`,
-      `task_step_commit`, all with the session gates from D2 and the actor-claim
-      check from D4. Tests: refusal matrix (locked/dead/shell/permission-parked),
-      commit-sha recording.
+- [x] **P2 — single-step tools (done 2026-10-08).** `task_step_report`,
+      `task_step_bug`, `task_step_commit`, all with the session gates from D2
+      (locked → `task_session_locked`; dead → `mission_session_dead`; shell →
+      `mission_not_an_agent`; permission-parked → `mission_permission_pending`)
+      and the actor-claim check from D4. The binding half landed with it:
+      `task_submit { session_id, reviewer }` validates pad/reviewer (D2/D3),
+      writes the FIRST `task_steps` row (session + `reviewer:<id>` in notes,
+      `reported_by` NULL so the first report claims it), and `task_status` /
+      `task_list` now surface the derived `current_step` (`task_list` via one
+      batched read, never per row). The commit runs in the session's project
+      folder through a `gitExec` seam in task-runner (quote + sentinel: exit
+      code and SHA both read off stdout) and records `artifact = <sha>`; a clean
+      tree records NOTHING (`task_commit_nothing`), and a pool task with no PAD
+      is refused (`task_commit_no_pad`). Tests: `src/test/task-steps.test.js`
+      — 16 cases incl. the four-way refusal matrix (each asserting NO row is
+      written), amend-vs-new-attempt, actor-claim, bug JSON, commit SHA.
+      Control: removing the lock mapping + the claim guard turns exactly those
+      2 red while the other 14 stay green. Note: `tasks` still frozen — every
+      fact lives on `task_steps` (G2).
 - [ ] **P3 — the pipeline driver.** `task_pipeline_start/status/stop` with the
       four hard walls from D7, task step records, timeout from `tasks.timeout_ms`.
       Proved END TO END live (a task walked review→build→test→hotfix→commit in a

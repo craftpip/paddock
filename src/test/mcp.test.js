@@ -343,10 +343,10 @@ describe('MCP Server - API key grants (plan 35b)', () => {
     // is spelled differently, and a test that passes on a partial list is the
     // "paper outrunning proof" failure (R17).
     //
-    // BOTH configurations matter, and the difference is 9 tools: the task
+    // BOTH configurations matter, and the difference is 12 tools: the task
     // family is behind `PADDOCK_TASK_QUEUE=1` (plan 52 §3 retired it, the
     // switch brings it back). So the default surface is 31 tools and the full
-    // one is 40 — which is exactly why counting registrations in the SOURCE
+    // one is 43 — which is exactly why counting registrations in the SOURCE
     // is misleading: the call sites are all there whether or not the gate is
     // on. Flipping one env var must not be able to introduce an unclassified
     // tool, so both are checked.
@@ -360,10 +360,11 @@ describe('MCP Server - API key grants (plan 35b)', () => {
     let on;
     try { on = grab(); } finally { delete process.env.PADDOCK_TASK_QUEUE; }
     assert.ok(off.length >= 30, `expected the default surface, got ${off.length}`);
-    assert.strictEqual(on.length, off.length + 9, 'the task gate should hide exactly the 9 task tools');
+    assert.strictEqual(on.length, off.length + 12, 'the task gate should hide exactly the 12 task tools');
     assert.deepStrictEqual(
       on.filter((t) => !off.includes(t)).sort(),
-      ['task_cancel', 'task_complete', 'task_get_next', 'task_list', 'task_priority', 'task_result', 'task_retry', 'task_status', 'task_submit'],
+      ['task_cancel', 'task_complete', 'task_get_next', 'task_list', 'task_priority', 'task_result', 'task_retry', 'task_status',
+        'task_step_bug', 'task_step_commit', 'task_step_report', 'task_submit'],
       'the gate should hide the whole task_* family and nothing else',
     );
 
@@ -394,12 +395,13 @@ describe('MCP Server - API key grants (plan 35b)', () => {
     // each is classified, not merely that it is classified. The three readers
     // are read-bucket tools and must NOT be exec: a read key can see task
     // results, and if these ever routed to exec the read bucket would quietly
-    // gain the ability to run work. The other six are mutations and must be
+    // gain the ability to run work. The other nine are mutations and must be
     // exec. Note the split is a fact about the tools, so it is asserted
-    // against both sets rather than assuming the map has all nine — three
+    // against both sets rather than assuming the map has all twelve — three
     // legitimately live in READ_TOOLS and have no map entry.
     const taskReaders = ['task_list', 'task_result', 'task_status'];
-    const taskMutators = ['task_cancel', 'task_complete', 'task_get_next', 'task_priority', 'task_retry', 'task_submit'];
+    const taskMutators = ['task_cancel', 'task_complete', 'task_get_next', 'task_priority', 'task_retry', 'task_submit',
+      'task_step_report', 'task_step_bug', 'task_step_commit'];
     for (const t of taskReaders) {
       assert.ok(read.has(t), `${t} is a task reader and should be in READ_TOOLS`);
       assert.ok(!map.has(t), `${t} is a read tool; giving it a map entry would grant it to a non-read key`);

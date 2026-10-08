@@ -152,6 +152,12 @@ const TOOL_GRANT_FOR = {
   task_retry: 'exec',
   task_priority: 'exec',
   task_cancel: 'exec',
+  // Step reporting (plan 69 D2/D4/D6) is work in a PAD like the other task
+  // verbs: a step report steers the lifecycle, a bug records a defect against
+  // it, and a commit RUNS git inside the task's PAD — none is a read.
+  task_step_report: 'exec',
+  task_step_bug: 'exec',
+  task_step_commit: 'exec',
   // Mission writers (plan 55). A project is a row, so it rides the same `create`
   // bucket as create_agent. Starting a session spawns a real TUI that burns
   // tokens, and mission_send types into a live conversation — both are work in
@@ -471,6 +477,26 @@ function taskRow(t, { full = false } = {}) {
     row.timeout_ms = t.timeout_ms;
   }
   return row;
+}
+
+/** One task_steps row, agent-facing. `state` is where the step is in its own
+ *  lifecycle (pending / running / needs_review / failed / done / aborted),
+ *  `status` is the verdict it was reported with, and `artifact` is where the
+ *  commit SHA (or a bug's file:line) is recorded — never the step's location. */
+function stepRow(s) {
+  if (!s) return null;
+  return {
+    task_id: s.task_id,
+    step: s.step,
+    attempt: Number(s.attempt) || 1,
+    state: s.state,
+    status: s.status || null,
+    session_id: s.session_id || null,
+    reported_by: s.reported_by || null,
+    notes: s.notes || '',
+    artifact: s.artifact || '',
+    occurred_at: s.occurred_at,
+  };
 }
 
 // ─── Mission (plan 55) ─────────────────────────────────────────────
@@ -1457,6 +1483,8 @@ function registerTools(server) {
         priority: z.number().int().optional().describe('Queue rank for pool tasks — lower numbers are served first (default 0)'),
         timeout: z.number().int().min(1000).max(3600000).optional().describe('Kill the task after this many ms (default 600000, max 3600000)'),
         autoApprove: z.boolean().optional().describe('Opt in to auto-approving permissions not explicitly denied — i.e. opencode `--auto`, codex `--sandbox danger-full-access` (no sandbox at all). DEFAULT false, so a task runs sandboxed and stops on anything needing a decision; plan 52 R3/A3 flipped this from true because the headless task path runs where the user cannot see it, which law 6 forbids. Pass true only when you have decided the prompt is safe unattended.'),
+        session_id: z.string().optional().describe('Bind the task to a Mission session (D2): the task then lives in that session\'s PAD and folder, its steps are gated by that session\'s state (locked/dead/shell/permission-parked refuse), and it is refused if the session is on a different PAD than `name`. Omit for an ordinary headless task — no step tool will resolve a session for it.'),
+        reviewer: z.string().optional().describe('Session that REVIEWS this task (D3) — requires `session_id` (the task\'s own session) and must be on the same PAD. The binding row records it as `reviewer:<id>`, and a review step may then be reported from either session.'),
       },
     },
     async (args) => {
@@ -1481,6 +1509,8 @@ function registerTools(server) {
         priority: args.priority,
         timeout: args.timeout,
         autoApprove: args.autoApprove === true,
+        session_id: args.session_id,
+        reviewer: args.reviewer,
         user,
       }));
       const task = taskRunner.getTask(id);
@@ -1497,6 +1527,11 @@ function registerTools(server) {
       // `task.route` already gives correctly.
       const route = taskRunner.taskRoute(task);
       const out = { ok: true, task_id: id, mode: route, task: taskRow(task) };
+      // The binding (session + reviewer) lives on task_steps, not on `tasks`,
+      // so a submit response would otherwise answer nothing about D2/D3 — the
+      // caller needs to know which session the steps are now gated by.
+      const binding = taskRunner.taskBinding(id);
+      if (binding.session_id) out.binding = binding;
       if (!pad) {
         out.queue = {
           ...taskRunner.queueState(),
@@ -1621,6 +1656,12 @@ function registerTools(server) {
       requireTaskGrant(currentUser(), 'task_status', task);
       const out = taskRow(task, { full: true });
       if (tail) out.stdout_tail = taskRunner.stripAnsi(task.stdout).slice(-tail);
+      // Where is this in the loop (D1) + which session gates its steps (D2/D3).
+      // Both live on task_steps, so this stays a read of the sibling table —
+      // `tasks` itself is frozen.
+      out.current_step = stepRow(taskRunner.getCurrentTaskStep(task_id));
+      const binding = taskRunner.taskBinding(task_id);
+      if (binding.session_id) out.binding = binding;
       return textResult(out);
     }
   );
@@ -1687,8 +1728,18 @@ function registerTools(server) {
       // nextUp is computed by the same selector the claim uses, so the preview
       // cannot name a task the claim would then skip.
       const up = taskRunner.nextUpTask(pad);
+      // The current step is ONE batched query over the page's tasks, not a read
+      // per row — a listing that fans out per row is how a list becomes a probe
+      // storm. Rows with no steps (an unbound headless task) simply carry null.
+      const page = visible.slice(0, limit);
+      const steps = taskRunner.currentStepsFor(page.map((t) => t.id));
       const out = {
-        tasks: visible.slice(0, limit).map((t) => taskRow(t)),
+        tasks: page.map((t) => {
+          const row = taskRow(t);
+          const step = steps[t.id];
+          if (step) row.current_step = stepRow(step);
+          return row;
+        }),
         total: visible.length,
         truncated: visible.length > limit,
         nextUp: up ? { task_id: up.id, priority: up.priority, for: pad || 'any worker (task_get_next)' } : null,
@@ -1722,6 +1773,235 @@ function registerTools(server) {
     }
   );
 
+  // ─── Step tools (plan 69 D2/D4/D6) ───────────────────────────────────────
+  // One task = one session-bound loop (D2). Every step write runs the same
+  // three checks in this order: the TASK grant, then the SESSION grant + state
+  // gates (D2), then the actor-claim (one attempt is one identity's to report).
+  // Nothing here reads `tasks` for its lifecycle — that table is frozen, so
+  // every fact about where a task is in the loop is a `task_steps` row.
+
+  const STEP_NAMES = ['review', 'build', 'test', 'hotfix', 'commit'];
+
+  /** Which session this step belongs to, and its gates (D2). `session_id` is
+   *  explicit when the caller passes one (a reviewer session reporting
+   *  `review` — D3); otherwise it is the session task_submit bound the task to.
+   *  Both halves are enforced: a caller may not report against a session the
+   *  task is not bound to, and the session's own state is then read from tmux
+   *  (locked → `task_session_locked`, dead → `mission_session_dead`, a bare
+   *  shell → `mission_not_an_agent`, permission-parked →
+   *  `mission_permission_pending`). */
+  async function stepSession(tool, task, sessionId) {
+    const binding = taskRunner.taskBinding(task.id);
+    const want = sessionId || binding.session_id;
+    if (!want) return { sessionId: null, binding, project: null };
+    if (sessionId && binding.session_id
+        && sessionId !== binding.session_id && sessionId !== binding.reviewer) {
+      throw new McpError(ErrorCode.InvalidRequest,
+        `task_session_mismatch: task ${task.id} is bound to session ${binding.session_id}`
+        + (binding.reviewer ? ` (reviewer ${binding.reviewer})` : '')
+        + ` — ${tool} cannot report a step against ${sessionId}.`);
+    }
+    const user = currentUser();
+    // Grant first (the session's PAD must be one this key may reach), then the
+    // tmux state gates — a refusal for "wrong PAD" should never cost a probe.
+    const { project } = missionRequireSession(user, tool, want);
+    await missionCall(() => mission.assertStepSession(want));
+    return { sessionId: want, binding, project };
+  }
+
+  /** Actor-claim (D4): an attempt is ONE identity's to report. A second
+   *  identity is refused with the holder's name rather than silently
+   *  overwriting who said what — an amend that changed `reported_by` would
+   *  make the audit trail argue with itself. */
+  function claimOrThrow(open, actor) {
+    if (open && open.reported_by && open.reported_by !== actor) {
+      throw new McpError(ErrorCode.InvalidRequest,
+        `task_step_claimed: step '${open.step}' attempt ${open.attempt} of task ${open.task_id}`
+        + ` is held by ${open.reported_by} (${actor} is a different identity).`
+        + ' One attempt is one actor\'s to report — finish or fail it, or start the NEXT attempt.');
+    }
+  }
+
+  /** Write one step row: AMEND the attempt already in flight (the binding row
+   *  a submit wrote, or a report left pending) so `current_step` stays
+   *  unambiguous, otherwise INSERT a new attempt. */
+  function writeStep(task, { step, state, status, session_id, notes, artifact, reported_by }) {
+    const open = taskRunner.openStepRow(task.id, step);
+    claimOrThrow(open, reported_by);
+    if (open) {
+      const patch = { state, status };
+      if (session_id !== undefined && session_id !== null) patch.session_id = session_id;
+      if (notes !== undefined) patch.notes = notes;
+      if (artifact !== undefined) patch.artifact = artifact;
+      if (!open.reported_by) patch.reported_by = reported_by;
+      return taskRunner.updateTaskStep(open.id, patch);
+    }
+    return taskRunner.insertTaskStep({
+      task_id: task.id,
+      step,
+      attempt: taskRunner.nextStepAttempt(task.id, step),
+      state,
+      status,
+      session_id: session_id || null,
+      reported_by,
+      notes,
+      artifact,
+    });
+  }
+
+  function stepResponse(task, row, binding) {
+    return textResult({
+      ok: true,
+      step: stepRow(row),
+      current_step: stepRow(taskRunner.getCurrentTaskStep(task.id)),
+      binding,
+    });
+  }
+
+  registerToolBound(
+    'task_step_report',
+    {
+      title: 'Report a task step',
+      description: 'Record where a task is in its loop: one `task_steps` row per step attempt. `state` is where the step IS (pending / running / needs_review / failed / done / aborted); `status` is the verdict (passed / failed / error) — the two are kept apart so "the test is running" and "the test failed" are never the same row. A report AMENDS the attempt already in flight (the binding row task_submit wrote, or a report left pending) and starts a NEW attempt otherwise, so `attempt` counts up across a re-run. Gated by the task\'s session: a locked session refuses with `task_session_locked`, a dead one with `mission_session_dead`, a bare shell with `mission_not_an_agent`, a permission-parked one with `mission_permission_pending`. Actor-claim: an attempt is one identity\'s to report, and a second one is refused with `task_step_claimed` rather than overwriting who said what. Read the derived step back from task_status (`current_step`) or task_list.',
+      inputSchema: {
+        task_id: z.string().describe('Task id'),
+        step: z.enum(STEP_NAMES).describe('Which step of the loop: review | build | test | hotfix | commit'),
+        state: z.enum(['pending', 'running', 'needs_review', 'failed', 'done', 'aborted']).describe('Where the step is NOW'),
+        status: z.enum(['passed', 'failed', 'error']).optional().describe('The verdict, when the step has one — `state` says where it is, `status` says how it went'),
+        session_id: z.string().optional().describe('Session to report against. Defaults to the session task_submit bound the task to; a reviewer session (D3) may report the `review` step'),
+        notes: z.string().optional().describe('Human note for this attempt'),
+        artifact: z.string().optional().describe('Evidence for the report — an id, a path, a link. NOT the step\'s location: that is `session_id`'),
+      },
+    },
+    async ({ task_id, step, state, status, session_id, notes, artifact }) => {
+      const user = currentUser();
+      const task = taskRunner.getTask(task_id);
+      requireTaskGrant(user, 'task_step_report', task);
+      const actor = missionActor(user);
+      const s = await stepSession('task_step_report', task, session_id);
+      const row = writeStep(task, {
+        step,
+        state,
+        status,
+        session_id: s.sessionId,
+        notes,
+        artifact,
+        reported_by: actor,
+      });
+      return stepResponse(task, row, s.binding);
+    }
+  );
+
+  registerToolBound(
+    'task_step_bug',
+    {
+      title: 'Record a bug against a task step',
+      description: 'A defect found while working a task, filed as an EXTRA row on the same attempt as the step it belongs to (`state: failed`, `status: failed`) so it sits under `current_step` without replacing the step\'s own report. `artifact` carries `{file, line, summary, repro}` as JSON (machine-readable), `notes` carries the one-line summary (human-readable). It does NOT change the task\'s own status — the task\'s outcome is task_complete\'s to set; a bug is evidence, not a verdict on the whole task. Same session gates and actor-claim as task_step_report.',
+      inputSchema: {
+        task_id: z.string().describe('Task id'),
+        step: z.enum(STEP_NAMES).optional().describe('Step the defect belongs to (default `test`)'),
+        session_id: z.string().optional().describe('Session to report against — defaults to the task\'s bound session'),
+        file: z.string().describe('Where the defect is — a path inside the workspace'),
+        line: z.number().int().optional().describe('Line number, when known'),
+        summary: z.string().describe('One line: what is wrong'),
+        repro: z.string().optional().describe('How to reproduce it'),
+      },
+    },
+    async ({ task_id, step, session_id, file, line, summary, repro }) => {
+      const user = currentUser();
+      const task = taskRunner.getTask(task_id);
+      requireTaskGrant(user, 'task_step_bug', task);
+      const actor = missionActor(user);
+      const s = await stepSession('task_step_bug', task, session_id);
+      const useStep = step || 'test';
+      claimOrThrow(taskRunner.openStepRow(task.id, useStep), actor);
+      const cur = taskRunner.getCurrentTaskStep(task.id);
+      const row = taskRunner.insertTaskStep({
+        task_id: task.id,
+        step: useStep,
+        attempt: cur && cur.step === useStep ? cur.attempt : taskRunner.nextStepAttempt(task.id, useStep),
+        state: 'failed',
+        status: 'failed',
+        session_id: s.sessionId,
+        reported_by: actor,
+        notes: summary,
+        artifact: JSON.stringify({
+          file,
+          line: line == null ? null : line,
+          summary,
+          repro: repro || null,
+        }),
+      });
+      return stepResponse(task, row, s.binding);
+    }
+  );
+
+  registerToolBound(
+    'task_step_commit',
+    {
+      title: "Commit the task's work",
+      description: "Runs `git add -A && git commit` INSIDE the task's PAD and records a `commit` step row whose `artifact` is the resulting SHA — the commit is a step of the loop, so it shows up in task_status's `current_step` instead of living only in captured stdout. The folder is the bound session's project folder, or (an unbound task) its own workspace; pass `cwd` to commit somewhere else. Refuses with `task_commit_no_pad` when the task has no PAD (a pool task claims one only when a worker takes it) and returns `ok: false, error: task_commit_nothing` when the tree is clean, because there is then no new SHA to record. Any git failure is recorded as a `failed` step carrying git's output, so a failed commit never claims a SHA it did not make. Same session gates as the other step tools.",
+      inputSchema: {
+        task_id: z.string().describe('Task id'),
+        session_id: z.string().optional().describe('Session whose folder to commit in — defaults to the task\'s bound session'),
+        message: z.string().optional().describe('Commit message (default: the task prompt, clipped to 500 chars)'),
+        cwd: z.string().optional().describe('Directory to commit (default: the session\'s project folder, else the task workspace). Quoted into `cd`, so a bad path fails loudly instead of committing somewhere else'),
+      },
+    },
+    async ({ task_id, session_id, message, cwd }) => {
+      const user = currentUser();
+      const task = taskRunner.getTask(task_id);
+      requireTaskGrant(user, 'task_step_commit', task);
+      const actor = missionActor(user);
+      const s = await stepSession('task_step_commit', task, session_id);
+
+      const agentName = (s.project && s.project.agent_name) || task.agent_name || task.claimed_by || '';
+      let folder = cwd || (s.project && s.project.folder) || '';
+      let agent = null;
+      if (agentName) {
+        try { agent = await requireAgent(agentName); } catch { agent = null; }
+      }
+      if (!agent) {
+        throw new McpError(ErrorCode.InvalidRequest,
+          `task_commit_no_pad: task ${task.id} has no PAD to commit in (a pool task gets one only when a worker claims it).`
+          + ' Bind it with task_submit {session_id}, or claim it with task_get_next first.');
+      }
+      if (!folder) folder = await taskErrorAsync(() => taskRunner.resolveTaskWorkspace(agent));
+
+      const res = await taskRunner.runGitCommit(
+        agent.runtime_ref || agent.name,
+        folder,
+        message || task.prompt || `task ${task.id}`
+      );
+      const ok = res.code === 0 && !!res.sha;
+      const notes = res.clean
+        ? 'nothing to commit — the working tree was already clean, so no new SHA exists'
+        : res.output.slice(-2000);
+      const row = taskRunner.insertTaskStep({
+        task_id: task.id,
+        step: 'commit',
+        attempt: taskRunner.nextStepAttempt(task.id, 'commit'),
+        state: ok ? 'done' : 'failed',
+        status: ok ? 'passed' : (res.clean ? 'error' : 'failed'),
+        session_id: s.sessionId,
+        reported_by: actor,
+        notes,
+        artifact: ok ? res.sha : '',
+      });
+      const out2 = {
+        ok,
+        step: stepRow(row),
+        current_step: stepRow(taskRunner.getCurrentTaskStep(task.id)),
+        binding: s.binding,
+        sha: res.sha,
+        exit_code: res.code,
+        commit_output: res.output.slice(-2000),
+      };
+      if (res.clean) out2.error = { code: 'task_commit_nothing', message: 'Working tree clean — nothing to commit, so there is no task SHA to record.' };
+      else if (!ok) out2.error = { code: 'task_commit_failed', message: `git exited ${res.code} — see commit_output.` };
+      return textResult(out2);
+    }
+  );
   } // end PADDOCK_TASK_QUEUE gate — service below stays loaded
 
   // ─── Mission (plan 55) ───────────────────────────────────────────────────
