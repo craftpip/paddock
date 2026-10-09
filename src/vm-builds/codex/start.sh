@@ -13,6 +13,13 @@ if [ -n "$SSH_PORT" ] && [ "$SSH_PORT" != "22" ]; then
     sed -i "s/^#\?[[:space:]]*Port .*/Port $SSH_PORT/" /etc/ssh/sshd_config
 fi
 /usr/sbin/sshd &
+# PAD HOME OWNERSHIP (plan 79): early pass — give the pad user the whole
+# home BEFORE the root-run hooks (start-web, post-start) below can find it
+# root-owned, so a session started mid-boot is already writable. The USER_MODE
+# branch re-runs it after the hooks in case one wrote into the home.
+if [ "$USER_MODE" = "user" ]; then
+    chown -R 1000:1000 /root 2>/dev/null || true
+fi
 # Paddock post-start hook (plan 41): if the webui wrote a post-start.sh (bound
 # via the build-dir /build mount), run it on EVERY container start.
 if [ -f /build/post-start.sh ]; then

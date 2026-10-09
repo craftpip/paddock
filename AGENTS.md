@@ -807,10 +807,19 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   uid-1000 agent then failed `mkdir` of its locks
   (`PermissionDenied: FileSystem.makeDirectory …/locks/<hash>.lock`), which
   surfaces as a session that lists **ZERO MCP tools** (the sticky entry above).
-  Every `src/vm-builds/*/start.sh` now `chown -R 1000:1000 /root` in the
-  `USER_MODE=user` branch (marker `PAD HOME OWNERSHIP`), the Dockerfiles do it in
-  the image baseline, `ensureHomeOwnership` / `imageHomeOwnershipBaked` backfill
-  existing pads, and — the half that is easy to miss — the MCP `exec` tool now
+  Every `src/vm-builds/*/start.sh` now `chown -R 1000:1000 /root` **twice** (marker
+  `PAD HOME OWNERSHIP`) — an **early pass** right after `sshd` starts, *before* the
+  root-run `start-web`/`post-start` hooks, and again in the `USER_MODE=user` branch
+  after the hooks. The early pass is the fix for the hook window: `start.sh` runs
+  `/build/post-start.sh` (a user hook, run as root) on every boot, and a slow one
+  (e.g. `apt install` + `opencode upgrade`) left `/root` root-owned for minutes —
+  the late branch chown only ran *after* it, so a session started mid-hook hit
+  `PermissionDenied` again. Both passes are needed: the early one makes the home
+  writable immediately, the late one re-takes anything a root-run hook wrote. The
+  Dockerfiles do it in the image baseline, `ensureHomeOwnership` /
+  `imageHomeOwnershipBaked` backfill existing pads (`imageHomeOwnershipBaked` greps
+  the **distinctive early-pass marker** so a pad that only has the late chown
+  rebuilds once), and — the half that is easy to miss — the MCP `exec` tool now
   splices `termUserArgs` (`mcp.js:execDockerArgs`), so a control-plane command no
   longer plants root-owned files in the pad's HOME. **The root cause is a
   root-run `opencode` CLI/TUI, NOT the boot `opencode web` server**: the web

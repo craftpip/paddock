@@ -2157,12 +2157,28 @@ async function imageHasPadUser(name, image, wasRunning) {
 // root-owned unless the image gives it away — so any tool that writes under
 // $HOME outside its one bind-mounted data dir (opencode's XDG state at
 // /root/.local/state, .cache, .config) hits PermissionDenied. The templates now
-// chown the home in the USER_MODE=user branch; `ensureHomeOwnership` backfills
-// an EXISTING user-mode pad's own build/start.sh (which carries the old narrow
-// `chown -R 1000:1000 /root/.<agent>` line), and the image probe decides
-// whether that backfill needs a rebuild.
+// chown the home twice: an early pass BEFORE the root-run hooks (so a session
+// started while a slow post-start hook runs is already writable) and again in
+// the USER_MODE=user branch after the hooks. `ensureHomeOwnership` backfills an
+// EXISTING user-mode pad's own build/start.sh (inserting the early pass and
+// upgrading the old narrow `chown -R 1000:1000 /root/.<agent>` line), and the
+// image probe decides whether that backfill needs a rebuild.
 
-const HOME_OWNERSHIP_MARKER = 'PAD HOME OWNERSHIP';
+// The DISTINCTIVE marker of the pre-hook pass. The image probe greps for this
+// (not the generic marker) so a pad backfilled by the first plan-79 cut — which
+// only had the late, in-branch chown — is seen as NOT yet baked and rebuilds
+// once to pick the early pass up.
+const HOME_EARLY_MARKER = 'PAD HOME OWNERSHIP (plan 79): early pass';
+
+// Early pass: take ownership of the whole home BEFORE the root-run hooks
+// (start-web, post-start) so a session started mid-boot is already writable.
+const HOME_EARLY_BLOCK = `# PAD HOME OWNERSHIP (plan 79): early pass — give the pad user the whole
+# home BEFORE the root-run hooks (start-web, post-start) below can find it
+# root-owned, so a session started mid-boot is already writable. The USER_MODE
+# branch re-runs it after the hooks in case one wrote into the home.
+if [ "$USER_MODE" = "user" ]; then
+    chown -R 1000:1000 /root 2>/dev/null || true
+fi`;
 
 const HOME_OWNERSHIP_BLOCK = `# PAD HOME OWNERSHIP (plan 79): the agent runs as uid 1000 with
     # HOME=/root, so give it the whole home — tools write under $HOME
@@ -2170,29 +2186,46 @@ const HOME_OWNERSHIP_BLOCK = `# PAD HOME OWNERSHIP (plan 79): the agent runs as 
     chown -R 1000:1000 /root 2>/dev/null || true`;
 
 /** Backfill the home-ownership chown into an instance's OWN build/start.sh.
+ *  Two edits, both idempotent: (1) insert the EARLY pass right after sshd
+ *  starts, before the root-run hooks — only when this looks like a user-mode
+ *  start.sh (it already has a home chown or the old narrow one); (2) upgrade an
+ *  old narrow `chown -R 1000:1000 /root/.<agent>` line to the whole-home chown.
  *  Returns true when it patched (caller must rebuild the image); false when it
- *  is already present or un-patchable (no narrow `chown -R 1000:1000 /root/.<x>`
- *  line — a root-mode or custom start.sh). Idempotent. */
+ *  is already current or un-patchable (a root-mode or custom start.sh). */
 function ensureHomeOwnership(name) {
   const dir = buildDir(name);
   const p = path.join(dir, 'start.sh');
   if (!fs.existsSync(p)) return false;
   let content = fs.readFileSync(p, 'utf8');
-  if (content.includes(HOME_OWNERSHIP_MARKER)) return false;
-  const re = /^\s*chown -R 1000:1000 \/root\/\.\w+.*$/m;
-  if (!re.test(content)) return false;
-  content = content.replace(re, HOME_OWNERSHIP_BLOCK);
+  const branchRe = /^\s*chown -R 1000:1000 \/root 2>\/dev\/null.*$/m;
+  const narrowRe = /^\s*chown -R 1000:1000 \/root\/\.\w+.*$/m;
+  const isUserMode = branchRe.test(content) || narrowRe.test(content);
+  let changed = false;
+  if (isUserMode && !content.includes(HOME_EARLY_MARKER)) {
+    const anchor = /^\/usr\/sbin\/sshd &\n/m;
+    if (anchor.test(content)) {
+      content = content.replace(anchor, `$&${HOME_EARLY_BLOCK}\n`);
+      changed = true;
+    }
+  }
+  if (narrowRe.test(content)) {
+    content = content.replace(narrowRe, HOME_OWNERSHIP_BLOCK);
+    changed = true;
+  }
+  if (!changed) return false;
   fs.writeFileSync(p, content, { mode: 0o755 });
   ensureOwned(p);
   return true;
 }
 
-/** Whether the baked /usr/local/bin/start.sh gives the pad user the home (i.e.
- *  the image was built from a start.sh containing the plan-79 chown). Used by
+/** Whether the baked /usr/local/bin/start.sh gives the pad user the home via
+ *  the EARLY pass (i.e. the image was built from a start.sh containing the
+ *  plan-79 pre-hook chown). Greps the distinctive early marker so a pad that
+ *  only has the late in-branch chown still rebuilds once. Used by
  *  `applyAgentChanges` to decide whether an existing user-mode pad needs a
  *  rebuild to pick it up (backfilled via ensureHomeOwnership). */
 async function imageHomeOwnershipBaked(name, image, wasRunning) {
-  return imageProbe(name, image, wasRunning, `grep -q '${HOME_OWNERSHIP_MARKER}' /usr/local/bin/start.sh`);
+  return imageProbe(name, image, wasRunning, `grep -q '${HOME_EARLY_MARKER}' /usr/local/bin/start.sh`);
 }
 
 /** Rebuild the image (--pull to redownload the base) and recreate the

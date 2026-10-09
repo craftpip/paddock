@@ -98,14 +98,20 @@ workspace, anywhere — is user-owned on the host by construction.
   bind-mounted data dir. The images `chmod 755 /root` so the pad user can
   traverse it; the PS1 hook adds a HISTFILE guard for the unwritable
   `/root/.bash_history`.
-- **The pad user owns the whole home (plan 79):** the `USER_MODE=user` branch of
-  `start.sh` does `chown -R 1000:1000 /root` (marker `PAD HOME OWNERSHIP`), and
-  the image baseline does too. This is because the agent's `HOME` is `/root`
-  but it writes state *outside* the bind-mounted data dir — opencode keeps
-  `/root/.local/state/opencode`, and a root-owned `locks/` there makes the
-  uid-1000 agent fail its next start with `PermissionDenied`. Root-mode pads are
-  untouched. An existing user-mode pad whose image predates the chown is
-  backfilled by `ensureHomeOwnership` (+ `imageHomeOwnershipBaked`), which
+- **The pad user owns the whole home (plan 79):** `start.sh` does
+  `chown -R 1000:1000 /root` (marker `PAD HOME OWNERSHIP`) in **two** places —
+  an **early pass** right after `sshd` starts, *before* the root-run hooks
+  (`start-web.sh`, `post-start.sh`), and again in the `USER_MODE=user` branch at
+  the end. The early pass closes the window where a slow `post-start` hook runs
+  as root while the home is still root-owned (a session started mid-hook would
+  otherwise hit `PermissionDenied`); the late pass re-takes ownership of anything
+  a root-run hook wrote. The image baseline chowns too. This matters because the
+  agent's `HOME` is `/root` but it writes state *outside* the bind-mounted data
+  dir — opencode keeps `/root/.local/state/opencode`, and a root-owned `locks/`
+  there makes the uid-1000 agent fail its next start with `PermissionDenied`.
+  Root-mode pads are untouched. An existing user-mode pad whose image predates
+  the early pass is backfilled by `ensureHomeOwnership` (+
+  `imageHomeOwnershipBaked`, which greps the distinctive early marker), which
   triggers a rebuild (see `backend/services.md`).
 - **Switching mode on an existing pad** runs the shared settings flow (confirm
   → rebuild if needed → recreate → restore prior stopped state). If the image

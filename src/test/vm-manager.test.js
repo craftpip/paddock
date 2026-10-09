@@ -1022,6 +1022,8 @@ describe('vm-manager - extra volumes & ports (plan 28)', () => {
       const start = path.join(build, 'start.sh');
       fs.writeFileSync(start,
         '#!/bin/bash\n' +
+        '/usr/sbin/sshd &\n' +
+        'if [ -f /build/post-start.sh ]; then bash /build/post-start.sh; fi\n' +
         'if [ "$USER_MODE" = "user" ]; then\n' +
         '    chown -R 1000:1000 /root/.opencode 2>/dev/null || true\n' +
         '    drop_to_pad tail -f /dev/null || tail -f /dev/null\n' +
@@ -1033,10 +1035,36 @@ describe('vm-manager - extra volumes & ports (plan 28)', () => {
 
       const after = fs.readFileSync(start, 'utf8');
       assert.ok(after.includes('PAD HOME OWNERSHIP'), 'marker inserted');
+      assert.ok(after.includes('PAD HOME OWNERSHIP (plan 79): early pass'), 'early pass inserted');
       assert.ok(after.includes('chown -R 1000:1000 /root 2>/dev/null || true'), 'home chown inserted');
       assert.ok(!/chown -R 1000:1000 \/root\/\./.test(after), 'narrow data-dir chown removed');
+      // The early pass must land BEFORE the post-start hook.
+      assert.ok(after.indexOf('early pass') < after.indexOf('/build/post-start.sh'), 'early pass before the post-start hook');
 
       assert.strictEqual(vm.ensureHomeOwnership('pad-ho'), false, 'idempotent second pass');
+    });
+  });
+
+  it('ensureHomeOwnership adds the early pass to a pad backfilled by the first plan-79 cut', () => {
+    withTmp((TMP, vm) => {
+      const build = path.join(TMP, 'instances', 'pad-ho-early', 'build');
+      fs.mkdirSync(build, { recursive: true });
+      const start = path.join(build, 'start.sh');
+      // The first cut had only the LATE, in-branch chown (no early pass).
+      fs.writeFileSync(start,
+        '#!/bin/bash\n' +
+        '/usr/sbin/sshd &\n' +
+        'if [ -f /build/post-start.sh ]; then bash /build/post-start.sh; fi\n' +
+        'if [ "$USER_MODE" = "user" ]; then\n' +
+        '    # PAD HOME OWNERSHIP (plan 79): the agent runs as uid 1000 with\n' +
+        '    chown -R 1000:1000 /root 2>/dev/null || true\n' +
+        'fi\n', { mode: 0o755 });
+
+      assert.strictEqual(vm.ensureHomeOwnership('pad-ho-early'), true, 'early pass added');
+      const after = fs.readFileSync(start, 'utf8');
+      assert.ok(after.includes('PAD HOME OWNERSHIP (plan 79): early pass'), 'early pass inserted');
+      assert.ok(after.indexOf('early pass') < after.indexOf('/build/post-start.sh'), 'early pass before the post-start hook');
+      assert.strictEqual(vm.ensureHomeOwnership('pad-ho-early'), false, 'idempotent second pass');
     });
   });
 
@@ -1060,12 +1088,19 @@ describe('vm-manager - extra volumes & ports (plan 28)', () => {
     for (const type of ['openclaw', 'opencode', 'picoclaw', 'codex', 'claude']) {
       const p = path.join(builds, type, 'start.sh');
       const src = fs.readFileSync(p, 'utf8');
-      assert.ok(src.includes('PAD HOME OWNERSHIP'), `${type}: home ownership marker present`);
       assert.ok(!/chown -R 1000:1000 \/root\/\./.test(src), `${type}: no narrow data-dir chown left`);
-      // The marker must sit inside the USER_MODE=user branch, not just anywhere.
+      assert.ok(src.includes('chown -R 1000:1000 /root 2>/dev/null || true'), `${type}: whole-home chown present`);
+      // The late chown must sit inside the USER_MODE=user branch.
       const branchAt = src.indexOf('USER_MODE" = "user"');
-      const markerAt = src.indexOf('PAD HOME OWNERSHIP');
-      assert.ok(branchAt !== -1 && markerAt > branchAt, `${type}: marker inside the user branch`);
+      assert.ok(branchAt !== -1, `${type}: has a USER_MODE=user branch`);
+      const branchMarkerAt = src.indexOf('PAD HOME OWNERSHIP', branchAt);
+      assert.ok(branchMarkerAt > branchAt, `${type}: in-branch home chown present`);
+      // And an EARLY pass must run BEFORE the post-start hook, so a session
+      // that starts while a slow hook is still running is already writable.
+      const earlyAt = src.indexOf('PAD HOME OWNERSHIP (plan 79): early pass');
+      assert.ok(earlyAt !== -1, `${type}: early pass present`);
+      const hookAt = src.indexOf('/build/post-start.sh');
+      assert.ok(hookAt !== -1 && earlyAt < hookAt, `${type}: early pass before the post-start hook`);
     }
   });
 
