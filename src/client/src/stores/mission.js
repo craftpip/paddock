@@ -554,7 +554,10 @@ export const useMission = create((set, get) => {
    *  is the only user action that legitimately empties the column. */
   closeSession: async (sessionId) => {
     await api(`/api/mission/sessions/${sessionId}`, { method: 'DELETE' })
-    set((s) => (s.openSession?.id === sessionId ? { openSession: null, sessionState: null } : {}))
+    set((s) => ({
+      ...(s.openSession?.id === sessionId ? { openSession: null, sessionState: null } : {}),
+      ...(s.selectedSessionId === sessionId ? { selectedSessionId: '' } : {}),
+    }))
     await get().refreshActive()
   },
 
