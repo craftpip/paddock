@@ -1,7 +1,7 @@
 # 81-mission-close-clears-open-session
 
 ## Status:
-In progress
+Complete
 
 ## Problem statement
 In the Missions page, when opening a session the terminal opens and a green dot is shown for it; when closing it, the green dot is not removed and it remains. Also the item shifts location in the listing when closing (needs verification of whether that is a visual shift in the rendered list or in the opencode output itself; clarify on inspection).
@@ -38,6 +38,6 @@ In the Missions page, when opening a session the terminal opens and a green dot 
 ## Expected behavior (clarification)
 When closing a session from the Missions page, the terminal window in col 3 should close (go back to the "no session open" state). That means: end/close the tmux session which is our terminal tab (kill the tmux pane/session backing that Mission terminal), clear `openSession` and `selectedSessionId` if that session was open, and remove the row's open/green-dot marker. The list should update accordingly (row may disappear or be marked closed depending on existing semantics).
 
-**Status update**: Draft. Needs investigation first. Do not commit fix until reproduced and root cause identified.
+**Status update**: Done. Fixed client store to clear  and  when closing the currently open session. Also confirmed the backend closes the tmux session (Mission DELETE ends the session).
 
 - **Green dot remains after close:** The store's `closeSession` clears `openSession` only if it matches the closed id (`s.openSession?.id === sessionId`). That should be correct. However, the row's "open" indicator is computed from `session.open` (server-stamped) or falls back to `live || busy`. After closing via the API, the list/row data may still reflect the old state until `refreshActive()` re-reads sessions. If `refreshActive()` does not update the row for that session in time, or if the row is showing cached data, the dot could remain. Also ensure `selectedSessionId` is not left pointing at a closed session (it is not cleared by closeSession except indirectly via refresh). The UI must treat a closed session as not open: clearing `openSession` means col 3 closes, and the row's dot must reflect `open === false` after the list refresh.
