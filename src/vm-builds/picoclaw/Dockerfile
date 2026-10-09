@@ -61,6 +61,7 @@ COPY extras/ /opt/extras/
 RUN addgroup -g 1000 pad 2>/dev/null; \
     adduser -D -u 1000 -G pad -h /home/pad -s /bin/bash pad 2>/dev/null || true; \
     chmod 755 /root; \
+    chown -R 1000:1000 /root; \
     if ! command -v sudo >/dev/null 2>&1; then apk add --no-cache sudo; fi; \
     echo 'ALL ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/pad && chmod 440 /etc/sudoers.d/pad
 

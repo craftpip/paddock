@@ -44,10 +44,12 @@ else
     DAEMON_ARGS="--allow-unconfigured"
 fi
 if [ "$USER_MODE" = "user" ]; then
-    # Data dir is bind-mounted from the host, where Paddock keeps it
-    # PUID:PGID-owned — re-chown anything the root boot recreated (workspace
-    # dirs, etc.) so the dropped daemon can write everywhere it needs.
-    chown -R 1000:1000 /root/.openclaw 2>/dev/null || true
+    # PAD HOME OWNERSHIP (plan 79): the agent runs as uid 1000 with
+    # HOME=/root, so give it the whole home — tools write under $HOME
+    # (opencode's XDG state at /root/.local/state), not just the data dir.
+    # The data dir is bind-mounted from the host, where Paddock keeps it
+    # PUID:PGID-owned; the root boot above can recreate root-owned siblings.
+    chown -R 1000:1000 /root 2>/dev/null || true
     drop_to_pad openclaw gateway run $DAEMON_ARGS || tail -f /dev/null
 else
     openclaw gateway run $DAEMON_ARGS || tail -f /dev/null

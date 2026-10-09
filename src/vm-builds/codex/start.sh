@@ -30,7 +30,10 @@ drop_to_pad() {
   fi
 }
 if [ "$USER_MODE" = "user" ]; then
-    chown -R 1000:1000 /root/.codex 2>/dev/null || true
+    # PAD HOME OWNERSHIP (plan 79): the agent runs as uid 1000 with
+    # HOME=/root, so give it the whole home — tools write under $HOME, not
+    # just the data dir.
+    chown -R 1000:1000 /root 2>/dev/null || true
     drop_to_pad tail -f /dev/null || tail -f /dev/null
 else
     tail -f /dev/null

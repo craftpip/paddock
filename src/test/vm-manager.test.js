@@ -1003,6 +1003,7 @@ describe('vm-manager - extra volumes & ports (plan 28)', () => {
       const dockerfile = fs.readFileSync(df, 'utf8');
       assert.ok(dockerfile.includes('__PAD_USER_MODE__'), 'marker injected');
       assert.ok(dockerfile.includes("ALL ALL=(ALL) NOPASSWD:ALL"), 'passwordless rule for any uid-1000 name');
+      assert.ok(dockerfile.includes('chown -R 1000:1000 /root;'), 'pad-user block gives the pad user the home (plan 79)');
       assert.ok(dockerfile.includes('apt-get install -y --no-install-recommends sudo'), 'block self-installs sudo');
       assert.ok(dockerfile.includes('COPY start.sh /usr/local/bin/start.sh\n'), 'COPY line intact after injection');
       assert.ok(!/padCOPY/.test(dockerfile), 'no fused block/directive lines');
@@ -1012,6 +1013,60 @@ describe('vm-manager - extra volumes & ports (plan 28)', () => {
 
       assert.strictEqual(vm.ensureUserModeBuildFiles('pad-um', 'opencode'), false, 'second pass is idempotent');
     });
+  });
+
+  it('ensureHomeOwnership backfills the home chown for an existing user-mode pad (plan 79)', () => {
+    withTmp((TMP, vm) => {
+      const build = path.join(TMP, 'instances', 'pad-ho', 'build');
+      fs.mkdirSync(build, { recursive: true });
+      const start = path.join(build, 'start.sh');
+      fs.writeFileSync(start,
+        '#!/bin/bash\n' +
+        'if [ "$USER_MODE" = "user" ]; then\n' +
+        '    chown -R 1000:1000 /root/.opencode 2>/dev/null || true\n' +
+        '    drop_to_pad tail -f /dev/null || tail -f /dev/null\n' +
+        'else\n' +
+        '    tail -f /dev/null\n' +
+        'fi\n', { mode: 0o755 });
+
+      assert.strictEqual(vm.ensureHomeOwnership('pad-ho'), true, 'narrow line replaced');
+
+      const after = fs.readFileSync(start, 'utf8');
+      assert.ok(after.includes('PAD HOME OWNERSHIP'), 'marker inserted');
+      assert.ok(after.includes('chown -R 1000:1000 /root 2>/dev/null || true'), 'home chown inserted');
+      assert.ok(!/chown -R 1000:1000 \/root\/\./.test(after), 'narrow data-dir chown removed');
+
+      assert.strictEqual(vm.ensureHomeOwnership('pad-ho'), false, 'idempotent second pass');
+    });
+  });
+
+  it('ensureHomeOwnership leaves a root-mode start.sh untouched (negative twin)', () => {
+    withTmp((TMP, vm) => {
+      const build = path.join(TMP, 'instances', 'pad-ho-root', 'build');
+      fs.mkdirSync(build, { recursive: true });
+      const start = path.join(build, 'start.sh');
+      const rootSh = '#!/bin/bash\ntail -f /dev/null\n';
+      fs.writeFileSync(start, rootSh, { mode: 0o755 });
+
+      assert.strictEqual(vm.ensureHomeOwnership('pad-ho-root'), false, 'no narrow line → no patch');
+      assert.strictEqual(fs.readFileSync(start, 'utf8'), rootSh, 'file untouched');
+    });
+  });
+
+  it('every user-mode start.sh template gives the pad user the home (plan 79)', () => {
+    const builds = path.join(__dirname, '..', 'vm-builds');
+    // hermes is always root-mode (no USER_MODE block) and is deliberately out
+    // of scope — hermes runs its gateway as its own user against /opt/data.
+    for (const type of ['openclaw', 'opencode', 'picoclaw', 'codex', 'claude']) {
+      const p = path.join(builds, type, 'start.sh');
+      const src = fs.readFileSync(p, 'utf8');
+      assert.ok(src.includes('PAD HOME OWNERSHIP'), `${type}: home ownership marker present`);
+      assert.ok(!/chown -R 1000:1000 \/root\/\./.test(src), `${type}: no narrow data-dir chown left`);
+      // The marker must sit inside the USER_MODE=user branch, not just anywhere.
+      const branchAt = src.indexOf('USER_MODE" = "user"');
+      const markerAt = src.indexOf('PAD HOME OWNERSHIP');
+      assert.ok(branchAt !== -1 && markerAt > branchAt, `${type}: marker inside the user branch`);
+    }
   });
 
   it('ensureUserModeBuildFiles replaces a stale pad-user block without mangling following lines', () => {
@@ -1717,6 +1772,7 @@ describe('vm-manager - capability image probes', () => {
     ['imageHasWebStartSupport', 'imageHasWebStartSupport'],
     ['imageHasPostStartHook', 'imageHasPostStartHook'],
     ['imageHasPadUser', 'imageHasPadUser'],
+    ['imageHomeOwnershipBaked', 'imageHomeOwnershipBaked'],
   ];
 
   it('exports every capability probe', () => {

@@ -39,6 +39,9 @@ expire 5 minutes after they finish.
 **Exec:** \`exec\` runs any shell command inside a PAD (\`docker exec -i sh -lc\`) — the vehicle
 for agent-config commands (models, MCP servers, skills, ...). Optional \`stdin\` is written
 verbatim to the process stdin; use it for secrets, never put secrets in the command text.
+In a **user-mode** PAD (the agent runs as the pad user) \`exec\` drops to that same user
+(uid 1000, \`HOME=/root\`) instead of root — expect no \`apt-get\`/root-only writes there; a
+root-mode PAD runs \`exec\` as root.
 
 **Mission (the shared workplace):** on the coding agents (opencode, codex, claude) a
 **project** is a (PAD, folder) pair and a **session** is a live agent TUI in that folder —

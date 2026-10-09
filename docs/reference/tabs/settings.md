@@ -89,12 +89,24 @@ workspace, anywhere — is user-owned on the host by construction.
   attach, and exec (`termUserArgs` in app.js) add `-u 1000:1000 -e HOME=/root`
   for user-mode pads, so the tmux socket (`/tmp/tmux-1000`), the shell, and
   every file typed in the terminal all belong to the pad user. The Engine-API
-  attach exec sets the same `User` + `HOME=/root`.
+  attach exec sets the same `User` + `HOME=/root`. The MCP `exec` tool drops the
+  same way (plan 79, `execDockerArgs` in `mcp.js`) — before that it `docker
+  exec`ed as root and could plant root-owned files in the pad's HOME; a
+  **root-mode** pad's `exec` is unchanged and still runs as root.
 - **`HOME=/root` is kept on purpose** — the agent CLIs (openclaw, opencode, …)
   resolve their config/workspace via `$HOME`, and `/root/.&lt;agent&gt;` is the
   bind-mounted data dir. The images `chmod 755 /root` so the pad user can
   traverse it; the PS1 hook adds a HISTFILE guard for the unwritable
   `/root/.bash_history`.
+- **The pad user owns the whole home (plan 79):** the `USER_MODE=user` branch of
+  `start.sh` does `chown -R 1000:1000 /root` (marker `PAD HOME OWNERSHIP`), and
+  the image baseline does too. This is because the agent's `HOME` is `/root`
+  but it writes state *outside* the bind-mounted data dir — opencode keeps
+  `/root/.local/state/opencode`, and a root-owned `locks/` there makes the
+  uid-1000 agent fail its next start with `PermissionDenied`. Root-mode pads are
+  untouched. An existing user-mode pad whose image predates the chown is
+  backfilled by `ensureHomeOwnership` (+ `imageHomeOwnershipBaked`), which
+  triggers a rebuild (see `backend/services.md`).
 - **Switching mode on an existing pad** runs the shared settings flow (confirm
   → rebuild if needed → recreate → restore prior stopped state). If the image
   lacks the pad user (`imageHasPadUser` runs `id pad`), the toggle rebuilds it

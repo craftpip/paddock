@@ -62,6 +62,7 @@ COPY extras/ /opt/extras/
 RUN groupadd -g 1000 pad 2>/dev/null || true; \
     (id pad >/dev/null 2>&1 || useradd -m -o -u 1000 -g 1000 -s /bin/bash pad 2>/dev/null) || useradd -m -o -u 1000 -s /bin/bash pad 2>/dev/null || true; \
     chmod 755 /root; \
+    chown -R 1000:1000 /root; \
     if ! command -v sudo >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends sudo; fi; \
     echo 'ALL ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/pad && chmod 440 /etc/sudoers.d/pad
 

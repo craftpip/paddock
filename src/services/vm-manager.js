@@ -2067,9 +2067,9 @@ const PAD_USER_MARKER = '__PAD_USER_MODE__';
  *  bases; idempotent. Creates a `pad` user at PUID:PGID (1000:1000), installs
  *  sudo when the base doesn't ship it (toggled pads keep their ORIGINAL package
  *  list, so the rule alone would be useless there), grants passwordless sudo,
- *  and chmod's /root 755 so a uid-1000 daemon can traverse into its
- *  bind-mounted /root/.<agent> config. */
-const PAD_USER_DOCKERFILE_BLOCK = `# PAD USER (plan 43 Phase 7) — pad at PUID:PGID + passwordless sudo + chmod 755 /root. ${PAD_USER_MARKER}
+ *  and gives the pad user the whole home (/root, plan 79) so tools that write
+ *  under $HOME outside the one bind-mounted data dir can. */
+const PAD_USER_DOCKERFILE_BLOCK = `# PAD USER (plan 43 Phase 7) — pad at PUID:PGID + passwordless sudo + chown of the home (plan 79). ${PAD_USER_MARKER}
 RUN if command -v apk >/dev/null 2>&1; then \\
       addgroup -g 1000 pad 2>/dev/null; adduser -D -u 1000 -G pad -h /home/pad -s /bin/bash pad 2>/dev/null || true; \\
     else \\
@@ -2077,6 +2077,7 @@ RUN if command -v apk >/dev/null 2>&1; then \\
       (id pad >/dev/null 2>&1 || useradd -m -o -u 1000 -g 1000 -s /bin/bash pad 2>/dev/null) || useradd -m -o -u 1000 -s /bin/bash pad 2>/dev/null || true; \\
     fi; \\
     chmod 755 /root; \\
+    chown -R 1000:1000 /root; \\
     if ! command -v sudo >/dev/null 2>&1; then \\
       if command -v apk >/dev/null 2>&1; then apk add --no-cache sudo; else DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends sudo; fi; \\
     fi; \\
@@ -2149,6 +2150,49 @@ function ensureUserModeBuildFiles(name, agent) {
  *  whether toggling Container user needs a rebuild. */
 async function imageHasPadUser(name, image, wasRunning) {
   return imageProbe(name, image, wasRunning, 'id -u pad');
+}
+
+// ─── User-mode home ownership (plan 79) ─────────────────────────────────────
+// A user-mode pad drops the agent to uid 1000 with HOME=/root, but /root stays
+// root-owned unless the image gives it away — so any tool that writes under
+// $HOME outside its one bind-mounted data dir (opencode's XDG state at
+// /root/.local/state, .cache, .config) hits PermissionDenied. The templates now
+// chown the home in the USER_MODE=user branch; `ensureHomeOwnership` backfills
+// an EXISTING user-mode pad's own build/start.sh (which carries the old narrow
+// `chown -R 1000:1000 /root/.<agent>` line), and the image probe decides
+// whether that backfill needs a rebuild.
+
+const HOME_OWNERSHIP_MARKER = 'PAD HOME OWNERSHIP';
+
+const HOME_OWNERSHIP_BLOCK = `# PAD HOME OWNERSHIP (plan 79): the agent runs as uid 1000 with
+    # HOME=/root, so give it the whole home — tools write under $HOME
+    # (opencode's XDG state at /root/.local/state), not just the data dir.
+    chown -R 1000:1000 /root 2>/dev/null || true`;
+
+/** Backfill the home-ownership chown into an instance's OWN build/start.sh.
+ *  Returns true when it patched (caller must rebuild the image); false when it
+ *  is already present or un-patchable (no narrow `chown -R 1000:1000 /root/.<x>`
+ *  line — a root-mode or custom start.sh). Idempotent. */
+function ensureHomeOwnership(name) {
+  const dir = buildDir(name);
+  const p = path.join(dir, 'start.sh');
+  if (!fs.existsSync(p)) return false;
+  let content = fs.readFileSync(p, 'utf8');
+  if (content.includes(HOME_OWNERSHIP_MARKER)) return false;
+  const re = /^\s*chown -R 1000:1000 \/root\/\.\w+.*$/m;
+  if (!re.test(content)) return false;
+  content = content.replace(re, HOME_OWNERSHIP_BLOCK);
+  fs.writeFileSync(p, content, { mode: 0o755 });
+  ensureOwned(p);
+  return true;
+}
+
+/** Whether the baked /usr/local/bin/start.sh gives the pad user the home (i.e.
+ *  the image was built from a start.sh containing the plan-79 chown). Used by
+ *  `applyAgentChanges` to decide whether an existing user-mode pad needs a
+ *  rebuild to pick it up (backfilled via ensureHomeOwnership). */
+async function imageHomeOwnershipBaked(name, image, wasRunning) {
+  return imageProbe(name, image, wasRunning, `grep -q '${HOME_OWNERSHIP_MARKER}' /usr/local/bin/start.sh`);
 }
 
 /** Rebuild the image (--pull to redownload the base) and recreate the
@@ -4197,6 +4241,17 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
         userRebuild = ensureUserModeBuildFiles(name, agentType);
       }
     }
+    // An EXISTING user-mode pad's image may predate plan 79 (narrow data-dir
+    // chown only): its build/start.sh already carries the pad-user marker, so
+    // ensureUserModeBuildFiles above does not regenerate it. Backfill the home
+    // chown and rebuild if the baked start.sh lacks the marker. (A root→user
+    // toggle is handled by ensureUserModeBuildFiles regenerating from the
+    // current template, which already has the chown — its marker makes the
+    // backfill below a no-op.)
+    let homeRebuild = false;
+    if (newUserMode === 'user' && !(await imageHomeOwnershipBaked(name, image, runningNow))) {
+      homeRebuild = ensureHomeOwnership(name);
+    }
     let buildRebuild = false;
     if (buildCommandsChanged) {
       // Custom build commands are baked into the image (Dockerfile block) — a
@@ -4206,7 +4261,7 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
     // Enabling post-start on an image whose baked start.sh lacks the /build
     // hook requires a rebuild (the hook was backfilled into build/start.sh in
     // prepare if the template was patchable; that only takes effect on build).
-    const needRebuildFinal = !!opts.pull || needRebuild || sshRebuild || webRebuild || userRebuild || buildRebuild || needPostStartBackfill;
+    const needRebuildFinal = !!opts.pull || needRebuild || sshRebuild || webRebuild || userRebuild || homeRebuild || buildRebuild || needPostStartBackfill;
     if (needRebuildFinal) {
       const why = opts.pull
         ? 'Updating to the latest base image'
@@ -4218,9 +4273,11 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
               ? 'start.sh must learn the web start hook'
               : userRebuild
                 ? 'Image needs the user-mode (pad user + drop) support'
-                : needPostStartBackfill
-                  ? 'Image needs the post-start hook baked into start.sh'
-                  : 'Build commands changed — rebuilding the image';
+                : homeRebuild
+                  ? 'Image must give the pad user its home (/root)'
+                  : needPostStartBackfill
+                    ? 'Image needs the post-start hook baked into start.sh'
+                    : 'Build commands changed — rebuilding the image';
       onLog('system', `${why} — rebuilding the image, then recreating…`);
       await updateAgent(name, { pull: !!opts.pull, onLog, onStep });
     } else {
@@ -4605,6 +4662,7 @@ module.exports = {
   imageHasDockerCli, imageHasSshPortSupport, imageHasWebStartSupport,
   imageHasPostStartHook,
   ensureUserModeBuildFiles, imageHasPadUser,
+  ensureHomeOwnership, imageHomeOwnershipBaked,
   imageFor, seedBuildDir, buildDir, buildEnvPath,
   readBuildEnv, setBuildEnv,
   argsFromDockerfile,

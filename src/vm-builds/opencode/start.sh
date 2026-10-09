@@ -35,10 +35,11 @@ drop_to_pad() {
   fi
 }
 if [ "$USER_MODE" = "user" ]; then
-    # opencode has no gateway daemon — keep the container alive so the terminal
-    # stays usable. Re-chown the data dir so the dropped user can write
-    # everywhere (workspace dirs created during the root boot).
-    chown -R 1000:1000 /root/.opencode 2>/dev/null || true
+    # PAD HOME OWNERSHIP (plan 79): the agent runs as uid 1000 with
+    # HOME=/root, so give it the whole home — tools write under $HOME
+    # (opencode's XDG state at /root/.local/state), not just the data dir.
+    # opencode has no gateway daemon — the drop keeps the terminal usable.
+    chown -R 1000:1000 /root 2>/dev/null || true
     drop_to_pad tail -f /dev/null || tail -f /dev/null
 else
     # opencode has no gateway daemon — keep the container alive so the terminal

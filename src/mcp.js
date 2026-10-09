@@ -20,6 +20,7 @@ const mission = require('./services/mission');
 const taskPipeline = require('./services/task-pipeline');
 const plans = require('./services/plans');
 const agentStore = require('./services/agent-store');
+const { termUserArgs } = require('./services/pad-tmux');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const PREFIX = process.env.CONTAINER_PREFIX || 'vm';
@@ -79,7 +80,22 @@ function runCmd(cmd, args, options = {}) {
 }
 
 async function dockerExec(vmName, cmd, timeout = 30000, input) {
-  return runCmd('docker', ['exec', '-i', vmName, 'sh', '-lc', cmd], { timeout, input });
+  // In a user-mode pad the agent daemon + terminal run as the pad user
+  // (PUID:PGID) and its HOME (/root) is owned by that user. Running a command
+  // here as root would let it create root-owned files inside the pad's HOME —
+  // e.g. opencode's /root/.local/state/opencode/locks — and the real agent
+  // (uid 1000) then fails its next start with PermissionDenied on that lock.
+  // So the MCP exec path drops to the pad user exactly like the terminal and
+  // Mission TUIs do. `termUserArgs` returns [] for root-mode pads, so those are
+  // unchanged and keep full root access.
+  return runCmd('docker', execDockerArgs(vmName, cmd), { timeout, input });
+}
+
+/** The `docker exec` argv the MCP `exec` tool runs. Split out so a unit test
+ *  can pin the command SHAPE (the user-mode drop) without a container — the
+ *  same reason pad-tmux exposes its argv through a runner seam. */
+function execDockerArgs(vmName, cmd) {
+  return ['exec', '-i', ...termUserArgs(vmName), vmName, 'sh', '-lc', cmd];
 }
 
 function getUserRole(userId) {
@@ -1457,7 +1473,7 @@ function registerTools(server) {
     'exec',
     {
       title: 'Run command in PAD',
-      description: 'Run a shell command inside a PAD container (docker exec). Returns stdout, stderr, exit code, and the `cwd` it actually ran in — read `cwd` before assuming anything about where a command landed, because the default is the CONTAINER\'s working directory (often the mounted workspace, sometimes not), not the workspace root you may have had in mind. Pass `cwd` to be explicit; it is resolved inside the container and the response echoes what was used. Use for `openclaw ...` and other in-container commands. No TTY is allocated — interactive commands hang or fail, so use the non-interactive alternatives from `agent_commands`. Optional `stdin` is written verbatim to the process stdin and is the ONLY safe channel for secrets (API keys, tokens) — it is never echoed back or logged.',
+      description: 'Run a shell command inside a PAD container (docker exec). Returns stdout, stderr, exit code, and the `cwd` it actually ran in — read `cwd` before assuming anything about where a command landed, because the default is the CONTAINER\'s working directory (often the mounted workspace, sometimes not), not the workspace root you may have had in mind. Pass `cwd` to be explicit; it is resolved inside the container and the response echoes what was used. Use for `openclaw ...` and other in-container commands. No TTY is allocated — interactive commands hang or fail, so use the non-interactive alternatives from `agent_commands`. Optional `stdin` is written verbatim to the process stdin and is the ONLY safe channel for secrets (API keys, tokens) — it is never echoed back or logged. In a USER-MODE pad (Settings → Container user = user) this runs as the PAD USER (uid 1000), not root — same as the terminal and Mission TUIs — so the pad\'s HOME stays user-owned and the agent keeps working; root-only commands (apt-get install, editing root-owned files) will fail there. Root-mode pads run as root, unchanged.',
       inputSchema: {
         name: z.string().describe('PAD name'),
         command: z.string().describe('Shell command to run inside the PAD'),
@@ -2717,4 +2733,4 @@ function mountMcp(app) {
 // ones are: they are the policy, and `mcp.test.js` asserts on them directly.
 // `mcpContext` is exported so a test can run a tool call under a synthetic
 // identity (it is the same store mountMcp fills per request).
-module.exports = { mountMcp, authenticateRequest, registerTools, createServer, SERVER_NAME, SERVER_VERSION, keyGrants, targetAllowed, toolAllowed, requireTool, mcpContext, missionVisibleAgents, missionMaySee, missionRequireProject, missionRequireSession, missionFail, publicAgent, resolveAgentName, notFoundMessage, shellQuote, missionSelectProjects };
+module.exports = { mountMcp, authenticateRequest, registerTools, createServer, SERVER_NAME, SERVER_VERSION, keyGrants, targetAllowed, toolAllowed, requireTool, mcpContext, missionVisibleAgents, missionMaySee, missionRequireProject, missionRequireSession, missionFail, publicAgent, resolveAgentName, notFoundMessage, shellQuote, missionSelectProjects, execDockerArgs };

@@ -698,6 +698,14 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   reach the client store at all. The ordering assert is a **sequence** predicate
   (see the guard/transient lesson above), and a negative here is only meaningful
   with a positive twin on the same fixture.
+- **`src/test/mcp-exec-usermode.test.js`** — plan 79's guard that the MCP `exec`
+  path (`mcp.js:execDockerArgs`) and `padExec` drop to the pad user
+  (`-u PUID:PGID -e HOME=/root`) in a **user-mode** pad and stay root in a
+  root-mode one. It points `WORKSPACE_ROOT` at a throwaway tree with two fake
+  instance dirs (`USER_MODE=user` / none) **before** requiring pad-tmux/mcp,
+  since `INSTANCES_DIR` is computed at load. A mutation control (delete the
+  `...termUserArgs(vmName)` from `execDockerArgs`) turns exactly that one test
+  red; run it in a `/tmp` copy, never in `/app` (bind-mounted).
 - **`src/client/src/components/OverlayScroll.jsx`** — the floating scrollbar the
   Mission listings use. A native bar always reserves layout space, so in a 260px
   column it eats a tenth of the listing, and `scrollbar-gutter: stable` only
@@ -791,6 +799,30 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   prompts land in a tool-less session, so the driver parks at `timeout` (read
   as a pipeline bug). Diagnose with `ls -ld /root/.local/state/opencode`
   inside the PAD, and confirm on a live session by asking it to list its tools.
+- **A user-mode pad's agent writes under its whole `HOME` (`/root`), so the fix
+  must give uid 1000 the whole home — and the MCP `exec` path must drop too
+  (plan 79).** The agent runs as uid 1000 with `HOME=/root`, but only
+  `/root/.<agent>` was chowned, so opencode's XDG state at
+  `/root/.local/state/opencode` was created against a root-owned parent and the
+  uid-1000 agent then failed `mkdir` of its locks
+  (`PermissionDenied: FileSystem.makeDirectory …/locks/<hash>.lock`), which
+  surfaces as a session that lists **ZERO MCP tools** (the sticky entry above).
+  Every `src/vm-builds/*/start.sh` now `chown -R 1000:1000 /root` in the
+  `USER_MODE=user` branch (marker `PAD HOME OWNERSHIP`), the Dockerfiles do it in
+  the image baseline, `ensureHomeOwnership` / `imageHomeOwnershipBaked` backfill
+  existing pads, and — the half that is easy to miss — the MCP `exec` tool now
+  splices `termUserArgs` (`mcp.js:execDockerArgs`), so a control-plane command no
+  longer plants root-owned files in the pad's HOME. **The root cause is a
+  root-run `opencode` CLI/TUI, NOT the boot `opencode web` server**: the web
+  server does not write `/root/.local/state` (proved by POSTing a session and
+  re-stat'ing) and `opencode --version` as root does not either; only a root
+  `opencode` session does, so a user-mode pad is **still** vulnerable if the user
+  launches opencode as root (host `docker exec`/SSH) instead of through the
+  Paddock terminal/Mission. **Never `rm -rf`/`chown` the running session's own
+  state dir "to reproduce"** — this agent IS a root `opencode` session inside the
+  pad, and deleting its `locks/` wedges every MCP call with that same
+  `FileSystem.makeDirectory` error until the dir is recreated by hand
+  (`docker exec -u 0 <pad> mkdir -p /root/.local/state/opencode/locks`).
 - **A redactor that reads like it normalizes, but doesn't, ships the secret it
   was written to stop (plan 60).** Three of the four bugs in the MCP config
   redactor were found by *testing*, not by re-reading it: `isSecretKey` had a
