@@ -1,7 +1,7 @@
 # 81-mission-close-clears-open-session
 
 ## Status:
-Draft (reported bug, investigation needed)
+In progress
 
 ## Problem statement
 In the Missions page, when opening a session the terminal opens and a green dot is shown for it; when closing it, the green dot is not removed and it remains. Also the item shifts location in the listing when closing (needs verification of whether that is a visual shift in the rendered list or in the opencode output itself; clarify on inspection).

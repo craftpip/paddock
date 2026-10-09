@@ -86,7 +86,7 @@ conversation's own store (`busyForSessions`) instead of the web-server probe.
 
 ## Queue
 
-- [ ] plans/81-mission-close-clears-open-session.md
+- [~] plans/81-mission-close-clears-open-session.md — started 2026-10-09
 
 
 ## Done
