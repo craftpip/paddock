@@ -86,7 +86,7 @@ conversation's own store (`busyForSessions`) instead of the web-server probe.
 
 ## Queue
 
-_(empty)_
+- [ ] plans/81-mission-close-clears-open-session.md
 
 
 ## Done
@@ -110,3 +110,4 @@ _(empty)_
 - [x] plans/61-fleet-identity.md — absorbed 2026-09-29: one shared `resolveAgentName()` (exact / bare / `display_name` / unique substring, ambiguity refused) behind `requirePad()`, so every tool gates AND acts on the *resolved* name; `list_agents` rows are openable by construction + `scope`/`agentsTotal`/`owner`; `exec` returns `cwd`/`requestedCwd`/`exitCode` and takes a quoted `cwd`; `settings_get` gains `networkFilter`; `job_status` reports `padExists`; a non-PAD host container is named as one. Post-absorb audit also fixed `update` (acted on the raw name) and the `agent_logs`/`workspace_read` raw-name echoes, and moved the peer filter BEFORE the cap so `searchedAll` is true. Tests: mcp 93/93, registry 4/4, vm-manager 111/111. **Open: `list_containers` still needs approval.**
 - [x] plans/59-network-switch-subnet-collision.md — absorbed 2026-09-29 into docs/reference/backend/services.md (pad subnet pool, `cleanStaleDoorDirs`, log-store door exclusion) + docs/reference/operations/overview.md (pool troubleshooting) + AGENTS.md (reservation ≠ live network, stale-door sweep writers)
 - [x] plans/58-mission-page-updates.md — absorbed 2026-09-28 into plans/53 §6 (col-3 `openSession` contract, listing rhythm, modal confirms) and §9a (defects 5 and 6)
+- [ ] plans/81-mission-close-clears-open-session.md
