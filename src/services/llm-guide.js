@@ -144,22 +144,29 @@ conversation).
 ## Plans — the durable record of a piece of work
 
 A conversation is not a record. It scrolls, it is scoped to one agent, and it ends.
-A **plan** is one markdown file per piece of work, living in that PAD's workspace
-under \`plans/\`, and it outlives every session that touched it. Three tools:
+A **plan** is one markdown file per piece of work, and it outlives every session that
+touched it. Three tools:
 
-- \`plan_list {agent, path?, archive?, folder?}\` — the plans in one PAD, newest activity first.
-  Each row carries \`status\` (its \`## Status:\` line), \`title\`, the \`session\` it is bound
-  to, and the derived \`ageMs\` / \`idleMs\` / \`elapsedMs\`. Pass \`path\` to get ONE plan's
-  body; \`archive: true\` lists \`plans/archive/\` (finished work) instead. A plan whose
-  \`session\` is also a Mission session carries \`sessionTracked\` / \`sessionLive\` /
-  \`sessionOpen\` / \`sessionBusy\` — \`sessionTracked: false\` means the conversation was
-  started outside the page, which is NOT the same as dead, plus \`sessionProject\` when it is.
-- \`plan_write {agent, path, content, session?}\` — write the file. \`agent\` is REQUIRED on
-  every plan tool: the plans folder is per-PAD, three pads can share one workspace,
-  and a tool that guessed the root would write into somebody else's project. The body
-  is yours; the frontmatter (\`created\`, \`last_activity\`, \`started\`, \`session\`) is
-  machine-managed and is what makes the listing answer "what is being worked on RIGHT
-  NOW". The folder is created on the first plan, and only then.
+- \`plan_list {agent?, project_id?, folder?, path?, archive?}\` — the plans in one SCOPE,
+  newest activity first. **Scope is what you pass:** \`project_id\` (or \`folder\`) reads a
+  Mission project's OWN plans folder — \`<project.folder>/<plans_folder>\`, default
+  \`plans/\`, so two projects on one PAD never share plans; \`agent\` alone reads that
+  PAD's PAD-wide \`plans/\` (legacy). An explicit project that matches nothing or several
+  is REFUSED with the candidates — never a silent fallback to the PAD folder. Each row
+  carries \`status\` (the canonical lifecycle value, see below), \`statusRaw\` (the header
+  verbatim), \`title\`, the \`session\` it is bound to, and the derived \`ageMs\` / \`idleMs\`
+  / \`elapsedMs\`. Pass \`path\` to get ONE plan's body; \`archive: true\` lists \`archive/\`
+  (finished work) instead. A row whose \`session\` is also a Mission session carries
+  \`sessionTracked\` / \`sessionLive\` / \`sessionOpen\` / \`sessionBusy\` — \`sessionTracked:
+  false\` means the conversation was started outside the page, which is NOT the same as
+  dead, plus \`sessionProject\` when it is.
+- \`plan_write {agent?, project_id?, folder?, path, content, session?}\` — write the file.
+  The body is yours; the frontmatter (\`created\`, \`last_activity\`, \`started\`, \`session\`)
+  is machine-managed and is what makes the listing answer "what is being worked on RIGHT
+  NOW". The folder is created on the first plan, and an \`INDEX.md\` entry file (whose
+  plans these are, the status vocabulary, the queue pointer) is written alongside it —
+  once, and never overwritten. \`INDEX.md\`, \`README.md\` and \`QUEUE.md\` are RESERVED and
+  refused as \`path\`.
 - \`plan_activity {agent, session_id}\` — what one conversation is doing, from that
   agent's OWN store (opencode sqlite, codex/claude rollout jsonl): the last user and
   assistant text with timestamps, the last tool call with \`running\` / \`completed\` /
@@ -173,23 +180,30 @@ under \`plans/\`, and it outlives every session that touched it. Three tools:
   scrubbed; free prose is not pattern-matched, so do not paste secrets into a
   conversation you intend to read this way.
 
+**The five statuses are the whole vocabulary.** \`status\` is one of \`new\` / \`in
+progress\` / \`blocked\` / \`need clarification\` / \`done\`, matched case-insensitively from
+the body's \`## Status:\` line; a header that matches none of them is surfaced verbatim
+in \`status\` (\`statusRaw\` always keeps the raw text), NEVER silently turned into an
+actionable state. **\`blocked\` and \`need clarification\` are STOP states** — record the
+reason and stop; do not proceed to the next queue item. Update the status when the work
+moves, not at the end.
+
 **How this fits the Mission tools.** \`mission_projects\` / \`mission_sessions\` answer
 "who is driving right now" — liveness, not progress: a session that did 400 tool calls
 and one that opened and died look identical there. The plans answer the other half,
-"what has this project been worked on": plan files live in the PAD's workspace, not in a
-project's folder, so a plan belongs to a project through the \`sessionProject\` of its
-bound session — and \`plan_list {agent, folder}\` does that narrowing for you (plans whose
-session the page does not know come back as \`sessionUnattributed\`, never quietly
-dropped). Take the \`folder\` from \`mission_projects\`.
+"what has this project been worked on": with a project scope the plans folder IS the
+project's folder, so \`plan_list {agent, project_id}\` is the project's progress, and the
+project row carries its \`plans_folder\`. Take the \`project_id\` (or \`folder\`) from
+\`mission_projects\`.
 
 **A plan is also the checklist that survives a closed chat.** There is no separate
 notes/journal store — the plan IS the memory, so a multi-step job is one plan whose body
 carries the ordered checklist (a plan's body is yours; only the frontmatter is managed).
 Work it in order, **one item at a time, in a visible session** — exactly the session rule
 above; nothing here runs where the human cannot watch. Tick each item off by rewriting
-the checklist in the plan body with \`plan_write {agent, path, content}\` when it is done
-(that bump is what makes \`plan_list\` answer "what is being worked on RIGHT NOW"). Read
-the plan on arrival (\`plan_list {agent, path}\`) before starting work, and write
+the checklist in the plan body with \`plan_write {project_id, path, content}\` when it is
+done (that bump is what makes \`plan_list\` answer "what is being worked on RIGHT NOW").
+Read the plan on arrival (\`plan_list {project_id, path}\`) before starting work, and write
 decisions back into it as you make them.
 ## Workflow recipes
 
@@ -236,10 +250,11 @@ decisions back into it as you make them.
 
 
 14. **See what a project is WORKING ON:** \`mission_projects {folder}\` for the project's
-    folder → \`plan_list {agent}\` and read the plans filed for it (a plan names its own
-    folder in the path) → \`plan_activity {agent, session}\` for the last exchange of the
-    conversation a plan is bound to. Skip this when the question is only "is anyone
-    driving right now" — that is \`mission_sessions\`, and it is cheaper.
+    \`project_id\` → \`plan_list {project_id}\` reads THAT project's own plans folder
+    (\`<project.folder>/<plans_folder>\`, default \`plans/\`) → \`plan_activity {agent,
+    session}\` for the last exchange of the conversation a plan is bound to. Skip this
+    when the question is only "is anyone driving right now" — that is
+    \`mission_sessions\`, and it is cheaper.
 
 15. **Run a task as a loop (the \`task_*\` tools, when they are listed):** the loop is
     \`review → build → test → (a failed test earns a hotfix) → commit\`. Bind the task

@@ -301,6 +301,46 @@ function containerViewOf(hostPath) {
   return null;
 }
 
+/** Resolve a PAD container path against the webui's ACTUAL bind mounts.
+ *  Returns { view, readonly } where `view` is the webui container path for the
+ *  given pad path, and `readonly` is true if the covering mount is ro.
+ *  Uses the webui's own /proc/self/mountinfo — sources there are daemon-resolved
+ *  and unreliable for matching, so we match on MOUNTPOINTS (the webui's own
+ *  container paths). A pad whose WORKSPACE_DIR spells the same folder the webui
+ *  mounts (e.g. both /www1) will match directly. Longest mountpoint prefix wins. */
+function webuiMountViewOf(padContainerPath) {
+  const p = path.normalize(String(padContainerPath));
+  let best = null;
+  try {
+    const mountinfo = fs.readFileSync('/proc/self/mountinfo', 'utf8');
+    for (const line of mountinfo.split('\n')) {
+      if (!line.trim()) continue;
+      const dash = line.indexOf(' - ');
+      if (dash === -1) continue;
+      const head = line.slice(0, dash).split(/\s+/);
+      const tail = line.slice(dash + 3).split(/\s+/);
+      if (head.length < 6 || tail.length < 2) continue;
+      const mountpoint = head[4];
+      const options = head[5];
+      const fstype = tail[0];
+      const source = tail[1];
+      if (!source.startsWith('/')) continue;
+      const excluded = new Set(['overlay', 'proc', 'sysfs', 'devpts', 'cgroup', 'cgroup2', 'mqueue', 'tmpfs', 'shm', 'hugetlbfs', 'autofs', 'fuse']);
+      if (excluded.has(fstype)) continue;
+      if (p === mountpoint || p.startsWith(mountpoint + '/')) {
+        if (!best || mountpoint.length > best.mountpoint.length) {
+          best = { mountpoint, readonly: options.includes('ro') };
+        }
+      }
+    }
+  } catch {
+    return null;
+  }
+  if (!best) return null;
+  const rel = p === best.mountpoint ? '' : p.slice(best.mountpoint.length + 1);
+  return { view: path.join(best.mountpoint, rel), readonly: best.readonly };
+}
+
 /** Validate a user-requested workspace mount `{ workspaceHost, workspaceDir }`
  *  against the server rules. Returns the normalized
  *  `{ host, container, webuiVisible, hostBrowsable }` for storage, or throws
@@ -4686,7 +4726,7 @@ module.exports = {
    readWebService, applyWebServices, webHookPath, buildWebHook,
    writeWebStartHook, removeWebStartHook, doorName, doorPorts, desiredDoors, recreateServices, isManagedDoorContainer,
   readWebAuth, applyWebAuth, removeWebAuth,
-  validateWorkspaceMount, workspaceMountInfo, readWorkspaceMount, containerViewOf,
+  validateWorkspaceMount, workspaceMountInfo, readWorkspaceMount, containerViewOf, webuiMountViewOf,
   validateExtraVolume, validateExtraVolumes, validateExtraPorts,
   readExtraVolumes, readExtraPorts, readSshCport, ensureSshStartBlock, autoSshPort,
   readDevContainerPlan, resolveDevContainerPlan, collectPublishedHostPorts,

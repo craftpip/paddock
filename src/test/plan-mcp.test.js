@@ -71,7 +71,7 @@ const padRow = (n) => {
       // A mount from outside the project root: the webui has no host view of
       // it, which is a refusal with a CODE, not an empty listing.
       workspace_root: path.join(WS, 'o-data'),
-      workspace_mount: { host: '/www1/somewhere', container: '/mnt/x', hostBrowsable: false, hostBrowseReason: 'outside' },
+      workspace_mount: { host: '/mnt/nowhere', container: '/mnt/x', hostBrowsable: false, hostBrowseReason: 'outside' },
       workspace_dir: '/mnt/x',
     };
   }
@@ -193,7 +193,12 @@ describe('MCP plans facility (plan 64)', () => {
 
     const after = await call('plan_list', { agent: PAD });
     assert.equal(after.data.count, 1, 'the list sees it');
-    assert.equal(after.data.plans[0].status, 'In progress (2026-09-29) — 1/2 done', 'the ## Status: header is data, not prose to re-read');
+    // Plan 82: `status` is the canonical lifecycle word, `statusRaw` keeps the
+    // header verbatim. Both are asserted, because the pair is the whole point —
+    // the canonical value is what a caller branches on, and the raw one is what
+    // proves nothing was lost folding a dated/commented header onto it.
+    assert.equal(after.data.plans[0].status, 'in progress', 'the ## Status: header folds onto a canonical value');
+    assert.equal(after.data.plans[0].statusRaw, 'In progress (2026-09-29) — 1/2 done', 'the raw header is preserved verbatim');
   });
 
   it('1a: the frontmatter is written, is parseable, and holds what it claims', async () => {
@@ -309,25 +314,30 @@ describe('MCP plans facility (plan 64)', () => {
     }
   });
 
-  it('the folder explains itself: a harness README is written on the first plan, and once only', async () => {
+  it('the folder explains itself: an INDEX.md is written on the first plan, and once only', async () => {
     const w = await call('plan_write', { agent: PAD, path: '88-readme.md', content: '# first\n' });
     assert.ok(!w.isError, 'the write succeeded');
-    const readme = path.join(PAD_PLANS, 'plans', 'README.md');
-    assert.ok(fs.existsSync(readme), 'the harness prompt exists in plans/');
-    const text = fs.readFileSync(readme, 'utf8');
+    const index = path.join(PAD_PLANS, 'plans', 'INDEX.md');
+    assert.ok(fs.existsSync(index), 'the entry file exists in plans/');
+    const text = fs.readFileSync(index, 'utf8');
     assert.match(text, /plan_write/, 'it names the tool that writes here');
     assert.match(text, /plan_list/, 'and the one that reads them');
     assert.match(text, /archive/i, 'and how a plan is ended');
+    // The five lifecycle rules and the stop rule are the LLM's instructions.
+    assert.match(text, /blocked/i, 'the blocked state is stated');
+    assert.match(text, /need clarification/i, 'and need clarification');
+    assert.match(text, /STOP/, 'and that they are STOP states, the core behavioural rule');
+    assert.match(text, /QUEUE\.md/, 'and it points at the queue file rather than restating queue rules');
     // Written ONCE: a second plan must not rewrite instructions a caller may be
     // reading right now.
-    const before = fs.statSync(readme).mtimeMs;
+    const before = fs.statSync(index).mtimeMs;
     await call('plan_write', { agent: PAD, path: '89-second.md', content: '# second\n' });
-    assert.equal(fs.statSync(readme).mtimeMs, before, 'the README is never overwritten');
+    assert.equal(fs.statSync(index).mtimeMs, before, 'the INDEX is never overwritten');
     // And it is NOT a plan: a row with no created and no Status would read as
     // work nobody started.
     const l = await call('plan_list', { agent: PAD });
     const paths = (l.data.plans || []).map((p) => p.path);
-    assert.ok(!paths.includes('README.md'), 'the README is not listed as a plan');
+    assert.ok(!paths.includes('INDEX.md'), 'the INDEX is not listed as a plan');
   });
 
   it('plan_list narrowed by path returns THAT plan with its body, and says so when there is none', async () => {
@@ -337,7 +347,7 @@ describe('MCP plans facility (plan 64)', () => {
     assert.equal(one.data.count, 1, 'exactly one row');
     assert.equal(one.data.plans[0].path, '10-first.md');
     assert.match(one.data.plans[0].body, /The body\./, 'and the BODY — a one-row title list would send the caller to exec cat');
-    assert.equal(one.data.plans[0].status, 'In progress', 'the ## Status: header came through');
+    assert.equal(one.data.plans[0].status, 'in progress', 'the ## Status: header came through');
 
     // A name that is not there is NOT an empty success: "no such plan" and "here
     // are zero plans" are different facts and the caller cannot tell them apart
@@ -350,7 +360,7 @@ describe('MCP plans facility (plan 64)', () => {
     // Still clamped: a path may not leave the folder even through the read side.
     const out = await call('plan_list', { agent: PAD, path: '../../../etc/hosts.md' });
     assert.ok(out.isError, 'traversal refused on the read side too');
-    assert.match(out.text, /may not leave the plans\/ folder/, 'with the same clamping message');
+    assert.match(out.text, /may not leave the plans folder/, 'with the same clamping message');
   });
 
   it('a PAD that never ran its agent says empty-store, not unreadable', () => {
@@ -601,20 +611,19 @@ describe('MCP plans facility (plan 64)', () => {
     assert.ok('sessionLive' in row, 'the field is present so a caller can tell it apart from a missing one');
   });
 
-  it('3f: a TRACKED session is stamped with its state AND its project, and folder scopes the listing', async () => {
+  it('3f: a TRACKED session is stamped with its state AND its project', async () => {
     // The untracked test above proves "not in the page" != "dead". This one proves
     // the other half: a session the page DOES know comes back with real liveness
     // and, crucially, the project it belongs to — that link is what makes a
     // Mission project's progress answerable (plan 64 §3f), and it exists only
     // because the stamp reads the session's own project rather than a folder.
+    // (Folder-scoped listing is now FILESYSTEM scope, plan 82 — see the
+    // project-rooted test below.)
     const mission = require('../services/mission');
     const project = mission.createProject({ name: 'zz-progress', agent: PAD, folder: '/root/www2/paddock' });
     const session = mission.createSession(project.id, { label: 'progress pad', agentSessionId: 'ses_stamp' });
 
     await call('plan_write', { agent: PAD, path: 'zz-tracked.md', content: 'A tracked plan', session: 'ses_stamp' });
-    await call('plan_write', { agent: PAD, path: 'zz-elsewhere.md', content: 'Another project', session: 'ses_other' });
-    // And one plan the page knows nothing about, to be the unattributable one.
-    await call('plan_write', { agent: PAD, path: 'zz-orphan.md', content: 'Started outside the page', session: 'ses_nobody' });
 
     const row = (await call('plan_list', { agent: PAD })).data.plans.find((p) => p.path === 'zz-tracked.md');
     assert.equal(row.sessionTracked, true, 'the page knows this conversation');
@@ -623,56 +632,90 @@ describe('MCP plans facility (plan 64)', () => {
     assert.deepEqual(row.sessionProject, { id: project.id, name: 'zz-progress', folder: '/root/www2/paddock' },
       'the plan carries the project of its bound session');
 
-    const scoped = await call('plan_list', { agent: PAD, folder: '/root/www2/paddock' });
-    const paths = scoped.data.plans.map((p) => p.path);
-    assert.ok(paths.includes('zz-tracked.md'), 'the matching plan is kept');
-    assert.ok(!paths.includes('zz-elsewhere.md'), 'a plan of another project is not');
-    assert.equal(scoped.data.sessionUnattributed, 2,
-      'unattributable plans are COUNTED, not dropped silently (a short answer that looks complete is the failure)');
-    assert.ok(scoped.data.folder, 'the scope is echoed');
-
-    // An unmatched folder is an empty answer, not everything.
-    const none = await call('plan_list', { agent: PAD, folder: '/root/nowhere' });
-    assert.equal(none.data.count, 0, 'a folder with no plans is an empty list');
-    assert.equal(none.data.sessionUnattributed, 2, 'and it still says what it could not attribute');
-
     mission.deleteSession(session.id);
     mission.deleteProject(project.id);
   });
 
-  it('a folder filter is refused before it can leak, and the description explains the linkage', async () => {
-    const t = (await client.listTools()).tools.find((x) => x.name === 'plan_list');
-    assert.ok(t.description.includes('sessionProject'), 'the tool says where a plan\'s project comes from');
-    assert.ok(t.inputSchema.properties.folder, 'folder is an input');
-    // It must not be REQUIRED: the whole listing is the common case.
-    assert.ok(!t.inputSchema.required.includes('folder'), 'folder stays optional');
+  it('plan_list/plan_write in PROJECT mode land in <project.folder>/<plans_folder>', async () => {
+    const mission = require('../services/mission');
+    // A folder inside the opencode driver workspace, so it maps to a real host
+    // dir. A SUBfolder, so the project-scoped plans do not coincide with the
+    // PAD-wide `plans/` (which a project rooted at the workspace top would).
+    const project = mission.createProject({ name: 'zz-project', agent: PAD, folder: '/root/.opencode/workspace/proj' });
+    const r = await call('plan_write', { agent: PAD, project_id: project.id, path: 'pr-first.md', content: '# P\n\n## Status: new\n' });
+    assert.ok(!r.isError, `write succeeds: ${r.text}`);
+    assert.equal(r.data.project_id, project.id, 'the write echoes the project it resolved');
+    assert.ok(fs.existsSync(path.join(PAD_PLANS, 'proj', 'plans', 'pr-first.md')), 'the plan lands under the project folder');
+    assert.ok(!fs.existsSync(path.join(PAD_PLANS, 'plans', 'pr-first.md')), 'and NOT in the PAD-wide plans/');
+
+    // The project-scoped listing sees it…
+    const scoped = await call('plan_list', { agent: PAD, project_id: project.id });
+    assert.deepEqual(scoped.data.plans.map((p) => p.path), ['pr-first.md']);
+    // …and it is INVISIBLE to the legacy PAD-wide listing (different directory).
+    const legacy = await call('plan_list', { agent: PAD });
+    assert.ok(!(legacy.data.plans || []).some((p) => p.path === 'pr-first.md'), 'legacy scope does not see project plans');
+    // …and a `path` inside the project scope reads ONE file's body (they combine
+    // in project mode — the directory is the scope, so path is a file in it).
+    const one = await call('plan_list', { agent: PAD, project_id: project.id, path: 'pr-first.md' });
+    assert.equal(one.data.found, true);
+    assert.match(one.data.plans[0].body, /# P/);
+
+    // Another project on the SAME pad does not see it.
+    const other = mission.createProject({ name: 'zz-other', agent: PAD, folder: '/root/.opencode/workspace/sub' });
+    const otherList = await call('plan_list', { agent: PAD, project_id: other.id });
+    assert.equal(otherList.data.count, 0, 'a sibling project sees none of the first project\'s plans');
+
+    // A custom plans folder moves the directory.
+    const custom = mission.createProject({ name: 'zz-custom', agent: PAD, folder: '/root/.opencode/workspace/sub', plansFolder: 'pplans' });
+    await call('plan_write', { agent: PAD, project_id: custom.id, path: 'c.md', content: '# C\n' });
+    assert.ok(fs.existsSync(path.join(PAD_PLANS, 'sub', 'pplans', 'c.md')), 'the custom plans folder is honoured');
+
+    mission.deleteProject(project.id);
+    mission.deleteProject(other.id);
+    mission.deleteProject(custom.id);
   });
 
-  it('`path` + `folder` is REFUSED — the one-file branch returns before the scope runs', async () => {
-    // The silent version of this bug is worse than a wrong answer: the caller
-    // asks for one plan INSIDE a project, the handler takes the `path` branch and
-    // returns that file with no indication the filter never ran, and the caller
-    // concludes the plan belongs to the project. Two different questions, so the
-    // combination is refused and the message names the call that answers it.
-    await call('plan_write', { agent: PAD, path: 'zz-both.md', content: 'A plan', session: 'ses_both' });
-    const r = await call('plan_list', { agent: PAD, path: 'zz-both.md', folder: '/root/www2/paddock' });
-    assert.equal(r.isError, true, 'the combination is an error, not a scoped answer');
-    assert.ok(/plan_path_and_folder/.test(r.text), `refused with a code the caller can branch on (got: ${r.text})`);
-    assert.ok(/path/.test(r.text) && /folder/.test(r.text), 'and the message says which is which');
-    assert.equal(r.data, null, 'nothing is returned as if it had been scoped');
+  it('an explicit bad project is REFUSED, never a fallback to the PAD folder', async () => {
+    // The one response a caller cannot tell apart from success: asked for a
+    // project, handed the PAD-wide list. Both a miss and an ambiguous folder
+    // refuse with candidates.
+    const miss = await call('plan_list', { agent: PAD, project_id: 'prj_nope' });
+    assert.equal(miss.isError, true, 'an unknown project id is an error');
+    assert.ok(/mission_project_not_found/.test(miss.text), `with the code (got: ${miss.text})`);
+    // An agent that disagrees with the project is refused, not silently picked.
+    const mission = require('../services/mission');
+    const project = mission.createProject({ name: 'zz-mismatch', agent: PAD, folder: '/root/.opencode/workspace' });
+    const bad = await call('plan_list', { agent: OUTSIDE, project_id: project.id });
+    assert.equal(bad.isError, true, 'agent/project disagreement is an error');
+    assert.ok(/plan_agent_mismatch/.test(bad.text), `with the mismatch code (got: ${bad.text})`);
+    mission.deleteProject(project.id);
   });
 
-  it('3d: agent is REQUIRED on every plan tool', async () => {
+  it('3d: scope is required at call time — agent for legacy, or a project (plan 82)', async () => {
     const tools = (await client.listTools()).tools;
-    for (const name of ['plan_list', 'plan_write', 'plan_activity']) {
+    // plan_activity is a session read, not a folder read: it still names a PAD.
+    const activity = tools.find((x) => x.name === 'plan_activity');
+    assert.ok(activity.inputSchema.required.includes('agent'), 'plan_activity still requires agent');
+    // plan_list/plan_write may be scoped by agent OR a project, so `agent` is no
+    // longer individually required — the requirement moved to call time.
+    for (const name of ['plan_list', 'plan_write']) {
       const t = tools.find((x) => x.name === name);
-      assert.ok(t.inputSchema.required.includes('agent'), `${name} requires agent (got ${JSON.stringify(t.inputSchema.required)})`);
+      const req = t.inputSchema.required || [];
+      assert.ok(!req.includes('agent'), `${name} does not require agent (project scope is an alternative)`);
+      assert.ok(t.inputSchema.properties.project_id && t.inputSchema.properties.folder, `${name} accepts a project scope`);
+      assert.ok(!req.includes('project_id') && !req.includes('folder'),
+        `${name} does not REQUIRE a project either — legacy mode is a real mode`);
     }
-    // And the write's other arguments stay required — making `agent` required
-    // must not have made a plan write without a path possible.
     const write = tools.find((x) => x.name === 'plan_write');
-    assert.ok(write.inputSchema.required.includes('path') && write.inputSchema.required.includes('content'), 'path and content stay required');
-    assert.ok(!write.inputSchema.required.includes('session'), 'session is optional — a plan can be filed before it is worked in');
+    const wreq = write.inputSchema.required || [];
+    assert.ok(wreq.includes('path') && wreq.includes('content'), 'path and content stay required');
+    assert.ok(!wreq.includes('session'), 'session is optional — a plan can be filed before it is worked in');
+
+    // And a call with NO scope at all is refused with its own code, not an
+    // unbound crash.
+    const r = await call('plan_list', {});
+    assert.equal(r.isError, true, 'no scope is an error');
+    assert.ok(/plan_scope_required/.test(r.text), `refused with the scope code (got: ${r.text})`);
   });
 
   it('the archive is a separate listing, not a second copy of the same plans', async () => {
@@ -683,7 +726,8 @@ describe('MCP plans facility (plan 64)', () => {
     const arch = await call('plan_list', { agent: PAD, archive: true });
     assert.equal(live.data.count, 1, 'the live folder does not include the archive');
     assert.equal(arch.data.count, 1, 'the archive lists on its own');
-    assert.equal(arch.data.plans[0].status, 'Complete (2026-01-01)');
+    assert.equal(arch.data.plans[0].status, 'done', 'a dated "Complete" header folds onto the canonical done');
+    assert.equal(arch.data.plans[0].statusRaw, 'Complete (2026-01-01)', 'and the raw header is preserved');
   });
 
   it('a plan with malformed frontmatter is still LISTED, with the reason on the row', async () => {
@@ -733,6 +777,187 @@ describe('plans service (plan 64 §1a)', () => {
   it('a session id is kept verbatim — it is the agent\'s own, and the resolver must not reshape it', () => {
     const { data } = plans.parseFrontmatter('---\nsession: ses_ABC:123\n---\n# x');
     assert.equal(data.session, 'ses_ABC:123', 'a colon in a value does not truncate it');
+  });
+});
+
+describe('plan status mapping (plan 82)', () => {
+  const canon = (body) => plans.describe({}, body, {}).status;
+  const raw = (body) => plans.describe({}, body, {}).statusRaw;
+
+  it('folds every header this repo actually uses onto one of the five, case-insensitively', () => {
+    const cases = [
+      ['## Status: Proposed', 'new'],
+      ['## Status: Draft', 'new'],
+      ['## Status: new', 'new'],
+      ['## Status: In progress', 'in progress'],
+      ['## Status: In Progress', 'in progress'],
+      ['## Status: Blocked', 'blocked'],
+      ['## Status: need clarification', 'need clarification'],
+      ['## Status: Needs clarification', 'need clarification'],
+      ['## Status: Complete', 'done'],
+      ['## Status: done', 'done'],
+      ['## Status: finished', 'done'],
+      ['## Status: review', 'done'],
+    ];
+    for (const [line, want] of cases) {
+      assert.equal(canon(`# x\n\n${line}\n`), want, `${line} → ${want}`);
+    }
+  });
+
+  it('keeps a dated/commented header\'s raw text and only maps the canonical value', () => {
+    const body = '# x\n\n## Status: In progress (2026-09-29) — 1/2 done\n';
+    assert.equal(canon(body), 'in progress', 'the prefix maps');
+    assert.equal(raw(body), 'In progress (2026-09-29) — 1/2 done', 'the whole header is preserved verbatim');
+  });
+
+  it('never coerces an UNKNOWN header into an actionable state', () => {
+    const body = '# x\n\n## Status: wibble\n';
+    assert.equal(canon(body), 'wibble', 'an unknown status passes through as itself');
+    assert.equal(raw(body), 'wibble');
+    assert.notEqual(canon(body), 'new', 'unknown is never silently "new"');
+    assert.notEqual(canon(body), 'done', 'unknown is never silently "done"');
+  });
+
+  it('reads a header with no Status line as null, not as a state', () => {
+    assert.equal(canon('# x\n\nno status here\n'), null);
+    assert.equal(raw('# x\n\nno status here\n'), null);
+  });
+
+  it('does not read a status from the NEXT line (this plan\'s own two-line header)', () => {
+    // "## Status:\nProposed" is a real shape. The old regex required the value
+    // on the same line, so it read null; keep that so a reformatted file does
+    // not silently change a row's meaning.
+    const body = '# x\n\n## Status:\nProposed (2026-01-01)\n';
+    assert.equal(raw(body), null, 'no value on the Status line → unknown, not a guess');
+    assert.equal(canon(body), null);
+  });
+});
+
+describe('project-rooted plans folder (plan 82)', () => {
+  const agent = () => ({
+    ...padRow(PAD),
+  });
+  const project = (over = {}) => ({
+    id: 'prj_1', name: 'paddock', agent_name: PAD, agent_type: 'opencode',
+    folder: '/root/.opencode/workspace', plans_folder: 'plans', ...over,
+  });
+
+  it('maps the default layout: <workspace_root>/workspace/<rel>/<plans_folder>', () => {
+    const a = agent();
+    assert.equal(
+      plans.projectPlansRoot(a, project()),
+      path.join(WS, 'a-data', 'workspace', 'plans')
+    );
+    assert.equal(
+      plans.projectPlansRoot(a, project({ folder: '/root/.opencode/workspace/sub' })),
+      path.join(WS, 'a-data', 'workspace', 'sub', 'plans')
+    );
+    assert.equal(
+      plans.projectPlansRoot(a, project({ plans_folder: 'pplans' })),
+      path.join(WS, 'a-data', 'workspace', 'pplans')
+    );
+  });
+
+  it('refuses a folder OUTSIDE the driver workspace rather than inventing a path', () => {
+    assert.throws(
+      () => plans.projectPlansRoot(agent(), project({ folder: '/root/elsewhere' })),
+      (e) => e.code === 'plan_project_folder_outside_workspace'
+    );
+  });
+
+  it('maps a custom workspace mount through containerViewOf, exactly like plansRoot', () => {
+    const a = {
+      ...padRow(PAD),
+      workspace_root: path.join(WS, 'm-data'),
+      workspace_dir: '/workspace',
+      workspace_mount: { host: PROJECT, container: '/workspace', webuiVisible: true, hostBrowsable: true },
+    };
+    // containerViewOf(PROJECT) is the webui's own view of the project root.
+    const view = require('../services/vm-manager').containerViewOf(PROJECT);
+    assert.ok(view, 'the project root has a webui view in-container');
+    assert.equal(plans.projectPlansRoot(a, project({ folder: '/workspace' })), path.join(view, 'plans'));
+    assert.equal(
+      plans.projectPlansRoot(a, project({ folder: '/workspace/sub' })),
+      path.join(view, 'sub', 'plans')
+    );
+  });
+
+  it('refuses a mount the webui cannot see, with the workspace surface\'s own reason', () => {
+    const a = {
+      ...padRow(OUTSIDE),
+    };
+    assert.throws(
+      () => plans.projectPlansRoot(a, project({ folder: '/mnt/x' })),
+      (e) => e.code === 'plan_workspace_not_host_visible'
+    );
+  });
+
+  it('reserved entry files are refused as plan paths, on read and on write', () => {
+    for (const name of ['INDEX.md', 'index.md', 'README.md', 'QUEUE.md']) {
+      assert.throws(
+        () => plans.planPath(agent(), name, { project: project() }),
+        (e) => e.code === 'plan_reserved_name',
+        `${name} is reserved`
+      );
+    }
+  });
+
+  it('plan_write + listPlans round-trip inside one project folder, and INDEX lands there', async () => {
+    const a = agent();
+    const p = project({ folder: '/root/.opencode/workspace', plans_folder: 'pplans' });
+    const base = plans.projectPlansRoot(a, p);
+    // writePlan writes through the workspace service, which re-resolves the pad
+    // by name — so the registry must answer for it here too.
+    const realGet = registry.getAgent;
+    registry.getAgent = (n) => (n === PAD ? a : realGet(n));
+    try {
+      const r = await plans.writePlan(a, '10-first.md', '# First\n\n## Status: new\n', { project: p });
+      assert.equal(r.path, '10-first.md');
+      assert.ok(fs.existsSync(path.join(base, '10-first.md')), 'the plan lands under the project plans folder');
+      assert.ok(fs.existsSync(path.join(base, 'INDEX.md')), 'INDEX.md is created alongside it');
+      const rows = plans.listPlans(a, { project: p });
+      assert.equal(rows.length, 1, 'the listing sees exactly the plan, not INDEX');
+      assert.equal(rows[0].path, '10-first.md');
+      assert.equal(rows[0].status, 'new');
+    } finally {
+      registry.getAgent = realGet;
+    }
+  });
+
+  it('initProjectPlans writes INDEX.md once and never overwrites it (plan 82 phase 5)', async () => {
+    const a = agent();
+    const p = project({ folder: '/root/.opencode/workspace', plans_folder: 'initp' });
+    const realGet = registry.getAgent;
+    registry.getAgent = (n) => (n === PAD ? a : realGet(n));
+    try {
+      const base = plans.projectPlansRoot(a, p);
+      const first = await plans.initProjectPlans(PAD, p);
+      assert.equal(first.created, true, 'the first init creates the entry file');
+      assert.ok(fs.existsSync(path.join(base, 'INDEX.md')), 'INDEX.md exists after init');
+      // Preserve-existing is the contract: instructions that change under a
+      // mid-work caller are worse than none. A sentinel an init must NOT clobber.
+      const mine = '# my own entry file\n';
+      fs.writeFileSync(path.join(base, 'INDEX.md'), mine);
+      const second = await plans.initProjectPlans(PAD, p);
+      assert.equal(second.created, false, 'the second init reports it did not create');
+      assert.equal(fs.readFileSync(path.join(base, 'INDEX.md'), 'utf8'), mine, 'and the existing file is untouched');
+    } finally {
+      registry.getAgent = realGet;
+    }
+  });
+
+  it('a project with no plans_folder defaults to `plans` (the migration default)', async () => {
+    const a = agent();
+    const p = project({ folder: '/root/.opencode/workspace', plans_folder: undefined });
+    const realGet = registry.getAgent;
+    registry.getAgent = (n) => (n === PAD ? a : realGet(n));
+    try {
+      const r = await plans.writePlan(a, 'd.md', '# D\n', { project: p });
+      assert.equal(r.path, 'd.md');
+      assert.ok(fs.existsSync(path.join(WS, 'a-data', 'workspace', 'plans', 'd.md')), 'a missing plans_folder resolves to plans/');
+    } finally {
+      registry.getAgent = realGet;
+    }
   });
 });
 

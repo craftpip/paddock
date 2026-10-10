@@ -38,6 +38,7 @@ const apiKeys = require('./services/api-keys');
 const containerHealth = require('./services/container-health');
 const logStore = require('./services/log-store');
 const mission = require('./services/mission');
+const plans = require('./services/plans');
 const padTmux = require('./services/pad-tmux');
 const { createTerminalInput } = require('./services/terminal-input');
 const ownership = require('./services/ownership');
@@ -2558,19 +2559,31 @@ app.get('/api/mission/projects', (req, res) => {
   }
 });
 
-app.post('/api/mission/projects', csrfCheck, (req, res) => {
+app.post('/api/mission/projects', csrfCheck, async (req, res) => {
   try {
     const project = mission.createProject({
       name: req.body.name,
       agent: req.body.agent,
       folder: req.body.folder,
+      plansFolder: req.body.plansFolder,
       createdBy: req.session.userId || null,
     });
     if (!canTouchAgent(req, project.agent_name)) {
       mission.deleteProject(project.id);
       return res.status(403).json({ error: 'Access denied' });
     }
-    res.json({ project });
+    // Initialize the project's plans folder + INDEX.md (plan 82 Phase 5). A
+    // failure here must NOT lose the project: the row is already saved and the
+    // folder is re-created lazily on the first plan_write. So the outcome is
+    // reported alongside the project rather than thrown — a create that says
+    // "done" while the workspace was unwritable is the lie to avoid.
+    let plansInit = null;
+    try {
+      plansInit = await plans.initProjectPlans(project.agent_name, project);
+    } catch (e) {
+      plansInit = { created: false, error: e.code || e.message || String(e) };
+    }
+    res.json({ project, plansInit });
   } catch (e) {
     missionFail(res, e);
   }
@@ -2599,7 +2612,7 @@ app.patch('/api/mission/projects/:id', csrfCheck, (req, res) => {
   const project = missionProject(req, res);
   if (!project) return;
   try {
-    res.json({ project: mission.updateProject(project.id, { name: req.body.name, folder: req.body.folder }) });
+    res.json({ project: mission.updateProject(project.id, { name: req.body.name, folder: req.body.folder, plansFolder: req.body.plansFolder }) });
   } catch (e) {
     missionFail(res, e);
   }

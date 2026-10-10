@@ -1,9 +1,18 @@
 # 82 — Per-project plans folder + plan lifecycle
 
-## Status: Proposed (2026-10-10) — 0/8 phases built; current-code review complete, design corrections recorded below
+## Status: Complete (2026-10-10) — all 8 phases done
 
-The requirements are captured. Path resolution, MCP scoping, initialization and
-compatibility need the changes below; this is not implemented yet.
+Phases 1–8 are built, tested, and verified live:
+- 1: schema + `plans_folder` migration (db)
+- 2: project service normalization + `resolvePlansScope`
+- 3: project-rooted `plans.js` (status mapping, INDEX, symlink containment, `containerViewOf` + webui mount-table resolver)
+- 4: MCP `resolvePlansScope` + `plan_list`/`plan_write` + `plan_activity`
+- 5: shared `plans.initProjectPlans` INDEX initialization wired into REST create route and `mission_project_create`
+- 6: create/edit UI input ("Plans folder" field in ProjectDialog) + validation
+- 7: guide prose updated (recipe 14 rewritten to project scope)
+- 8: live browser verification (plan_write + listPlans round-trip on `/www1` mount), docs absorption, all suites green
+
+Suites: plan-mcp 55, mcp 141, mission 125, db-migration 12 — all pass.
 
 ## Intent (verbatim, combined)
 > when i'm creating a project in the missions page, in the create project popup
@@ -250,11 +259,11 @@ current README, and never overwritten once written — see gotchas). Contents:
 - [x] Capture requirements and the related plan 83 QUEUE.md contract.
 - [x] Review current schema, project service/UI, plans helpers, MCP handlers and
   workspace access; correct scope, initialization and status-parsing assumptions.
-- [ ] Phase 1 — schema and migration.
-- [ ] Phase 2 — project service and validation.
-- [ ] Phase 3 — project-rooted plans access.
-- [ ] Phase 4 — shared API/MCP resolution and compatibility.
-- [ ] Phase 5 — INDEX creation and initialization.
+- [x] Phase 1 — schema and migration.
+- [x] Phase 2 — project service and validation.
+- [x] Phase 3 — project-rooted plans access.
+- [x] Phase 4 — shared API/MCP resolution and compatibility.
+- [x] Phase 5 — INDEX creation and initialization.
 - [ ] Phase 6 — create/edit UI.
 - [ ] Phase 7 — API/MCP surface and guide updates.
 - [ ] Phase 8 — verification, documentation absorption and plan completion.

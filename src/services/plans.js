@@ -14,8 +14,9 @@ const path = require('path');
 
 const registry = require('./agent-registry');
 const { getDriver } = require('./drivers');
-const { containerViewOf } = require('./vm-manager');
+const { containerViewOf, webuiMountViewOf } = require('./vm-manager');
 const workspace = require('./workspace');
+const { ensureOwned } = require('./ownership');
 
 // ONE definition of "where host scope starts" for this pad. Re-deriving it here
 // would be the gate and the action disagreeing about the same folder again.
@@ -23,6 +24,43 @@ const hostBrowseRootFor = workspace.hostBrowseRoot;
 
 const PLANS_DIR = 'plans';
 const ARCHIVE_DIR = 'archive';
+
+/** Files that carry the FOLDER's own instructions rather than a piece of work.
+ *  `README.md` predated plans (the old harness note); `INDEX.md` and `QUEUE.md`
+ *  are plan 82's project entry files. All three are skipped in listings and
+ *  refused as `path` values, so `plan_write` can never clobber the folder's
+ *  own voice with a plan body. */
+const RESERVED_PLAN_NAMES = new Set(['readme.md', 'index.md', 'queue.md']);
+
+/** The lifecycle a plan moves through (plan 82). Exactly five values, and the
+ *  `## Status:` headers this repo already uses are folded onto them:
+ *
+ *    new  ← "Proposed", "Draft", "new"
+ *    in progress
+ *    blocked
+ *    need clarification  ("needs clarification" too)
+ *    done ← "Complete", "done", "finished", "review"
+ *
+ *  An unrecognized header is NEVER folded onto any of the five — coercing it
+ *  would assert a lifecycle step nobody chose. It passes through verbatim as
+ *  `status` (exactly what the row used to say) and `statusRaw` keeps the
+ *  spelling either way, so no information is lost by either route. */
+const PLAN_STATUSES = ['new', 'in progress', 'blocked', 'need clarification', 'done'];
+const STATUS_RULES = [
+  [/^(complete|done|finished|review)\b/i, 'done'],
+  [/^in progress\b/i, 'in progress'],
+  [/^need(?:s)? clarification\b/i, 'need clarification'],
+  [/^blocked\b/i, 'blocked'],
+  [/^(new|proposed|draft)\b/i, 'new'],
+];
+
+function planStatus(raw) {
+  const text = raw == null ? '' : String(raw);
+  for (const [re, value] of STATUS_RULES) {
+    if (re.test(text)) return value;
+  }
+  return null;
+}
 
 class PlansError extends Error {
   constructor(code, message) {
@@ -97,39 +135,185 @@ function requireAgent(name) {
   return agent;
 }
 
-/** `plans` / `plans/archive` under the pad's workspace, created on first write. */
-function plansDir(agent, { archive = false } = {}) {
-  const root = path.join(plansRoot(agent), PLANS_DIR);
+/**
+ * The HOST directory that holds one project's plans — `<folder>/<plans_folder>`
+ * mapped onto the webui's own filesystem (plan 82). This is what makes a plan
+ * part of the project rather than the pad: the folder IS the scope, so two
+ * projects on one pad can never see each other's plans through this surface.
+ *
+ * Mapping rules, split by layout:
+ *
+ *  - custom workspace mount (meta WORKSPACE_HOST/DIR + HOST_BROWSE=1): the
+ *    project folder must sit under the mount's CONTAINER path, and the mount's
+ *    host source is looked up through `containerViewOf` exactly like
+ *    `plansRoot` does for the pad root. A mount the webui cannot see (e.g.
+ *    `/www1`) is refused the same way `plansRoot` refuses it: permission cannot
+ *    buy a capability, and a plan written to a host path the webui does not
+ *    mount would vanish the moment it was written.
+ *
+ *  - default layout: the project folder must sit under the driver's workspace
+ *    dir, whose host twin lives under the agent data dir — the same mapping the
+ *    pad-root case starts from, with the project's own folder (and, again, its
+ *    own plans folder) appended.
+ *
+ *  - an out-of-scope folder (the project's folder is outside the workspace it
+ *    was created on) is REFUSED rather than guessed: `containerViewOf`/path
+ *    arithmetic can be made to say anything, but only the project's own folder
+ *    is where a plan belongs.
+ */
+function projectPlansRoot(agent, project) {
+  if (!project) return null;
+  const pf = normalizePlansFolderShorthand(project.plans_folder);
+  const folder = String(project.folder || '').replace(/\/+$/, '');
+  const mount = agent.workspace_mount;
+  if (mount && mount.host) {
+    const cb = String(mount.container || '').replace(/\/+$/, '');
+    if (!(cb && (folder === cb || folder.startsWith(cb + '/')))) {
+      throw new PlansError(
+        'plan_project_folder_outside_workspace',
+        `The project folder ${folder} is not inside the workspace mount (${cb}) on ${agent.name}, so its plans would live outside the workspace. Repoint the project folder or pick another project.`
+      );
+    }
+    const rel = folder === cb ? '' : folder.slice(cb.length + 1);
+
+    // 1. Project-root mapping: HOST_WORKSPACE → WORKSPACE (rw), covers /www2/paddock.
+    const cv = containerViewOf(mount.host);
+    if (cv) return path.join(cv, rel, pf);
+
+    // 2. Webui's actual bind mounts: match the pad's workspace dir (cb)
+    //    against the webui's own mountpoints. Longest prefix wins.
+    //    The user mounts the same folder spelling into both pad and webui,
+    //    so the container path spelling coincides.
+    let wv = webuiMountViewOf(cb);
+    if (!wv) {
+      // Fallback: match the mount's host spelling (same string in compose).
+      wv = webuiMountViewOf(mount.host);
+    }
+    if (wv) {
+      if (wv.readonly) {
+        throw new PlansError(
+          'plan_workspace_read_only',
+          `The webui sees ${mount.host} read-only; plan files cannot be written there.`
+        );
+      }
+      return path.join(wv.view, rel, pf);
+    }
+
+    // 3. Genuinely unmounted host-side — same refusal as before.
+    plansRoot(agent); // throws plan_workspace_not_host_visible
+  }
+  const driver = getDriver(agent.agent_type);
+  const dataDir = driver.dataDir || '';
+  const wsDir = driver.workspaceDir || '';
+  if (wsDir.startsWith(dataDir + '/')) {
+    const wsHost = path.join(agent.workspace_root, wsDir.slice(dataDir.length + 1));
+    if (!(folder === wsDir || folder.startsWith(wsDir + '/'))) {
+      throw new PlansError(
+        'plan_project_folder_outside_workspace',
+        `The project folder ${folder} is not inside the driver workspace (${wsDir}) on ${agent.name}, so its plans would live outside the workspace. Repoint the project folder or pick another project.`
+      );
+    }
+    const rel = folder === wsDir ? '' : folder.slice(wsDir.length + 1);
+    return path.join(wsHost, rel, pf);
+  }
+  // No driver workspace dir: the data dir itself is the workspace (plansRoot's
+  // `!wsDir` fallback), and its host twin is the agent's own data dir.
+  if (!wsDir) {
+    if (!(folder === agent.workspace_root || folder.startsWith(agent.workspace_root + '/'))) {
+      throw new PlansError(
+        'plan_project_folder_outside_workspace',
+        `The project folder ${folder} is not inside the workspace of ${agent.name}, so its plans would live outside the workspace. Repoint the project folder or pick another project.`
+      );
+    }
+    const rel = folder === agent.workspace_root ? '' : folder.slice(agent.workspace_root.length + 1);
+    return path.join(agent.workspace_root, rel, pf);
+  }
+  // The driver's workspace is not under its data dir — same refusal as the pad
+  // root case; there is no host folder to keep plans in.
+  plansRoot(agent); // throws
+}
+
+/** `plan_project.plans_folder` may be missing on rows that predate the column
+ *  migration — but it defaults in the database, so treat a missing value as the
+ *  same default rather than building a path with a hole in it. */
+function normalizePlansFolderShorthand(plansFolder) {
+  const p = String(plansFolder ?? '').trim().replace(/\/+$/, '');
+  return p || 'plans';
+}
+
+/** `plans` / `plans/archive` under the pad's workspace — or, when `project` is
+ *  given, under that project's own `<folder>/<plans_folder>`. Created on first
+ *  write. */
+function plansDir(agent, { archive = false, project } = {}) {
+  const root = project
+    ? projectPlansRoot(agent, project)
+    : path.join(plansRoot(agent), PLANS_DIR);
   return archive ? path.join(root, ARCHIVE_DIR) : root;
 }
 
 /**
- * Clamp a caller-supplied plan path to the pad's `plans/` folder. A plan path
- * is NOT a general workspace path: `../..` out of `plans/` must be refused even
- * though `workspace_write` would allow it inside its own root, or `plan_write`
- * becomes a general writer wearing a plan-shaped hat.
+ * Clamp a caller-supplied plan path to the plans folder (of the pad, or of one
+ * project). A plan path is NOT a general workspace path: `../..` out of the
+ * folder must be refused even though `workspace_write` would allow it inside
+ * its own root, or `plan_write` becomes a general writer wearing a plan-shaped
+ * hat. The reserved entry files are likewise refused as `path` values.
  */
-function planPath(agent, relPath, { archive = false } = {}) {
+/** Resolve `p` to a canonical path even when it (or part of it) does not exist
+ *  yet: realpath the deepest EXISTING ancestor, then re-attach the tail. A
+ *  symlink is thereby followed wherever the filesystem would follow it, so a
+ *  plan path can be checked against the folder it will ACTUALLY land in rather
+ *  than the string it was spelled with. (Plan 82: `planPath`'s lexical check is
+ *  a string test, and a symlink inside `plans/` pointing out of it passes that
+ *  test and then the write follows it out.) */
+function realResolve(p) {
+  let cur = path.resolve(p);
+  const tail = [];
+  for (;;) {
+    try {
+      const real = fs.realpathSync(cur);
+      return tail.length ? path.join(real, ...tail.reverse()) : real;
+    } catch (e) {
+      if (e.code !== 'ENOENT') throw e;
+      const parent = path.dirname(cur);
+      if (parent === cur) return path.join(cur, ...tail.reverse());
+      tail.push(path.basename(cur));
+      cur = parent;
+    }
+  }
+}
+
+function withinBase(base, target) {
+  return target === base || target.startsWith(base + path.sep);
+}
+
+function planPath(agent, relPath, { archive = false, project } = {}) {
   const raw = String(relPath == null ? '' : relPath).trim();
   if (!raw) throw new PlansError('plan_path_required', 'A plan path is required (e.g. "64-plans-facility.md").');
   if (raw.includes('\0')) throw new PlansError('plan_path_invalid', 'Invalid plan path.');
   if (path.isAbsolute(raw)) {
-    throw new PlansError('plan_path_invalid', `A plan path is relative to the PAD's plans/ folder, not absolute: ${raw}`);
+    throw new PlansError('plan_path_invalid', `A plan path is relative to the plans folder, not absolute: ${raw}`);
   }
-  const base = plansDir(agent, { archive });
+  if (RESERVED_PLAN_NAMES.has(raw.toLowerCase())) {
+    throw new PlansError('plan_reserved_name', `"${raw}" is reserved for the folder's own entry file and cannot be a plan.`);
+  }
+  const base = plansDir(agent, { archive, project });
   const resolved = path.resolve(base, raw);
   if (resolved !== base && !resolved.startsWith(base + path.sep)) {
-    throw new PlansError('plan_path_invalid', `A plan path may not leave the plans/ folder: ${raw}`);
+    throw new PlansError('plan_path_invalid', `A plan path may not leave the plans folder: ${raw}`);
   }
   if (!resolved.endsWith('.md')) {
     throw new PlansError('plan_path_invalid', `A plan is a .md file: ${raw}`);
   }
+  // Follow symlinks before trusting the containment above.
+  if (!withinBase(realResolve(base), realResolve(resolved))) {
+    throw new PlansError('plan_path_invalid', `A plan path must stay inside the plans folder: ${raw}`);
+  }
   return resolved;
 }
 
-/** Relative-to-`plans/` form, as stored and reported. */
-function planRel(agent, absPath, { archive = false } = {}) {
-  const base = plansDir(agent, { archive });
+/** Relative-to-plans-folder form, as stored and reported. */
+function planRel(agent, absPath, { archive = false, project } = {}) {
+  const base = plansDir(agent, { archive, project });
   return path.relative(base, absPath).split(path.sep).join('/');
 }
 
@@ -183,13 +367,20 @@ function stripFrontmatter(text) {
 }
 
 /**
- * The plan's own `## Status:` header, which is the completion convention this
- * repo already uses. Read as DATA here so `plan_list` can answer "what is
- * finished" without the caller re-reading every file.
+ * The plan's own `## Status:` header verbatim, which is the completion
+ * convention this repo already uses. Read as DATA here so `plan_list` can
+ * answer "what is finished" without the caller re-reading every file.
  */
-function statusOf(body) {
+function statusRawOf(body) {
   const m = /^##[ \t]+Status:[ \t]*(.+)$/m.exec(body);
   return m ? m[1].trim() : null;
+}
+
+/** The canonical lifecycle value for the header, un-recognized text passed
+ *  through verbatim (see `planStatus` above for why it is never coerced). */
+function statusOf(body) {
+  const raw = statusRawOf(body);
+  return planStatus(raw) ?? raw;
 }
 
 function titleOf(body) {
@@ -216,6 +407,7 @@ function timings(data, now = Date.now()) {
 }
 
 function describe(data, body, { now = Date.now(), relPath } = {}) {
+  const raw = statusRawOf(body);
   return {
     path: relPath,
     session: data.session || null,
@@ -225,39 +417,48 @@ function describe(data, body, { now = Date.now(), relPath } = {}) {
     done: data.done || null,
     ...timings(data, now),
     title: titleOf(body),
-    status: statusOf(body),
+    // `status` is the canonical five-value lifecycle word when the header
+    // matches one, otherwise the header verbatim; `statusRaw` is ALWAYS the
+    // header verbatim. The pair exists because the canonical form is what a
+    // caller branches on (`status === 'done'`) and a raw 'Complete (2026-01-01)'
+    // would silently never equal it.
+    status: planStatus(raw) ?? raw,
+    statusRaw: raw,
   };
 }
 
 /** One plan's frontmatter + header fields. Missing file → null, so a caller
  *  can tell "no such plan" from "a plan with no status". */
-function readPlan(agent, relPath, { archive = false } = {}) {
-  const abs = planPath(agent, relPath, { archive });
+function readPlan(agent, relPath, { archive = false, project } = {}) {
+  const abs = planPath(agent, relPath, { archive, project });
   if (!fs.existsSync(abs)) return null;
   const { data, body } = parseFrontmatter(fs.readFileSync(abs, 'utf8'));
   // The body travels WITH the row. `describe` derives from it (title, status)
   // and threw it away, which left no way to read a plan's text through this
   // service at all — so a caller holding a plan name had to go back to
   // `exec cat`, i.e. the facility could create a plan and never read one back.
-  return { abs, body, ...describe(data, body, { relPath: planRel(agent, abs, { archive }) }) };
+  return { abs, body, ...describe(data, body, { relPath: planRel(agent, abs, { archive, project }) }) };
 }
 
 /**
- * Every `*.md` in `plans/`, newest first by last activity (then created, then
- * name, so the order is total and stable). The `## Done` section of this repo's
- * own queue and the `done:` field agree: a plan with `done:` is finished.
+ * Every `*.md` in the plans folder, newest first by last activity (then created,
+ * then name, so the order is total and stable). The `## Done` section of this
+ * repo's own queue and the `done:` field agree: a plan with `done:` is finished.
  */
-function listPlans(agent, { archive = false, now = Date.now() } = {}) {
-  const dir = plansDir(agent, { archive });
+function listPlans(agent, { archive = false, now = Date.now(), project } = {}) {
+  const dir = plansDir(agent, { archive, project });
   if (!fs.existsSync(dir)) return [];
   const rows = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    // `isFile()` is FALSE for a symlinked entry, so a symlink inside the folder
+    // is skipped here too — following it would serve a file from outside under
+    // a plan's name.
     if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
-    // The harness README lives here too, and it is instructions rather than a
-    // piece of work. Listing it would put a row with no `created` and no
-    // `## Status:` in the middle of the working set, which reads as a plan
-    // nobody wrote.
-    if (entry.name.toLowerCase() === 'readme.md') continue;
+    // The folder's own entry files (README/INDEX/QUEUE) are instructions rather
+    // than a piece of work. Listing them would put a row with no `created` and
+    // no `## Status:` in the middle of the working set, which reads as a plan
+    // nobody wrote. They are refusable as paths too, so this is one rule.
+    if (RESERVED_PLAN_NAMES.has(entry.name.toLowerCase())) continue;
     const abs = path.join(dir, entry.name);
     let parsed;
     try {
@@ -269,7 +470,7 @@ function listPlans(agent, { archive = false, now = Date.now() } = {}) {
         path: entry.name,
         session: null, created: null, started: null, last_activity: null, done: null,
         ageMs: null, idleMs: null, elapsedMs: null,
-        title: null, status: null,
+        title: null, status: null, statusRaw: null,
         unreadable: e.message,
         bytes: fs.statSync(abs).size,
       });
@@ -305,69 +506,143 @@ function listPlans(agent, { archive = false, now = Date.now() } = {}) {
  */
 
 /**
- * The harness prompt (the user's requirement, plan 64 §1): the agent works these
- * plans, so the folder has to explain itself to a reader that has never seen it.
- * Written ONCE, on the first plan, and never overwritten — instructions that
- * change under a caller who is mid-work are worse than no instructions at all.
- * Created through the workspace service, like the plan file itself, so the
- * harness prompt obeys the same gate as the thing it describes.
+ * The folder's own entry file (plan 82: `INDEX.md`). The agent works these
+ * plans, so the folder has to explain itself to a reader that has never seen
+ * it: where it is, what a plan is, and the five lifecycle states a `## Status:`
+ * header can hold. Written ONCE, on the first plan, and never overwritten —
+ * instructions that change under a caller who is mid-work are worse than no
+ * instructions at all. Created through the workspace service, like the plan
+ * file itself, so it obeys the same gate as the thing it describes.
  */
-// A markdown code span. Named once so the harness prompt below can be written as
+// A markdown code span. Named once so the entry body below can be written as
 // ordinary single-quoted strings and still contain backticks.
 const BT = String.fromCharCode(96);
 
-const README_BODY = [
-  '# Plans',
-  '',
-  'One markdown file per piece of work. This folder is the durable record; a',
-  'conversation is not — a session ends, a plan does not.',
-  '',
-  '## Writing one',
-  '',
-  'Use ' + BT + 'plan_write {agent, path, content, session?}' + BT + ':',
-  '',
-  'The folder is created on the first plan, and only then.',
-  '',
-  '- ' + BT + 'path' + BT + ' is a file name relative to this folder, e.g. ' + BT + '64-plans-facility.md' + BT + '. A',
-  '  number prefix keeps the folder readable in order; it is not enforced.',
-  '- ' + BT + 'content' + BT + ' is the body. Frontmatter is managed for you: ' + BT + 'created' + BT + ' is stamped on',
-  '  the first write and never moves, ' + BT + 'last_activity' + BT + ' moves on every write, and ' + BT + 'session' + BT + ' / ' + BT + 'started' + BT + ' are',
-  '  stamped when you pass a session id.',
-  '- ' + BT + 'session' + BT + ' is the agent\'s own conversation id, so the plan can be joined to that',
-  '  conversation later with ' + BT + 'plan_activity {agent, session_id}' + BT + '.',
-  '',
-  '## Keeping one honest',
-  '',
-  '- The body carries a ' + BT + '## Status:' + BT + ' line using this repo\'s vocabulary: ' + BT + 'Complete' + BT + ', ' + BT + 'In progress' + BT + ', ' + BT + 'Proposed' + BT + ', ' + BT + 'Blocked' + BT + ', ' + BT + 'Draft' + BT + '.',
-  '- Update the plan when the work moves, not at the end. A plan written once and',
-  '  never touched is a note.',
-  '- One plan is one piece of work. If it needs an "and also", it is two plans.',
-  '',
-  '## Ending one',
-  '',
-  'Rewrite it with its final state, then move the file into ' + BT + 'archive/' + BT + '. Read the',
-  'ended ones with ' + BT + 'plan_list {agent, archive: true}' + BT + '; an archive that still turns up in',
-  'the working list is a plan nobody closed.',
-  '',
-].join('\n');
+/** The `INDEX.md` body for one folder. Interpolated because requirement 1 of the
+ *  entry file is "who we are" — a folder has to name the project and PAD it
+ *  belongs to, or the LLM reading it cannot tell whose plans these are. */
+function indexBody(agent, project) {
+  const where = project
+    ? [
+        '- Project: ' + (project.name || '(unnamed)'),
+        '- PAD: ' + agent.name + ' (' + (agent.agent_type || 'agent') + ')',
+        '- Project folder: ' + (project.folder || '(unknown)'),
+        '- Plans folder: ' + (project.folder || '') + '/' + normalizePlansFolderShorthand(project.plans_folder),
+      ]
+    : [
+        '- PAD: ' + agent.name + ' (' + (agent.agent_type || 'agent') + ')',
+        '- This is the PAD-wide plans folder, not tied to one Mission project.',
+      ];
+  return [
+    '# Plans',
+    '',
+    'One markdown file per piece of work. This folder is the durable record; a',
+    'conversation is not — a session ends, a plan does not.',
+    '',
+    '## Who we are',
+    '',
+    ...where,
+    '',
+    '## Writing one',
+    '',
+    'Use ' + BT + 'plan_write {agent, project_id, path, content, session?}' + BT + ':',
+    '',
+    'The folder is created on the first plan, and only then.',
+    '',
+    '- ' + BT + 'path' + BT + ' is a file name relative to this folder, e.g. ' + BT + '64-plans-facility.md' + BT + '. A',
+    '  number prefix keeps the folder readable in order; it is not enforced.',
+    '- ' + BT + 'content' + BT + ' is the body. Frontmatter is managed for you: ' + BT + 'created' + BT + ' is stamped on',
+    '  the first write and never moves, ' + BT + 'last_activity' + BT + ' moves on every write, and ' + BT + 'session' + BT + ' / ' + BT + 'started' + BT + ' are',
+    '  stamped when you pass a session id.',
+    '- ' + BT + 'session' + BT + ' is the agent\'s own conversation id, so the plan can be joined to that',
+    '  conversation later with ' + BT + 'plan_activity {agent, session_id}' + BT + '.',
+    '',
+    '## Statuses',
+    '',
+    'The body\'s ' + BT + '## Status:' + BT + ' line carries one of five lifecycle states, and they are',
+    'the only five:',
+    '',
+    '- ' + BT + 'new' + BT + ' — recently added; pick it up in queue order.',
+    '- ' + BT + 'in progress' + BT + ' — being worked; keep going.',
+    '- ' + BT + 'blocked' + BT + ' — needs intervention. **STOP**: do not proceed to the next',
+    '  queue item.',
+    '- ' + BT + 'need clarification' + BT + ' — a question must be asked or sorted. Surface it',
+    '  and wait.',
+    '- ' + BT + 'done' + BT + ' — the task is done; move it to review/next.',
+    '',
+    'Update the status when the work moves, not at the end. A plan written once and',
+    'never touched is a note. ' + BT + 'blocked' + BT + ' and ' + BT + 'need clarification' + BT + ' are stop states — record the',
+    'reason and stop.',
+    '',
+    '## The queue',
+    '',
+    'Execution order, parser format and the runner\'s instructions live in',
+    BT + 'QUEUE.md' + BT + ' in this folder when it exists. A plan that is ' + BT + 'blocked' + BT + ' or needs',
+    'clarification must be reflected there as ' + BT + 'need input' + BT + ' with its reason. Do not keep',
+    'a second queue here.',
+    '',
+    '## Ending one',
+    '',
+    'Rewrite it with its final state, then move the file into ' + BT + 'archive/' + BT + '. Read the',
+    'ended ones with ' + BT + 'plan_list {agent, project_id, archive: true}' + BT + '; an archive that still',
+    'turns up in the working list is a plan nobody closed.',
+    '',
+  ].join('\n');
+}
 
-async function ensureReadme(agent, base) {
-  const abs = path.join(base, 'README.md');
+async function ensureIndex(agent, base, project) {
+  const abs = path.join(base, 'INDEX.md');
   if (fs.existsSync(abs)) return;
-  const rel = path.relative(hostBrowseRootFor(agent), abs).split(path.sep).join('/');
-  await workspace.writeFile(agent.name, rel, README_BODY, 'host');
+  const text = indexBody(agent, project);
+  if (project) {
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, text, 'utf8');
+    ensureOwned(abs);
+  } else {
+    const rel = path.relative(hostBrowseRootFor(agent), abs).split(path.sep).join('/');
+    await workspace.createDirectories(agent.name, path.posix.dirname(rel), 'host');
+    await workspace.writeFile(agent.name, rel, text, 'host');
+  }
 }
 
 /**
- * Write a plan. The file is produced BY the workspace service, not by a private
- * `fs.writeFileSync` here — one gate, one reason, one place (plan 64 3a/3d).
- * A direct write here would be a writer that never asks whether the pad's
- * workspace may be browsed, so `plan_write` would put a file on a pad the user
- * had refused, while `workspace_write` on the same pad says no. The mkdir goes
- * through the same service for the same reason: creating `plans/` IS a write.
+ * Initialize one project's plans folder and its `INDEX.md`, at CREATE time (plan
+ * 82 Phase 5) — the same write-once entry file `writePlan` would create lazily,
+ * now awaited by the creation flow so the folder exists the moment a project
+ * does. Both the REST route and the MCP `mission_project_create` call THIS, so
+ * the two surfaces cannot drift into two different entry files.
+ *
+ * Idempotent and non-destructive: an existing `INDEX.md` is left exactly as it
+ * is (instructions that change under a mid-work caller are worse than none), and
+ * a project whose plans folder already exists is untouched. Returns what it did
+ * so the caller can REPORT the outcome rather than swallow it — a create must
+ * not fail just because the workspace happened to be unwritable, but it must not
+ * pretend the initialization happened either.
  */
-async function writePlan(agent, relPath, body, { session, now = Date.now() } = {}) {
-  const abs = planPath(agent, relPath);
+async function initProjectPlans(agentName, project) {
+  const agent = requireAgent(agentName);
+  if (!project) return { created: false, dir: null, reason: 'no-project' };
+  const base = plansDir(agent, { project });
+  const abs = path.join(base, 'INDEX.md');
+  const existed = fs.existsSync(abs);
+  await ensureIndex(agent, base, project);
+  return { created: !existed, dir: base, indexPath: abs };
+}
+
+/**
+ * Write a plan. For pad-root scope (no project), the file is produced BY the
+ * workspace service — one gate, one reason, one place (plan 64 3a/3d).
+ * A direct write there would be a writer that never asks whether the pad's
+ * workspace may be browsed, so `plan_write` would put a file on a pad the user
+ * had refused, while `workspace_write` on the same pad says no.
+ *
+ * For project scope, `projectPlansRoot` has ALREADY resolved the absolute path
+ * and verified the webui has an rw bind mount covering it. The project folder
+ * IS the scope, so we write directly at the resolved path; the resolver is the
+ * gate. The mkdir goes through the same absolute write for the same reason.
+ */
+async function writePlan(agent, relPath, body, { session, now = Date.now(), project } = {}) {
+  const abs = planPath(agent, relPath, { project });
   // MILLISECOND resolution, deliberately. Truncating to whole seconds made
   // `last_activity` unchanged by two writes inside the same second — which is a
   // normal thing for an agent to do while editing one plan — and that field is
@@ -385,12 +660,19 @@ async function writePlan(agent, relPath, body, { session, now = Date.now() } = {
     data.started = existing.started || stamp;
   }
   const text = renderFrontmatter(data) + body;
-  const base = hostBrowseRootFor(agent);
-  const relToBrowseRoot = path.relative(base, abs).split(path.sep).join('/');
-  await workspace.createDirectories(agent.name, path.posix.dirname(relToBrowseRoot), 'host');
-  await ensureReadme(agent, plansDir(agent));
-  await workspace.writeFile(agent.name, relToBrowseRoot, text, 'host');
-  return { abs, ...describe(data, body, { now, relPath: planRel(agent, abs) }) };
+  if (project) {
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, text, 'utf8');
+    ensureOwned(abs);
+    await ensureIndex(agent, plansDir(agent, { project }), project);
+  } else {
+    const base = hostBrowseRootFor(agent);
+    const relToBrowseRoot = path.relative(base, abs).split(path.sep).join('/');
+    await workspace.createDirectories(agent.name, path.posix.dirname(relToBrowseRoot), 'host');
+    await ensureIndex(agent, plansDir(agent, { project }), project);
+    await workspace.writeFile(agent.name, relToBrowseRoot, text, 'host');
+  }
+  return { abs, ...describe(data, body, { now, relPath: planRel(agent, abs, { project }) }) };
 }
 
 /**
@@ -494,14 +776,18 @@ module.exports = {
   PlansError,
   PLANS_DIR,
   ARCHIVE_DIR,
+  RESERVED_PLAN_NAMES,
   plansRoot,
   plansDir,
   planPath,
   planRel,
+  projectPlansRoot,
   parseFrontmatter,
   renderFrontmatter,
   stripFrontmatter,
+  planStatus,
   statusOf,
+  statusRawOf,
   titleOf,
   timings,
   describe,
@@ -510,5 +796,6 @@ module.exports = {
   withSessionState,
   scopeByProjectFolder,
   writePlan,
+  initProjectPlans,
   requireAgent,
 };

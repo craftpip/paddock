@@ -739,6 +739,49 @@ function missionSelectProjects(projects, { projectId = '', name = '', folder = '
   );
 }
 
+/** Resolve the plans FOLDER a `plan_list` / `plan_write` call targets (plan 82).
+ *
+ *  Two modes, and what the caller passes chooses which:
+ *
+ *   - PROJECT mode (`project_id` or `folder` present): the plans folder is
+ *     `<project.folder>/<project.plans_folder>`, inside one Mission project's
+ *     own directory. Resolution goes through what the KEY may see, then the
+ *     project's PAD is authorized — resolve-then-gate, like every mission tool,
+ *     so a target-restricted key is never gated on a name it did not name.
+ *   - LEGACY mode (`agent` alone): the PAD-root `plans/`, unchanged.
+ *
+ *  A supplied `agent` alongside a project must AGREE with the project's pad.
+ *  Picking one of the two silently is the failure this exists to prevent: the
+ *  caller named two pads' worth of context and one of them is wrong.
+ *
+ *  An explicit bad/ambiguous project NEVER falls back to legacy `plans/` —
+ *  `missionSelectProjects` throws with the candidates, and that is the answer. */
+async function resolvePlansScope(user, tool, { agent, project_id, folder } = {}) {
+  const wantId = String(project_id || '').trim();
+  const wantFolder = String(folder || '').trim();
+  if (!wantId && !wantFolder) {
+    if (!agent) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        'plan_scope_required: pass `agent` for the PAD-wide plans folder, or `project_id`/`folder` for one Mission project\'s plans folder.'
+      );
+    }
+    const pad = await requirePad(tool, agent);
+    return { padName: pad.name, project: null };
+  }
+  const visible = missionCallSync(() => mission.listProjects({ agents: missionVisibleAgents(user) }));
+  const [project] = missionSelectProjects(visible, { projectId: wantId, folder: wantFolder });
+  const padName = project.agent_name;
+  if (agent && agent !== padName) {
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      `plan_agent_mismatch: project ${project.id} (${project.name}) is on ${padName}, not ${agent} — pass its own PAD or drop \`agent\`.`
+    );
+  }
+  requireTool(user, tool, padName);
+  return { padName, project };
+}
+
 /** WHO is acting, in the one spelling the audit log stores: `key:<id>` for an MCP
  *  key, `user:<id>` for the web UI, `system` when there is no caller to name.
  *  This is deliberately the SAME convention as a session's `created_by` and a
@@ -870,6 +913,7 @@ function missionProjectRow(p, { includeSessions = false } = {}) {
     agent_type: p.agent_type,
     ...(agent && agent.status ? { agentStatus: agent.status } : {}),
     folder: p.folder,
+    plans_folder: p.plans_folder || 'plans',
     sessionCount: p.sessionCount,
     liveCount: p.liveCount,
     ...(p.openCount === undefined ? {} : { openCount: p.openCount }),
@@ -2285,14 +2329,15 @@ function registerTools(server) {
     'mission_project_create',
     {
       title: 'Create a Mission project',
-      description: "Create a Mission project — a (PAD, folder) pair — on a coding agent your key owns, the LLM-side twin of the page's \"+ New project\" dialog. Row only: no container, no tmux session, no shell. A folder you pass must be an absolute path that exists INSIDE the PAD (it is probed there, and refused otherwise); omit it to use that agent type's default workspace. The project appears in the Mission page's first column immediately. Not for openclaw / picoclaw / hermes — they do not support Mission.",
+      description: "Create a Mission project — a (PAD, folder) pair — on a coding agent your key owns, the LLM-side twin of the page's \"+ New project\" dialog. Row only: no container, no tmux session, no shell. A folder you pass must be an absolute path that exists INSIDE the PAD (it is probed there, and refused otherwise); omit it to use that agent type's default workspace. `plans_folder` is a relative name INSIDE the project's folder (default `plans/`) where this project's plans live — each project gets its own, so two projects on one PAD never share a plans folder. Creating a project also writes its `INDEX.md` entry file. The project appears in the Mission page's first column immediately. Not for openclaw / picoclaw / hermes — they do not support Mission.",
       inputSchema: {
         name: z.string().describe('Project name (shown in the Mission page)'),
         agent: z.string().describe('PAD name — must be an opencode, codex or claude agent you own'),
         folder: z.string().optional().describe('Absolute container path (default: that agent type\'s workspace dir)'),
+        plans_folder: z.string().optional().describe("Relative folder for this project's plans, INSIDE the project folder (default `plans`). No absolute or `..` paths."),
       },
     },
-    async ({ name, agent, folder }) => {
+    async ({ name, agent, folder, plans_folder }) => {
       const user = currentUser();
       // Gate BEFORE the probe: the probe is a container command on that PAD.
       requireTool(user, 'mission_project_create', agent);
@@ -2317,9 +2362,20 @@ function registerTools(server) {
       }
 
       const project = missionCallSync(() =>
-        mission.createProject({ name, agent, folder: dir, createdBy: (user && user.userId) || null })
+        mission.createProject({ name, agent, folder: dir, plansFolder: plans_folder, createdBy: (user && user.userId) || null })
       );
-      return textResult({ project: missionProjectRow({ ...project, sessions: [], sessionCount: 0, liveCount: 0 }) });    }
+      // Initialize the project's plans folder + INDEX.md (plan 82 Phase 5), the
+      // same call the REST route makes. A failure is REPORTED, not thrown: the
+      // row is saved and the folder is re-created lazily on the first plan_write.
+      let plansInit = null;
+      try {
+        plansInit = await plans.initProjectPlans(project.agent_name, project);
+      } catch (e) {
+        plansInit = { created: false, error: e.code || e.message || String(e) };
+      }
+      const row = missionProjectRow({ ...project, sessions: [], sessionCount: 0, liveCount: 0 });
+      return textResult({ project: { ...row, plans_folder: project.plans_folder || 'plans' }, plansInit });
+    }
   );
 
   registerToolBound(
@@ -2547,54 +2603,48 @@ function registerTools(server) {
   registerToolBound(
     'plan_list',
     {
-      title: 'List the plans in a PAD workspace',
-      description: "The plan files in one PAD's workspace, newest activity first. A plan is a markdown file under `plans/` carrying machine-managed frontmatter (`session`, `created`, `started`, `last_activity`, `done`) and the `## Status:` header this project already uses — so a plan is the durable record of a piece of work and stays readable with `exec cat` when this tool is not available. Each row carries `status` (the `## Status:` line), `session` (the agent conversation it is bound to — pass it to `plan_activity`), and the DERIVED `ageMs` / `idleMs` / `elapsedMs`, so \"is this stale?\" is one field instead of date arithmetic. A plan with no session has never been worked in; one with `done` is finished. A bound plan also carries `sessionProject` ({id, name, folder}) — that project is what a Mission project's progress is made of, and `folder` narrows the listing to one project for you. A bound plan also carries the state of its conversation: `sessionTracked` (is this conversation one the Mission page knows at all — `false` means it was started outside the page, NOT that it is dead) and then `sessionLive` / `sessionOpen` / `sessionBusy` / `sessionBusyKnown`, taken from the Mission service rather than re-probed here. Archived (finished) plans live in `plans/archive` and are listed with `archive: true`.",
+      title: 'List the plans in a PAD or Mission project',
+      description: "The plan files for one scope, newest activity first. A plan is a markdown file carrying machine-managed frontmatter (`session`, `created`, `started`, `last_activity`, `done`) and a `## Status:` header — the durable record of a piece of work, readable with `exec cat` when this tool is not there.\n\n**Scope is chosen by what you pass.** With `project_id` or `folder`, the plans live at `<project.folder>/<plans_folder>` INSIDE that Mission project's own directory (the project's `plans_folder`, default `plans`); only opencode/codex/claude have projects. With `agent` alone, you get that PAD's PAD-wide `plans/` folder (legacy mode). An explicit `project_id`/`folder` that matches nothing or several is REFUSED with candidates — it never falls back to the PAD folder. A `path` may be combined with a project scope to read ONE file inside it.\n\nEach row carries `status` (the canonical lifecycle value — `new`, `in progress`, `blocked`, `need clarification`, `done` — or the header verbatim when it matches none; `statusRaw` always keeps the header text) and `session` (the agent conversation it is bound to — pass it to `plan_activity`), plus DERIVED `ageMs` / `idleMs` / `elapsedMs`. `blocked` and `need clarification` are STOP states. A bound plan also carries `sessionTracked` / `sessionLive` / `sessionOpen` / `sessionBusy` / `sessionBusyKnown`. Archived (finished) plans live in `archive/` and are listed with `archive: true`.",
       inputSchema: {
-        agent: z.string().describe('PAD name — required: the plans folder is per-PAD'),
-        path: z.string().optional().describe('Narrow to ONE plan FILE, e.g. "64-plans-facility.md", and get its body. Omit for the whole folder (a folder listing is archive: true, not a path).'),
-        archive: z.boolean().optional().describe('List plans/archive (finished plans) instead of plans/ (default false)'),
-        folder: z.string().optional().describe("Only plans being worked in the Mission project at this folder (a project's folder from mission_projects). Plans FILES live in the pad workspace, so a plan is matched through the project of the conversation it is bound to; a plan whose session the page does not know cannot be attributed, and those are reported as sessionUnattributed rather than quietly dropped. Cannot be combined with `path` — that reads one file, this scopes the list."),
+        agent: z.string().optional().describe('PAD name. Required for the PAD-wide folder; when a project is given it must match that project\'s PAD.'),
+        project_id: z.string().optional().describe("A Mission project id (from mission_projects); its plans folder is <project.folder>/<plans_folder>. Refused if it matches nothing, or nothing your key can see."),
+        folder: z.string().optional().describe("Select a Mission project by its folder (e.g. \"/www2/paddock\"). A folder matching zero or several projects is refused with the candidates — never silently interpreted as the PAD folder."),
+        path: z.string().optional().describe('Read ONE plan FILE inside the scope, e.g. "64-plans-facility.md", and get its body. Omit to LIST the whole folder.'),
+        archive: z.boolean().optional().describe('List archive/ (finished plans) instead of the working folder (default false)'),
       },
     },
-    async ({ agent, path: relPath, archive, folder }) => {
-      const pad = await requirePad('plan_list', agent);
+    async ({ agent, project_id, folder, path: relPath, archive }) => {
+      const scope = await resolvePlansScope(currentUser(), 'plan_list', { agent, project_id, folder });
       return plansCall(async () => {
-        const row = plans.requireAgent(pad.name);
-        const dir = plans.plansDir(row, { archive: !!archive });
-        // `path` and `folder` are two DIFFERENT questions — one file, versus the
-        // set belonging to a project — and the one-file branch returns before the
-        // scope is applied. Answering with the file anyway would make a filter
-        // that looks like it ran and did not, which is indistinguishable from a
-        // match. Refuse, and say which call answers the conjunction.
-        if (relPath && folder) {
-          throw new plans.PlansError(
-            'plan_path_and_folder',
-            '`path` reads ONE plan file and `folder` scopes the LIST to a Mission project — they are two different questions. Call plan_list {agent, folder} to see the project\'s plans, then read the one you want with {agent, path}.'
-          );
-        }
+        const row = plans.requireAgent(scope.padName);
+        const project = scope.project;
+        const dir = plans.plansDir(row, { archive: !!archive, project });
+        const scopeFields = project
+          ? { project_id: project.id, project: project.name, folder: project.folder, plans_folder: project.plans_folder || 'plans' }
+          : {};
         // ONE plan named → that plan, with its body. The listing is metadata, and
         // a caller holding a file name wants the file; answering with a one-row
         // list of titles and no way to get the text would send them to
         // `exec cat`, which is the thing this facility exists to replace.
         if (relPath) {
-          const one = plans.readPlan(row, relPath, { archive: !!archive });
+          const one = plans.readPlan(row, relPath, { archive: !!archive, project });
           if (!one) {
             return textResult({
-              agent: pad.name, archive: !!archive, path: relPath, found: false, count: 0, plans: [],
+              agent: scope.padName, ...scopeFields, archive: !!archive, path: relPath, found: false, count: 0, plans: [],
               hint: 'No such plan in this folder. plan_list with no path lists what is there.',
             });
           }
           const [stamped] = await plans.withSessionState(row, [one]);
-          return textResult({ agent: pad.name, archive: !!archive, found: true, count: 1, plans: [stamped] });
+          return textResult({ agent: scope.padName, ...scopeFields, archive: !!archive, found: true, count: 1, plans: [stamped] });
         }
-        const stamped = await plans.withSessionState(row, plans.listPlans(row, { archive: !!archive }));
-        // Scoped AFTER the stamp: attribution comes from the session's project, so
-        // filtering first would compare a folder against a field nothing has set.
-        const { rows: listed, unattributed } = plans.scopeByProjectFolder(stamped, folder);
+        // In PROJECT mode the directory IS the scope: every file in it belongs to
+        // that project, so there is nothing to attribute or drop. The session
+        // stamp is still applied (it answers "who is working this"), it just no
+        // longer decides which directory a plan is in.
+        const stamped = await plans.withSessionState(row, plans.listPlans(row, { archive: !!archive, project }));
         return textResult({
-          agent: pad.name, archive: !!archive, plansFolder: dir,
-          ...(folder ? { folder, sessionUnattributed: unattributed } : {}),
-          count: listed.length, plans: listed,
+          agent: scope.padName, ...scopeFields, archive: !!archive, plansFolder: dir,
+          count: stamped.length, plans: stamped,
         });
       });
     }
@@ -2603,31 +2653,38 @@ function registerTools(server) {
   registerToolBound(
     'plan_write',
     {
-      title: 'Create or update a plan in a PAD workspace',
-      description: "Write a plan file into one PAD's workspace `plans/` folder, creating the folder on first use. The BODY is yours — this never rewrites your prose — but the frontmatter is machine-managed: `created` is stamped once and never moved, `last_activity` is bumped on every write (that is what makes `plan_list` able to answer \"what is being worked on right now\"), and `started` is stamped the first time you bind a `session`. Pass `session` (the agent's own conversation id — `ses_…` for opencode, the rollout uuid for codex, the `projects/*.jsonl` filename for claude) to bind the plan to a conversation; it is the same id you would resume with, and `plan_activity` takes it. Ending a plan is a human decision: move the file to `plans/archive/`, do not just stop writing to it.",
+      title: 'Create or update a plan in a PAD or Mission project',
+      description: "Write a plan file into one scope, creating the folder on first use. With `project_id` or `folder` the file lands at `<project.folder>/<plans_folder>` inside that Mission project's directory; with `agent` alone it goes to the PAD-wide `plans/` folder (legacy mode). An explicit project that matches nothing or several is refused with candidates — never a fallback.\n\nThe BODY is yours — this never rewrites your prose — but the frontmatter is machine-managed: `created` is stamped once and never moves, `last_activity` is bumped on every write (that is what makes `plan_list` able to answer \"what is being worked on right now\"), and `started` is stamped the first time you bind a `session`. Pass `session` (the agent's own conversation id — `ses_…` for opencode, the rollout uuid for codex, the `projects/*.jsonl` filename for claude) to bind the plan to a conversation; it is the same id you would resume with, and `plan_activity` takes it. The names `INDEX.md`, `README.md` and `QUEUE.md` are reserved for the folder's own entry files and refused as `path`. Ending a plan is a human decision: move the file to `archive/`, do not just stop writing to it.",
       inputSchema: {
-        agent: z.string().describe('PAD name — required: the plans folder is per-PAD'),
-        path: z.string().describe('Plan file name relative to plans/, e.g. "64-plans-facility.md"'),
+        agent: z.string().optional().describe('PAD name. Required for the PAD-wide folder; when a project is given it must match that project\'s PAD.'),
+        project_id: z.string().optional().describe("A Mission project id; write into <project.folder>/<plans_folder>. Refused if it matches nothing, or nothing your key can see."),
+        folder: z.string().optional().describe("Select a Mission project by its folder. A folder matching zero or several projects is refused with the candidates — never the PAD folder."),
+        path: z.string().describe('Plan file name relative to the plans folder, e.g. "64-plans-facility.md"'),
         content: z.string().describe('Full markdown body of the plan, WITHOUT frontmatter (it is managed for you)'),
         session: z.string().optional().describe('Agent conversation id this plan is worked in'),
       },
     },
-    async ({ agent, path: relPath, content, session }) => {
-      const pad = await requirePad('plan_write', agent);
+    async ({ agent, project_id, folder, path: relPath, content, session }) => {
+      const scope = await resolvePlansScope(currentUser(), 'plan_write', { agent, project_id, folder });
       // The callback is async BECAUSE the write is: plan_write goes through the
       // workspace service, so a rejection arrives as a promise. A sync callback
       // here would return a Promise as the tool's RESULT — the caller would get
       // a half-written object instead of a refusal, which is the exact shape
       // of the 3a bug this facility was built on.
       return await plansCall(async () => {
-        const row = plans.requireAgent(pad.name);
+        const row = plans.requireAgent(scope.padName);
+        const project = scope.project;
         const body = String(content == null ? '' : content);
         // A caller that pastes the file it just read back must not end up with
         // two frontmatter blocks, so the old one is stripped before the new
         // stamps go on. The body the caller sent wins either way.
         const clean = plans.stripFrontmatter(body);
-        const written = await plans.writePlan(row, relPath, clean.startsWith('\n') ? clean.slice(1) : clean, { session: session || null });
-        return textResult({ agent: pad.name, path: written.path, ...written });
+        const written = await plans.writePlan(row, relPath, clean.startsWith('\n') ? clean.slice(1) : clean, { session: session || null, project });
+        return textResult({
+          agent: scope.padName, path: written.path,
+          ...(project ? { project_id: project.id, project: project.name, folder: project.folder, plans_folder: project.plans_folder || 'plans' } : {}),
+          ...written,
+        });
       });
     }
   );

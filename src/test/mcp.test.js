@@ -162,6 +162,7 @@ describe('MCP Server - Handshake', () => {
     assert.ok(create.name, 'mission_project_create has name');
     assert.ok(create.agent, 'mission_project_create has agent');
     assert.ok(create.folder, 'mission_project_create has folder');
+    assert.ok(create.plans_folder, 'mission_project_create has plans_folder (per-project plans dir, plan 82)');
     const start = props('mission_session_start');
     assert.ok(start.project_id, 'mission_session_start has project_id');
     assert.ok(start.agent_session_id, 'mission_session_start has agent_session_id');
@@ -1818,7 +1819,11 @@ describe('MCP secret hygiene (plan 60)', () => {
     for (const t of ['plan_list', 'plan_write', 'plan_activity']) {
       assert.ok(g.includes(t), 'the section names ' + t);
     }
-    assert.match(g, /REQUIRED on\s*\n?\s*every plan tool|is REQUIRED on/, "it says agent is required on every plan tool");
+    assert.match(g, /REFUSED with the candidates|refused with the candidates/i,
+      "it says an unmatched project scope refuses with candidates, not a fallback");
+    assert.match(g, /new\b[\s\S]{0,40}?in\s+progress[\s\S]{0,40}?blocked[\s\S]{0,40}?need\s+clarification[\s\S]{0,40}?done/,
+      "it lists the five statuses");
+    assert.match(g, /STOP states/i, "it marks blocked / need clarification as stop states");
     assert.match(g, /stopped\*{0,2} pad still answers/i, "it says a stopped pad still answers");
     assert.match(g, /prose is not pattern-matched/i, "it states the redaction boundary instead of implying a scrub that does not happen");
     assert.match(g, /liveness, not progress/i, "it separates the liveness counts from progress");

@@ -74,6 +74,29 @@ function normalizeFolder(folder) {
   return f;
 }
 
+/** The project's own plans directory, RELATIVE to its folder (plan 82). Unlike
+ *  the folder it must NOT be absolute: it is the agent's working subfolder, so
+ *  an absolute value or a `..` escape would point plans somewhere outside the
+ *  project — the one thing the resolution code treats as a refusal. An empty
+ *  value means "the default", never an error: every project in the database
+ *  predates the choice, and the documented default IS what they all use. */
+function normalizePlansFolder(plansFolder) {
+  let p = String(plansFolder ?? '').trim();
+  if (!p) return 'plans';
+  if (p.length > 1) p = p.replace(/\/+$/, '');
+  if (path.isAbsolute(p)) {
+    throw new MissionError('mission_bad_plans_folder', 'The plans folder must be relative to the project folder');
+  }
+  if (p.split('/').some((s) => s === '.' || s === '..')) {
+    throw new MissionError('mission_bad_plans_folder', '". " and ".." are not allowed in the plans folder');
+  }
+  if (p.includes('\n') || p.includes('\0')) {
+    throw new MissionError('mission_bad_plans_folder', 'The plans folder contains illegal characters');
+  }
+  if (p.length > 120) throw new MissionError('mission_bad_plans_folder', 'The plans folder is too long');
+  return p;
+}
+
 function agentRow(agentName) {
   const row = getDb().prepare('SELECT name, agent_type, status, owner_id FROM agents WHERE name = ?').get(agentName);
   if (!row) throw new MissionError('mission_agent_not_found', `No agent named ${agentName}`, 404);
@@ -85,7 +108,7 @@ function agentRow(agentName) {
 /** Create a project. A project IS an (agent, folder) pair; many projects per
  *  agent is the normal case, so there is no uniqueness constraint — the caller
  *  may warn about an exact duplicate, we never block it. */
-function createProject({ name, agent, folder, createdBy = null, defaultFolder = '' }) {
+function createProject({ name, agent, folder, plansFolder, createdBy = null, defaultFolder = '' }) {
   const projectName = String(name || '').trim();
   if (!projectName) throw new MissionError('mission_bad_name', 'A project needs a name');
   if (projectName.length > 120) throw new MissionError('mission_bad_name', 'Project name is too long');
@@ -95,15 +118,16 @@ function createProject({ name, agent, folder, createdBy = null, defaultFolder = 
   const driver = assertMissionAgent(row.agent_type);
 
   const dir = normalizeFolder(folder || defaultFolder || driver.workspaceDir || '');
+  const plansDir = normalizePlansFolder(plansFolder);
 
   const id = newId('prj');
   const now = new Date().toISOString();
   getDb()
     .prepare(
-      `INSERT INTO mission_projects (id, name, agent_name, agent_type, folder, created_by, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO mission_projects (id, name, agent_name, agent_type, folder, plans_folder, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(id, projectName, row.name, row.agent_type, dir, createdBy, now, now);
+    .run(id, projectName, row.name, row.agent_type, dir, plansDir, createdBy, now, now);
   const project = getProject(id);
   audit(project, 'project_create', { actor: createdBy, details: dir });
   return project;
@@ -157,7 +181,7 @@ function withSessions(project, sessions, isLive) {
 /** Rename and/or repoint the folder. Repointing deliberately does NOT touch
  *  live sessions (open question 1) — it applies to sessions created after the
  *  change. */
-function updateProject(id, { name, folder } = {}) {
+function updateProject(id, { name, folder, plansFolder } = {}) {
   const project = getProject(id);
   const sets = [];
   const params = [];
@@ -170,6 +194,10 @@ function updateProject(id, { name, folder } = {}) {
   if (folder !== undefined) {
     sets.push('folder = ?');
     params.push(normalizeFolder(folder));
+  }
+  if (plansFolder !== undefined) {
+    sets.push('plans_folder = ?');
+    params.push(normalizePlansFolder(plansFolder));
   }
   if (!sets.length) return project;
   sets.push("updated_at = ?");
@@ -1663,6 +1691,7 @@ module.exports = {
   assertMissionAgent,
   newTmuxId,
   normalizeFolder,
+  normalizePlansFolder,
   createProject,
   getProject,
   listProjects,

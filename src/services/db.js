@@ -162,6 +162,7 @@ function migrate(db) {
       agent_name TEXT NOT NULL,
       agent_type TEXT NOT NULL,
       folder TEXT NOT NULL,
+      plans_folder TEXT NOT NULL DEFAULT 'plans',
       created_by TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -262,6 +263,16 @@ function migrate(db) {
   const sessionCols = db.prepare("PRAGMA table_info(mission_sessions)").all().map(c => c.name);
   if (!sessionCols.includes('created_by')) {
     db.exec("ALTER TABLE mission_sessions ADD COLUMN created_by TEXT");
+  }
+
+  // Plan 82: a project's plans live in its own `plans/<plans_folder>/` inside the
+  // project folder. Fresh DBs get it from the CREATE above; pre-existing ones
+  // need the ALTER, and their rows must NOT stay empty — every existing project
+  // is by definition one that never chose otherwise, so the documented default
+  // is the true answer for all of them (same reasoning as `enqueue`'s default).
+  const projectCols = db.prepare("PRAGMA table_info(mission_projects)").all().map(c => c.name);
+  if (!projectCols.includes('plans_folder')) {
+    db.exec("ALTER TABLE mission_projects ADD COLUMN plans_folder TEXT NOT NULL DEFAULT 'plans'");
   }
 
   // `last_seen_at` moved a long time and a caller could not tell what it meant:

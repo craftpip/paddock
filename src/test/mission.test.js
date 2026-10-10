@@ -56,7 +56,7 @@ describe('Mission - schema', () => {
     assert.ok(tables.includes('mission_projects'), 'mission_projects exists');
     assert.ok(tables.includes('mission_sessions'), 'mission_sessions exists');
     const pcols = db.prepare('PRAGMA table_info(mission_projects)').all().map((c) => c.name);
-    for (const c of ['id', 'name', 'agent_name', 'agent_type', 'folder', 'created_by', 'created_at', 'updated_at']) {
+    for (const c of ['id', 'name', 'agent_name', 'agent_type', 'folder', 'plans_folder', 'created_by', 'created_at', 'updated_at']) {
       assert.ok(pcols.includes(c), `mission_projects has ${c}`);
     }
     const scols = db.prepare('PRAGMA table_info(mission_sessions)').all().map((c) => c.name);
@@ -143,6 +143,38 @@ describe('Mission - projects', () => {
     const after = mission.updateProject(p.id, { name: 'after', folder: '/www2' });
     assert.equal(after.name, 'after');
     assert.equal(after.folder, '/www2');
+  });
+
+  it('defaults the plans folder to the documented value', () => {
+    const p = mission.createProject({ name: 'def-fold', agent: 'pad-msn-oc', folder: '/www1' });
+    assert.equal(p.plans_folder, 'plans');
+    // A pre-existing project (no plans_folder ever written) reads the same default.
+    const row = mission.getProject(p.id);
+    assert.equal(row.plans_folder, 'plans');
+  });
+
+  it('stores a custom plans folder as given and trims its trailing slash', () => {
+    const p = mission.createProject({ name: 'cust-fold', agent: 'pad-msn-oc', folder: '/www1', plansFolder: 'pplans/' });
+    assert.equal(p.plans_folder, 'pplans');
+  });
+
+  it('moves the plans folder via update', () => {
+    const p = mission.createProject({ name: 'move', agent: 'pad-msn-oc', folder: '/www1' });
+    const after = mission.updateProject(p.id, { plansFolder: 'pplans/queue' });
+    assert.equal(after.plans_folder, 'pplans/queue');
+    // An empty string means back to the default, never a cleared row.
+    const back = mission.updateProject(p.id, { plansFolder: '' });
+    assert.equal(back.plans_folder, 'plans');
+  });
+
+  it('refuses an absolute or traversing plans folder', () => {
+    for (const bad of ['/www1/plans', '../plans', './plans', 'a/../../plans']) {
+      assert.throws(
+        () => mission.createProject({ name: 'bad-fold', agent: 'pad-msn-oc', folder: '/www1', plansFolder: bad }),
+        (e) => e.code === 'mission_bad_plans_folder',
+        `rejects ${bad}`
+      );
+    }
   });
 
   it('cascades sessions away with the project', () => {

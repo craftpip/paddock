@@ -63,6 +63,10 @@ describe('Database - migrations onto a populated pre-67 database', () => {
     // 2. rewind it to before the ALTERs
     fs.copyFileSync(seedPath, oldPath);
     dropColumn(oldPath, 'mission_sessions', 'created_by');
+    // The project's plans-folder column (plan 82): the CREATE seeds it on fresh
+    // databases, so an existing table gets it from the ALTER alone — and its
+    // pre-existing project must read the documented default, not NULL.
+    dropColumn(oldPath, 'mission_projects', 'plans_folder');
     // Plan 62 1f: the probe/output split lives in two new columns, and a
     // pre-62 database has neither. `noteOutput`'s UPDATE would throw
     // SQLITE_MISMATCH on the very first capture — the same class of death as
@@ -107,6 +111,16 @@ describe('Database - migrations onto a populated pre-67 database', () => {
     const row = db.prepare("SELECT last_output_at, last_output_hash FROM mission_sessions WHERE id='msn_1'").get();
     assert.strictEqual(row.last_output_at, null, 'a session from before the migration claims no output');
     assert.strictEqual(row.last_output_hash, null, 'and no content to compare against');
+  });
+
+  it('adds plans_folder to a mission_projects table that predates it, with the documented default', () => {
+    // CREATE TABLE IF NOT EXISTS skipped the table, so the ALTER is the only
+    // thing that could have added the column. And the pre-existing project row
+    // must read 'plans' — the default is the TRUE answer for a project that
+    // never chose otherwise, and a NULL would break the resolution code.
+    assert.ok(cols('mission_projects').includes('plans_folder'), 'plans_folder was added by the migration');
+    const row = db.prepare("SELECT plans_folder FROM mission_projects WHERE id='prj_1'").get();
+    assert.strictEqual(row.plans_folder, 'plans', 'a pre-existing project keeps the documented default');
   });
 
   it('adds last_output_at to a tasks table that predates it', () => {
@@ -219,14 +233,17 @@ describe('Database - control: the task migrations are what add the columns', () 
     delete require.cache[dbModule()];
     const seed = require('../services/db').getDb();
     seed.prepare("INSERT INTO tasks (id, prompt, status) VALUES ('task_1','do the thing','pending')").run();
+    seed.prepare("INSERT INTO agents (id, name, runtime_ref) VALUES ('ag_1','pad-oc','container:pad-oc')").run();
+    seed.prepare("INSERT INTO mission_projects (id, name, agent_name, agent_type, folder) VALUES ('prj_1','paddock','pad-oc','opencode','/www2/paddock')").run();
     seed.close();
     fs.copyFileSync(cseed, cpath);
     for (const c of ['enqueue', 'timeout_ms', 'timed_out', 'attempt', 'superseded_by']) {
       dropColumn(cpath, 'tasks', c);
     }
+    dropColumn(cpath, 'mission_projects', 'plans_folder');
     const realExec = Database.prototype.exec;
     Database.prototype.exec = function patched(sql) {
-      if (/ALTER TABLE tasks ADD COLUMN/i.test(sql)) return this;
+      if (/ALTER TABLE (tasks|mission_projects) ADD COLUMN/i.test(sql)) return this;
       return realExec.call(this, sql);
     };
     try {
@@ -250,6 +267,10 @@ describe('Database - control: the task migrations are what add the columns', () 
     for (const c of ['enqueue', 'timeout_ms', 'timed_out', 'attempt', 'superseded_by']) {
       assert.ok(!cols.includes(c), `tasks.${c} is absent — so its presence elsewhere really is the migration's doing`);
     }
+    assert.ok(
+      !db.prepare('PRAGMA table_info(mission_projects)').all().map((c) => c.name).includes('plans_folder'),
+      'plans_folder is absent too — so its presence in the fixture suite is the ALTER and not the CREATE'
+    );
     assert.strictEqual(
       db.prepare('SELECT COUNT(*) c FROM tasks').get().c, 1,
       'and the rest of the table is intact, so the absence is the ALTERs and not a broken fixture'

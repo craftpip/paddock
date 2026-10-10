@@ -41,6 +41,7 @@ export default function ProjectDialog({ project, onClose }) {
   const [name, setName] = useState(project?.name || '')
   const [agentName, setAgentName] = useState(project?.agent_name || '')
   const [folderPath, setFolderPath] = useState(project?.folder || '')
+  const [plansFolder, setPlansFolder] = useState(project?.plans_folder || 'plans')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const timer = useRef(null)
@@ -73,11 +74,20 @@ export default function ProjectDialog({ project, onClose }) {
 
   const probe = folder && folder.req === folderPath ? folder : null
   const folderOk = !!probe && probe.exists && probe.isDir
+  // The plans folder is RELATIVE to the project folder, so an absolute path or
+  // a `..` segment is the one thing it must never be — the server refuses both,
+  // and a client that let them through would surface the refusal only on save.
+  const plansFolderNorm = plansFolder.trim().replace(/\/+$/, '')
+  const plansFolderOk =
+    plansFolderNorm.length > 0 &&
+    plansFolderNorm.length <= 120 &&
+    !plansFolderNorm.startsWith('/') &&
+    !plansFolderNorm.split('/').includes('..')
   const duplicate = useMission((s) =>
     s.projects.some((p) => p.agent_name === agentName && p.folder === folderPath.replace(/\/+$/, '') && p.id !== project?.id)
   )
 
-  const canSave = name.trim() && agentName && folderPath && folderOk && !busy
+  const canSave = name.trim() && agentName && folderPath && folderOk && plansFolderOk && !busy
 
   const onFolderChange = (v) => {
     touchedFolder.current = true
@@ -90,8 +100,8 @@ export default function ProjectDialog({ project, onClose }) {
     setBusy(true)
     setError('')
     try {
-      const payload = { name: name.trim(), agent: agentName, folder: folderPath.replace(/\/+$/, '') || '/' }
-      if (editing) await updateProject(project.id, { name: payload.name, folder: payload.folder })
+      const payload = { name: name.trim(), agent: agentName, folder: folderPath.replace(/\/+$/, '') || '/', plansFolder: plansFolderNorm }
+      if (editing) await updateProject(project.id, { name: payload.name, folder: payload.folder, plansFolder: payload.plansFolder })
       else await createProject(payload)
       onClose()
     } catch (err) {
@@ -244,6 +254,31 @@ export default function ProjectDialog({ project, onClose }) {
                 ))}
               </div>
             )}
+          </label>
+
+          <label className="msn-field msn-field-plans-folder flex flex-col gap-1">
+            <span className="msn-field-label text-[11px] font-semibold uppercase tracking-wider text-ink-muted">
+              Plans folder
+            </span>
+            <Input
+              mono
+              size="sm"
+              value={plansFolder}
+              onChange={(e) => setPlansFolder(e.target.value)}
+              placeholder="plans"
+              spellCheck={false}
+              className="msn-input-plans-folder"
+            />
+            <span
+              className={cx(
+                'msn-plans-folder-status text-[11px]',
+                plansFolderOk ? 'text-ink-faint' : 'msn-warn text-warning'
+              )}
+            >
+              {plansFolderOk
+                ? `Relative to the project folder — ${folderPath.replace(/\/+$/, '') || '/'}/${plansFolderNorm}/`
+                : 'A relative folder name only — no absolute paths or "..".'}
+            </span>
           </label>
 
           {duplicate && (
