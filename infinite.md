@@ -86,6 +86,8 @@ conversation's own store (`busyForSessions`) instead of the web-server probe.
 
 ## Queue
 
+_(empty)_
+
 ## Done
 
 - [x] plans/79-user-mode-home-ownership.md — absorbed 2026-10-09. A user-mode pad's agent runs as uid 1000 with `HOME=/root`, but only `/root/.<agent>` was chowned, so opencode's XDG state at `/root/.local/state` stayed root-owned and the uid-1000 agent failed `mkdir` of its locks (`PermissionDenied`) — surfacing as a session that lists ZERO MCP tools. Fix: every `src/vm-builds/*/start.sh` `chown -R 1000:1000 /root` in the `USER_MODE=user` branch (marker `PAD HOME OWNERSHIP`) and the Dockerfile baseline does too; `ensureHomeOwnership`/`imageHomeOwnershipBaked` backfill an existing user-mode pad and drive a rebuild. Root cause corrected live: it is a **root-run opencode CLI/TUI**, NOT the boot `opencode web` server (proved by chowning state and re-stat'ing after a POST). Scope extension (user-approved): the MCP `exec` tool now drops to the pad user too (exported `execDockerArgs` splices `termUserArgs`), matching the terminal/Mission; root-mode pads unchanged. Tests: `mcp-exec-usermode` 5/5 (+mutation control), plan-79 vm-manager tests green, `mcp.test.js` 141/141. Absorbed into `docs/reference/backend/services.md` (§`ensureUserModeBuildFiles` + the `exec` row of §MCP Tools), `docs/reference/tabs/settings.md` §4b, `src/services/llm-guide.js` §Exec, and `AGENTS.md` (user-mode HOME rule + project-map test entry).
