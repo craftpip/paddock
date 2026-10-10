@@ -1077,6 +1077,40 @@ describe('Mission - busy reads each conversation\u2019s own store (plan 52 R8)',
     assert.strictEqual(proj.sessions[1].state, 'dead');
     assert.strictEqual(proj.openCount, 1, 'only the live running session counts open');
   });
+
+  it('titleOf carries the agent\u2019s OWN title from the same store read (plan 80)', async () => {
+    agentStore.readActivity = async (vm, id) =>
+      (id === 'titled_1' ? { store: { available: true }, lastToolCall: { status: 'completed' }, title: 'auth v3' } : done);
+    const { titleOf, knownOf } = await mission.busyForSessions([
+      { agent_name: 'pad-msn-oc', agent_session_id: 'titled_1' },
+    ]);
+    assert.strictEqual(titleOf.get('titled_1'), 'auth v3');
+    assert.strictEqual(knownOf.get('titled_1'), true);
+  });
+
+  it('an UNREADABLE store yields NO title — an invented name is worse than none (plan 80)', async () => {
+    agentStore.readActivity = async () => {
+      throw new Error('boom');
+    };
+    const { titleOf, knownOf } = await mission.busyForSessions([
+      { agent_name: 'pad-msn-oc', agent_session_id: 'titled_unread_1' },
+    ]);
+    assert.strictEqual(knownOf.get('titled_unread_1'), false, 'the probe itself failed');
+    assert.ok(!titleOf.has('titled_unread_1'), 'a conversation we could not read must not be handed a name');
+  });
+
+  it('withAgentBusy stamps the agent\u2019s title onto the row (plan 80)', async () => {
+    const p = mission.createProject({ name: 'r8-title', agent: 'pad-msn-oc', folder: '/www1/r8' });
+    const s = mission.createSession(p.id, { tmuxId: 'msn-d4444444' });
+    agentStore.readActivity = async (vm, id) =>
+      (id === 'titled_live_1' ? { store: { available: true }, lastToolCall: { status: 'completed' }, title: 'migration plan' } : done);
+    const [row] = await mission.withAgentBusy(
+      [{ ...s, live: true, tuiAlive: true, agent_session_id: 'titled_live_1' }],
+      () => p.agent_name
+    );
+    assert.strictEqual(row.title, 'migration plan', 'the row the listing renders carries the title');
+    assert.strictEqual(row.busyKnown, true);
+  });
 });
 
 // The pane map is what lets list mode say "shell" BEFORE a caller types into it.

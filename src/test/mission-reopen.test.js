@@ -130,7 +130,7 @@ beforeEach(async () => {
     // "the user left on another row" early return — which made a "the poll never
     // restarts" test pass for the wrong reason, asserting nothing at all.
     openSession: { ...SNAPSHOT },
-    selectedSessionId: SESSION_ID,
+    selectedConversationId: SESSION_ID,
     sessionState: null,
     reopenFor: null,
     reopenError: '',

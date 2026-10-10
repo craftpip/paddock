@@ -129,19 +129,49 @@ describe('plan 68: clicking the selected project again deselects (Idea 1)', () =
   });
 });
 
-describe('plan 68: the all view never hijacks the selection', () => {
-  it('fetchAll follows a live row to the HIGHLIGHT, never to selectedProjectId', async () => {
+describe('plan 80: a fetch never invents a highlight', () => {
+  it('fetchAll with no prior selection highlights NOTHING (plan 73 phantom)', async () => {
     store = await freshStore();
     route(/^\/api\/mission\/sessions$/, {
-      sessions: [{ id: 'msn_x', live: true, project: { id: 'prj_a' } }],
+      sessions: [{ id: 'msn_x', live: true, agent_session_id: 'ses_x', project: { id: 'prj_a' } }],
     });
     store.setState({ selectedProjectId: '' });
     await store.getState().fetchAll();
     await settle();
 
-    assert.strictEqual(store.getState().selectedSessionId, 'msn_x', 'the row is still highlighted');
+    assert.strictEqual(store.getState().selectedConversationId, '',
+      'a fetch must not adopt a live row on its own — that is the phantom `msn-row-selected`');
     assert.strictEqual(store.getState().selectedProjectId, '',
       'the row\'s project must not become the selection — that would flip the very list that just loaded');
+  });
+
+  it('a fetch PRESERVES a selection the user made', async () => {
+    store = await freshStore();
+    route(/^\/api\/mission\/sessions$/, {
+      sessions: [{ id: 'msn_x', live: true, agent_session_id: 'ses_x', project: { id: 'prj_a' } }],
+    });
+    store.setState({ selectedProjectId: '', selectedConversationId: 'ses_x' });
+    await store.getState().fetchAll();
+    await settle();
+
+    assert.strictEqual(store.getState().selectedConversationId, 'ses_x', 'the highlight survives a refresh');
+  });
+
+  it('close does NOT clear the highlight — the conversation stays selected', async () => {
+    store = await freshStore();
+    route(/^\/api\/mission\/sessions\/msn_x$/, {}, 204);
+    route(/^\/api\/mission\/sessions$/, { sessions: [] });
+    store.setState({
+      selectedProjectId: '',
+      selectedConversationId: 'ses_x',
+      openSession: { id: 'msn_x', agentSessionId: 'ses_x', projectId: 'prj_a' },
+    });
+    await store.getState().closeSession('msn_x');
+    await settle();
+
+    assert.strictEqual(store.getState().selectedConversationId, 'ses_x',
+      'closing the pane removes the pane, not the conversation — the row must stay highlighted');
+    assert.strictEqual(store.getState().openSession, null, 'but col 3 is emptied');
   });
 });
 
@@ -160,15 +190,31 @@ describe('plan 68: the view persists and hydrates (Idea 2)', () => {
   it('hydrates the three view fields from localStorage on store creation', async () => {
     seedStorage({
       selectedProjectId: 'prj_a',
-      selectedSessionId: 'msn_z',
-      openSession: { id: 'msn_z', projectId: 'prj_a', agentName: 'pad-opencode-proj', folder: '/www2/alpha' },
+      selectedConversationId: 'ses_z',
+      openSession: { id: 'msn_z', agentSessionId: 'ses_z', projectId: 'prj_a', agentName: 'pad-opencode-proj', folder: '/www2/alpha' },
     });
     store = await freshStore();
     await settle();
 
     assert.strictEqual(store.getState().selectedProjectId, 'prj_a');
-    assert.strictEqual(store.getState().selectedSessionId, 'msn_z');
+    assert.strictEqual(store.getState().selectedConversationId, 'ses_z');
     assert.strictEqual(store.getState().openSession?.id, 'msn_z');
+  });
+
+  it('an old blob without `selectedConversationId` falls back to the open snapshot id', async () => {
+    // Post-deploy migration (plan 80): the field was `selectedSessionId` and held
+    // the MISSION id. A blob from that shape has no `selectedConversationId`, so
+    // the open snapshot's conversation id stands in for one reload.
+    seedStorage({
+      selectedProjectId: 'prj_a',
+      selectedSessionId: 'msn_z',
+      openSession: { id: 'msn_z', agentSessionId: 'ses_z', projectId: 'prj_a', agentName: 'pad-opencode-proj', folder: '/www2/alpha' },
+    });
+    store = await freshStore();
+    await settle();
+
+    assert.strictEqual(store.getState().selectedConversationId, 'ses_z',
+      'the highlight survives the rename by falling back to the snapshot conversation');
   });
 
   it('writes the same three fields back on every change', async () => {
@@ -198,8 +244,8 @@ describe('plan 68: the view persists and hydrates (Idea 2)', () => {
   it('clears an open session whose project has vanished (validation on fetch)', async () => {
     seedStorage({
       selectedProjectId: 'prj_a',
-      selectedSessionId: 'msn_z',
-      openSession: { id: 'msn_z', projectId: 'prj_gone', agentName: 'pad-opencode-proj', folder: '/www2/gone' },
+      selectedConversationId: 'ses_z',
+      openSession: { id: 'msn_z', agentSessionId: 'ses_z', projectId: 'prj_gone', agentName: 'pad-opencode-proj', folder: '/www2/gone' },
     });
     store = await freshStore();
     route(/^\/api\/mission\/projects$/, { projects: PROJECTS });

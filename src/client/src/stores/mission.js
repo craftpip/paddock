@@ -41,19 +41,27 @@ function readPersistedView() {
     // must be `null`, never `undefined` — the persist writer serializes
     // `undefined` as an ABSENT key, and an absent key round-trips to
     // `undefined` again, so the blob would never carry `openSession`.
-    return { selectedProjectId: '', selectedSessionId: '', openSession: null }
+    return { selectedProjectId: '', selectedConversationId: '', openSession: null }
   }
   try {
     const raw = localStorage.getItem(PERSIST_KEY)
-    if (!raw) return { selectedProjectId: '', selectedSessionId: '', openSession: null }
+    if (!raw) return { selectedProjectId: '', selectedConversationId: '', openSession: null }
     const v = JSON.parse(raw)
     return {
       selectedProjectId: typeof v.selectedProjectId === 'string' ? v.selectedProjectId : '',
-      selectedSessionId: typeof v.selectedSessionId === 'string' ? v.selectedSessionId : '',
+      // Renamed from `selectedSessionId` (plan 80): the highlight is a
+      // CONVERSATION now, not the mission row, so closing a pane no longer
+      // drops it. An old blob has no `selectedConversationId`, so fall back to
+      // the open snapshot's conversation id (present on new blobs) so the
+      // highlight survives one reload, then `''`.
+      selectedConversationId:
+        typeof v.selectedConversationId === 'string'
+          ? v.selectedConversationId
+          : (v.openSession && typeof v.openSession.agentSessionId === 'string' ? v.openSession.agentSessionId : ''),
       openSession: v.openSession || null,
     }
   } catch {
-    return { selectedProjectId: '', selectedSessionId: '', openSession: null }
+    return { selectedProjectId: '', selectedConversationId: '', openSession: null }
   }
 }
 
@@ -64,7 +72,7 @@ function writePersistedView(s) {
       PERSIST_KEY,
       JSON.stringify({
         selectedProjectId: s.selectedProjectId,
-        selectedSessionId: s.selectedSessionId,
+        selectedConversationId: s.selectedConversationId,
         openSession: s.openSession,
       })
     )
@@ -73,22 +81,20 @@ function writePersistedView(s) {
   }
 }
 
-/** "Which session is highlighted" as ONE rule, used by every path that follows
- *  the first live row — a refresh in either view, the aggregate read.
+/** "Which conversation is highlighted" — and the ONLY rule is that a DATA FETCH
+ *  never moves it. Every `fetchSessions` / aggregate `fetchAll` success spreads
+ *  this, so it MUST NOT pick a row: the old `rows.find(live) || rows[0]`
+ *  fallback invented a highlight for a page the user had opened nothing on
+ *  (plan 73's phantom `msn-row-selected`), and now that the highlight is a
+ *  CONVERSATION it would also resurrect a highlight the user never chose.
  *
- *  This moves the ROW HIGHLIGHT only, and only that. It deliberately never
- *  touches `selectedProjectId` (plan 68): since plan 68 made the selection the
- *  source of col 2's scope, following an aggregate row to its project would
- *  flip the very list that just loaded — a user showing "all projects" would
- *  be yanked to one. Col 1 highlight follows the user's click and nothing else.
- *
- *  Which conversation col 3 shows is `openSession` (see `snapshotOf`), and a
- *  refresh must never touch it either: the list is refetched, emptied and
- *  re-pointed for reasons that have nothing to do with the conversation the
- *  user is sitting in. */
-function followSessionPatch(rows, currentId) {
-  const pick = rows.find((s) => s.id === currentId) || rows.find((s) => s.live) || rows[0] || null
-  return { selectedSessionId: pick?.id || '' }
+ *  The selection is written by exactly two user actions (click a row, start a
+ *  session) and cleared only when the list it belongs to is replaced
+ *  (`select` / `createProject` / `deleteProject`). It deliberately survives a
+ *  refresh — and, the whole point of plan 80, a CLOSE: closing the pane removes
+ *  the pane, not the conversation, so the row stays highlighted. */
+function followSessionPatch(_rows, currentId) {
+  return { selectedConversationId: currentId || '' }
 }
 
 /** A frozen copy of the row that was opened, plus enough of its project for col
@@ -114,6 +120,13 @@ function snapshotOf(row, projects) {
     id: row.id,
     tmux_id: row.tmux_id,
     label: row.label || '',
+    // The agent's own title for the conversation (plan 80) — stamped by the
+    // list read when it could read the store, else refreshed from the detail
+    // read. Col 3's header shows it before the tmux id, exactly like a row.
+    title: row.title || '',
+    // The conversation this pane is on. It is the ROW's identity now: the
+    // selection is keyed on it so a live row and its history twin are one item.
+    agentSessionId: row.agent_session_id || '',
     locked: !!row.locked,
     live: row.live,
     projectId: row.project?.id || project?.id || '',
@@ -161,7 +174,7 @@ export const useMission = create((set, get) => {
   // stopped PAD must not hide the others, and a probe failure is not a
   // conversation.
   historyErrors: [],
-  selectedSessionId: restored.selectedSessionId,
+  selectedConversationId: restored.selectedConversationId,
   // The conversation col 3 is showing — a snapshot taken when it was opened, NOT
   // derived from `sessions`. See `snapshotOf`: this is what keeps a scope switch
   // or a poll from tearing the terminal down. Restored from localStorage on
@@ -240,11 +253,11 @@ export const useMission = create((set, get) => {
    *  col 3 pointing at different projects is legible rather than confusing. */
   select: (projectId) => {
     if (get().selectedProjectId === projectId) {
-      set({ selectedProjectId: '', selectedSessionId: '', sessions: [], history: null, loadedFor: '' })
+      set({ selectedProjectId: '', selectedConversationId: '', sessions: [], history: null, loadedFor: '' })
       get().fetchAll()
       return
     }
-    set({ selectedProjectId: projectId, selectedSessionId: '', sessions: [], history: null, loadedFor: '' })
+    set({ selectedProjectId: projectId, selectedConversationId: '', sessions: [], history: null, loadedFor: '' })
     if (projectId) {
       get().fetchSessions(projectId)
       get().fetchHistory(projectId, get().includeSubfolders)
@@ -297,7 +310,7 @@ export const useMission = create((set, get) => {
         // the col-1 selection here, because this IS the no-selection view and
         // a followed row's project must not turn it into a one-project view
         // (plan 68 Idea 1).
-        ...followSessionPatch(sessions, s.selectedSessionId),
+        ...followSessionPatch(sessions, s.selectedConversationId),
       }))
     } else {
       set({
@@ -350,7 +363,7 @@ export const useMission = create((set, get) => {
         loadedFor: id,
         // Keep the open session if it is still there, else follow the first
         // live one — landing on a dead pane with no way back is a dead end.
-        ...followSessionPatch(sessions, s.selectedSessionId),
+        ...followSessionPatch(sessions, s.selectedConversationId),
       }))
     } catch (e) {
       // The project can be deleted from under an open page (another tab, the
@@ -430,7 +443,11 @@ export const useMission = create((set, get) => {
       if (data?.session?.id && token === startToken) {
         const row = get().sessions.find((s) => s.id === data.session.id)
         set({
-          selectedSessionId: data.session.id,
+          // The highlight is a CONVERSATION (plan 80): prefer the id the agent
+          // minted for it, so a start and a later history row for the same chat
+          // share one identity. A legacy row with no conversation falls back to
+          // its mission id.
+          selectedConversationId: data.session.agent_session_id || data.session.id,
           openSession: snapshotOf(row || { ...data.session, project_id: id }, get().projects),
         })
         // `refreshActive()` above spent its pane-state call on whatever was open
@@ -465,7 +482,11 @@ export const useMission = create((set, get) => {
   selectSession: (sessionId) => {
     const row = get().sessions.find((s) => s.id === sessionId)
     set({
-      selectedSessionId: sessionId,
+      // Highlight the CONVERSATION (plan 80), not the mission row: when the pane
+      // closes, the row switches to its history twin keyed by the same
+      // conversation id, and the highlight must follow it rather than vanish.
+      // Closes deliberately do NOT clear this (see `closeSession`).
+      selectedConversationId: row?.agent_session_id || sessionId || '',
       openSession: snapshotOf(row, get().projects),
       sessionState: null,
       reopenError: '',
@@ -497,7 +518,13 @@ export const useMission = create((set, get) => {
       const data = await api(`/api/mission/sessions/${id}`)
       state = data.state || null
       // The user may have clicked another row while this was in flight.
-      set((s) => (s.openSession?.id === id ? { sessionState: state } : s))
+      // Alongside the pane state, refresh the snapshot's DISPLAY title from the
+      // detail read (plan 80) — the agent renames a conversation after it starts,
+      // and col 3's header must follow it. This updates a display field only:
+      // which session is OPEN is untouched, exactly the plan 58 contract.
+      set((s) => (s.openSession?.id === id
+        ? { sessionState: state, openSession: { ...s.openSession, title: data.session?.title || s.openSession.title } }
+        : s))
     } catch {
       set((s) => (s.openSession?.id === id ? { sessionState: null } : s))
       return null
@@ -551,13 +578,16 @@ export const useMission = create((set, get) => {
 
   /** Close a session. This is the ONE thing that clears `openSession` (when it
    *  is the session being closed): col 3 shows that conversation, so closing it
-   *  is the only user action that legitimately empties the column. */
+   *  is the only user action that legitimately empties the column.
+   *
+   *  It deliberately does NOT clear the HIGHLIGHT (plan 80). Closing the pane
+   *  removes the pane, not the conversation: the row comes straight back as its
+   *  history twin keyed by the same conversation id, and the user asked for it
+   *  to stay selected. Clearing here is what made a closed session look like a
+   *  different, unselected item. */
   closeSession: async (sessionId) => {
     await api(`/api/mission/sessions/${sessionId}`, { method: 'DELETE' })
-    set((s) => ({
-      ...(s.openSession?.id === sessionId ? { openSession: null, sessionState: null } : {}),
-      ...(s.selectedSessionId === sessionId ? { selectedSessionId: '' } : {}),
-    }))
+    set((s) => (s.openSession?.id === sessionId ? { openSession: null, sessionState: null } : {}))
     await get().refreshActive()
   },
 
@@ -574,7 +604,7 @@ export const useMission = create((set, get) => {
       // selection IS the scope (plan 68), that also makes col 2 show it and
       // gives `+ New session` a target. A new project is immediately usable
       // without re-navigating.
-      set({ selectedProjectId: data.project.id, selectedSessionId: '', sessions: [], history: null, loadedFor: '' })
+      set({ selectedProjectId: data.project.id, selectedConversationId: '', sessions: [], history: null, loadedFor: '' })
       get().fetchSessions(data.project.id)
       get().fetchHistory(data.project.id, get().includeSubfolders)
     }
@@ -607,7 +637,7 @@ export const useMission = create((set, get) => {
     // in its own words, with a Reopen button. Snapping the terminal to a
     // neighbour instead would throw away the conversation the user was looking
     // at, at the exact moment they are told it is gone.
-    set({ selectedSessionId: '', sessions: [], history: null, loadedFor: '' })
+    set({ selectedConversationId: '', sessions: [], history: null, loadedFor: '' })
     await get().fetchProjects()
     // The aggregate list held rows from the project that is now gone; the
     // project list re-read above already reset the selection to whatever

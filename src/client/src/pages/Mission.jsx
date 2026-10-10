@@ -591,7 +591,7 @@ export default function Mission() {
                   </span>
                 )}
                 <span className="msn-agent-label truncate text-[11px] font-medium text-ink-dim">
-                  {session.label || session.tmux_id}
+                  {session.title || session.label || session.tmux_id}
                 </span>
                 <span className="msn-agent-cwd truncate font-mono text-[10px] text-ink-faint" title={sessionState?.cwd || sessionFolder}>
                   {sessionState?.cwd || sessionFolder}

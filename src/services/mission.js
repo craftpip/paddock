@@ -1132,17 +1132,26 @@ function stampTruth(s, probe) {
   const live = s.live === true;
   const id = s.agent_session_id;
   const looked = !!(id && probe.knownOf && probe.knownOf.get(id));
+  // The agent's OWN title for this conversation, taken from the store read the
+  // busy probe already made (never a second `sqlite3` exec per row — that is
+  // what `sessionTitle` does on the send/detail paths). `titleOf` only holds ids
+  // whose store was actually read, so a row we could not look at stays
+  // title-less rather than being handed a fabricated name; a store that read
+  // cleanly but has no title yet is also empty, and the row falls back to its
+  // label/tmux id exactly as before.
+  const title = id && probe.titleOf && probe.titleOf.get(id);
+  const named = title ? { title } : {};
   if (!live) {
     const wasBusy = !!(id && probe.busyOf && probe.busyOf.get(id));
-    return { ...s, busy: false, busyKnown: looked, open: false, state: 'dead', ...(wasBusy ? { wasBusy: true } : {}) };
+    return { ...s, busy: false, busyKnown: looked, open: false, state: 'dead', ...named, ...(wasBusy ? { wasBusy: true } : {}) };
   }
   // Live: a shell pane is reachable as a shell but `mission_send` refuses it,
   // so it is not `open` as an agent session.
   if (s.tuiAlive === false) {
-    return { ...s, busy: false, busyKnown: looked, open: false };
+    return { ...s, busy: false, busyKnown: looked, open: false, ...named };
   }
   const busy = !!(id && probe.busyOf && probe.busyOf.get(id));
-  return { ...s, busy, busyKnown: looked, open: s.tuiAlive !== false };
+  return { ...s, busy, busyKnown: looked, open: s.tuiAlive !== false, ...named };
 }
 
 /** Live + pane map for one PAD in two execs (still O(PADs), never O(sessions)).
@@ -1327,14 +1336,19 @@ const BUSY_CACHE = new Map();
 
 /** Probe `rows` (flat session rows carrying `agent_name` and
  *  `agent_session_id`) through each conversation's own store. Returns
- *  `{ busyOf, knownOf }`: `busyOf` maps an id whose store says its newest tool
- *  part is running; `knownOf` maps an id whose store could actually be read.
- *  An id we were not asked about is absent from both — stampTruth turns that
- *  into UNKNOWN, and that absence is exactly what stops "the probe worked"
- *  from reading as "this row is idle" (C1-F1). */
+ *  `{ busyOf, knownOf, titleOf }`: `busyOf` maps an id whose store says its
+ *  newest tool part is running; `knownOf` maps an id whose store could actually
+ *  be read; `titleOf` maps an id to the agent's OWN title for that conversation
+ *  — the SAME `readActivity` read, so a listing gets the name the agent gave a
+ *  chat for free instead of one `sqlite3` exec per row. An id we were not asked
+ *  about is absent from all three — stampTruth turns that into UNKNOWN, and that
+ *  absence is exactly what stops "the probe worked" from reading as "this row is
+ *  idle" (C1-F1). `titleOf` likewise only holds ids whose store was READ, so an
+ *  unreadable conversation never gets an invented name. */
 async function busyForSessions(rows) {
   const busyOf = new Map();
   const knownOf = new Map();
+  const titleOf = new Map();
   await Promise.all((rows || []).map(async (s) => {
     const id = s && s.agent_session_id;
     const vm = s && s.agent_name;
@@ -1344,24 +1358,27 @@ async function busyForSessions(rows) {
     if (hit && Date.now() - hit.at < BUSY_TTL) {
       busyOf.set(id, hit.value.busy);
       knownOf.set(id, hit.value.known);
+      if (hit.value.known) titleOf.set(id, hit.value.title || '');
       return;
     }
-    let value = { busy: false, known: false };
+    let value = { busy: false, known: false, title: '' };
     try {
       const row = await agentStore.readActivity(vm, id);
       const ok = !!(row && row.store && row.store.available);
       value = {
         busy: !!(ok && row.lastToolCall && row.lastToolCall.status === 'running'),
         known: ok,
+        title: ok ? (row.title || '') : '',
       };
     } catch {
-      value = { busy: false, known: false };
+      value = { busy: false, known: false, title: '' };
     }
     BUSY_CACHE.set(key, { at: Date.now(), value });
     busyOf.set(id, value.busy);
     knownOf.set(id, value.known);
+    if (value.known) titleOf.set(id, value.title);
   }));
-  return { busyOf, knownOf };
+  return { busyOf, knownOf, titleOf };
 }
 
 /** Stamp each row from its OWN conversation's store: `busy` = its newest tool

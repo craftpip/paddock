@@ -65,6 +65,13 @@ function LiveRow({ session, selected, onSelect, onClose, onLock }) {
     : session.busy
       ? 'the agent is working on this conversation right now'
       : 'open — a session is on it'
+  // The name on the row is the agent's OWN title for the conversation (plan 80),
+  // falling back to the operator's label and only then to the tmux id. A live
+  // row and its history twin are one item, so they must read the same name: the
+  // history row has always shown `item.title`, and a live row that showed
+  // `label || tmux_id` is why a fresh session read as `msn-…` and then
+  // "renamed" the moment it was closed.
+  const name = session.title || session.label || session.tmux_id
   return (
     <div
       role="button"
@@ -88,9 +95,9 @@ function LiveRow({ session, selected, onSelect, onClose, onLock }) {
           identifies the row. */}
       <span
         className={`msn-session-label min-w-0 truncate text-xs font-medium ${selected ? 'text-ink' : 'text-ink-dim'}`}
-        title={session.label || session.tmux_id}
+        title={name}
       >
-        {session.label || session.tmux_id}
+        {name}
       </span>
       {/* Line 2 is the state line: the dot, the project name, the "when" text
           flush RIGHT, then the hover buttons (user, 2026-09-27). Two things
@@ -228,7 +235,7 @@ function LiveRow({ session, selected, onSelect, onClose, onLock }) {
   )
 }
 
-function HistoryRow({ item, projectFolder, onResume, busy }) {
+function HistoryRow({ item, projectFolder, onResume, busy, selected }) {
   // In the 'all' scope each row carries its OWN project, so the directory is
   // compared against that project's folder — otherwise every subfolder row
   // would print the same folder and the project badge would be the only thing
@@ -260,15 +267,15 @@ function HistoryRow({ item, projectFolder, onResume, busy }) {
         }
       }}
       className={`msn-history-row group flex flex-col gap-0.5 border-b border-line-faint px-3 py-2 ${
-        busy ? 'cursor-default opacity-60' : 'cursor-pointer hover:bg-raised'
-      }`}
+        busy ? 'cursor-default opacity-60' : 'cursor-pointer'
+      } ${selected ? 'msn-row-selected bg-accent/10' : busy ? '' : 'hover:bg-raised'}`}
     >
       {/* Line 1 is the conversation title and nothing else, exactly like a live
           session row — the two row types are one list, so they are one shape:
           same height, same padding, same inset, and the SAME 500 weight on the
           name line. A 400 here and 500 there said "these are different kinds of
           thing" in the one column where they are not. */}
-      <span className="msn-history-title min-w-0 truncate text-xs font-medium text-ink-dim" title={item.title}>
+      <span className={`msn-history-title min-w-0 truncate text-xs font-medium ${selected ? 'text-ink' : 'text-ink-dim'}`} title={item.title}>
         {item.title || '(untitled)'}
       </span>
       <div className="relative flex items-center gap-1.5">
@@ -325,7 +332,7 @@ export default function SessionList() {
   const {
     sessions, sessionsLoading, sessionsError,
     history, historyLoading, historyError, historyErrors, includeSubfolders, loadedFor,
-    selectedProjectId, allLoaded, allError, selectedSessionId, startingKey, projects,
+    selectedProjectId, allLoaded, allError, selectedConversationId, startingKey, projects,
     selectSession, startSession, closeSession, toggleSessionLock, setSubfolders,
   } = useMission()
 
@@ -425,6 +432,13 @@ export default function SessionList() {
   // by tmux id, and a history row keyed by the agent's session id — and as two
   // groups that was invisible, but merged it would print the conversation twice
   // with two dots. The live row wins: it carries the tmux id the terminal needs.
+  //
+  // `conversationId` is the row's IDENTITY (plan 80) and it is what the
+  // highlight compares: a live row and its history twin share it
+  // (`agent_session_id` === the history row's `id`), so selecting the live row
+  // and then closing it keeps the SAME row selected — as its history twin, not a
+  // differently-named item. A legacy live row with no conversation falls back to
+  // its own stable key so it can still be highlighted.
   const liveAgentIds = new Set(sessions.map((s) => s.agent_session_id).filter(Boolean))
   const histRows = [
     ...(hist?.exact || []),
@@ -434,6 +448,7 @@ export default function SessionList() {
     ...sessions.map((s) => ({
       kind: 'live',
       key: `live:${s.id}`,
+      conversationId: s.agent_session_id || `live:${s.id}`,
       // `last_seen_at` is touched by the terminal while you are actually talking
       // to the session, so an in-use session rises in the list on its own
       // instead of being pinned to the top by state.
@@ -442,7 +457,7 @@ export default function SessionList() {
     })),
     ...histRows
       .filter((h) => !liveAgentIds.has(h.id))
-      .map((h) => ({ kind: 'history', key: `hist:${h.id}`, at: h.updatedAt || '', item: h })),
+      .map((h) => ({ kind: 'history', key: `hist:${h.id}`, conversationId: h.id, at: h.updatedAt || '', item: h })),
   ].sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')))
 
   return (
@@ -539,7 +554,7 @@ export default function SessionList() {
             {row.kind === 'live' ? (
               <LiveRow
                 session={row.session}
-                selected={row.session.id === selectedSessionId}
+                selected={row.conversationId === selectedConversationId}
                 onSelect={selectSession}
                 onClose={askClose}
                 onLock={(id, locked) => run(() => toggleSessionLock(id, locked), 'Could not change the lock')}
@@ -549,6 +564,7 @@ export default function SessionList() {
                 item={row.item}
                 projectFolder={project?.folder}
                 busy={startingKey === rowKey(row.item)}
+                selected={row.conversationId === selectedConversationId}
                 onResume={resume}
               />
             )}
