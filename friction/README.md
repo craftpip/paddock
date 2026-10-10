@@ -53,6 +53,7 @@ entries were retired rather than fixed.
   non-PAD container (`craftpip`). **Mostly resolved** — `networkFilter` and the
   non-PAD near-miss hint both landed. **Still open:** `create_agent`'s enum omits
   `claude`, unchanged since 2026-09-27; and there is still no `list_containers`.
+  (Both re-confirmed 2026-10-09.)
 - `2026-09-27-run-task-in-project.md` — running agent work in a Mission
   project: the task queue cannot address a project, and the Mission route loses
   both the prompt and the answer. **Superseded** — the task queue was retired on
@@ -63,11 +64,13 @@ entries were retired rather than fixed.
   `mission_session_start` can time out and succeed. **Resolved** (plans 60, 61,
   65) except `config_get`'s outstanding *token rotation*, which is an operator
   action and still open. `workspace_write` itself was later fixed and the other
-  two tools retired.
+  two tools retired. **Still open:** `exec` false-greens on an empty *and* a
+  whitespace-only command (re-confirmed 2026-10-09).
 - `2026-09-28-pm-portfolio-intake.md` — the `networkHealth` "stale and running"
   findings, and a false negative about a session named "Starting infinite queue"
-  that was in fact present. **Open** — now owned by `plans/66-network-peer-truth.md`
-  (Draft, 0/4).
+  that was in fact present. **Resolved** — the `networkHealth` self-contradiction
+  closed and was re-verified 2026-10-09 (`state: "staleBinding"` plus a
+  self-explaining `reason`); the false negative was corrected earlier.
 - `2026-09-29-task-queue.md` — building a task queue. **Every finding RETIRED,
   not fixed**: all eight `task_*` tools were removed from the surface. Kept for
   history.
@@ -91,33 +94,54 @@ entries were retired rather than fixed.
   finding above. **14 fixed, 1 still open (`claude` enum), 8 `task_*` tools
   retired, 7 new findings.** The sharpest new one: the plans facility refuses on
   every opencode pad with a bind-mounted workspace, which is the failure
-  `list-plans.md` predicted before it shipped.
+  `list-plans.md` predicted before it shipped. **Re-verified 2026-10-09:** its
+  `task_*`-undocumented-in-`help` finding closed (`help` recipe 15 documents the
+  gated loop); the `plan_*` bind-mount refusal and the doubled `workspace_write`
+  refusal are still open.
 - `2026-10-08-plan69-pipeline-proof.md` — running plan 69's server-side
-  pipeline against a real session. **3 new findings, all open:** a session
-  minted while opencode's state dir was unwritable keeps zero MCP tools even
-  after the cause is fixed (the step prompt then parks at timeout);
-  `friction/` is `root:root` so uid-1000 sessions cannot file into it; and
-  `pad_workspace_write`'s refusal does not point at `exec`, which works.
+  pipeline against a real session. **3 findings, still open** (re-checked
+  2026-10-09): a session minted while opencode's state dir was unwritable keeps
+  zero MCP tools even after the cause is fixed (the step prompt then parks at
+  timeout) — not independently re-verified 2026-10-09; `friction/` is `root:root`
+  so uid-1000 sessions cannot file into it; and `pad_workspace_write`'s refusal
+  does not name `exec` and prints its reason twice.
 
-## Still open as of 2026-09-29
+## Still open as of 2026-10-09
+
+Re-verified live in a verify pass on 2026-10-09 (MCP only). Two items from the
+2026-09-29 list closed (see the **Closed** line below); the three `2026-10-08`
+findings are folded in after them.
 
 1. `create_agent`'s `agent` enum omits `claude`
    ([`craftpip-status.md`](2026-09-27-craftpip-status.md)) — one word, survived
-   three sessions.
-2. `plan_*` is gated on `hostBrowsable` and refuses on 4 of the 6 opencode pads —
-   every one whose workspace is a bind mount
-   ([`recheck-friction-log.md`](2026-09-29-recheck-friction-log.md) finding 2).
-3. `plan_list {folder}` returns zero for the folder the plans live in (finding 3).
+   four sessions.
+2. `plan_*` is gated on `hostBrowsable` and refuses on every opencode pad whose
+   workspace is a bind mount
+   ([`recheck-friction-log.md`](2026-09-29-recheck-friction-log.md) finding 2) —
+   re-confirmed 2026-10-09: `plan_list {agent: "pad-opencode-proj"}` still returns
+   `plan_workspace_not_host_visible`, and every pad in the fleet reads
+   `hostBrowsable: false`.
+3. `plan_list {folder}` cannot be reached while (2) holds (finding 3).
 4. `workspace_write` resolves relative paths against the agent's data dir, not
-   the workspace (finding 4).
-5. The retired `task_*` family is undocumented in `help` (finding 1).
-6. `exec` still reports success for a whitespace-only command
-   ([`tool-surface-sweep.md`](2026-09-27-tool-surface-sweep.md)).
-7. `settings_get.networkHealth` still says `state: "stale"` where `health`
-   explains the same condition perfectly — `plans/66-network-peer-truth.md`,
-   Draft, 0/4.
-8. No `list_containers` (non-PAD containers are only recognisable, not
+   the workspace (finding 4) — untestable while the host-browse gate refuses
+   every pad here.
+5. `exec` still reports success for a whitespace-only command — and for an empty
+   one too ([`tool-surface-sweep.md`](2026-09-27-tool-surface-sweep.md)).
+6. No `list_containers` (non-PAD containers are only recognisable, not
    lookable-up), no `mission_project_delete`, no plan delete.
+7. The `workspace_write` refusal still prints its explanation twice, and still
+   does not name `exec`
+   ([`recheck-friction-log.md`](2026-09-29-recheck-friction-log.md),
+   [`2026-10-08-plan69-pipeline-proof.md`](2026-10-08-plan69-pipeline-proof.md)).
+8. `friction/` is still `root:root drwxr-xr-x`, so a uid-1000 session cannot file
+   into it ([`2026-10-08-plan69-pipeline-proof.md`](2026-10-08-plan69-pipeline-proof.md)).
+9. A session minted with no MCP tools keeps zero tools
+   ([`2026-10-08-plan69-pipeline-proof.md`](2026-10-08-plan69-pipeline-proof.md)) —
+   not independently re-verified 2026-10-09.
+
+**Closed on 2026-10-09:** `settings_get.networkHealth`'s self-contradiction (now
+`state: "staleBinding"` plus a `reason` that states its own condition), and
+`help`'s silence about the `task_*` family (recipe 15 documents the gated loop).
 
 ## See Also
 
