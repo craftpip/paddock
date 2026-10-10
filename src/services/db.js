@@ -189,8 +189,35 @@ function migrate(db) {
       FOREIGN KEY (project_id) REFERENCES mission_projects(id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS infinite_runners (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      session_id TEXT,
+      queue_file TEXT NOT NULL DEFAULT 'QUEUE.md',
+      enabled INTEGER NOT NULL DEFAULT 0,
+      control_state TEXT NOT NULL DEFAULT 'paused',
+      idle_grace_ms INTEGER NOT NULL DEFAULT 120000,
+      min_nudge_interval_ms INTEGER NOT NULL DEFAULT 120000,
+      no_progress_budget INTEGER NOT NULL DEFAULT 3,
+      compaction_grace_ms INTEGER NOT NULL DEFAULT 300000,
+      long_command_threshold_ms INTEGER NOT NULL DEFAULT 1800000,
+      recover_exited INTEGER NOT NULL DEFAULT 1,
+      recovery_budget INTEGER NOT NULL DEFAULT 3,
+      run_generation INTEGER NOT NULL DEFAULT 0,
+      last_progress_at TEXT,
+      last_nudge_at TEXT,
+      retry_count INTEGER NOT NULL DEFAULT 0,
+      last_reason TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (project_id) REFERENCES mission_projects(id) ON DELETE CASCADE,
+      FOREIGN KEY (session_id) REFERENCES mission_sessions(id) ON DELETE SET NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_mission_projects_agent ON mission_projects(agent_name);
     CREATE INDEX IF NOT EXISTS idx_mission_sessions_project ON mission_sessions(project_id);
+    CREATE INDEX IF NOT EXISTS idx_infinite_runners_project ON infinite_runners(project_id);
 
     CREATE INDEX IF NOT EXISTS idx_activity_agent ON activity_events(agent_id);
     CREATE INDEX IF NOT EXISTS idx_activity_ts ON activity_events(timestamp);

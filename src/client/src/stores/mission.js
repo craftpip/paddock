@@ -150,6 +150,10 @@ export const useMission = create((set, get) => {
   projects: [],
   loading: true,
   error: '',
+  // Runners (plan 83)
+  runners: [],
+  runnersLoading: false,
+  runnersError: '',
   // `''` = no selection = the ALL-projects view. A project id = that project's
   // view. There is no third state (plan 68 removed `scope`): what col 2 shows
   // is derived from this one field, so a selection change can never leave the
@@ -670,6 +674,119 @@ export const useMission = create((set, get) => {
         ? { folder: { ...s.folder, checking: false, exists: false, isDir: false, entries: [], error: errText(e) } }
         : s))
       return null
+    }
+  },
+
+  clearFolder: () => set({ folder: null }),
+
+  // Runners (plan 83)
+  fetchRunners: async (projectId) => {
+    const id = projectId || get().selectedProjectId
+    if (!id) return
+    set({ runnersLoading: true, runnersError: '' })
+    try {
+      const data = await api(`/api/mission/projects/${id}/runners`)
+      set({ runners: data.runners || [], runnersLoading: false, runnersError: '' })
+    } catch (e) {
+      set({ runnersLoading: false, runnersError: errText(e, 'Could not load runners') })
+    }
+  },
+
+  createRunner: async (payload) => {
+    const id = get().selectedProjectId
+    if (!id) return null
+    set({ runnersLoading: true, runnersError: '' })
+    try {
+      const data = await api(`/api/mission/projects/${id}/runners`, {
+        method: 'POST',
+        body: payload,
+      })
+      await get().fetchRunners()
+      return data.runner
+    } catch (e) {
+      set({ runnersLoading: false, runnersError: errText(e, 'Could not create runner') })
+      throw e
+    }
+  },
+
+  updateRunner: async (runnerId, payload) => {
+    set({ runnersLoading: true, runnersError: '' })
+    try {
+      const data = await api(`/api/mission/runners/${runnerId}`, {
+        method: 'PATCH',
+        body: payload,
+      })
+      await get().fetchRunners()
+      return data.runner
+    } catch (e) {
+      set({ runnersLoading: false, runnersError: errText(e, 'Could not update runner') })
+      throw e
+    }
+  },
+
+  startRunner: async (runnerId) => {
+    set({ runnersLoading: true, runnersError: '' })
+    try {
+      const data = await api(`/api/mission/runners/${runnerId}/start`, {
+        method: 'POST',
+      })
+      await get().fetchRunners()
+      return data
+    } catch (e) {
+      set({ runnersLoading: false, runnersError: errText(e, 'Could not start runner') })
+      throw e
+    }
+  },
+
+  pauseRunner: async (runnerId) => {
+    set({ runnersLoading: true, runnersError: '' })
+    try {
+      const data = await api(`/api/mission/runners/${runnerId}/pause`, {
+        method: 'POST',
+      })
+      await get().fetchRunners()
+      return data
+    } catch (e) {
+      set({ runnersLoading: false, runnersError: errText(e, 'Could not pause runner') })
+      throw e
+    }
+  },
+
+  resumeRunner: async (runnerId) => {
+    set({ runnersLoading: true, runnersError: '' })
+    try {
+      const data = await api(`/api/mission/runners/${runnerId}/resume`, {
+        method: 'POST',
+      })
+      await get().fetchRunners()
+      return data
+    } catch (e) {
+      set({ runnersLoading: false, runnersError: errText(e, 'Could not resume runner') })
+      throw e
+    }
+  },
+
+  removeRunner: async (runnerId) => {
+    set({ runnersLoading: true, runnersError: '' })
+    try {
+      await api(`/api/mission/runners/${runnerId}`, { method: 'DELETE' })
+      await get().fetchRunners()
+    } catch (e) {
+      set({ runnersLoading: false, runnersError: errText(e, 'Could not remove runner') })
+      throw e
+    }
+  },
+
+  getRunner: async (runnerId) => {
+    set({ runnersLoading: true, runnersError: '' })
+    try {
+      const data = await api(`/api/mission/runners/${runnerId}`)
+      return data.runner
+    } catch (e) {
+      set({ runnersLoading: false, runnersError: errText(e, 'Could not load runner') })
+      throw e
+    } finally {
+      set({ runnersLoading: false })
     }
   },
 

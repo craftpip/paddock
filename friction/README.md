@@ -99,12 +99,17 @@ entries were retired rather than fixed.
   gated loop); the `plan_*` bind-mount refusal and the doubled `workspace_write`
   refusal are still open.
 - `2026-10-08-plan69-pipeline-proof.md` — running plan 69's server-side
-  pipeline against a real session. **3 findings, still open** (re-checked
-  2026-10-09): a session minted while opencode's state dir was unwritable keeps
-  zero MCP tools even after the cause is fixed (the step prompt then parks at
-  timeout) — not independently re-verified 2026-10-09; `friction/` is `root:root`
-  so uid-1000 sessions cannot file into it; and `pad_workspace_write`'s refusal
-  does not name `exec` and prints its reason twice.
+  pipeline against a real session. Findings 1 (zero MCP tools from a root-owned
+  state dir) and 2 (`friction/` `root:root`) were reproduced live and **fixed on
+  2026-10-11** (both chowned to uid 1000; `opencode mcp list` connected).
+  Finding 3 (`pad_workspace_write` refusal) is still open.
+- `2026-10-11-mcp-drop.md` — the `pad_*` tools dropped mid-session; the API-key
+  hypothesis was false. Two independent causes separated by client-log evidence:
+  a root/uid-1000 state-dir collision (`locks/` owned by root) that broke the
+  CLI registration path — **fixed** (chowned to uid 1000), and opencode's
+  running-session rule that a `failed` remote MCP server is never re-fetched
+  until process restart (no reload action exists; config hot-reload does not
+  fire). Fresh sessions verify `pad_*` works.
 
 ## Still open as of 2026-10-09
 
@@ -133,15 +138,24 @@ findings are folded in after them.
    does not name `exec`
    ([`recheck-friction-log.md`](2026-09-29-recheck-friction-log.md),
    [`2026-10-08-plan69-pipeline-proof.md`](2026-10-08-plan69-pipeline-proof.md)).
-8. `friction/` is still `root:root drwxr-xr-x`, so a uid-1000 session cannot file
-   into it ([`2026-10-08-plan69-pipeline-proof.md`](2026-10-08-plan69-pipeline-proof.md)).
-9. A session minted with no MCP tools keeps zero tools
-   ([`2026-10-08-plan69-pipeline-proof.md`](2026-10-08-plan69-pipeline-proof.md)) —
-   not independently re-verified 2026-10-09.
+8. ~~`friction/` still `root:root drwxr-xr-x`~~ — **closed 2026-10-11**: chowned
+   to uid 1000 and touch-probe verified
+   ([`2026-10-08-plan69-pipeline-proof.md`](2026-10-08-plan69-pipeline-proof.md)).
+9. ~~A session minted with no MCP tools keeps zero tools~~ — **closed 2026-10-11**:
+   the root cause (a root-owned `locks/` in the shared opencode state dir) was
+   reproduced live and fixed. The caller-side rule survives: a *running* zero-tool
+   conversation stays that way — restart the session
+   ([`2026-10-08-plan69-pipeline-proof.md`](2026-10-08-plan69-pipeline-proof.md),
+   [`2026-10-11-mcp-drop.md`](2026-10-11-mcp-drop.md)).
 
 **Closed on 2026-10-09:** `settings_get.networkHealth`'s self-contradiction (now
 `state: "staleBinding"` plus a `reason` that states its own condition), and
 `help`'s silence about the `task_*` family (recipe 15 documents the gated loop).
+
+**Closed on 2026-10-11:** plan69 findings 1 and 2 (see their entries) — the
+harness's state dir and the fleet's `friction/` are uid-1000 owned, and the node
+TUI registers `browser` / `paddock` / `pad` (`opencode mcp list` connected).
+The unrelated `pad_workspace_write` refusal (plan69 finding 3) is still open.
 
 ## See Also
 

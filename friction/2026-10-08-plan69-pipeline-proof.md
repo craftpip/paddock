@@ -37,6 +37,15 @@ session on `pad-opencode-proj`. The gate itself (`PADDOCK_TASK_QUEUE=1` in
   opencode side must stop a toolset-less session from being sticky, because
   `-s <id>` reproducing `NONE` after the cause is fixed is what turns a one-off
   permissions bug into a permanent dead conversation.
+- **Resolution (2026-10-11):** root cause re-verified live and **fixed**. The
+  node TUI and a root `opencode web` process share `/root/.local/state/opencode`
+  (uid 1000 has `HOME=/root`), and the root side owned `locks/`, so the node
+  side's MCP registration died with the identical error:
+  `PermissionDenied: FileSystem.makeDirectory (…/locks/…lock)`. `sudo chown -R
+  1000:1000 /root/.local/state/opencode` applied and verified: `opencode mcp
+  list` now reports `browser` / `paddock` / `pad` connected. The caller-side
+  rule survives unchanged: a *running* conversation with zero tools keeps zero
+  tools — restart the session to pick them up.
 
 ### The friction log itself is not writable by the agents who file into it
 
@@ -53,6 +62,11 @@ session on `pad-opencode-proj`. The gate itself (`PADDOCK_TASK_QUEUE=1` in
 - **Fix:** give `friction/` (and any other root-side collection dir an agent
   is asked to append to) the `PUID:PGID` ownership the rest of the tree gets,
   or have the webui append on the agent's behalf through `workspace_write`.
+- **Resolution (2026-10-11):** **fixed and verified.** `sudo chown -R 1000:1000
+  /www2/paddock/friction` applied; the uid-1000 TUI now passes a touch probe in
+  that directory. The standing point stands: root-side collection dirs an agent
+  is asked to append to need the same PUID:PGID ownership the rest of the tree
+  gets.
 
 ### `pad_workspace_write` refuses where `pad_exec` writes fine, and does not say so
 

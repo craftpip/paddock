@@ -7,6 +7,16 @@ const padTmux = require('./pad-tmux');
 const registry = require('./agent-registry');
 const workspace = require('./workspace');
 const agentStore = require('./agent-store');
+const plans = require('./plans');
+
+/** Look up a PAD by name, throwing if not found (shared with plans.js). */
+function requireAgent(name) {
+  const agent = registry.getAgent(name);
+  if (!agent) {
+    throw new MissionError('mission_agent_not_found', `Agent not found: ${name}`);
+  }
+  return agent;
+}
 
 // Mission (plan 53): projects are (agent, folder) pairs, and a session is the
 // only unit of work — one live tmux session per row, running the agent's TUI in
@@ -1685,6 +1695,357 @@ async function assertStepSession(sessionId) {
   return { session, project, vmName, pane: pre };
 }
 
+/* ---------------------------------------------------------------- */
+/*  INFINITE RUNNER SERVICE (plan 83)                               */
+/* ---------------------------------------------------------------- */
+
+const RUNNER_CONTROL_STATES = Object.freeze(['enabled', 'paused', 'waiting', 'need_input', 'finished']);
+const RUNNER_HEALTH_STATES = Object.freeze([
+  'working', 'waiting_for_tool', 'compacting', 'recovering',
+  'suspected_stuck', 'usage_exhausted', 'auth_expired',
+  'rate_limited', 'observation_unavailable', 'invalid_queue'
+]);
+
+/** Generate a runner id. */
+function newRunnerId() {
+  return 'run_' + crypto.randomBytes(8).toString('hex');
+}
+
+/** Create a runner configuration. */
+async function createRunner({ projectId, name, sessionId, queueFile = 'QUEUE.md',
+  idleGraceMs = 120000, minNudgeIntervalMs = 120000, noProgressBudget = 3,
+  compactionGraceMs = 300000, longCommandThresholdMs = 1800000,
+  recoverExited = true, recoveryBudget = 3 }) {
+  const project = getProject(projectId);
+  const id = newRunnerId();
+  const now = new Date().toISOString();
+  const db = getDb();
+  db.prepare(`
+    INSERT INTO infinite_runners (id, name, project_id, session_id, queue_file,
+      enabled, control_state, idle_grace_ms, min_nudge_interval_ms, no_progress_budget,
+      compaction_grace_ms, long_command_threshold_ms, recover_exited, recovery_budget,
+      run_generation, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, 0, 'paused', ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+  `).run(
+    id, name, projectId, sessionId || null, queueFile,
+    idleGraceMs, minNudgeIntervalMs, noProgressBudget,
+    compactionGraceMs, longCommandThresholdMs,
+    recoverExited ? 1 : 0, recoveryBudget,
+    now, now
+  );
+  return getRunner(id);
+}
+
+/** Get a runner by id. */
+function getRunner(id) {
+  return getDb().prepare('SELECT * FROM infinite_runners WHERE id = ?').get(id);
+}
+
+/** Get the enabled runner for a project (at most one). */
+function getActiveRunnerForProject(projectId) {
+  return getDb().prepare(`
+    SELECT * FROM infinite_runners
+    WHERE project_id = ? AND enabled = 1
+    ORDER BY run_generation DESC LIMIT 1
+  `).get(projectId);
+}
+
+/** List runners for a project. */
+function listRunnersForProject(projectId) {
+  return getDb().prepare('SELECT * FROM infinite_runners WHERE project_id = ? ORDER BY created_at DESC').all(projectId);
+}
+
+/** Update runner settings (not state). */
+async function updateRunner(id, { name, idleGraceMs, minNudgeIntervalMs, noProgressBudget,
+  compactionGraceMs, longCommandThresholdMs, recoverExited, recoveryBudget }) {
+  const runner = getRunner(id);
+  if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
+  const updates = [];
+  const params = [];
+  if (name !== undefined) { updates.push('name = ?'); params.push(name); }
+  if (idleGraceMs !== undefined) { updates.push('idle_grace_ms = ?'); params.push(idleGraceMs); }
+  if (minNudgeIntervalMs !== undefined) { updates.push('min_nudge_interval_ms = ?'); params.push(minNudgeIntervalMs); }
+  if (noProgressBudget !== undefined) { updates.push('no_progress_budget = ?'); params.push(noProgressBudget); }
+  if (compactionGraceMs !== undefined) { updates.push('compaction_grace_ms = ?'); params.push(compactionGraceMs); }
+  if (longCommandThresholdMs !== undefined) { updates.push('long_command_threshold_ms = ?'); params.push(longCommandThresholdMs); }
+  if (recoverExited !== undefined) { updates.push('recover_exited = ?'); params.push(recoverExited ? 1 : 0); }
+  if (recoveryBudget !== undefined) { updates.push('recovery_budget = ?'); params.push(recoveryBudget); }
+  if (!updates.length) return getRunner(id);
+  updates.push('updated_at = ?');
+  params.push(new Date().toISOString());
+  params.push(id);
+  getDb().prepare(`UPDATE infinite_runners SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+  return getRunner(id);
+}
+
+/** Set runner control state (enabled/paused/waiting/need_input/finished). */
+async function setRunnerControlState(id, controlState) {
+  if (!RUNNER_CONTROL_STATES.includes(controlState)) {
+    throw new MissionError('runner_invalid_state', `Invalid control state: ${controlState}`);
+  }
+  const runner = getRunner(id);
+  if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
+  getDb().prepare('UPDATE infinite_runners SET control_state = ?, updated_at = ? WHERE id = ?')
+    .run(controlState, new Date().toISOString(), id);
+  return getRunner(id);
+}
+
+/** Increment run generation (for Start idempotency and restart reconciliation). */
+function incrementRunGeneration(id) {
+  getDb().prepare('UPDATE infinite_runners SET run_generation = run_generation + 1, updated_at = ? WHERE id = ?')
+    .run(new Date().toISOString(), id);
+}
+
+/** Get runner with project and session details for supervision. */
+async function getRunnerForSupervision(id) {
+  const runner = getRunner(id);
+  if (!runner) return null;
+  const project = getProject(runner.project_id);
+  const agent = requireAgent(project.agent_name);
+  let session = null;
+  if (runner.session_id) session = getSession(runner.session_id);
+  const queue = await plans.readQueue(agent, { ...project, plans_folder: project.plans_folder || 'plans' });
+  return { runner, project, agent, session, queue };
+}
+
+/** Start (or resume) a runner. Validates queue, binds/creates worker session, sends startup message. */
+async function startRunner(id, { actor = null } = {}) {
+  const runner = getRunner(id);
+  if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
+  if (!RUNNER_CONTROL_STATES.includes(runner.control_state)) {
+    throw new MissionError('runner_invalid_state', `Runner in invalid control state: ${runner.control_state}`);
+  }
+  if (runner.control_state === 'finished') {
+    throw new MissionError('runner_finished', 'This runner has finished; create a new one to continue');
+  }
+  // Increment run generation for idempotency
+  incrementRunGeneration(id);
+  const fresh = getRunner(id);
+  const { project, agent, session, queue } = await getRunnerForSupervision(id);
+  // Validate queue
+  if (!queue || !queue.parsed || queue.parsed.items.length === 0) {
+    // Empty queue → nothing to do, just mark finished
+    await setRunnerControlState(id, 'finished');
+    return { started: false, reason: 'empty_queue', runner: getRunner(id) };
+  }
+  if (queue.aggregate.state === 'invalid') {
+    await setRunnerControlState(id, 'finished');
+    throw new MissionError('runner_invalid_queue', `Queue is invalid: ${queue.aggregate.reason}`);
+  }
+  // Resolve worker session
+  let workerSession = session;
+  if (!workerSession) {
+    // No session bound yet — create one
+    const startResult = await startSession(runner.project_id, {
+      label: `Runner: ${runner.name}`,
+      origin: 'agent',
+      createdBy: actor || 'runner',
+    });
+    workerSession = fresh.session = startResult.session;
+    getDb().prepare('UPDATE infinite_runners SET session_id = ? WHERE id = ?').run(workerSession.id, id);
+  } else if (!workerSession.live) {
+    // Bound session is dead — restart it
+    await restartSession(workerSession.id, { actor });
+    workerSession = getSession(workerSession.id);
+  } else if (workerSession.tuiAlive === false) {
+    // Bare shell — relaunch TUI
+    await relaunchTui(workerSession.id, { actor });
+    workerSession = getSession(workerSession.id);
+  }
+  // Verify session is ready for send (not busy, not locked, not permission)
+  const pre = await padTmux.paneState(project.agent_name, workerSession.tmux_id);
+  const perm = detectPermission((await padTmux.captureScreen(project.agent_name, workerSession.tmux_id, 20)).text);
+  const verdict = sendVerdict({ ...workerSession, live: pre.live, tuiAlive: pre.tuiAlive, command: pre.command }, perm);
+  if (!verdict.canSend) {
+    await setRunnerControlState(id, 'waiting');
+    throw new MissionError('runner_session_not_ready', `Worker session not ready: ${verdict.refusal}`);
+  }
+  // Enable runner and send startup message
+  await setRunnerControlState(id, 'enabled');
+  // Compose startup message
+  const queuePath = plans.queuePath(requireAgent(project.agent_name), { ...project, plans_folder: project.plans_folder || 'plans' });
+  const indexPath = queuePath.replace('QUEUE.md', 'INDEX.md');
+  const startupMsg = [
+    '=== INFINITE RUNNER STARTUP ===',
+    `Runner: ${runner.name} (${id})`,
+    `Queue: ${queuePath}`,
+    `Index: ${indexPath}`,
+    '',
+    'Read QUEUE.md and INDEX.md completely before acting.',
+    'Work one item at a time, in array order.',
+    'If ANY item is "need input", stop immediately and explain the reason.',
+    'Resume the "in progress" item first, otherwise take the first "new" item.',
+    'Write "in progress" BEFORE doing work. At most one item in progress.',
+    'Follow the plan lifecycle from INDEX.md. Mark "done" only when work AND verification are complete.',
+    'When blocked, set item to "need input" with the exact question in reason. Then STOP.',
+    'After finishing an item, re-read QUEUE.md and continue. When all done, report completion and wait.',
+    '=== END STARTUP ==='
+  ].join('\n');
+  await sendText(workerSession.id, startupMsg, { actor });
+  // Update runner with fresh generation and session
+  const updated = getRunner(id);
+  return { started: true, runner: updated, session: workerSession, queue: queue.aggregate };
+}
+
+/** Pause a runner (disable nudges, end tmux session). */
+async function pauseRunner(id, { actor = null } = {}) {
+  const runner = getRunner(id);
+  if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
+  if (runner.session_id) {
+    // End the tmux session but keep the conversation (stamp-and-keep)
+    await endSession(runner.session_id, { actor });
+  }
+  await setRunnerControlState(id, 'paused');
+  // Invalidate run generation so any in-flight nudge/recovery aborts
+  incrementRunGeneration(id);
+  return getRunner(id);
+}
+
+/** Resume a paused runner. */
+async function resumeRunner(id, { actor = null } = {}) {
+  const runner = getRunner(id);
+  if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
+  if (runner.control_state !== 'paused') {
+    throw new MissionError('runner_not_paused', 'Runner is not paused');
+  }
+  return startRunner(id, { actor });
+}
+
+/** Remove runner (disable supervision, release binding, keep session/queue). */
+async function removeRunner(id) {
+  const runner = getRunner(id);
+  if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
+  // Invalidate run generation to abort any in-flight nudge/recovery
+  incrementRunGeneration(id);
+  // If enabled, pause first (ends tmux session)
+  if (runner.enabled || runner.control_state === 'enabled') {
+    await pauseRunner(id);
+  }
+  // Clear session binding and disable
+  getDb().prepare('UPDATE infinite_runners SET session_id = NULL, enabled = 0, control_state = \'paused\' WHERE id = ?').run(id);
+  return { removed: true };
+}
+
+/** Reconcile runners on webui restart: re-enable runners that were enabled, but don't auto-resume. */
+async function reconcileRunners() {
+  const runners = getDb().prepare('SELECT id FROM infinite_runners WHERE enabled = 1').all();
+  for (const r of runners) {
+    const runner = getRunner(r.id);
+    // The run generation was incremented on pause/remove, so a restarted webui
+    // sees run_generation > 0 but control_state = 'paused'.
+    // We do NOT auto-resume — the human must explicitly Resume.
+    // Just ensure the generation is respected (it already is).
+    console.log(`[runner reconcile] Runner ${runner.id} (${runner.name}) was enabled at shutdown; control_state=${runner.control_state}, run_generation=${runner.run_generation}. Awaiting explicit Resume.`);
+  }
+}
+
+/** The supervisor watch loop — called periodically for enabled runners. */
+async function runnerWatchTick() {
+  const runners = getDb().prepare('SELECT id FROM infinite_runners WHERE enabled = 1').all();
+  for (const r of runners) {
+    try {
+      await runnerWatchOnce(r.id);
+    } catch (e) {
+      console.error(`[runner watch] Runner ${r.id} tick error:`, e.message);
+    }
+  }
+}
+
+/** Single watch tick for one runner. */
+async function runnerWatchOnce(runnerId) {
+  const runner = getRunner(runnerId);
+  if (!runner || !runner.enabled) return;
+  const gen = runner.run_generation;
+  const { project, agent, session, queue } = await getRunnerForSupervision(runnerId);
+  if (!session) {
+    console.log(`[runner watch] ${runnerId}: no worker session bound`);
+    return;
+  }
+  // Verify this run generation still owns the lease
+  const fresh = getRunner(runnerId);
+  if (fresh.run_generation !== gen) return; // superseded by new Start/Pause/Remove
+  // Read and validate queue
+  if (!queue || queue.aggregate.state === 'invalid') {
+    await setRunnerControlState(runnerId, 'finished');
+    return;
+  }
+  if (queue.aggregate.state === 'done' || queue.aggregate.state === 'need input') {
+    await setRunnerControlState(runnerId, queue.aggregate.state === 'done' ? 'finished' : 'need_input');
+    return;
+  }
+  // Observe pane/turn state
+  const paneState = await padTmux.paneState(project.agent_name, session.tmux_id);
+  if (!paneState.live) {
+    console.log(`[runner watch] ${runnerId}: pane dead`);
+    if (runner.recover_exited && runner.retry_count < runner.recovery_budget) {
+      await recoverWorkerSession(runnerId, gen, project, session);
+    } else {
+      await setRunnerControlState(runnerId, 'suspected_stuck');
+    }
+    return;
+  }
+  // Check permission/solo lock
+  const screen = await padTmux.captureScreen(project.agent_name, session.tmux_id, 20);
+  const perm = detectPermission(screen.text);
+  const verdict = sendVerdict({ ...session, live: paneState.live, tuiAlive: paneState.tuiAlive, command: paneState.command }, perm);
+  if (!verdict.canSend) {
+    if (verdict.refusal.startsWith('mission_permission_pending')) {
+      await setRunnerControlState(runnerId, 'need_input');
+    }
+    return;
+  }
+  // Check if a turn is running (tool running, output advancing)
+  const activity = agentStore.readActivity(project.agent_name, session.agent_session_id, { agentRunning: project.status === 'running' });
+  const busy = activity.store?.available && activity.lastToolCall?.status === 'running';
+  if (busy) {
+    // Turn is running — update last_progress
+    getDb().prepare('UPDATE infinite_runners SET last_progress_at = ? WHERE id = ?').run(new Date().toISOString(), runnerId);
+    return;
+  }
+  // Check if output is advancing (compaction grace)
+  // For simplicity: if not busy and not need_input/done, check idle grace
+  const now = Date.now();
+  const lastProgress = runner.last_progress_at ? Date.parse(runner.last_progress_at) : 0;
+  const idleMs = now - (lastProgress || now);
+  if (idleMs >= runner.idle_grace_ms) {
+    // Send nudge if budget allows
+    if (runner.retry_count < runner.no_progress_budget) {
+      const nudgeMsg = '=== RUNNER NUDGE ===\nRe-read QUEUE.md and INDEX.md. Continue the active/next item, or record "need input" if blocked.\n=== END NUDGE ===';
+      await sendText(session.id, nudgeMsg, { actor: 'runner' });
+      getDb().prepare('UPDATE infinite_runners SET last_nudge_at = ?, retry_count = retry_count + 1 WHERE id = ?')
+        .run(new Date().toISOString(), runnerId);
+    } else {
+      await setRunnerControlState(runnerId, 'suspected_stuck');
+    }
+  }
+}
+
+/** Recover a worker session that exited. */
+async function recoverWorkerSession(runnerId, gen, project, deadSession) {
+  const runner = getRunner(runnerId);
+  if (!runner || runner.run_generation !== gen) return;
+  // End the dead session (already dead)
+  await endSession(deadSession.id, { actor: 'runner' });
+  // Create new session with same conversation
+  const startResult = await startSession(runner.project_id, {
+    label: `Runner: ${runner.name} (recovery ${runner.retry_count + 1}/${runner.recovery_budget})`,
+    origin: 'agent',
+    agentSessionId: deadSession.agent_session_id,
+    createdBy: 'runner',
+  });
+  getDb().prepare('UPDATE infinite_runners SET session_id = ?, retry_count = retry_count + 1, updated_at = ? WHERE id = ?')
+    .run(startResult.session.id, new Date().toISOString(), runnerId);
+  // Send recovery message
+  const queuePath = plans.queuePath(requireAgent(project.agent_name), { ...project, plans_folder: project.plans_folder || 'plans' });
+  const recoveryMsg = [
+    '=== RUNNER RECOVERY ===',
+    `The previous pane exited. This pane resumes the same conversation (${deadSession.agent_session_id}).`,
+    `Re-read QUEUE.md (${queuePath}) and continue.`,
+    '=== END RECOVERY ==='
+  ].join('\n');
+  await sendText(startResult.session.id, recoveryMsg, { actor: 'runner' });
+}
+
 module.exports = {
   MissionError,
   supportedTypes,
@@ -1733,4 +2094,23 @@ module.exports = {
   withAgentBusyProjects,
   closeSession,
   endSession,
+  // Runner (plan 83)
+  newRunnerId,
+  createRunner,
+  getRunner,
+  getActiveRunnerForProject,
+  listRunnersForProject,
+  updateRunner,
+  setRunnerControlState,
+  incrementRunGeneration,
+  getRunnerForSupervision,
+  startRunner,
+  pauseRunner,
+  resumeRunner,
+  removeRunner,
+  reconcileRunners,
+  runnerWatchTick,
+  runnerWatchOnce,
+  RUNNER_CONTROL_STATES,
+  RUNNER_HEALTH_STATES,
 };

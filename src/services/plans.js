@@ -11,6 +11,7 @@
  */
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const registry = require('./agent-registry');
 const { getDriver } = require('./drivers');
@@ -629,6 +630,310 @@ async function initProjectPlans(agentName, project) {
   return { created: !existed, dir: base, indexPath: abs };
 }
 
+/* ---------------------------------------------------------------- */
+/*  QUEUE CONTRACT — plan 83 Phase 2                                */
+/* ---------------------------------------------------------------- */
+
+/** Queue file name. */
+const QUEUE_FILENAME = 'QUEUE.md';
+
+/** Markers that fence the machine-readable JSON block. */
+const QUEUE_MARKERS = {
+  start: '<!-- paddock-queue:start -->',
+  end: '<!-- paddock-queue:end -->',
+};
+
+/** Supported queue version. */
+const QUEUE_VERSION = 1;
+
+/** Allowed item statuses. */
+const QUEUE_ITEM_STATUSES = Object.freeze(['new', 'in progress', 'need input', 'done']);
+
+/** Compute the absolute path of the queue file for a project. Agent can be a name string or agent object. */
+function queuePath(agent, project) {
+  const a = typeof agent === 'string' ? requireAgent(agent) : agent;
+  return path.join(plansDir(a, { project }), QUEUE_FILENAME);
+}
+
+/** SHA-256 content hash for compare-and-swap. */
+function queueHash(content) {
+  return crypto.createHash('sha256').update(content, 'utf8').digest('hex');
+}
+
+/**
+ * Generated QUEUE.md template (plan 83 §141-203).
+ * Created once per project when the queue is first initialised.
+ */
+function queueTemplate(agent, project) {
+  const where = project
+    ? `- Project: ${project.name || '(unnamed)'}\n- PAD: ${agent.name} (${agent.agent_type || 'agent'})\n- Project folder: ${project.folder || '(unknown)'}\n- Plans folder: ${project.folder || ''}/${normalizePlansFolderShorthand(project.plans_folder)}`
+    : `- PAD: ${agent.name} (${agent.agent_type || 'agent'})\n- This is the PAD-wide plans folder, not tied to one Mission project.`;
+
+  return [
+    '# Plan queue',
+    '',
+    'Read this file and `INDEX.md` before starting or resuming work. `INDEX.md` explains',
+    'how to maintain plans; this file explains how to run this queue.',
+    '',
+    '## Worker rules',
+    '',
+    '1. Read the whole queue before acting. Work one item at a time, in array order.',
+    '2. If ANY item is `need input`, stop immediately. Explain its `reason` to the',
+    '   human, keep this session open, and wait. Never skip it to do later items.',
+    '3. Resume the `in progress` item first. Otherwise take the first `new` item and',
+    '   write `in progress` BEFORE doing work. At most one item may be in progress.',
+    '4. Read the referenced plan and follow INDEX.md\'s plan lifecycle. Keep the plan\'s',
+    '   progress current. Mark a queue item `done` only when its required work and',
+    '   verification are complete under those rules. Finishing a chat turn is not done.',
+    '5. When blocked or needing clarification, update the plan and set this item to',
+    '   `need input`. Put the exact question or required intervention in `reason`.',
+    '   Then stop. Do not guess, skip the item, or clear your own blocker.',
+    '6. After finishing an item, re-read this file and continue with the next item.',
+    '   When every item is done, report completion and wait. Do not invent work.',
+    '7. After the human resolves a blocker, they explicitly resume/requeue the item.',
+    '   Re-read the updated queue on Start; do not assume an old answer still applies.',
+    '',
+    '## Editing rules — keep the parser working',
+    '',
+    '- Preserve the two markers and exactly one JSON block between them.',
+    '- Keep `version` equal to 1 and use the exact lowercase status strings:',
+    '  `new`, `in progress`, `need input`, `done`.',
+    '- Each item has a unique, stable `id`, a `plan` path relative to this directory,',
+    '  a `status`, and a string `reason`. No absolute paths or paths escaping this directory.',
+    '- `reason` is required and nonempty for `need input`; use an empty string otherwise.',
+    '- Add new items at the end with status `new`. Never change existing item IDs.',
+    '- Keep completed entries as `done`; do not delete them to signal completion.',
+    '- Do not add comments or trailing commas inside JSON, extra JSON fields, duplicate',
+    '  keys, or a hand-written overall queue status. Overall status is computed in code.',
+    '- Re-read before writing so newly added tasks are preserved. Use the queue update',
+    '  operation with its revision check when available. Never overwrite a newer revision.',
+    '- Write the complete valid file atomically; never leave half-written JSON behind.',
+    '- Put explanations outside the marked block, or in the item\'s `reason` when blocked.',
+    '',
+    QUEUE_MARKERS.start,
+    '```json',
+    JSON.stringify({ version: QUEUE_VERSION, items: [] }, null, 2),
+    '```',
+    QUEUE_MARKERS.end,
+  ].join('\n');
+}
+
+/**
+ * Parse a QUEUE.md file, validate structure, and return the parsed JSON plus metadata.
+ * Throws PlansError with code on any validation failure.
+ * @returns { version, items[], hash, rawJson }
+ */
+function parseQueue(raw) {
+  const { start, end } = QUEUE_MARKERS;
+  const startIdx = raw.indexOf(start);
+  const endIdx = raw.indexOf(end);
+  if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) {
+    throw new PlansError('queue_markers_missing', 'Queue file missing or malformed markers (<!-- paddock-queue:start/end -->).');
+  }
+  const jsonStart = startIdx + start.length;
+  const jsonBlock = raw.slice(jsonStart, endIdx).trim();
+  if (!jsonBlock.startsWith('```json') || !jsonBlock.endsWith('```')) {
+    throw new PlansError('queue_json_fence_missing', 'JSON block must be fenced with ```json ... ```.');
+  }
+  const jsonText = jsonBlock.slice(7, -3).trim(); // strip ```json and ```
+  let parsed;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch (e) {
+    throw new PlansError('queue_json_invalid', `JSON parse error: ${e.message}`);
+  }
+  if (!parsed || typeof parsed !== 'object') {
+    throw new PlansError('queue_json_invalid', 'Queue JSON must be an object.');
+  }
+  if (parsed.version !== QUEUE_VERSION) {
+    throw new PlansError('queue_version_unsupported', `Unsupported queue version: ${parsed.version} (expected ${QUEUE_VERSION}).`);
+  }
+  if (!Array.isArray(parsed.items)) {
+    throw new PlansError('queue_items_missing', 'Queue must have an `items` array.');
+  }
+  const seenIds = new Set();
+  for (let i = 0; i < parsed.items.length; i++) {
+    const item = parsed.items[i];
+    if (!item || typeof item !== 'object') {
+      throw new PlansError('queue_item_invalid', `Item ${i} is not an object.`);
+    }
+    if (!item.id || typeof item.id !== 'string' || item.id.trim() === '') {
+      throw new PlansError('queue_item_invalid', `Item ${i} missing required nonempty string id.`);
+    }
+    if (seenIds.has(item.id)) {
+      throw new PlansError('queue_duplicate_id', `Duplicate item id: ${item.id}`);
+    }
+    seenIds.add(item.id);
+    if (!item.plan || typeof item.plan !== 'string' || item.plan.trim() === '') {
+      throw new PlansError('queue_item_invalid', `Item ${item.id} missing required nonempty string plan.`);
+    }
+    // Path containment: relative, no absolute, no .. escape
+    if (path.isAbsolute(item.plan) || item.plan.includes('..')) {
+      throw new PlansError('queue_plan_path_invalid', `Item ${item.id} plan path must be relative and not escape the plans folder: ${item.plan}`);
+    }
+    if (!QUEUE_ITEM_STATUSES.includes(item.status)) {
+      throw new PlansError('queue_item_invalid', `Item ${item.id} has invalid status: ${item.status} (allowed: ${QUEUE_ITEM_STATUSES.join(', ')}).`);
+    }
+    if (item.reason === undefined || item.reason === null) {
+      throw new PlansError('queue_item_invalid', `Item ${item.id} missing required reason (string, empty for non-need-input).`);
+    }
+    if (typeof item.reason !== 'string') {
+      throw new PlansError('queue_item_invalid', `Item ${item.id} reason must be a string.`);
+    }
+    if (item.status === 'need input' && item.reason.trim() === '') {
+      throw new PlansError('queue_item_invalid', `Item ${item.id} has status 'need input' but reason is empty.`);
+    }
+    if (item.status !== 'need input' && item.reason !== '') {
+      // Allow non-empty reason for other statuses? Plan says "use an empty string otherwise" — enforce empty.
+      throw new PlansError('queue_item_invalid', `Item ${item.id} has status '${item.status}' but reason is not empty.`);
+    }
+    // No extra fields beyond id, plan, status, reason
+    const allowedKeys = ['id', 'plan', 'status', 'reason'];
+    for (const k of Object.keys(item)) {
+      if (!allowedKeys.includes(k)) {
+        throw new PlansError('queue_item_invalid', `Item ${item.id} has unexpected field: ${k}. Allowed: ${allowedKeys.join(', ')}.`);
+      }
+    }
+  }
+  // At most one 'in progress'
+  const inProgress = parsed.items.filter((it) => it.status === 'in progress');
+  if (inProgress.length > 1) {
+    throw new PlansError('queue_multiple_in_progress', 'Only one item may have status "in progress".');
+  }
+  return {
+    version: parsed.version,
+    items: parsed.items,
+    hash: queueHash(jsonText),
+    rawJson: jsonText,
+  };
+}
+
+/** Alias for parseQueue — validates and returns parsed queue. */
+function validateQueue(raw) {
+  return parseQueue(raw);
+}
+
+/**
+ * Validate a parsed queue and compute aggregate state.
+ * @returns { state: 'new'|'in progress'|'need input'|'done'|'invalid', reason?, inProgressItem?, needInputItem? }
+ */
+function queueAggregateState(parsed) {
+  if (!parsed || !parsed.items || !parsed.items.length) {
+    return { state: 'new', reason: 'Queue is empty.' };
+  }
+  const hasNeedInput = parsed.items.some((it) => it.status === 'need input');
+  if (hasNeedInput) {
+    const needInputItem = parsed.items.find((it) => it.status === 'need input');
+    return { state: 'need input', reason: 'Blocked on input.', needInputItem };
+  }
+  const hasInProgress = parsed.items.some((it) => it.status === 'in progress');
+  if (hasInProgress) {
+    const inProgressItem = parsed.items.find((it) => it.status === 'in progress');
+    return { state: 'in progress', inProgressItem };
+  }
+  const allDone = parsed.items.every((it) => it.status === 'done');
+  if (allDone) {
+    return { state: 'done', reason: 'All items completed.' };
+  }
+  // Some new, some done, none in progress, none need input
+  return { state: 'in progress', reason: 'Completed items with remaining new work.' };
+}
+
+/**
+ * Read and validate the queue file for a project.
+ * Returns { parsed, aggregate, path, hash } or throws PlansError.
+ */
+async function readQueue(agent, project) {
+  const abs = queuePath(agent, project);
+  if (!fs.existsSync(abs)) {
+    return { parsed: { version: QUEUE_VERSION, items: [] }, aggregate: { state: 'new', reason: 'Queue file does not exist.' }, path: abs, hash: null };
+  }
+  const raw = fs.readFileSync(abs, 'utf8');
+  const parsed = parseQueue(raw);
+  const aggregate = queueAggregateState(parsed);
+  return { parsed, aggregate, path: abs, hash: parsed.hash };
+}
+
+/**
+ * Write the queue file with compare-and-swap (CAS) on content hash.
+ * Validates items structure before writing. @param {string} expectedHash - the hash returned by a prior readQueue; write fails if file changed.
+ * @returns { hash, path }
+ */
+async function writeQueue(agent, project, items, expectedHash) {
+  const abs = queuePath(agent, project);
+  // Validate items structure before writing (mirrors parseQueue validation)
+  if (!Array.isArray(items)) throw new PlansError('queue_items_missing', 'Queue items must be an array.');
+  const seenIds = new Set();
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (!item || typeof item !== 'object') throw new PlansError('queue_item_invalid', `Item ${i} is not an object.`);
+    if (!item.id || typeof item.id !== 'string' || item.id.trim() === '') throw new PlansError('queue_item_invalid', `Item ${i} missing required nonempty string id.`);
+    if (seenIds.has(item.id)) throw new PlansError('queue_duplicate_id', `Duplicate item id: ${item.id}`);
+    seenIds.add(item.id);
+    if (!item.plan || typeof item.plan !== 'string' || item.plan.trim() === '') throw new PlansError('queue_item_invalid', `Item ${item.id} missing required nonempty string plan.`);
+    if (path.isAbsolute(item.plan) || item.plan.includes('..')) throw new PlansError('queue_plan_path_invalid', `Item ${item.id} plan path must be relative and not escape the plans folder: ${item.plan}`);
+    if (!QUEUE_ITEM_STATUSES.includes(item.status)) throw new PlansError('queue_item_invalid', `Item ${item.id} has invalid status: ${item.status} (allowed: ${QUEUE_ITEM_STATUSES.join(', ')}).`);
+    if (item.reason === undefined || item.reason === null) throw new PlansError('queue_item_invalid', `Item ${item.id} missing required reason (string, empty for non-need-input).`);
+    if (typeof item.reason !== 'string') throw new PlansError('queue_item_invalid', `Item ${item.id} reason must be a string.`);
+    if (item.status === 'need input' && item.reason.trim() === '') throw new PlansError('queue_item_invalid', `Item ${item.id} has status 'need input' but reason is empty.`);
+    if (item.status !== 'need input' && item.reason !== '') throw new PlansError('queue_item_invalid', `Item ${item.id} has status '${item.status}' but reason is not empty.`);
+    const allowedKeys = ['id', 'plan', 'status', 'reason'];
+    for (const k of Object.keys(item)) if (!allowedKeys.includes(k)) throw new PlansError('queue_item_invalid', `Item ${item.id} has unexpected field: ${k}. Allowed: ${allowedKeys.join(', ')}.`);
+  }
+  const inProgress = items.filter((it) => it.status === 'in progress');
+  if (inProgress.length > 1) throw new PlansError('queue_multiple_in_progress', 'Only one item may have status "in progress".');
+
+  const payload = JSON.stringify({ version: QUEUE_VERSION, items }, null, 2);
+  const newHash = queueHash(payload);
+  if (expectedHash && expectedHash !== newHash) {
+    // Re-read to confirm and surface the conflict
+    const current = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : '';
+    let currentHash = null;
+    try { currentHash = parseQueue(current).hash; } catch {}
+    if (currentHash && currentHash !== expectedHash) {
+      throw new PlansError('queue_revision_conflict', `Queue was modified by another writer (expected hash ${expectedHash}, current ${currentHash}). Re-read and retry.`);
+    }
+  }
+  // Build full file with markers
+  const full = [
+    QUEUE_MARKERS.start,
+    '```json',
+    payload,
+    '```',
+    QUEUE_MARKERS.end,
+    '',
+  ].join('\n');
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.writeFileSync(abs, full, 'utf8');
+  ensureOwned(abs);
+  return { hash: newHash, path: abs };
+}
+
+/**
+ * Ensure the queue file exists (create from template if missing).
+ * Returns { created, path, hash }.
+ */
+async function ensureQueue(agent, project) {
+  const abs = queuePath(agent, project);
+  if (fs.existsSync(abs)) {
+    const raw = fs.readFileSync(abs, 'utf8');
+    try {
+      const parsed = parseQueue(raw);
+      return { created: false, path: abs, hash: parsed.hash };
+    } catch {
+      // Existing file is invalid — leave it, report error on read
+      return { created: false, path: abs, hash: null, invalid: true };
+    }
+  }
+  const agentObj = requireAgent(agent);
+  const text = queueTemplate(agentObj, project);
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.writeFileSync(abs, text, 'utf8');
+  ensureOwned(abs);
+  const parsed = parseQueue(text);
+  return { created: true, path: abs, hash: parsed.hash };
+}
+
 /**
  * Write a plan. For pad-root scope (no project), the file is produced BY the
  * workspace service — one gate, one reason, one place (plan 64 3a/3d).
@@ -798,4 +1103,16 @@ module.exports = {
   writePlan,
   initProjectPlans,
   requireAgent,
+  QUEUE_MARKERS,
+  QUEUE_VERSION,
+  QUEUE_ITEM_STATUSES,
+  queueTemplate,
+  queuePath,
+  queueHash,
+  parseQueue,
+  validateQueue,
+  queueAggregateState,
+  readQueue,
+  writeQueue,
+  ensureQueue,
 };

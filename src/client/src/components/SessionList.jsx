@@ -1,9 +1,11 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import OverlayScroll from './OverlayScroll'
 import Button from './ui/Button'
 import { useConfirm } from '../lib/confirm'
 import { useMission } from '../stores/mission'
 import { translateHistoryError } from '../lib/error-text'
+import RunnerDialog from './RunnerDialog'
+import { cx } from '../lib/cx'
 
 // Col 2 — every conversation in this project, in ONE list.
 //
@@ -334,14 +336,24 @@ export default function SessionList() {
     history, historyLoading, historyError, historyErrors, includeSubfolders, loadedFor,
     selectedProjectId, allLoaded, allError, selectedConversationId, startingKey, projects,
     selectSession, startSession, closeSession, toggleSessionLock, setSubfolders,
+    // Runners (plan 83)
+    runners, runnersLoading, runnersError,
+    fetchRunners, createRunner, updateRunner, startRunner, pauseRunner, resumeRunner, removeRunner,
   } = useMission()
 
   const [actionError, setActionError] = useState('')
+  const [runnerDialog, setRunnerDialog] = useState(null) // { runner, project }
+  const [runnerActionError, setRunnerActionError] = useState('')
   const project = useMission((s) => s.projects.find((p) => p.id === s.selectedProjectId))
   const confirm = useConfirm()
   // Plan 68: there is no `scope` — the selection IS the scope. `''` = the
   // ALL-projects view; a project id = that project's view.
   const isAll = !selectedProjectId
+
+  // Fetch runners when project changes
+  useEffect(() => {
+    if (project) fetchRunners(project.id)
+  }, [project?.id, fetchRunners])
 
   // In 'all' the column still needs a project for `+ New session` and for
   // resuming a history row that predates the aggregate, but there is nothing to
@@ -354,6 +366,19 @@ export default function SessionList() {
       await fn()
     } catch (e) {
       setActionError(e?.error || e?.message || msg)
+    }
+  }
+
+  const handleRunnerAction = async (action, runnerId) => {
+    setRunnerActionError('')
+    try {
+      if (action === 'start') await startRunner(runnerId)
+      else if (action === 'pause') await pauseRunner(runnerId)
+      else if (action === 'resume') await resumeRunner(runnerId)
+      else if (action === 'remove') await removeRunner(runnerId)
+      await fetchRunners()
+    } catch (e) {
+      setRunnerActionError(e?.error || e?.message || `Could not ${action} runner`)
     }
   }
 
@@ -473,6 +498,17 @@ export default function SessionList() {
         >
           {newBusy ? 'Opening…' : '+ New session'}
         </Button>
+        {/* Infinite runner button (plan 83) */}
+        <Button
+          variant="secondary"
+          size="bare"
+          disabled={!project}
+          onClick={() => setRunnerDialog({ runner: null, project })}
+          className="msn-btn-new-runner py-1 text-[11px]"
+          title={project ? `Create infinite runner in ${project.name}` : 'Pick a project first'}
+        >
+          ∞ Infinite runner
+        </Button>
         <span
           className="msn-project-folder ml-auto truncate font-mono text-[10px] text-ink-faint"
           title={isAll ? `${projects.length} projects` : project?.folder}
@@ -517,6 +553,29 @@ export default function SessionList() {
           take 10px out of a 260px listing. The floating thumb is drawn over the
           rows instead, so the folder path and the row actions get the width. */}
       <OverlayScroll scrollerClassName="msn-sessions-body">
+        {/* Pinned infinite runners (plan 83) — appear at the top of the listing,
+            above the Sessions group, across both project and all views. */}
+        {project && runners.length > 0 && (
+          <div className="msn-runners-pinned">
+            {runners.map((r) => (
+              <RunnerRow
+                key={r.id}
+                runner={r}
+                project={project}
+                selected={selectedConversationId === `runner:${r.id}`}
+                onSelect={() => {}}
+                onStart={() => handleRunnerAction('start', r.id)}
+                onPause={() => handleRunnerAction('pause', r.id)}
+                onResume={() => handleRunnerAction('resume', r.id)}
+                onRemove={() => handleRunnerAction('remove', r.id)}
+                onConfigure={() => setRunnerDialog({ runner: r, project })}
+                busy={runnersLoading}
+              />
+            ))}
+            <div className="msn-runners-divider border-b border-line-faint my-1" />
+          </div>
+        )}
+
         {/* ONE header, ONE list. The two groups this replaced ("Running" and
             "History") listed the same thing two ways, and the only difference
             the user cares about — is this conversation open right now — is a
@@ -602,7 +661,105 @@ export default function SessionList() {
               )}
             </>
           ))}
-      </OverlayScroll>
+</OverlayScroll>
+      {runnerDialog && (
+        <RunnerDialog
+          runner={runnerDialog.runner}
+          project={runnerDialog.project}
+          onClose={() => setRunnerDialog(null)}
+        />
+      )}
+      </div>
+    )
+  }
+
+/** Pinned runner row (plan 83). Shows at the top of the session listing. */
+function RunnerRow({ runner, project, onSelect, onStart, onPause, onResume, onRemove, onConfigure, busy }) {
+  const isEnabled = runner.control_state === 'enabled'
+  const isPaused = runner.control_state === 'paused'
+  const isWaiting = runner.control_state === 'waiting'
+  const isNeedInput = runner.control_state === 'need_input'
+  const isFinished = runner.control_state === 'finished'
+  const health = runner.last_reason || ''
+
+  const canStart = isPaused || isWaiting || isNeedInput
+  const canPause = runner.control_state === 'enabled'
+  const canResume = isPaused
+
+  const stateColor = isEnabled ? 'text-success' : isPaused ? 'text-warning' : isWaiting ? 'text-info' : isNeedInput ? 'text-warning' : 'text-ink-faint'
+  const stateLabel = isEnabled ? 'Enabled' : isPaused ? 'Paused' : isWaiting ? 'Waiting' : isNeedInput ? 'Need input' : 'Finished'
+
+  return (
+    <div
+      className={`msn-runner-row group relative flex cursor-pointer flex-col gap-0.5 border-b border-line-faint px-3 py-2 ${busy ? 'opacity-60' : ''}`}
+    >
+      <div className="flex items-center gap-2">
+        <span className="msn-runner-badge shrink-0 rounded bg-accent/15 px-1.5 text-[9px] font-medium text-accent">∞</span>
+        <span className="msn-runner-name min-w-0 truncate text-xs font-medium text-ink">{runner.name}</span>
+        <span className={`msn-runner-state shrink-0 text-[10px] font-medium ${stateColor}`}>{stateLabel}</span>
+        {health && (
+          <span className="msn-runner-health shrink-0 truncate text-[9px] text-ink-faint" title={health}>
+            {health}
+          </span>
+        )}
+      </div>
+      <div className="msn-runner-meta flex items-center gap-1.5 text-[10px] text-ink-faint">
+        <span className="msn-runner-project shrink-0 truncate" title={project.folder}>{project.name}</span>
+        <span className="msn-runner-queue shrink-0 truncate text-ink-faint/70">{runner.queue_file || 'QUEUE.md'}</span>
+        {runner.session_id && (
+          <span className="msn-runner-session shrink-0 truncate font-mono" title={runner.session_id}>
+            {runner.session_id.slice(0, 8)}…
+          </span>
+        )}
+        {runner.run_generation > 0 && (
+          <span className="msn-runner-gen shrink-0 text-ink-faint/70">gen {runner.run_generation}</span>
+        )}
+      </div>
+      <div className="msn-runner-actions pointer-events-none absolute right-0 top-0 flex h-full shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100">
+        <Button
+          variant="none"
+          size="bare"
+          icon
+          title={runner.control_state === 'enabled' ? 'Pause' : 'Start'}
+          onClick={() => runner.control_state === 'enabled' ? onPause() : onStart()}
+          disabled={busy}
+          className={`msn-btn-runner msn-btn-runner-start h-4 w-4 leading-none ${runner.control_state === 'enabled' ? 'text-warning hover:text-warning/80' : 'text-success hover:text-success/80'}`}
+        >
+          <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            {runner.control_state === 'enabled'
+              ? <>
+                  <rect x="6" y="4" width="4" height="16" rx="1" />
+                  <rect x="14" y="4" width="4" height="16" rx="1" />
+                </>
+              : <polygon points="5 3 19 12 5 21" />}
+          </svg>
+        </Button>
+        <Button
+          variant="none"
+          size="bare"
+          icon
+          title="Configure"
+          onClick={() => onConfigure()}
+          className="msn-btn-runner msn-btn-runner-config h-4 w-4 leading-none text-ink-faint hover:text-ink"
+        >
+          <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+          </svg>
+        </Button>
+        <Button
+          variant="none"
+          size="bare"
+          icon
+          title="Remove as runner"
+          onClick={() => onRemove()}
+          className="msn-btn-runner msn-btn-runner-remove h-4 w-4 leading-none text-ink-faint hover:text-danger"
+        >
+          <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true">
+            <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+          </svg>
+        </Button>
+      </div>
     </div>
   )
 }

@@ -1,6 +1,6 @@
 # 83 — Infinite runner sessions
 
-## Status: Proposed (2026-10-10) — requirements and current-code review captured; edit, pause and remove-runner controls specified; 0/7 implementation phases complete
+## Status: In progress (2026-10-11) — Phase 1 complete (signals recorded, paths aligned with plan 82); Phase 2 complete (queue contract, MCP tools + grants); Phase 3 complete (runner persistence); Phase 4 complete (supervisor loop); Phase 5 complete (MCP tools + grants + UI); Phase 6 starting next (browser/session flow verification); 5/7 implementation phases complete
 
 ## Goal
 
@@ -48,8 +48,8 @@ still in flight.
 | `mission.js`, `busyForSessions` | Five-second cache; `busy` is only `lastToolCall.status === 'running'`, and `known` only means the store was readable. Neither a false busy flag nor a true known flag proves a completed/idle turn. |
 | `src/services/agent-store.js`, `readOpencode` / `readActivity` | Returns latest text/tool, message count and an activity timestamp derived from message/tool timestamps. No explicit turn boundary, compaction state, tool heartbeat, or provider-exhaustion verdict is exposed. Extend the reader with measured signals rather than treating this summary as a progress clock. |
 | `src/services/task-pipeline.js` | Already drives Mission sends and polls explicit `task_steps` reports with timeouts. Its loop is an in-memory Map intentionally lost on webui restart. Reuse service patterns, not its report-driven state machine or timeout-as-failure rule for silent builds. |
-| `src/services/plans.js`, `plansRoot` / `plansDir` | Still PAD-workspace-rooted with constant `PLANS_DIR = 'plans'`. Plan 82 must supply project-rooted resolution before this feature assumes it. Host visibility/browse gates can refuse external workspaces. |
-| `src/services/workspace.js`, `readFile` / `writeFile` | Supports host and container scope. Host writes currently use direct `fs.writeFileSync`, without atomic replacement or compare-and-swap. Queue revision-safe writes need new shared support, preserving the access/ownership gates. |
+| `src/services/plans.js`, `plansRoot` / `plansDir` | **Plan 82 SHIPPED (2026-10-10):** `plansDir(agent, {project})` now resolves a project's own `<folder>/<plans_folder>`. `projectPlansRoot` maps the folder through `containerViewOf` (pad-root `/www2/paddock` → `/workspace` rw), then `webuiMountViewOf` (the webui's OWN `/proc/self/mountinfo`, longest mountpoint prefix), then the driver data-dir default — refusing with `plan_workspace_read_only` (a ro mount) or `plan_workspace_not_host_visible` (unmounted). Pad-root `plansRoot` keeps the legacy `hostBrowsable` gate; project scope dropped it (the resolver IS the gate). The runner's QUEUE.md path is `plansDir({project}) + 'QUEUE.md'`. `RESERVED_PLAN_NAMES` already excludes `queue.md` from plan listings and generated `INDEX.md` already links `QUEUE.md`. |
+| `src/services/workspace.js`, `readFile` / `writeFile` | Supports host and container scope. Host writes use direct `fs.writeFileSync` — no atomic replace, no compare-and-swap. **Plan 82 precedent:** project-scope writes in `plans.js` now ALSO go direct fs (resolver-is-the-gate), bypassing this service. Queue revision-safe writes need shared CAS support; the ownership gates are now exercised through the resolver path. |
 | `src/services/pad-tmux.js`, `sendText` / `sendKeys` | Text is submitted **one line at a time**, each with Enter. Send startup/nudge instructions as one logical line referencing QUEUE/INDEX, not a multiline prompt accidentally submitted as several turns. Raw keys exist, but a verified per-driver stop/interrupt contract still needs defining. |
 | `src/client/src/components/SessionList.jsx` | Merges Mission/history rows, deduplicates by conversation ID, then sorts by activity. Put the creation control beside `.msn-group-sessions` / `.msn-group-count`; add runner-first ordering and preserve the merge's no-duplicate behaviour. |
 | `src/client/src/stores/mission.js` | Owns scope refresh and the open-session snapshot. Add runner refresh/actions here while keeping terminal selection independent from list sorting and polling. |
@@ -66,10 +66,7 @@ still in flight.
 - `sendText` confirms a changed screen, not a durable receipt of this particular
   message. An ambiguous delivery must not trigger a blind retry. Test this with
   the actual TUI, including a repaint unrelated to the sent prompt.
-- For non-host-visible workspaces, explicitly choose validated container-scope
-  queue access or show an unsupported-path reason. Reusing `plansRoot` alone will
-  not make every Mission project's queue readable. Preserve originals and access
-  policy; do not sneak around a refused host read using an implicit fallback.
+- **Plan 82 supersedes this:** `projectPlansRoot` now resolves the project's plans folder through the webui's own mountinfo (rw → host path, ro → `plan_workspace_read_only`, unmounted → `plan_workspace_not_host_visible`). The runner reads QUEUE.md via `plansDir({project}) + 'QUEUE.md'` — the same resolver, same three outcomes. A container-scope fallback is a separate path if the webui mount fails; the project resolver is the primary gate, not an implicit fallback.
 - Revision checks serialize cooperative writers. They cannot guarantee against
   arbitrary direct editor writes between check and rename. Document that boundary
   and route worker updates through the revision-aware operation where available.
@@ -340,18 +337,50 @@ after the human fixes the issue; no repeated paid/rejected requests to test it.
 - Record transitions and action metadata for diagnosis, not full prompts, provider
   credentials, or arbitrary transcript copies in audit logs.
 
+## Phase 1 Findings — per-driver signals (2026-10-11)
+
+The table below records what `readActivity` actually surfaces for each driver, so the supervisor knows exactly which automatic decisions are possible and which require unknown/unsupported handling.
+
+| Signal | opencode (sqlite) | codex (jsonl) | claude (jsonl) |
+|---|---|---|---|
+| **Last user/assistant message** | `lastMessage.{user,assistant}.{text,at}` — newest prose per role | Same shape | Same shape |
+| **Last tool call** | `lastToolCall.{tool,status,at}` — `status: 'running'` when tool part has `state.status === 'running'` | `status: 'running'` when `function_call` has no `function_call_output` | `status: 'running'` when `tool_use` has no matching `tool_result` |
+| **Message count** | `messageCount` (sqlite `COUNT(*)`) | Not available | Not available |
+| **Conversation match** | `matched: 'exact'` (session id is primary key) | `matched: 'name' | 'only-file'` — filename match or single-file guess | `matched: 'name' | 'only-file'` |
+| **Turn boundary** | **No** — each assistant step is its own message; no grouping | **No** — `event_msg` → `user_message` marks human turns, but assistant turns are implicit | **No** — `user`/`assistant` role alternation is implicit |
+| **Compaction state** | **No** — not exposed in sqlite | **No** — not in rollout | **No** — not in jsonl |
+| **Provider errors (429, exhaustion)** | **No** — not in store; would need output scan or provider API | **No** | **No** |
+| **Token usage / cost** | **No** | **No** | **No** |
+| **Exit signal (pane/tmux)** | `padRunning` (container) + `paneState().live` (mission) | Same | Same |
+| **Identity guarantee** | Exact (sqlite PK) | Filename match or 'only-file' guess | Filename match or 'only-file' guess |
+
+**Implications for the supervisor (Phase 4):**
+- **Turn idle detection**: Must use tool completion + grace period, not an explicit turn boundary. Unknown `busy` when store unreadable → no auto-nudge.
+- **Compaction grace**: Cannot detect compaction; rely on tool absence + time + no new messages.
+- **Provider exhaustion**: Must capture from pane text (e.g., OpenCode's subscription notice) or skip auto-recovery when unconfirmed.
+- **Identity**: Reject 'only-file' matches for runner control; require exact session id match.
+- **Cost**: opencode = 1 indexed query (~2ms); codex/claude = parse one jsonl file (grows with transcript). Budget polling accordingly.
+
+**Explicitly unsupported (no automatic recovery will be attempted):**
+- Provider API rate limits without pane evidence
+- Compaction waits beyond configured grace
+- 'Only-file' guessed identity for runner control
+- Token budget enforcement
+
+All cases above surface as `unknown` / `observation unavailable` health states with reason, never as idle or done.
+
 ## Implementation checklist
 
-- [ ] **1. Dependencies and signals:** align paths with plan 82; confirm actual
+- [x] **1. Dependencies and signals:** align paths with plan 82; confirm actual
   per-driver turn/tool/compaction, identity, exit, and provider-error signals. Record
   unsupported/unknown cases explicitly before enabling automatic recovery.
-- [ ] **2. Queue contract:** parser, generated QUEUE.md instructions, aggregate state,
+- [x] **2. Queue contract:** parser, generated QUEUE.md instructions, aggregate state,
   validated revision-aware updates, path checks, plan-list exclusion, and file errors.
-- [ ] **3. Runner persistence:** schema/migrations, project/session binding, settings,
+- [x] **3. Runner persistence:** schema/migrations, project/session binding, settings,
   queue ownership lease, lifecycle transitions, idempotency and restart reconciliation.
-- [ ] **4. Supervisor:** startup prompt, progress sampling, conservative nudging,
+- [x] **4. Supervisor:** startup prompt, progress sampling, conservative nudging,
   bounded recovery, stop handling, intervention and usage-limit states.
-- [ ] **5. Surfaces:** create/configure popup, pinned listing rows and statuses,
+- [x] **5. Surfaces:** create/configure popup, pinned listing rows and statuses,
   Edit/Start/Pause/Resume/Remove as runner, details; shared API/MCP operations and tool descriptions.
 - [ ] **6. Verification:** parser/state-machine tests plus actual browser/session
   flows below; tune defaults from observed behaviour.

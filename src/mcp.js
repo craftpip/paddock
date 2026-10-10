@@ -150,6 +150,10 @@ const READ_TOOLS = new Set([
   'mission_projects', 'mission_sessions',
   // Plans reads (plan 64). `plan_write` is NOT here — see TOOL_GRANT_FOR.
   'plan_list', 'plan_activity',
+  // Queue reads (plan 83): the queue is the runner's instruction file.
+  'queue_read',
+  // Runner reads (plan 83): inspect runner config, queue, and session state.
+  'runner_list', 'runner_get',
 ]);
 
 const TOOL_GRANT_FOR = {
@@ -207,6 +211,17 @@ const TOOL_GRANT_FOR = {
   // other verbs that do work — never the read bucket, however harmless "write
   // my own plan down" sounds next to plan_list.
   plan_write: 'exec',
+  // Queue writers (plan 83): the queue steers real work inside a PAD, so both
+  // write and ensure ride the `exec` bucket.
+  queue_write: 'exec',
+  queue_ensure: 'exec',
+  // Runner verbs (plan 83): runner lifecycle verbs steer real work in a PAD.
+  runner_create: 'create',
+  runner_start: 'exec',
+  runner_pause: 'exec',
+  runner_resume: 'exec',
+  runner_remove: 'exec',
+  runner_update: 'exec',
 };
 
 function keyGrants(user) {
@@ -2712,6 +2727,106 @@ function registerTools(server) {
           throw new plans.PlansError('plan_session_unknown', `No transcript for ${id} on ${pad.name}.`);
         }
         return textResult({ agent: pad.name, ...activity });
+      });
+    }
+  );
+
+  // Queue tools (plan 83) — the plan queue lives in the project's plans folder
+  registerToolBound(
+    'queue_read',
+    {
+      title: 'Read the plan queue for a Mission project',
+      description: "Read the QUEUE.md for a project and return the parsed queue, aggregate state, and revision hash. The queue controls execution order for the infinite runner. Requires a project scope (project_id or folder).",
+      inputSchema: {
+        project_id: z.string().optional().describe("A Mission project id (from mission_projects); its queue is at <project.folder>/<plans_folder>/QUEUE.md. Refused if it matches nothing, or nothing your key can see."),
+        folder: z.string().optional().describe("Select a Mission project by its folder (e.g. \"/www2/paddock\"). A folder matching zero or several projects is refused with the candidates."),
+      },
+    },
+    async ({ project_id, folder }) => {
+      const scope = await resolvePlansScope(currentUser(), 'queue_read', { project_id, folder });
+      return plansCall(async () => {
+        const row = plans.requireAgent(scope.padName);
+        const project = scope.project;
+        const { parsed, aggregate, path, hash } = await plans.readQueue(row, project);
+        return textResult({
+          agent: scope.padName,
+          project_id: project.id,
+          project: project.name,
+          folder: project.folder,
+          plans_folder: project.plans_folder || 'plans',
+          path,
+          hash,
+          version: parsed.version,
+          items: parsed.items,
+          aggregate,
+        });
+      });
+    }
+  );
+
+  registerToolBound(
+    'queue_write',
+    {
+      title: 'Write or update the plan queue for a Mission project',
+      description: "Write the QUEUE.md for a project with compare-and-swap (CAS) on the revision hash. Pass the items array and the expected hash from a prior queue_read. Returns the new hash on success. Requires a project scope (project_id or folder).",
+      inputSchema: {
+        project_id: z.string().optional().describe("A Mission project id; write into its queue. Refused if it matches nothing, or nothing your key can see."),
+        folder: z.string().optional().describe("Select a Mission project by its folder. A folder matching zero or several projects is refused with the candidates."),
+        items: z.array(z.object({
+          id: z.string().describe('Unique stable id for this item'),
+          plan: z.string().describe('Plan file path relative to the plans folder'),
+          status: z.enum(['new', 'in progress', 'need input', 'done']).describe('Item status'),
+          reason: z.string().describe('Required. Nonempty only for "need input"; empty string otherwise.'),
+        })).describe('Queue items in order. At most one "in progress".'),
+        expected_hash: z.string().describe('The hash from a prior queue_read — write fails if queue changed.'),
+      },
+    },
+    async ({ project_id, folder, items, expected_hash }) => {
+      const scope = await resolvePlansScope(currentUser(), 'queue_write', { project_id, folder });
+      return plansCall(async () => {
+        const row = plans.requireAgent(scope.padName);
+        const project = scope.project;
+        const { hash, path } = await plans.writeQueue(row, project, items, expected_hash);
+        return textResult({
+          agent: scope.padName,
+          project_id: project.id,
+          project: project.name,
+          folder: project.folder,
+          plans_folder: project.plans_folder || 'plans',
+          path,
+          hash,
+        });
+      });
+    }
+  );
+
+  registerToolBound(
+    'queue_ensure',
+    {
+      title: 'Ensure the plan queue exists for a Mission project',
+      description: "Create the QUEUE.md from the template if it does not exist. Returns whether it was created and the revision hash. Requires a project scope (project_id or folder).",
+      inputSchema: {
+        project_id: z.string().optional().describe("A Mission project id; ensure its queue. Refused if it matches nothing, or nothing your key can see."),
+        folder: z.string().optional().describe("Select a Mission project by its folder. A folder matching zero or several projects is refused with the candidates."),
+      },
+    },
+    async ({ project_id, folder }) => {
+      const scope = await resolvePlansScope(currentUser(), 'queue_ensure', { project_id, folder });
+      return plansCall(async () => {
+        const row = plans.requireAgent(scope.padName);
+        const project = scope.project;
+        const { created, path, hash, invalid } = await plans.ensureQueue(row, project);
+        return textResult({
+          agent: scope.padName,
+          project_id: project.id,
+          project: project.name,
+          folder: project.folder,
+          plans_folder: project.plans_folder || 'plans',
+          path,
+          hash,
+          created,
+          invalid: !!invalid,
+        });
       });
     }
   );

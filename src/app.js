@@ -2818,6 +2818,116 @@ app.delete('/api/mission/sessions/:id', csrfCheck, (req, res) => {
   );
 });
 
+// ─── API: Mission Runners (plan 83) ──────────────────────────
+
+app.get('/api/mission/projects/:id/runners', (req, res) => {
+  const project = missionProject(req, res);
+  if (!project) return;
+  try {
+    const runners = mission.listRunnersForProject(project.id);
+    res.json({ runners });
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+app.post('/api/mission/projects/:id/runners', csrfCheck, async (req, res) => {
+  const project = missionProject(req, res);
+  if (!project) return;
+  if (!canTouchAgent(req, project.agent_name)) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+  try {
+    const runner = await mission.createRunner({
+      projectId: project.id,
+      name: req.body.name,
+      sessionId: req.body.sessionId,
+      queueFile: req.body.queueFile || 'QUEUE.md',
+      idleGraceMs: req.body.idleGraceMs,
+      minNudgeIntervalMs: req.body.minNudgeIntervalMs,
+      noProgressBudget: req.body.noProgressBudget,
+      compactionGraceMs: req.body.compactionGraceMs,
+      longCommandThresholdMs: req.body.longCommandThresholdMs,
+      recoverExited: req.body.recoverExited,
+      recoveryBudget: req.body.recoveryBudget,
+    });
+    res.json({ runner });
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+app.get('/api/mission/runners/:id', async (req, res) => {
+  try {
+    const runner = mission.getRunner(req.params.id);
+    if (!runner) return res.status(404).json({ error: 'Runner not found', code: 'runner_not_found' });
+    const project = mission.getProject(runner.project_id);
+    const agent = registry.getAgent(project.agent_name);
+    const queue = await plans.readQueue(agent, { ...project, plans_folder: project.plans_folder || 'plans' });
+    res.json({
+      runner,
+      project: project ? { id: project.id, name: project.name, folder: project.folder } : null,
+      queue: queue ? { aggregate: queue.aggregate, path: queue.path, hash: queue.hash } : null,
+    });
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+app.patch('/api/mission/runners/:id', csrfCheck, async (req, res) => {
+  try {
+    const runner = await mission.updateRunner(req.params.id, {
+      name: req.body.name,
+      idleGraceMs: req.body.idleGraceMs,
+      minNudgeIntervalMs: req.body.minNudgeIntervalMs,
+      noProgressBudget: req.body.noProgressBudget,
+      compactionGraceMs: req.body.compactionGraceMs,
+      longCommandThresholdMs: req.body.longCommandThresholdMs,
+      recoverExited: req.body.recoverExited,
+      recoveryBudget: req.body.recoveryBudget,
+    });
+    res.json({ runner });
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+app.post('/api/mission/runners/:id/start', csrfCheck, async (req, res) => {
+  try {
+    const result = await mission.startRunner(req.params.id, { actor: missionActorFor(req) });
+    res.json(result);
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+app.post('/api/mission/runners/:id/pause', csrfCheck, async (req, res) => {
+  try {
+    const runner = await mission.pauseRunner(req.params.id, { actor: missionActorFor(req) });
+    res.json({ runner });
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+app.post('/api/mission/runners/:id/resume', csrfCheck, async (req, res) => {
+  try {
+    const result = await mission.resumeRunner(req.params.id, { actor: missionActorFor(req) });
+    res.json(result);
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+app.delete('/api/mission/runners/:id', csrfCheck, async (req, res) => {
+  try {
+    await mission.removeRunner(req.params.id);
+    res.json({ removed: true });
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
 // ─── API: Vault (encrypted key-value store) ────────────────
 
 app.get('/api/vault', (req, res) => {
