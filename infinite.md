@@ -14,6 +14,10 @@ Then tell the agent **"check infinite"** (or **"keep going"** / **"drain"**).
 It works infinite: test each plan, commit it, then move straight to the next
 until the queue is empty. **Infinite means keep going — never stop after one.**
 
+**Rule:** When a task is done and the plan has been **absorbed into `docs/` and
+its file removed**, **commit the changes** (git add intended files + git commit)
+before moving the line to `## Done` and starting the next task.
+
 ## Needs your call
 
 Decisions only you can make. Deliberately **not** `- [ ]` lines and **not** in
@@ -86,7 +90,8 @@ conversation's own store (`busyForSessions`) instead of the web-server probe.
 
 ## Queue
 
-_(empty)_
+- [ ] plans/82-mission-project-plans-folder.md
+- [ ] plans/83-infinite-runner.md
 
 ## Done
 
