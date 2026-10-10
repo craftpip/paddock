@@ -39,6 +39,7 @@ const containerHealth = require('./services/container-health');
 const logStore = require('./services/log-store');
 const mission = require('./services/mission');
 const padTmux = require('./services/pad-tmux');
+const { createTerminalInput } = require('./services/terminal-input');
 const ownership = require('./services/ownership');
 const { USER_UID, USER_GID } = ownership;
 const { getDb } = require('./services/db');
@@ -3244,6 +3245,14 @@ wss.on('connection', async (ws, req) => {
 
   const wsType = parts[1];
   const vmName = parts[2];
+  // Register BEFORE any await (authentication, Docker, tmux, history). The
+  // page can finish laying out and send its real size while those run.
+  const terminalInput = createTerminalInput({
+    cols: Math.max(40, Math.min(400, parseInt(url.searchParams.get('cols') || '120', 10) || 120)),
+    rows: Math.max(12, Math.min(120, parseInt(url.searchParams.get('rows') || '32', 10) || 32)),
+  });
+  ws.on('message', terminalInput.onMessage);
+  ws.on('close', () => terminalInput.close());
 
   // Authenticate before inspecting Docker or revealing whether the PAD exists.
   if (!AUTO_LOGIN) {
@@ -3283,8 +3292,7 @@ wss.on('connection', async (ws, req) => {
   // broken `docker exec stty` on a different process. No `\r` mangling needed:
   // the PTY line discipline handles CR/LF itself.
   if (wsType === 'terminal') {
-    const cols = Math.max(40, Math.min(400, parseInt(url.searchParams.get('cols') || '120', 10) || 120));
-    const rows = Math.max(12, Math.min(120, parseInt(url.searchParams.get('rows') || '32', 10) || 32));
+    const { cols, rows } = terminalInput.size;
     const session = safeSessionName(url.searchParams.get('session') || 'main');
     // A client that is SWITCHING between sessions on one page already holds a
     // rendered buffer, and the attach repaint below overwrites the screen
@@ -3308,6 +3316,7 @@ wss.on('connection', async (ws, req) => {
     const cleanup = (reason) => {
       if (closed) return;
       closed = true;
+      terminalInput.close();
       console.log(`[wss/terminal] cleanup ${connId} ${session} reason=${reason}`);
       // Destroying the hijacked stream makes the Docker daemon kill the exec
       // process. That process is only the `tmux attach` client — the tmux
@@ -3500,8 +3509,19 @@ wss.on('connection', async (ws, req) => {
       return;
     }
 
-    // Set the initial PTY size (Docker allocates the exec TTY at start).
-    try { await dockerExec.resize({ h: rows, w: cols }); } catch {}
+    // Apply the newest size, including updates received during setup. A
+    // transport-open socket is not yet a shell-ready socket.
+    try {
+      if (!await terminalInput.attach(dockerExec, dockerStream)) {
+        cleanup('closed-during-attach');
+        return;
+      }
+    } catch (err) {
+      console.error('[wss/terminal] initial resize error:', err.message);
+      cleanup('initial-resize-error');
+      ws.close();
+      return;
+    }
 
     const decoder = new StringDecoder('utf8');
 
@@ -3528,6 +3548,8 @@ wss.on('connection', async (ws, req) => {
         if (ws.readyState === ws.OPEN) ws.send(decoder.write(data));
       });
     }
+
+    if (ws.readyState === ws.OPEN) ws.send('\x00\x00' + JSON.stringify({ type: 'ready' }));
 
     // Feed a live title to the client as NUL-NUL-prefixed JSON control frames
     // (the same framing the client uses for resize), so the terminal header
@@ -3578,31 +3600,6 @@ wss.on('connection', async (ws, req) => {
       console.error(`[wss/terminal] stream error ${connId}:`, err.message);
       if (ws.readyState === ws.OPEN) { ws.send(`\r\n\x1b[31m[Terminal error: ${err.message}]\x1b[0m\r\n`); ws.close(); }
       cleanup('stream-error');
-    });
-
-    ws.on('message', (data) => {
-      if (closed || !dockerStream || dockerStream.destroyed) return;
-      // Control frames are NUL-NUL-prefixed JSON:
-      //   `\x00\x00{"type":"resize","cols":n,"rows":n}`
-      // Raw shell bytes never start with two NULs — browsers cannot paste a
-      // NUL, and a lone Ctrl+Space (single \x00) still passes through to the
-      // shell. So there is no JSON.parse on keystrokes and a pasted document
-      // that happens to look like a resize frame goes straight to the shell.
-      const msg = data.toString();
-      if (msg.charCodeAt(0) === 0 && msg.charCodeAt(1) === 0) {
-        try {
-          const parsed = JSON.parse(msg.slice(2));
-          if (parsed.type === 'resize' && parsed.cols && parsed.rows) {
-            const w = Math.max(2, parseInt(parsed.cols, 10) || 0);
-            const h = Math.max(2, parseInt(parsed.rows, 10) || 0);
-            if (w && h && dockerExec) dockerExec.resize({ h, w }).catch(() => {});
-          }
-        } catch {
-          // Malformed control frame — drop it rather than corrupting the shell.
-        }
-        return;
-      }
-      dockerStream.write(data);
     });
 
     ws.on('close', () => cleanup('ws-close'));

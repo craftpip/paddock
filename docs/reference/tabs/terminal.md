@@ -25,6 +25,7 @@ prompt.
 |-------|------|--------------|
 | Frontend component | `src/client/src/components/Terminal.jsx` | The one-and-only shell component (xterm.js + WebSocket + session tab strip). |
 | Backend WS handler | `src/app.js` — "Terminal WebSocket" block (`wsType === 'terminal'`) | tmux session setup, scrollback replay, real PTY attach. |
+| Input readiness | `src/services/terminal-input.js` | Retains resize updates during setup; forwards input only after attachment. |
 | Sessions API | `src/app.js` — `GET/DELETE /api/agents/:name/terminal-sessions[/:id]` | List, switch, create, kill tmux sessions. |
 | Command log | `src/app.js` — `POST /api/agents/:name/command-log` | Records run commands for the Activity tab. |
 | Used by | `src/client/src/pages/AgentDetail.jsx` | The agent page — docked terminal, always mounted, one per agent. |
@@ -162,19 +163,19 @@ Props (current — see `Terminal.jsx` header for the full table):
 | `showCollapse` | boolean | `true` | Show the collapse chevron (needs `onToggleCollapse`). |
 | `onToggleCollapse` | fn | — | Fired when the chevron is clicked. |
 | `onCommandStart` / `onCommandDone` | fn | — | Fired when a tracked/locked injected command starts/finishes. |
-| `onConnChange` | fn | — | Called `true`/`false` as the WS connects/disconnects. AgentDetail gates every command button on it. |
+| `onConnChange` | fn | — | Called `true` when the PTY is ready and `false` while connecting/disconnected. AgentDetail gates command buttons on it. |
 | `disabled` | boolean | `false` | Lock input from outside. Injected commands still run. |
 
 Imperative API through `ref`:
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `runCommand(cmd, {track})` | boolean | Sends `cmd` + newline. With `{track:true}` appends a completion sentinel and fires `onCommandStart`/`onCommandDone`. **No queue** — returns `false` if the WS isn't open. |
-| `write(text)` | boolean | Raw write to shell stdin. **No queue** — drops when disconnected. |
+| `runCommand(cmd, {track})` | boolean | Sends `cmd` + newline. With `{track:true}` appends a completion sentinel and fires `onCommandStart`/`onCommandDone`. Returns `false` before PTY readiness; untracked commands can queue behind a busy shell. |
+| `write(text)` | boolean | Raw write to shell stdin. Drops before PTY readiness or when disconnected. |
 | `clear()` | — | Sends `clear` to the shell — clears the real pane, survives refresh. |
 | `reconnect()` | — | Confirms, tears down, and starts a fresh session. Scrollback is preserved (tmux). |
 | `focus()` | — | Focuses the terminal. |
-| `isConnected()` | boolean | True when the WebSocket is OPEN. |
+| `isConnected()` | boolean | True after backend PTY readiness, while the WebSocket remains open. |
 | `setLocked(v)` / `lock()` / `unlock()` | — | Imperative lock control (independent of the `disabled` prop). |
 
 ### Docked layout (AgentDetail)
@@ -187,23 +188,44 @@ fullscreen overlay toggle.
 
 ### Session tabs
 
-The header tab strip (plan 53) lists the PAD's active tmux sessions (`GET
-/api/agents/:name/terminal-sessions`, loaded on mount) and lets you switch
-(click a tab), create (`+` → next free `term-N`), or close (`×` on hover,
-DELETE) a session. Each tab shows its **session name** (`main`, `term-N`), and the
-**active tab additionally shows the terminal title**: for opencode agents that
-is the TUI session name (`OC | …`)
-— delivered on first paint via the sessions fetch (stamped onto the attached
-session only) and kept live by the WebSocket control frame as you type/act;
-other types send none and the tab keeps the session name. No title is stamped
-on the other tabs on purpose — opencode's `session` table has no tty column, so
-a tab cannot be mapped to a specific session; a shared "latest title" on every
-tab was tried and removed because it made all tabs show one sticky title. The
-connection dot sits left of the strip (status via tooltip); the old status text
-and session dropdown are gone. The selected session is persisted in
-`localStorage` (`pad-term-session-&lt;name&gt;`), so a page reload returns to the
-same session. Closing the current session falls back to `main`. Session names
-are validated against `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`
+The header tab strip lists the PAD's active tmux sessions (`GET
+/api/agents/:name/terminal-sessions`, loaded on mount). Left-click, Enter, or
+Space selects a tab. `+` opens the next free `term-N`; repeated clicks are
+serialized so each request creates a distinct session before the next starts.
+
+Tabs have no vertical padding inset, with an 8px left margin before the first tab. Only the selected
+tab has a visible bottom border; there are no top or side tab borders. Each
+label renders once and truncates with an ellipsis. Its tooltip contains the
+session id and full title. The old repeating marquee is removed. The `+` button
+is circular and follows the last tab when there is room. The list shrinks when
+it overflows, keeping `+` outside the scroller at the right edge of the tab bar.
+On narrow layouts, the tab bar takes its own full-width row above the controls.
+
+A tab starts with its **session name** (`main`, `term-N`). For OpenCode,
+the server can report a TUI title (`OC | …`) through the initial listing and
+the attached session's WebSocket. `sessionTitles` caches each received title
+under that connection's tmux id, so switching away keeps the title on its own
+tab. Inactive titles are last-observed values, not background polling. An empty
+title frame clears that session's cached title; closing/recreating a tab clears
+its old title, and changing PAD resets the cache. This cache lives in the mounted
+component; it does not copy one tab's title onto every other tab.
+
+Switching resets only the outgoing **browser buffer**, never the tmux session
+or its persistent history. The pane displays `Opening…` while creating or
+attaching a tab, rather than the previous tab's output. Command buttons remain
+disabled during new-tab creation and until the attachment reports readiness.
+
+Close with `×` or middle-click. Middle-button `mousedown` prevents autoscroll,
+and `auxclick` calls the same close flow as `×`: `DELETE` removes the tmux
+session. Closing the selected tab falls back to its previous neighbour, or
+`main` if none exists; closing an inactive tab keeps the current selection.
+The close button remains keyboard-accessible, and its key events do not also
+select its parent tab.
+
+The connection dot sits between the tabs and controls, with status in its
+tooltip. The selected session is persisted in `localStorage`
+(`pad-term-session-&lt;name&gt;`), so reload returns to the same session.
+Session names are validated against `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`
 (`safeSessionName`).
 
 ## WebSocket protocol
@@ -219,24 +241,44 @@ Endpoint: `ws://&lt;host&gt;/ws/terminal/&lt;name&gt;?session=&lt;id&gt;&cols=&l
   a resize frame reaches the shell.
 - **Server → client:** raw PTY output as text frames (rendered verbatim by
   xterm.js), prefixed on a fresh connection by the tmux scrollback replay.
+  Control frames use the same double-NUL JSON prefix: `type: 'ready'` signals
+  that the PTY is attached, its latest size is applied, and output forwarding is
+  installed; `type: 'title'` updates the active terminal title.
 
 The connection is only accepted when the container is `running` and the
 session cookie passes auth — otherwise `ws.close()`.
 
 ## Resize
 
-- **Initial size** comes from the `?cols=&rows=` URL params (clamped) and is
-  applied right after `exec.start()` via `exec.resize({ h, w })`.
+- **Initial size** starts with the `?cols=&rows=` URL params (clamped).
+  The server installs its input listener before any async setup and retains
+  resize frames received during authentication, tmux setup, and history replay.
+  After `exec.start()`, `terminal-input.attach()` applies the latest size via
+  `exec.resize({ h, w })`. If the size changes during that round-trip, it applies
+  the newer size before announcing readiness.
 - **Live resize:** the client sends `\x00\x00{ type: 'resize', cols, rows }`
   after every `fit()` (a `ResizeObserver` on the pane) and after font-size
   changes. The server calls the official `POST /exec/:id/resize`, which resizes
   the actual running PTY. The old `docker exec stty` approach never worked
   because it targeted a brand-new process, not the real PTY.
 
+The WebSocket opening does not mean the shell is ready. Command buttons stay
+disabled until the backend sends `ready`; raw input before attachment is
+dropped, never replayed later. Resize frames still travel while connecting.
+
+This prevents a startup layout race: at 1200×700 the initial layout measured
+23 rows, then settled to 20. Losing that early resize painted a taller tmux
+screen into a shorter xterm, leaving the prompt above a blank viewport. The
+prompt-based command queue then saw a blank cursor row as a busy shell, so a
+button's command could wait until pressing Enter restored a prompt. Keeping
+the sizes aligned fixes the display and that false busy state without sending
+synthetic Enter, clearing history, or overriding intentional scrollback browsing.
+
 ## Lifecycle & robustness
 
 - **Mount:** dynamically imports xterm + FitAddon, opens the terminal, opens
-  the WebSocket, attaches a ResizeObserver.
+  the WebSocket, attaches a ResizeObserver. The connection indicator remains
+  connecting until the backend's `ready` frame arrives.
 - **`name` change:** full teardown + fresh session.
 - **Unmount:** WebSocket closed, xterm disposed, ResizeObserver disconnected,
   all refs cleared. No setState after unmount.
@@ -333,6 +375,27 @@ is the interface. Read-only GETs are fine (MCP server chips,
 exception on purpose (secrets live server-side).
 
 ## Verifying it works
+
+`src/test/terminal-input.test.js` covers early resize retention, a resize arriving
+during attachment, pre-ready input dropping, live resize/protocol separation,
+disconnect during attachment, and initial resize failure. Run it individually:
+
+```bash
+timeout 60 docker exec paddock node --test test/terminal-input.test.js
+```
+
+Plan 84's live checks used Navigator on `pad-opencode-proj`: five refreshes at
+1200×700 preserved the visible prompt/output; new sessions and the Version
+button needed no extra Enter; 100 lines survived refresh and remained scrollable.
+Fullscreen, dock collapse/reopen, and a 390×844 layout preserved usable output.
+An interactive `top` session rendered and exited with `q` back to the prompt.
+
+Plan 85's Navigator checks cover rapid `+` clicks, the opening overlay hiding
+an old-tab marker, single/truncated labels, active and inactive middle-click
+closing (including backend session removal), keyboard closing and selection,
+and desktop/narrow layouts. The selected tab's bottom border was checked in
+both colour modes. The user's live `term-2` OpenCode title stayed on that tab
+after switching away, including while creating more tabs.
 
 Browser E2E: open a PAD → Commands mode → type `echo ok`, press Enter → you
 should see `ok` echo back and a fresh prompt. Also try a raw-mode app like

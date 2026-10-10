@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useImperativeHandle, forwardRef, useState, useCallback } from 'react'
+import { useEffect, useRef, useImperativeHandle, forwardRef, useState, useCallback } from 'react'
 import { useConfirm } from '../lib/confirm'
 import Button from './ui/Button'
 
@@ -44,7 +44,7 @@ import Button from './ui/Button'
  *  | `clear()`        | —        | Runs `clear` in the shell (clears the visible screen). |
  *  | `reconnect()`    | —        | Confirms, then tears down and starts a fresh shell session. |
  *  | `focus()`        | —        | Focuses the terminal.                        |
- *  | `isConnected()`  | boolean  | True when the WebSocket is OPEN.             |
+ *  | `isConnected()`  | boolean  | True when the backend PTY is ready and the WebSocket is open. |
  *  | `isBusy()`       | boolean  | True when a command appears to be running (prompt heuristic + tracked injected commands). |
  *  | `setLocked(v)`   | —        | Lock/unlock input imperatively (independent of the `disabled` prop). |
  *  | `lock()`         | —        | Shorthand for `setLocked(true)`.             |
@@ -130,8 +130,8 @@ import Button from './ui/Button'
  *    (TUI) mode xterm's arrow-key alternate scroll is suppressed so the wheel
  *    never types ^[[A/^[[B into apps; apps with mouse reporting still get real
  *    wheel events and scroll themselves.
- *  - No write queue: command buttons are disabled until the WS is open (the
- *    parent is told via `onConnChange`), and writes attempted while disconnected
+ *  - No pre-attach write queue: command buttons are disabled until the PTY is ready (the
+ *    parent is told via `onConnChange`), and writes attempted before readiness or while disconnected
  *    are dropped, never buffered.
  *  - Init failures (bad `name`, xterm load error) render a visible error inside
  *    the terminal area instead of failing silently.
@@ -151,6 +151,7 @@ const Terminal = forwardRef(function Terminal(
   const termRef = useRef(null) // current xterm.js instance
   const fitAddonRef = useRef(null) // current FitAddon instance
   const wsRef = useRef(null) // current WebSocket
+  const readyRef = useRef(false) // backend PTY attached, not just transport open
   const roRef = useRef(null) // current ResizeObserver
   const genRef = useRef(0) // generation token for async init
   const mountedRef = useRef(true) // guards setState after unmount
@@ -192,7 +193,8 @@ const Terminal = forwardRef(function Terminal(
   const [shellBusy, setShellBusy] = useState(false)
   const [uiLocked, setUiLocked] = useState(false)
   const [fullscreen, setFullscreen] = useState(false)
-  const [dynTitle, setDynTitle] = useState('') // tmux window title pushed by the server
+  const [sessionTitles, setSessionTitles] = useState({}) // last reported title per tmux session
+  useEffect(() => { setSessionTitles({}) }, [name])
 
   // ── Sessions (persistent tmux shells per PAD) ────────────────────────────
   const SAFE_SESSION_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/
@@ -214,27 +216,8 @@ const Terminal = forwardRef(function Terminal(
   const [sessions, setSessions] = useState([])
   const [sessionsLoading, setSessionsLoading] = useState(false)
   const [sessionsLoaded, setSessionsLoaded] = useState(false)
-  // Per-tab marquee: only engage the scrolling (duplicated-title) track when the
-  // label actually overflows the tab; otherwise a plain single title is shown.
-  // Re-measured after every render (cheap: a handful of tabs).
-  const [marqueeTabs, setMarqueeTabs] = useState({})
-  const marqueeRefs = useRef({})
-  useLayoutEffect(() => {
-    const changed = {}
-    let any = false
-    for (const key of Object.keys(marqueeRefs.current)) {
-      const m = marqueeRefs.current[key]
-      if (!m?.measure || !m?.wrap) continue
-      const overflow = m.measure.scrollWidth > m.wrap.clientWidth + 1
-      if (marqueeTabs[key] !== overflow) { changed[key] = overflow; any = true }
-    }
-    if (any) setMarqueeTabs((p) => ({ ...p, ...changed }))
-  })
-  useEffect(() => {
-    const onResize = () => setMarqueeTabs({})
-    window.addEventListener('resize', onResize)
-    return () => window.removeEventListener('resize', onResize)
-  }, [])
+  const newSessionQueueRef = useRef(Promise.resolve())
+  const [newSessionsPending, setNewSessionsPending] = useState(0)
   const tabListRef = useRef(null)
 
   /** Set state only while the component is mounted. */
@@ -259,7 +242,7 @@ const Terminal = forwardRef(function Terminal(
    *  no queue; the parent disables command buttons until the terminal is ready. */
   const sendToShell = useCallback((text) => {
     const ws = wsRef.current
-    if (ws && ws.readyState === WebSocket.OPEN) {
+    if (readyRef.current && ws && ws.readyState === WebSocket.OPEN) {
       ws.send(text)
       return true
     }
@@ -320,7 +303,7 @@ const Terminal = forwardRef(function Terminal(
   const queueOrSend = useCallback((payload) => {
     checkShellBusy()
     const ws = wsRef.current
-    if (!ws || ws.readyState !== WebSocket.OPEN) return false
+    if (!readyRef.current || !ws || ws.readyState !== WebSocket.OPEN) return false
     const now = Date.now()
     const recent = now - lastSendRef.current < COOLDOWN_MS
     if (shellBusyRef.current || recent) {
@@ -338,7 +321,7 @@ const Terminal = forwardRef(function Terminal(
     if (pending.length === 0) return
     checkShellBusy()
     const ws = wsRef.current
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
+    if (!readyRef.current || !ws || ws.readyState !== WebSocket.OPEN) {
       pendingCmdsRef.current = []
       return
     }
@@ -441,7 +424,7 @@ const Terminal = forwardRef(function Terminal(
         // Locked mode: drop keystrokes unless an injected command is running.
         if (isInputLocked()) return
         const live = wsRef.current
-        if (live && live.readyState === WebSocket.OPEN) live.send(data)
+        if (readyRef.current && live && live.readyState === WebSocket.OPEN) live.send(data)
       })
 
       const ro = new ResizeObserver(() => {
@@ -486,7 +469,8 @@ const Terminal = forwardRef(function Terminal(
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     setStateSafe(setConnState, 'connecting')
-    setStateSafe(setDynTitle, '') // a new session has its own title
+    readyRef.current = false
+    const connectedSession = sessionIdRef.current || 'main'
     // `history=0` on a soft swap only — see skipHistoryRef. Consumed here, so a
     // later reconnect of the same session still replays its scrollback.
     const skipHistory = skipHistoryRef.current
@@ -517,7 +501,6 @@ const Terminal = forwardRef(function Terminal(
       if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null }
       retryDelayRef.current = 2000
       wasConnectedRef.current = true
-      setStateSafe(setConnState, 'connected')
       pushResize(term.cols, term.rows)
     }
 
@@ -530,7 +513,14 @@ const Terminal = forwardRef(function Terminal(
       if (data.charCodeAt(0) === 0 && data.charCodeAt(1) === 0) {
         try {
           const parsed = JSON.parse(data.slice(2))
-          if (parsed.type === 'title') setStateSafe(setDynTitle, parsed.title || '')
+          if (parsed.type === 'ready') {
+            readyRef.current = true
+            setStateSafe(setConnState, 'connected')
+            pushResize(term.cols, term.rows)
+          }
+          if (parsed.type === 'title') {
+            setStateSafe(setSessionTitles, (titles) => ({ ...titles, [connectedSession]: parsed.title || '' }))
+          }
         } catch {}
         return
       }
@@ -570,6 +560,7 @@ const Terminal = forwardRef(function Terminal(
       // A superseded session (explicit teardown / session switch) bumps the gen
       // counter, so its late close is ignored here and never schedules a retry.
       if (gen !== genRef.current) return
+      readyRef.current = false
       setStateSafe(setConnState, 'disconnected')
       // 4001 = the server replaced this connection with a newer one for the
       // same PAD/session (single-client policy). The replacement client is
@@ -622,6 +613,7 @@ const Terminal = forwardRef(function Terminal(
 
   /** Tear down the current session. Idempotent and safe mid-init. */
   function teardown() {
+    readyRef.current = false
     genRef.current++ // invalidate any in-flight init
     initInFlightRef.current = false
     if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null }
@@ -702,9 +694,9 @@ const Terminal = forwardRef(function Terminal(
   // Tell the parent when the terminal becomes ready/not-ready so command
   // buttons can be disabled until writes can actually reach the shell.
   useEffect(() => {
-    onConnChange?.(connState === 'connected')
+    onConnChange?.(connState === 'connected' && newSessionsPending === 0)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connState])
+  }, [connState, newSessionsPending])
 
   // The `disabled` prop controls the external lock.
   useEffect(() => {
@@ -852,12 +844,14 @@ const Terminal = forwardRef(function Terminal(
       sessionIdRef.current = id
       setSessionId(id)
       try { localStorage.setItem(`pad-term-session-${name}`, id) } catch {}
-      // Soft swap: reuse the live xterm instance and only reconnect the
-      // WebSocket to the new session, so switching tabs never blanks the
-      // terminal. Bumping the gen invalidates the old WS's handlers — its late
+      // Reuse xterm, but never display the outgoing session under the new tab.
+      // Reset only the browser buffer; tmux retains the session's real history.
+      // Bumping the gen invalidates the old WS's handlers — its late
       // close can't reschedule a reconnect. (teardown() stays for real
       // teardowns: PAD stop, name change, unmount, explicit reconnect.)
       genRef.current++
+      readyRef.current = false
+      try { termRef.current?.reset() } catch {}
       initInFlightRef.current = false
       if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null }
       if (wsRef.current) { try { wsRef.current.close() } catch {} ; wsRef.current = null }
@@ -898,18 +892,20 @@ const Terminal = forwardRef(function Terminal(
   }, [controlledSessionId])
 
   /** Create a new session with the next free `term-N` name. */
-  const newSession = useCallback(async () => {
+  const createNewSession = useCallback(async () => {
     if (!name) return
     const list = await refreshSessions()
     const used = new Set([...list.map((s) => s.name), sessionIdRef.current])
     let n = 1
     while (used.has(`term-${n}`)) n += 1
     const target = `term-${n}`
+    setStateSafe(setSessionTitles, (titles) => ({ ...titles, [target]: '' }))
     // Show the new session in the list immediately, like the header does. The
     // backend creates the tmux session on WS attach, so the API can lag behind.
     // Poll until the API reports it; only then swap in the authoritative list
     // (keeps the optimistic entry visible instead of it flashing away).
     setSessions((prev) => (prev.some((s) => s.name === target) ? prev : [...prev, { name: target, attached: true, created: Date.now() }]))
+    if (!mountedRef.current) return
     switchSession(target)
     let attempts = 0
     while (attempts < 8) {
@@ -919,6 +915,7 @@ const Terminal = forwardRef(function Terminal(
           const data = await res.json()
           const got = (data.sessions || []).map((s) => (s.name === target ? { ...s, name: target } : s))
           if (got.some((s) => s.name === target)) {
+            if (!mountedRef.current) return
             setSessions(got)
             break
           }
@@ -928,6 +925,18 @@ const Terminal = forwardRef(function Terminal(
       if (attempts < 8) await new Promise((r) => setTimeout(r, 300))
     }
   }, [name, switchSession, refreshSessions])
+
+  // Each click creates a session, in order. Do not let concurrent refreshes
+  // choose the same free id or close an attach before its session is created.
+  const newSession = useCallback(() => {
+    setNewSessionsPending((n) => n + 1)
+    newSessionQueueRef.current = newSessionQueueRef.current.catch(() => {}).then(() => {
+      if (mountedRef.current) return createNewSession()
+    }).finally(() => {
+      setStateSafe(setNewSessionsPending, (n) => n - 1)
+    })
+    return newSessionQueueRef.current
+  }, [createNewSession])
 
   /** Kill a tmux session. Closing the current one falls back to the previous
    *  session in the list (or `main`, which the backend recreates on attach). */
@@ -946,10 +955,15 @@ const Terminal = forwardRef(function Terminal(
       // Remove it from the list immediately; the poll below swaps in the
       // authoritative list once the backend confirms.
       setSessions((prev) => prev.filter((s) => s.name !== id))
+      setStateSafe(setSessionTitles, (titles) => {
+        const next = { ...titles }
+        delete next[id]
+        return next
+      })
       try {
         await fetch(`/api/agents/${encodeURIComponent(name)}/terminal-sessions/${encodeURIComponent(id)}`, { method: 'DELETE' })
       } catch {}
-      if (currentWasClosed) switchSession(fallback)
+      if (currentWasClosed && sessionIdRef.current === id) switchSession(fallback)
       let list = await refreshSessions()
       // The backend recreates the current session when the WS reconnects (the
       // attach auto-creates the tmux session), so the list fetch can race ahead
@@ -990,6 +1004,7 @@ const Terminal = forwardRef(function Terminal(
 
   /** Inject `text` as a tracked command (sentinel + completion callbacks). */
   const injectTracked = useCallback((text) => {
+    if (!readyRef.current || wsRef.current?.readyState !== WebSocket.OPEN) return false
     const marker = nextMarker()
     pendingMarkersRef.current.add(marker)
     markerCmdRef.current.set(marker, text)
@@ -1021,7 +1036,7 @@ const Terminal = forwardRef(function Terminal(
       close: () => sendToShell('\x03'),
       reconnect,
       focus: () => termRef.current?.focus(),
-      isConnected: () => wsRef.current?.readyState === WebSocket.OPEN,
+      isConnected: () => connState === 'connected' && wsRef.current?.readyState === WebSocket.OPEN,
       isBusy: () => shellBusyRef.current || cmdRunningRef.current,
       setLocked: (v) => {
         manualLockRef.current = !!v
@@ -1037,13 +1052,13 @@ const Terminal = forwardRef(function Terminal(
       },
       isLocked: () => isInputLocked(),
     }),
-    [sendToShell, isInputLocked, nextMarker, injectTracked, queueOrSend, onCommandStart, onCommandDone, refreshLockUI]
+    [connState, sendToShell, isInputLocked, nextMarker, injectTracked, queueOrSend, onCommandStart, onCommandDone, refreshLockUI]
   )
 
   return (
     <div className={`flex flex-col overflow-hidden bg-sunken ${fullscreen ? 'fixed inset-0 z-[100]' : bordered ? 'relative rounded-card border border-line-faint' : ''} ${className}`}>
-      <div className="flex items-center gap-3 px-4 py-2 border-b border-line-faint bg-sunken/80 select-none">
-        <div className="flex items-center gap-2 shrink-0">
+      <div className="terminal-header flex flex-wrap sm:flex-nowrap items-stretch border-b border-line-faint bg-panel select-none">
+        <div className="order-2 flex items-center gap-2 px-2 shrink-0">
           <span
             title={connState === 'connected' ? 'Terminal Connected' : connState === 'connecting' ? 'Terminal Connecting' : 'Terminal Disconnected'}
             className={`w-2 h-2 rounded-full ${connState === 'connected' ? 'bg-success' : connState === 'connecting' ? 'bg-warning' : 'bg-line'}`}
@@ -1058,9 +1073,11 @@ const Terminal = forwardRef(function Terminal(
           )}
         </div>
         {showSessions && (
-        <div ref={tabListRef} role="tablist" aria-label="Terminal sessions" className="flex flex-1 min-w-0 items-center gap-1 overflow-x-auto">
+        <div className="terminal-tab-bar order-1 flex flex-1 basis-full sm:basis-auto min-h-9 min-w-0 items-stretch">
+        <div ref={tabListRef} role="tablist" aria-label="Terminal sessions" className="terminal-tabs flex flex-initial min-w-0 items-stretch overflow-x-auto overflow-y-hidden">
           {(sessions.some((s) => s.name === activeSessionId) ? sessions : [...sessions, { name: activeSessionId }]).map((s) => {
             const isCur = s.name === activeSessionId
+            const tabTitle = sessionTitles[s.name] ?? s.title ?? ''
             return (
               <div
                 key={s.name}
@@ -1069,54 +1086,43 @@ const Terminal = forwardRef(function Terminal(
                 tabIndex={0}
                 data-active={isCur ? 'true' : 'false'}
                 onClick={() => switchSession(s.name)}
-                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); switchSession(s.name) } }}
-                title={isCur && (dynTitle || s.title) ? `${s.name} — ${dynTitle || s.title}` : `Session ${s.name}`}
-                className={`group flex max-w-40 shrink-0 cursor-pointer items-center gap-1 px-2.5 py-1 text-xs font-mono transition-colors ${isCur ? 'text-ink shadow-[inset_0_-2px_0_0_var(--t-accent)]' : 'text-ink-dim hover:text-ink hover:bg-raised/40'}`}
+                onMouseDown={(e) => { if (e.button === 1) e.preventDefault() }}
+                onAuxClick={(e) => {
+                  if (e.button !== 1) return
+                  e.preventDefault()
+                  e.stopPropagation()
+                  closeSession(s.name)
+                }}
+                onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); switchSession(s.name) } }}
+                title={tabTitle ? `${s.name} — ${tabTitle}` : `Session ${s.name}`}
+                className={`terminal-tab group relative -mb-px first:ml-2 flex min-w-0 max-w-48 shrink-0 cursor-pointer items-center gap-1 border-b-2 pl-3 pr-1.5 text-xs font-mono transition-colors outline-none ${isCur ? 'bg-sunken text-ink border-accent' : 'text-ink-dim border-transparent hover:text-ink hover:bg-raised'}`}
               >
-                <span className={`tab-marquee relative min-w-0 flex-1 ${sessionsLoading && !sessionsLoaded ? 'animate-pulse' : ''}`}>
-                  {(() => {
-                    const label = isCur ? (dynTitle || s.title || s.name) : s.name
-                    const marquee = !!marqueeTabs[s.name]
-                    return (
-                      <>
-                        {marquee && (
-                          <span className="tab-marquee-track" aria-hidden="true">
-                            <span className="tab-marquee-text">{label}</span>
-                            <span className="tab-marquee-sep">·</span>
-                            <span className="tab-marquee-text">{label}</span>
-                          </span>
-                        )}
-                        <span
-                          key="measure"
-                          ref={(el) => { const m = marqueeRefs.current[s.name] || (marqueeRefs.current[s.name] = {}); m.measure = el; m.wrap = m.wrap || (el && el.parentElement) }}
-                          className={`tab-marquee-text ${marquee ? 'absolute left-0 top-0 invisible' : 'truncate'}`}
-                        >{label}</span>
-                      </>
-                    )
-                  })()}
+                <span className={`terminal-tab-label min-w-0 flex-1 truncate ${sessionsLoading && !sessionsLoaded ? 'animate-pulse' : ''}`}>
+                  {tabTitle || s.name}
                 </span>
                 <Button
-                  variant="ghost"
-                  size="sm"
-                  icon
+                  variant="dangerLink"
+                  size="bare"
                   onClick={(e) => { e.stopPropagation(); closeSession(s.name) }}
                   title={`Close session ${s.name}`}
                   aria-label={`Close session ${s.name}`}
-                  className="shrink-0 text-ink-dim hover:text-danger opacity-0 group-hover:opacity-100 focus:opacity-100 focus-visible:opacity-100 transition-opacity leading-none"
+                  className={`h-4.5 w-4.5 shrink-0 rounded-full p-0 text-ink-faint hover:text-danger hover:bg-danger-soft leading-none ${isCur ? '' : 'opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto'}`}
                 >
-                  ×
+                  <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" aria-hidden="true">
+                    <path d="m5 5 14 14M19 5 5 19" />
+                  </svg>
                 </Button>
               </div>
             )
           })}
+        </div>
           <Button
             variant="ghost"
-            size="sm"
-            icon
+            size="bare"
             onClick={newSession}
             title="New terminal tab"
             aria-label="New terminal tab"
-            className="shrink-0 text-ink-dim hover:text-accent-text hover:bg-panel/60"
+            className="self-center mx-2 h-7 w-7 shrink-0 rounded-full border border-line-faint p-0 text-lg leading-none text-ink-dim hover:text-accent-text hover:bg-raised"
           >
             +
           </Button>
@@ -1126,14 +1132,15 @@ const Terminal = forwardRef(function Terminal(
               size="sm"
               onClick={() => ref.current?.close()}
               title="Send Ctrl+C to interrupt the running command"
-              className="shrink-0 hover:text-ink"
+              aria-label="Stop command"
+              className="self-center mx-1 my-1 shrink-0"
             >
               Stop Command
             </Button>
           )}
         </div>
         )}
-        <div className="relative flex shrink-0 items-center gap-1.5">
+        <div className="order-3 relative ml-auto flex shrink-0 items-center gap-1.5 px-2 py-1">
           <span className="w-px h-4 bg-raised" />
           <Button variant="ghost" size="sm" onClick={() => setFontSize((s) => Math.max(10, s - 1))} className="text-ink-faint">A-</Button>
           <span className="text-xs text-ink-dim w-6 text-center">{fontSize}</span>
@@ -1201,10 +1208,17 @@ const Terminal = forwardRef(function Terminal(
           )}
         </div>
       </div>
-      <div ref={containerRef} className={`w-full ${collapsed ? 'hidden' : ''}`} style={{ height, minHeight }}>
+      <div className={`relative w-full ${collapsed ? 'hidden' : ''}`} style={{ height, minHeight }}>
+      <div ref={containerRef} className="h-full w-full">
         {initError && (
           <div className="p-4 text-sm text-danger font-mono whitespace-pre-wrap">{initError}</div>
         )}
+      </div>
+      {(connState === 'connecting' || newSessionsPending > 0) && !initError && (
+        <div role="status" className="terminal-opening absolute inset-0 z-10 flex items-center justify-center bg-sunken text-sm text-ink-dim font-mono">
+          {newSessionsPending > 0 ? 'Opening terminal…' : `Opening ${activeSessionId}…`}
+        </div>
+      )}
       </div>
     </div>
   )
