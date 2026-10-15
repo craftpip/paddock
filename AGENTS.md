@@ -821,13 +821,28 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   the **distinctive early-pass marker** so a pad that only has the late chown
   rebuilds once), and — the half that is easy to miss — the MCP `exec` tool now
   splices `termUserArgs` (`mcp.js:execDockerArgs`), so a control-plane command no
-  longer plants root-owned files in the pad's HOME. **The root cause is a
-  root-run `opencode` CLI/TUI, NOT the boot `opencode web` server**: the web
-  server does not write `/root/.local/state` (proved by POSTing a session and
-  re-stat'ing) and `opencode --version` as root does not either; only a root
-  `opencode` session does, so a user-mode pad is **still** vulnerable if the user
-  launches opencode as root (host `docker exec`/SSH) instead of through the
-  Paddock terminal/Mission. **Never `rm -rf`/`chown` the running session's own
+  longer plants root-owned files in the pad's HOME. **Plan 89 extends the same
+  drop to every other *managed* process**: `buildWebHook` runs the published
+  agent server through a `pad_run` wrapper behind a **runtime** gate
+  (`USER_MODE=user` and uid 0 — runtime, because the hook is re-executed by the
+  boot `start.sh` *and* by root `docker exec` re-execs, so a generation-time gate
+  would be right for one caller and wrong for another); `task-runner` and
+  `orchestrator.execInPad` splice the same `termUserArgs`. Because the hook lives
+  on disk, not in the image, an already-published PAD keeps its old root-launching
+  hook until something rewrites it — `ensureWebHookUserDrop` does that on the
+  publish path and the `migrateWebHooks` boot sweep does it on a webui restart
+  (preserving the web password, which only the hook holds for `env`-target
+  drivers). One measured exception: **`tee` stays root** — `/proc/1/fd/1` (pid 1's
+  stdout, which `docker logs`/the Logs tab read) is **not writable by uid 1000**,
+  so the hook chowns only the `web.pid`/`web.log` files it owns. **The root cause
+  is a root-run `opencode` CLI/TUI, NOT the boot `opencode web` server**:
+  re-measured after plan 89, a uid-1000 server booted and served a session POST
+  with an **empty** `locks/` dir, and `opencode --version` as root does not write
+  state either; only a root `opencode` session does (a pad's root-owned `.lock`
+  dirs date from a root run). So a user-mode pad is **still** vulnerable if the
+  user launches opencode as root (host `docker exec`/SSH) instead of through the
+  Paddock terminal/Mission — plan 89 drops every *managed* process, not a human's
+  root shell. **Never `rm -rf`/`chown` the running session's own
   state dir "to reproduce"** — this agent IS a root `opencode` session inside the
   pad, and deleting its `locks/` wedges every MCP call with that same
   `FileSystem.makeDirectory` error until the dir is recreated by hand

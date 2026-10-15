@@ -1,6 +1,6 @@
 # Backend Services
 
-> Last updated: 2026-10-06
+> Last updated: 2026-10-16
 
 ## PAD Discovery (agent-registry.js)
 
@@ -328,7 +328,32 @@ and its own image tag (`paddock-vm-&lt;name&gt;:latest`). See
   the image `start.sh` so its port-guard cannot exit the parent start script.
   `buildWebHook` starts web servers through `tee`: output remains in
   `&lt;dataDir&gt;/web.log` and is also written to `/proc/1/fd/1` for `docker logs`
-  and the Logs tab.
+  and the Logs tab. **Plan 89:** in a user-mode PAD the published agent server
+  runs as the pad user (`USER_UID:USER_GID`, `HOME=/root`) rather than root, the
+  same rule every *managed* agent process follows. A root-run `opencode` process
+  creates root-owned state — `/root/.local/state/opencode/locks` (0755 root) and
+  the `.lock` dirs inside it (0700 root) — after which the pad user can never
+  `mkdir` a lock and its next session dies with `PermissionDenied`; the fix is
+  that no managed process, including this server, runs as root. (Measured: the
+  server itself does not create lock entries on boot or on a session POST — the
+  recurring root writer is a root `opencode` CLI/TUI — but a root-launched server
+  is still the wrong identity, and the boot hook is the one place it was set.)
+  The generated hook wraps the start
+  command in a `pad_run` function (`setpriv --reuid … --clear-groups`, else
+  `su -s /bin/bash pad -c`) behind a **runtime** gate
+  `[ "$USER_MODE" = "user" ] && [ "$(id -u)" = "0" ]` — runtime, not
+  generation-time, because the same file is executed by the boot `start.sh` and
+  by root re-execs in `docker exec`, and all of them inherit the container env,
+  so the gate is the one place the answer is always right. Only the **server**
+  drops; `tee` deliberately stays root because `/proc/1/fd/1` (pid 1's stdout,
+  read by `docker logs`/the Logs tab) is not writable by the pad user. The hook
+  re-`chown`s the `web.pid`/`web.log` files it owns. A root-mode PAD keeps the
+  exact old line. `ensureWebHookUserDrop(name, agent)` rewrites an existing hook
+  that lacks the marker (preserving the web password by reading it back through
+  `readWebAuth`), and `migrateWebHooks()` is the boot sweep that backfills every
+  published PAD on a webui restart — needed because the hook is on disk, not in
+  the image, so an already-published PAD keeps its old root-launching hook until
+  something rewrites it. `applyAgentChanges` also calls it on the publish path.
 - `getNetworkHealth(name, { declaredPeer })` — the pad's network peer verdict; see § [Network peer truth](#network-peer-truth). `declaredPeer` is meta `NETWORK` and is **required for the verdict to be right**
 - `validateWorkspaceMount(name, agent, host, dir)` — the single authority for custom workspace binds (plan 24); returns `{ host, container, webuiVisible, hostBrowsable }` or throws
 - `autoSshPort()` — next free host port starting at 43817 (scans web/extra/ssh host ports)
@@ -647,9 +672,22 @@ user despite the root process.
   pass this as the `skipDir` predicate; a pad *named* `hermes` or a workspace
   folder named `hermes` is not excluded.
 
+**User-mode agent processes.** In a PAD configured `USER_MODE=user`, every
+*managed agent process* runs as the pad user (`PUID:PGID`, `HOME=/root`), not
+root: the published agent server (the web hook above), every control-plane
+`docker exec` (`task-runner`, `orchestrator.execInPad`, the MCP `exec` tool),
+and the Mission TUI. The shared primitive is `pad-tmux.termUserArgs(name)` —
+`['-u', '<uid>:<gid>', '-e', 'HOME=/root']` for a user-mode pad, `[]` for
+root-mode — and every exec/spawn site splices it in. This matters because a root
+process plants root-owned files in the pad's `HOME` that the pad user can never
+reclaim; plan 89 closed the last *managed* root launch — the published server
+(§ `buildWebHook`) — so only a human-run root `opencode` (host `docker exec` or
+SSH) can still plant them. A root-mode PAD is unchanged.
+
 `app.js` runs `ensureDataOwned()` + DB init at boot, then a background
 `normalizeTree(INSTANCES_DIR, hermes-skip)` — the automatic replacement for the
-old manual `chown -R node:node instances/` runbook.
+old manual `chown -R node:node instances/` runbook. It also runs
+`vm.migrateWebHooks()` (plan 89) to backfill pre-fix web hooks.
 
 ## Database (db.js)
 
