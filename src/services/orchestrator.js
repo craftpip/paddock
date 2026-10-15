@@ -55,11 +55,22 @@ class OrchestratorError extends Error {
  *  `spawn` + `child.stdin.write/end` and under `printf | docker exec -i`. The
  *  same reported pairing (openssh the key from stdin, "use spawn, not
  *  execFile") is already an AGENTS.md watch item for the openclaw auth path. */
+/** The `docker exec` argv for `execInPad`, split out so the plan-89 drop is
+ *  testable without a container (the same shape as mcp.js's `execDockerArgs`).
+ *  Plan 89: `opencode mcp add` initializes opencode, which creates
+ *  `$HOME/.local/state/opencode/locks`. Run as root in a user-mode PAD and those
+ *  locks land root-owned (0700), so the pad user's own sessions later die with
+ *  PermissionDenied. Drop to the pad user exactly like pad-tmux does; a root-mode
+ *  PAD yields no extra argv. */
+function execDockerArgs(name, script) {
+  return ['exec', '-i', ...require('./pad-tmux').termUserArgs(name), name, 'sh', '-lc', script];
+}
+
 function execInPad(name, script, input) {
   return new Promise((resolve, reject) => {
     let stdout = '';
     let stderr = '';
-    const child = spawn('docker', ['exec', '-i', name, 'sh', '-lc', script]);
+    const child = spawn('docker', execDockerArgs(name, script));
     child.stdout.on('data', (d) => { stdout += d; });
     child.stderr.on('data', (d) => { stderr += d; });
     // A hung attach must become a FAILURE, not a promise that never settles:
@@ -239,4 +250,4 @@ function getOrchestrator(name, userId) {
   };
 }
 
-module.exports = { confer, removeConferral, getOrchestrator, isConferred, orchestratorConfigPath, OrchestratorError, _setExecRunner };
+module.exports = { confer, removeConferral, getOrchestrator, isConferred, orchestratorConfigPath, OrchestratorError, _setExecRunner, execDockerArgs };

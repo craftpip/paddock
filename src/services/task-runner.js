@@ -53,6 +53,12 @@ let gitExecFn = defaultGitExec;
 // docker/tmux layer into every test that touches bookkeeping, and the seam is
 // how the tests make a folder exist or not.
 let folderExistsFn = require('./pad-tmux').folderExists;
+// Plan 89: a managed agent process must run as the pad user in a user-mode PAD.
+// Without this a root `opencode run` creates root-owned state the pad user can
+// never write again (the same defect the published web hook had). Same seam
+// pattern as folderExistsFn, and same reason: a service must not require the
+// docker layer at module scope, but the call itself must still drop.
+let termUserArgsFn = require('./pad-tmux').termUserArgs;
 
 function defaultLookupAgent(name) {
   return registry.getAgent(name);
@@ -63,12 +69,12 @@ function defaultIsRunning(ref) {
 }
 
 function defaultContainerExec(ref, script, cb) {
-  execFile('docker', ['exec', '-i', ref, 'sh', '-lc', script], { timeout: 15000 }, (err) => cb && cb(err));
+  execFile('docker', ['exec', '-i', ...termUserArgsFn(ref), ref, 'sh', '-lc', script], { timeout: 15000 }, (err) => cb && cb(err));
 }
 
 function defaultGitExec(ref, script, timeout) {
   return new Promise((resolve) => {
-    execFile('docker', ['exec', '-i', ref, 'sh', '-lc', script], { timeout },
+    execFile('docker', ['exec', '-i', ...termUserArgsFn(ref), ref, 'sh', '-lc', script], { timeout },
       (err, stdout, stderr) => {
         // A nonzero exit is still an ANSWER (git said "nothing to commit"), so
         // this never rejects: the caller reads the code, not an exception.
@@ -526,7 +532,7 @@ async function submitTask({ name, prompt, model, agent, priority = 0, timeout, a
     const script = buildExecCommand(cap, prompt, { workspaceDir, model, agent, autoApprove }, id);
     const child = spawnFn(
       'docker',
-      ['exec', '-i', runtimeRef, 'sh', '-lc', script],
+      ['exec', '-i', ...termUserArgsFn(runtimeRef), runtimeRef, 'sh', '-lc', script],
       { stdio: ['pipe', 'pipe', 'pipe'] }
     );
     attachProcess(id, child, limit, runtimeRef, cap);
@@ -725,7 +731,7 @@ async function runGitCommit(ref, folder, message, timeout = 60000) {
   };
 }
 
-function _setForTests({ spawn, getAgent, isRunning, containerExec, folderExists, gitExec, resetRunning, resetSeams } = {}) {
+function _setForTests({ spawn, getAgent, isRunning, containerExec, folderExists, gitExec, termUserArgs, resetRunning, resetSeams } = {}) {
   if (resetSeams) {
     spawnFn = realSpawn;
     lookupAgent = defaultLookupAgent;
@@ -733,6 +739,7 @@ function _setForTests({ spawn, getAgent, isRunning, containerExec, folderExists,
     containerExecFn = defaultContainerExec;
     gitExecFn = defaultGitExec;
     folderExistsFn = require('./pad-tmux').folderExists;
+    termUserArgsFn = require('./pad-tmux').termUserArgs;
   }
   if (spawn) spawnFn = spawn;
   if (getAgent) lookupAgent = getAgent;
@@ -740,6 +747,7 @@ function _setForTests({ spawn, getAgent, isRunning, containerExec, folderExists,
   if (containerExec) containerExecFn = containerExec;
   if (gitExec) gitExecFn = gitExec;
   if (folderExists) folderExistsFn = folderExists;
+  if (termUserArgs) termUserArgsFn = termUserArgs;
   if (resetRunning) {
     for (const entry of running.values()) {
       if (entry.state.timer) clearTimeout(entry.state.timer);

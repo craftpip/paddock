@@ -2268,6 +2268,65 @@ async function imageHomeOwnershipBaked(name, image, wasRunning) {
   return imageProbe(name, image, wasRunning, `grep -q '${HOME_EARLY_MARKER}' /usr/local/bin/start.sh`);
 }
 
+// ─── User-mode web-hook drop (plan 89) ──────────────────────────────────────
+// The web start hook is machine-managed but lives on disk (instances/<pad>/
+// <agent>/start-web.sh) and is NOT baked into the image, so an already-published
+// PAD keeps its old root-launching hook until something rewrites it. That is the
+// file that created a root-owned `opencode` state dir at boot and again on every
+// publish re-apply. `ensureWebHookUserDrop` regenerates it from the current
+// `buildWebHook` template when it lacks the marker, and is called from both the
+// webui boot sweep (so an existing PAD is fixed on restart, no apply needed) and
+// `applyAgentChanges` (the publish path). Regeneration preserves the web
+// password by reading it back through `readWebAuth`, which parses the very hook
+// being replaced.
+
+/** Rewrite an instance's `start-web.sh` to carry the plan-89 user-mode drop.
+ *  Returns true when a rewrite happened. No-op when: no hook (never published),
+ *  no web binding, the marker is already present, or the driver has no webApp —
+ *  every one of those is "there is nothing here to fix", not a failure. The
+ *  marker check is the cheap gate; `buildWebHook` output is the canonical form. */
+function ensureWebHookUserDrop(name, agent) {
+  let driver;
+  try { driver = getDriverOr(agent); } catch { return false; }
+  if (!driver || !driver.webApp || typeof driver.webApp.startCommand !== 'function') return false;
+  const p = webHookPath(name, driver.type);
+  if (!fs.existsSync(p)) return false;
+  let content;
+  try { content = fs.readFileSync(p, 'utf8'); } catch { return false; }
+  if (content.includes(WEB_USER_DROP_MARKER)) return false;
+  const web = readWebService(name);
+  if (!web) return false;
+  let password = '';
+  try { password = readWebAuth(driver, name); } catch {}
+  const fresh = buildWebHook(driver, agent, web, password);
+  try {
+    fs.writeFileSync(p, fresh, { mode: 0o755 });
+    ensureOwned(p);
+  } catch { return false; }
+  return true;
+}
+
+/** Boot sweep (plan 89): rewrite every already-published PAD's `start-web.sh`
+ *  that predates the user-mode drop, so an existing PAD is fixed on a webui
+ *  restart without a settings apply. Skips hidden/quarantine dirs and any dir
+ *  without an AGENT. Returns the pads that changed (empty is the normal case). */
+function migrateWebHooks() {
+  const changed = [];
+  let names = [];
+  try { names = fs.readdirSync(INSTANCES_DIR); } catch { return changed; }
+  for (const name of names) {
+    if (name.startsWith('.')) continue;
+    try {
+      const dir = path.join(INSTANCES_DIR, name);
+      if (!fs.statSync(dir).isDirectory()) continue;
+      const meta = readMeta(dir) || {};
+      if (!meta.AGENT) continue;
+      if (ensureWebHookUserDrop(name, meta.AGENT)) changed.push(name);
+    } catch {}
+  }
+  return changed;
+}
+
 /** Rebuild the image (--pull to redownload the base) and recreate the
  *  container. The recreate restarts it automatically when it's done.
  *  `buildArgs` are passed as `--build-arg K=V` (ad-hoc overrides; the instance
@@ -3109,11 +3168,42 @@ async function hostPortInUse(hostPort, excludeName) {
   return false;
 }
 
+/** Marker that a web hook carries the plan-89 user-mode drop. Used by the
+ *  backfill (`ensureWebHookUserDrop`) to detect a hook generated before it. */
+const WEB_USER_DROP_MARKER = 'PAD WEB USER DROP (plan 89)';
+
+/** Single-quote a string for embedding inside `sh -lc '<cmd>'`. Every `'`
+ *  becomes `'\''` — the standard POSIX escape — so a generated start command
+ *  carrying quotes (the web password does) survives unchanged. */
+function shSingleQuote(s) {
+  return `'${String(s).replace(/'/g, `'\\''`)}'`;
+}
+
 /** Shell content of the per-instance web start hook (start-web.sh). The hook
  *  is written into the agent's data-dir bind mount and executed by start.sh on
  *  boot, so the published server survives recreates. Execute it with `bash`,
  *  not `source`: its early exit must not terminate start.sh. It is re-runnable:
- *  a port probe skips the launch when an instance is already listening. */
+ *  a port probe skips the launch when an instance is already listening.
+ *
+ *  Plan 89: in a user-mode PAD the published agent server must run as the pad
+ *  user (PUID:PGID, HOME=/root). A root-run server creates root-owned state —
+ *  `/root/.local/state/opencode/locks` (0755 root) and the `.lock` dirs inside
+ *  it (0700 root) — and the pad user can then never `mkdir` a lock again:
+ *  `opencode mcp list` and every MCP-carrying session die with
+ *  `PermissionDenied: FileSystem.makeDirectory …/locks/<hash>.lock`. The gate
+ *  is on `$USER_MODE` at RUN time, not at generation time, because the SAME
+ *  hook is executed by three different callers (the boot `start.sh`, and the
+ *  create/apply paths in `docker exec`) and only some of them see a user-mode
+ *  env directly — but all of them inherit the container's own env, so the
+ *  runtime gate is the one place the answer is always right. A root-mode PAD
+ *  keeps the exact old line.
+ *
+ *  Only the SERVER drops. `tee` deliberately stays root: `/proc/1/fd/1` (pid
+ *  1's stdout, which is what `docker logs` and the Logs tab read) is NOT
+ *  openable by the pad user — measured, `echo x >> /proc/1/fd/1` as uid 1000 is
+ *  `Permission denied` — so a pad-user `tee` would lose the server's console
+ *  stream entirely. The hook re-`chown`s the two files it owns (pidfile, log)
+ *  to the pad user so nothing it creates stays root-owned. */
 function buildWebHook(driver, agent, webService, password) {
   const dataDir = driver.dataDir;
   const pidFile = `${dataDir}/web.pid`;
@@ -3127,8 +3217,23 @@ if ( exec 3<>/dev/tcp/127.0.0.1/${webService.containerPort} ) 2>/dev/null; then
   exec 3>&- 2>/dev/null
   exit 0
 fi
-${startCmd} 2>&1 | tee -a ${logFile} >/proc/1/fd/1 &
-echo $! > "${pidFile}"
+# ${WEB_USER_DROP_MARKER}: run the agent server as the pad user when this is a
+# user-mode PAD (runtime gate), so it can never write root-owned state.
+pad_run() {
+  if command -v setpriv >/dev/null 2>&1; then
+    setpriv --reuid ${USER_UID} --regid ${USER_GID} --clear-groups -- sh -lc "$1"
+  else
+    su -s /bin/bash pad -c "$1"
+  fi
+}
+if [ "$USER_MODE" = "user" ] && [ "$(id -u)" = "0" ]; then
+  pad_run ${shSingleQuote(startCmd)} 2>&1 | tee -a ${logFile} >/proc/1/fd/1 &
+  echo $! > "${pidFile}"
+  chown ${USER_UID}:${USER_GID} "${pidFile}" "${logFile}" 2>/dev/null || true
+else
+  ${startCmd} 2>&1 | tee -a ${logFile} >/proc/1/fd/1 &
+  echo $! > "${pidFile}"
+fi
 `;
 }
 
@@ -3167,8 +3272,19 @@ function readWebAuth(driver, name) {
   if (!fs.existsSync(hookPath)) return '';
   const content = fs.readFileSync(hookPath, 'utf8');
   const envKey = (auth && auth.envKey) || 'OPENCODE_SERVER_PASSWORD';
-  const m = new RegExp(`${envKey}='([^']*)'`).exec(content);
-  return m ? m[1] : '';
+  // The password for an 'env'-target driver lives ONLY in this hook — the
+  // `authToken` in web.json is for urlToken drivers (openclaw). Plan 89 nested
+  // the whole start command inside a shell `pad_run '<cmd>'` wrapper, which
+  // turns the plain `KEY='pw'` into `KEY='\''pw'\''`; a naive `KEY='([^']*)'`
+  // then captures the escape backslash and a regeneration would DESTROY the
+  // credential (measured: `uMVbmzi6ACgWKDTN` → `\`). Match the escaped form
+  // first, fall back to the plain form for a hook written before plan 89.
+  const escaped = new RegExp(`${envKey}='\\\\''([^']*)'\\\\''`);
+  const plain = new RegExp(`${envKey}='([^']*)'`);
+  const m = escaped.exec(content) || plain.exec(content);
+  // A lone backslash is the escape artifact of an EMPTY password (never a real
+  // generated token), so it must not be read back as one and re-emitted.
+  return m && m[1] !== '\\' ? m[1] : '';
 }
 
 /** Path of the state file holding an openclaw gateway's pre-publish
@@ -4325,6 +4441,10 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
     if (newUserMode === 'user' && !(await imageHomeOwnershipBaked(name, image, runningNow))) {
       homeRebuild = ensureHomeOwnership(name);
     }
+    // Plan 89: the web hook is on disk, not in the image, so an already-published
+    // PAD keeps its old root-launching hook until it is rewritten. Not a rebuild
+    // trigger — the boot `start.sh` and the publish re-exec read the file fresh.
+    ensureWebHookUserDrop(name, agentType);
     let buildRebuild = false;
     if (buildCommandsChanged) {
       // Custom build commands are baked into the image (Dockerfile block) — a
@@ -4735,7 +4855,7 @@ module.exports = {
   imageHasDockerCli, imageHasSshPortSupport, imageHasWebStartSupport,
   imageHasPostStartHook,
   ensureUserModeBuildFiles, imageHasPadUser,
-  ensureHomeOwnership, imageHomeOwnershipBaked,
+  ensureHomeOwnership, imageHomeOwnershipBaked, ensureWebHookUserDrop, migrateWebHooks,
   imageFor, seedBuildDir, buildDir, buildEnvPath,
   readBuildEnv, setBuildEnv,
   argsFromDockerfile,

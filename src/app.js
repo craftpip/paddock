@@ -3292,6 +3292,13 @@ setImmediate(() => {
     ownership.normalizeTree(INSTANCES_DIR, (dir) =>
       ownership.isSelfManagedAgentData(dir, INSTANCES_DIR));
   } catch {}
+  // Plan 89: a PAD's web start hook lives on disk, not in its image, so an
+  // already-published user-mode PAD keeps its root-launching hook until it is
+  // rewritten. Regenerate on boot so the fix lands on restart, no apply needed.
+  try {
+    const fixed = vm.migrateWebHooks();
+    if (fixed.length) console.log(`[plan 89] web start hook now drops to the pad user: ${fixed.join(', ')}`);
+  } catch {}
 });
 
 const server = app.listen(6789, () => console.log('VM WebUI listening on port 6789'));
