@@ -263,5 +263,6 @@ Every row is an end-to-end acceptance test, not a source-text assertion.
 - QueuePanel.jsx uses queue.state, queue.scheduler instead of runner.control_state. **Phase 5 complete.**
 - [x] Add projection-integrity recovery without hiding queue data.
 - canonicalQueueProjection detects drift, QueuePanel shows Regenerate. **Phase 6 complete.**
-- [ ] Prove all state transitions with focused suites and mutation controls.
+- [x] Prove all state transitions with focused suites and mutation controls.
+- runner-state-sequence.test.js covers all 24 canonical transitions + mutation controls. **Phase 7 complete.**
 - [ ] Build an intentional SPA snapshot, browser-test every matrix row, document and absorb.
