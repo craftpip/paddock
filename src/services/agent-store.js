@@ -542,6 +542,7 @@ function readActivity(agent, sessionId, { agentRunning = null } = {}) {
 
   return {
     session: sessionId,
+    resolvedSessionId: parsed.sessionId || sessionId,
     title: safe.title,
     directory: safe.directory,
     messageCount: parsed.messageCount ?? null,
@@ -556,4 +557,144 @@ function readActivity(agent, sessionId, { agentRunning = null } = {}) {
   };
 }
 
-module.exports = { StoreError, STORES, locate, readActivity };
+/** Plan 75 row 8 — the MEASURED usage-exhaustion signature, read from the
+ *  worker conversation's own store for the ONE conversation a runner drives.
+ *
+ *  The signature, verified against the captured failure and its healthy control
+ *  on this host, is: **the newest message is an unanswered user input AND the
+ *  last assistant message produced zero output tokens.** Captured failing
+ *  session `ses_f12b8a…` = [user, assistant(out=0), user] — newest is user and
+ *  the only assistant reply is empty; healthy control `ses_f12e374…` ends in
+ *  user too but its last assistant produced 669 tokens, so the token check is
+ *  what separates "dead turn" from "just typed".
+ *
+ *  This is deliberately a TRI-STATE, because plan 75's whole point is that an
+ *  unreadable answer and a negative answer are different:
+ *    - `exhausted`: the signature is positively read.
+ *    - `ok`: the store is readable and the signature is absent (the input was
+ *      answered, or the last reply produced tokens).
+ *    - `unknown`: the store could not be read, the conversation is absent, the
+ *      driver has no measured signature (codex/claude are `unmeasured` per plan
+ *      75 — do NOT guess them an answer), or the token field itself was
+ *      unreadable. The caller WITHHOLDS on unknown.
+ *
+ *  A live turn ALSO ends in a user message, so `exhausted` alone is not
+ *  exhaustion: the caller must still disambiguate with the busy probe. This
+ *  reader deliberately does NOT read busy — it reports only what the store
+ *  says. */
+function readUsageEvidence(agent, sessionId) {
+  const unknown = (reason) => ({ state: 'unknown', reason, evidence: null });
+  try {
+    if (typeof agent === 'string') {
+      const resolved = registry.getAgent(agent);
+      if (!resolved) return unknown(`Agent not found: ${agent}`);
+      agent = resolved;
+    }
+    if (!agent || !sessionId) return unknown('Worker conversation identity unavailable');
+    if (agent.agent_type !== 'opencode') {
+      return unknown(`Usage-exhaustion evidence unmeasured for ${agent.agent_type}`);
+    }
+    const located = locate(agent);
+    if (!located.ok) return unknown(located.reason || 'Worker store unavailable');
+    const db = new Database(located.path, { readonly: true, fileMustExist: true });
+    try {
+      if (!db.prepare('SELECT id FROM session WHERE id = ?').get(sessionId)) {
+        return unknown('Exact worker conversation not found');
+      }
+      // The newest message OVERALL (any role), and the newest assistant. Ordered
+      // by time_created with id as a tiebreak so two messages written in the
+      // same millisecond have a stable order.
+      const newestOverall = db.prepare(
+        "SELECT id, json_extract(data, '$.role') AS role, time_created FROM message WHERE session_id = ? ORDER BY time_created DESC, id DESC LIMIT 1"
+      ).get(sessionId);
+      const assistant = db.prepare(
+        "SELECT id, data, time_created FROM message WHERE session_id = ? AND json_extract(data, '$.role') = 'assistant' ORDER BY time_created DESC, id DESC LIMIT 1"
+      ).get(sessionId);
+      // No user message at all means there is nothing for the agent to answer.
+      const hasUser = db.prepare(
+        "SELECT 1 AS x FROM message WHERE session_id = ? AND json_extract(data, '$.role') = 'user' LIMIT 1"
+      ).get(sessionId);
+      if (!hasUser) return { state: 'ok', reason: 'No user input exists to answer', evidence: null };
+
+      const newestIsUser = !!newestOverall && newestOverall.role === 'user';
+      let assistantOutput = null;
+      if (assistant) {
+        let data = null;
+        try { data = JSON.parse(assistant.data); } catch { data = null; }
+        const raw = data && data.tokens ? data.tokens.output : undefined;
+        if (typeof raw === 'number' && Number.isFinite(raw)) assistantOutput = raw;
+      }
+      const evidence = {
+        newestRole: newestOverall ? newestOverall.role || null : null,
+        newestMessageId: newestOverall ? newestOverall.id : null,
+        assistantId: assistant ? assistant.id : null,
+        assistantAt: assistant ? iso(assistant.time_created) : null,
+        assistantOutputTokens: assistantOutput,
+      };
+      if (!newestIsUser) {
+        if (assistantOutput === null || assistantOutput === 0) {
+          return { state: 'unknown', reason: 'Empty assistant step is not evidence of quota recovery', evidence };
+        }
+        return { state: 'ok', reason: 'Newest message is an assistant reply', evidence };
+      }
+      if (assistant && assistantOutput === null) {
+        // Newest is user AND an assistant exists but its token field could not
+        // be read: we cannot tell a dead turn from a just-finished one. Withhold.
+        return { state: 'unknown', reason: 'Last assistant message has no readable token count', evidence };
+      }
+      if (assistantOutput !== null && assistantOutput > 0) {
+        return { state: 'ok', reason: 'Last assistant reply produced output tokens', evidence };
+      }
+      return {
+        state: 'exhausted',
+        reason: 'Newest message is an unanswered user input and the last assistant reply produced no output',
+        evidence,
+      };
+    } finally { db.close(); }
+  } catch (e) {
+    return unknown(e.message || 'Worker usage evidence unreadable');
+  }
+}
+
+/** Runner control needs the latest TURN, not the latest tool or text-bearing step.
+ * OpenCode persists time.completed on EACH step: finish=tool-calls is still work.
+ * Only a completed stop step belonging to the newest input establishes idle.
+ * Unsupported/missing signals are unknown, never idle capacity. */
+function readTurn(agent, sessionId) {
+  const unknown = (reason) => ({ state: 'unknown', reason, userId: null, progressAt: null });
+  try {
+    if (typeof agent === 'string') agent = registry.getAgent(agent);
+    if (!agent || !sessionId) return unknown('Worker conversation identity unavailable');
+    if (agent.agent_type !== 'opencode') return unknown(`Turn-completion observation unavailable for ${agent.agent_type}`);
+    const located = locate(agent);
+    if (!located.ok) return unknown('Worker store unavailable');
+    const db = new Database(located.path, { readonly: true, fileMustExist: true });
+    try {
+      return db.transaction(() => {
+        if (!db.prepare('SELECT id FROM session WHERE id = ?').get(sessionId)) return unknown('Exact worker conversation not found');
+        const newest = (role) => db.prepare("SELECT id, data, time_created, time_updated FROM message WHERE session_id = ? AND json_extract(data, '$.role') = ? ORDER BY time_created DESC, id DESC LIMIT 1").get(sessionId, role);
+        const user = newest('user');
+        if (!user) return { state: 'idle', reason: 'New conversation has no input', userId: null, progressAt: null, completedAt: null };
+        const parts = (id) => db.prepare('SELECT data, time_updated FROM part WHERE message_id = ? ORDER BY id').all(id);
+        const userText = parts(user.id).map((r) => JSON.parse(r.data)).filter((p) => p.type === 'text').map((p) => p.text || '').join('\n');
+        // OpenCode appends a separator space after bracketed paste. Ignore only
+        // transport-added trailing whitespace when matching runner instructions.
+        const input = { userId: user.id, inputHash: require('crypto').createHash('sha256').update(userText.trimEnd()).digest('hex') };
+        const assistant = newest('assistant');
+        if (!assistant || assistant.time_created < user.time_created) return { ...input, state: 'working', reason: 'Waiting for response to current input', progressAt: null };
+        const data = JSON.parse(assistant.data);
+        if (data.parentID !== user.id) return { ...unknown('Assistant step does not match current input'), ...input };
+        const rows = parts(assistant.id);
+        const running = rows.some((r) => { const p = JSON.parse(r.data); return p.type === 'tool' && ['pending', 'running'].includes(p.state?.status); });
+        const progressAt = iso(Math.max(assistant.time_updated, ...rows.map((r) => r.time_updated)));
+        const base = { ...input, assistantId: assistant.id, progressAt, completedAt: iso(data.time?.completed) };
+        if (running || !data.time?.completed || data.finish === 'tool-calls') return { ...base, state: 'working', reason: 'Waiting for current turn' };
+        if (data.error) return { ...base, state: 'idle', outcome: 'error', reason: 'Worker turn interrupted or failed — explicit recovery required' };
+        if (data.finish === 'stop' && !data.summary) return { ...base, state: 'idle', reason: 'Current turn completed' };
+        return { ...base, state: 'unknown', reason: 'Turn-completion signal unavailable (possibly compacting)' };
+      })();
+    } finally { db.close(); }
+  } catch { return unknown('Worker turn state unreadable'); }
+}
+
+module.exports = { StoreError, STORES, locate, readActivity, readTurn, readUsageEvidence };

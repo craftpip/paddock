@@ -1,4 +1,6 @@
 import { useState, useEffect } from 'react'
+import { useNavigation, useDirtyNavigation, popupIdentity } from '../lib/navigation'
+import { parsePopups } from '../lib/url-state'
 import { api } from '../lib/api'
 import { useToast } from '../lib/toast'
 import { useConfirm } from '../lib/confirm'
@@ -25,13 +27,17 @@ const LockIcon = ({ className = 'w-4 h-4' }) => (
 )
 
 export default function Vault() {
+  const { location, openPopup, closePopup, drafts } = useNavigation()
+  const popup = parsePopups(location.search, location.pathname).at(-1)
   const toast = useToast()
   const confirm = useConfirm()
   const [items, setItems] = useState([])
   const [meta, setMeta] = useState({ pinSet: false, locked: false })
   const [loading, setLoading] = useState(true)
-  const [mode, setMode] = useState(null)
-  const [form, setForm] = useState({ name: '', description: '', value: '' })
+  const [loadError, setLoadError] = useState('')
+  const mode = popup?.type === 'vault-add' ? 'add' : popup?.type === 'vault-edit' ? popup.args[0] : null
+  const setMode = (value) => value === null ? closePopup() : value === 'add' ? openPopup('vault-add') : openPopup('vault-edit', String(value))
+  const [form, setFormState] = useState({ name: '', description: '', value: '' })
   const [saving, setSaving] = useState(false)
 
   // PIN gate for the current operation (asked at the moment of use — the vault
@@ -42,16 +48,40 @@ export default function Vault() {
   const [promptBusy, setPromptBusy] = useState(false)
 
   // set / reset PIN modal state
-  const [pinModal, setPinModal] = useState(null) // null | 'set' | 'reset'
+  const pinModal = popup?.type === 'vault-pin' ? popup.args[0] : null
+  const setPinModal = (value) => value === null ? closePopup() : openPopup('vault-pin', value)
   const [pinForm, setPinForm] = useState({ pin: '', confirm: '', oldPin: '', password: '' })
   const [pinErr, setPinErr] = useState('')
   const [pinBusy, setPinBusy] = useState(false)
+  useEffect(() => {
+    setPinForm({ pin: '', confirm: '', oldPin: '', password: '' })
+    setPinErr('')
+  }, [pinModal])
+  const formKey = `vault:${mode}`
+  const setForm = (next) => setFormState((old) => {
+    const value = typeof next === 'function' ? next(old) : next
+    if (mode) drafts.set(formKey, value)
+    return value
+  })
+  const baseline = mode === 'add' ? { name: '', description: '' } : items.find((it) => String(it.id) === mode)
+  const dirty = !!mode && !!baseline && (form.name !== baseline.name || form.description !== (baseline.description || '') || !!form.value)
+  useDirtyNavigation(dirty || (pinModal && Object.values(pinForm).some(Boolean)), popupIdentity, () => {
+    drafts.delete(formKey); setFormState({ name: '', description: '', value: '' }); setPinForm({ pin: '', confirm: '', oldPin: '', password: '' })
+  })
+  useEffect(() => {
+    if (!mode || loading) return
+    const item = items.find((it) => String(it.id) === mode)
+    if (mode !== 'add' && !item) return
+    setFormState(drafts.get(formKey) || { name: item?.name || '', description: item?.description || '', value: '' })
+  }, [mode, loading])
 
   function load() {
     api('/api/vault').then((d) => {
+      setLoadError('')
       setItems(d?.items || [])
       setMeta(d?.meta || { pinSet: false, locked: false })
     }).catch((err) => {
+      setLoadError(err.error || err.message || 'Failed to load vault')
       toast.error('Failed to load vault: ' + (err.error || err.message))
     }).finally(() => setLoading(false))
   }
@@ -60,20 +90,23 @@ export default function Vault() {
 
   const editing = mode !== null
   const locked = meta.pinSet
+  useEffect(() => {
+    if (!loading && !loadError && mode && mode !== 'add' && !items.some((it) => String(it.id) === mode)) {
+      toast.error('This vault item is unavailable.')
+      closePopup({ saved: true, expected: popup?.value })
+    }
+  }, [loading, loadError, mode, items])
 
   function cancel() {
-    setMode(null)
-    setForm({ name: '', description: '', value: '' })
+    closePopup()
   }
 
   function doAdd() {
     setMode('add')
-    setForm({ name: '', description: '', value: '' })
   }
 
   function doEdit(item) {
     setMode(item.id)
-    setForm({ name: item.name, description: item.description || '', value: '' })
   }
 
   function startAdd() {
@@ -100,7 +133,8 @@ export default function Vault() {
         await api(`/api/vault/${mode}`, { method: 'PUT', body: { name, description: form.description, value: form.value.trim(), pin } })
         toast.success('Vault item updated')
       }
-      cancel()
+      drafts.delete(formKey)
+      closePopup({ saved: true, expected: popup?.value })
       load()
     } finally {
       setSaving(false)
@@ -117,7 +151,7 @@ export default function Vault() {
   async function doDelete(item, pin) {
     await api(`/api/vault/${item.id}`, { method: 'DELETE', body: { pin } })
     toast.success('Vault item deleted')
-    if (mode === item.id) cancel()
+    if (String(mode) === String(item.id)) closePopup({ saved: true, expected: popup?.value })
     load()
   }
 
@@ -165,8 +199,6 @@ export default function Vault() {
 
   function openPinModal(m) {
     setPinModal(m)
-    setPinForm({ pin: '', confirm: '', oldPin: '', password: '' })
-    setPinErr('')
   }
 
   function closePinModal() {
@@ -192,7 +224,8 @@ export default function Vault() {
         },
       })
       toast.success(pinModal === 'reset' ? 'PIN reset — vault items erased' : 'PIN set')
-      setPinModal(null)
+      setPinForm({ pin: '', confirm: '', oldPin: '', password: '' })
+      closePopup({ saved: true, expected: popup?.value })
       load()
     } catch (err) {
       setPinErr(err.error || err.message || 'Failed to set PIN')
@@ -248,6 +281,7 @@ export default function Vault() {
         </div>
       )}
 
+      {loadError && <p className="mb-3 text-sm text-danger">{loadError} <Button onClick={load}>Retry</Button></p>}
       <Card className="overflow-hidden">
         <div className="px-5 py-4 border-b border-line/60 flex items-center justify-between gap-4">
           <div>
@@ -282,7 +316,7 @@ export default function Vault() {
                 <tr><td colSpan={5} className="py-8 text-center text-sm text-ink-dim">No vault items yet</td></tr>
               )}
               {items.map((item) =>
-                mode === item.id ? (
+                mode === String(item.id) ? (
                   <EditorRow key={item.id} form={form} setForm={setForm} isNew={false} saving={saving} onSave={handleSave} onCancel={cancel} />
                 ) : (
                   <tr key={item.id} className={`transition-colors ${editing ? 'opacity-40 pointer-events-none' : 'hover:bg-raised/30'}`}>

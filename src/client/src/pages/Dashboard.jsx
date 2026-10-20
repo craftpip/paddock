@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
+import { useQueryInput } from '../lib/navigation'
 import { useAgents } from '../stores/agents'
 import AgentCard from '../components/AgentCard'
 import { api } from '../lib/api'
@@ -9,7 +10,7 @@ export default function Dashboard() {
   const stats = useAgents((s) => s.stats)
   const loading = useAgents((s) => s.loading)
   const fetchAgents = useAgents((s) => s.fetchAgents)
-  const [query, setQuery] = useState('')
+  const [query, setQuery] = useQueryInput('q')
   const [fleetStats, setFleetStats] = useState([])
   const [fleetLoading, setFleetLoading] = useState(true)
   const fleetIntervalRef = useRef(null)

@@ -127,13 +127,22 @@ stores these numeric IDs on bind-mounted files; the host and container each
 resolve them to their own local account names. `docker-compose.yml` includes
 `1000:1000` fallbacks if `PUID` or `PGID` are not supplied.
 
-Files created by the webui in project bind mounts are `chown`ed to
-`PUID:PGID`. Files created by the Docker daemon, Docker-managed volumes, or
-individual PAD agent containers can use different ownership because they are
-created by different processes — agent containers run as root, so their data
-is root-owned until the webui's boot sweep re-normalizes it to `PUID:PGID`
-(hermes data dirs excepted, since hermes manages its own ownership). See
-[backend/services.md](../backend/services.md) for the ownership module.
+Paddock's own writers normalize ownership **at write time** (plan 95), not only
+at boot: plans/queue, host-scope workspace create/upload, config and `.env`
+saves, devcontainer, instance build metadata, compose/lifecycle/web-hook files
+and the stale-door quarantine all use the strict ownership primitives in
+`ownership.js`, and a failed correction is reported as an error instead of a
+silent success. The boot sweep remains a compatibility backstop for older files
+and for writes performed by other processes.
+
+Files created by the Docker daemon, Docker-managed volumes, or individual PAD
+agent containers can use different ownership because they are created by
+different processes — a root-mode agent writing its own files is not a Paddock
+writer, so its output can remain root-owned until the boot sweep re-normalizes
+it to `PUID:PGID` (hermes data dirs excepted, since hermes manages its own
+ownership). User-mode PAD helper mutations run as the pad user and are verified
+by the same module. See [backend/services.md](../backend/services.md) for the
+ownership primitives and their boundaries.
 
 ### Vite Dev Server (HMR)
 

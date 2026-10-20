@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useDirtyNavigation } from '../../lib/navigation'
 import { api } from '../../lib/api'
 import { useConfirm } from '../../lib/confirm'
 import { useToast } from '../../lib/toast'
@@ -43,6 +44,7 @@ export default function WebTab({ agent, run, connected, expandTerminal }) {
   const [sshCport, setSshCport] = useState('22')
   const [sshPassword, setSshPassword] = useState('')
   const [showSshPw, setShowSshPw] = useState(false)
+  useDirtyNavigation(portDirty || !!password || !!sshPassword, (l) => l.pathname)
   function refresh() {
     api(`/api/agents/${agent.name}/web`)
       .then((d) => {

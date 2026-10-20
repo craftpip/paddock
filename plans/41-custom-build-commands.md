@@ -1,53 +1,15 @@
 # Dev Container Standard for Paddock (plan 41)
 
-## Status: In progress (2026-08-16) — items 1–11 + 32–36 done & verified, 25/25
-## items complete. Items 12–16 (workspaceFolder/environment/mounts/runArgs/
-## forwardPorts) DONE — implemented, 61/61 vm-manager tests green, live-verified
-## on pad-craftpip (Craftpip /www1 workspace, opencode driver): /workspace mount
-## + /srv/app-readonly:ro, NG_SERVE_HOST/CRAFTPIP_MODE env, SYS_PTRACE +
-## somaxconn runArgs, forwardPort 4200→4202 (gluetun holds 4200; allocator now
-## sees live docker ps). Two live bugs fixed: compose port short-syntax must put
-## protocol on the container side only (`4202:4200/tcp`), and
-## collectPublishedHostPorts excludes the pad's own ports so mappings stay
-## stable across apply cycles. Item 17 (remoteUser/containerUser → pad user)
-## DONE — parser exposes preferredUserMode, resolveDevContainerPlan persists
-## remoteUser/containerUser/userMode, createVm seeds USER_MODE=user from the
-## plan when the caller doesn't pick (MCP), the probe + create form default the
-## Container user toggle to Local user for non-root workspaces (explicit pick
-## wins), 63/63 tests green, live-verified on a throwaway /www2 workspace
-## (node → user, containerUser root wins → root, numeric uid → user). Items
-## 18–19 (devcontainer generation + write-back) DONE — 68/68 tests green;
-## generateWorkspaceDevContainer writes a `.devcontainer/devcontainer.json`
-## mirror (x-paddock.generated: workspaceFolder, lifecycle commands, mounts,
-## forwardPorts, remoteUser) at create when the workspace has none (default on,
-## opt-out via create form toggle / MCP generateDevContainer arg), and
-## syncDevContainer writes pad Settings changes back in place — generated files
-## regenerate wholesale, project-authored files get only the 1:1 mapped fields
-## (lifecycle clears propagate; runArgs/portsAttributes/remoteUser stay
-## untouched); never touches a devcontainer the pad never adopted. Live-verified
-## on a throwaway pad-dcgen: generated file correct at create, postStart edit
-## mirrored back, container healthy, agent + workspace cleaned up. Item 20 (Dev
-## Container card UI) DONE — 72/72 tests green; new `devContainerStatus` (file
-## path, state badge generated/project-authored/missing, current content + the
-## computed "what Paddock would write now" target for the diff preview, sync/
-## regenerate flags) + `regenerateDevContainer` (wholesale rewrite, creates when
-## missing), exposed as `GET /api/agents/:name/devcontainer` + `POST …/sync` +
-## `POST …/regenerate` (no container recreate); Settings gains the "Dev
-## Container" card (path, badge, LCS line-diff preview with identical-line
-## collapsing, Sync/Regenerate with confirms — Regenerate warns it clobbers a
-## project-authored file); Create Agent gains the "generate .devcontainer for
-## this workspace" checkbox (default on, sends generateDevContainer; hints
-## adapt: "Leave on…" vs "already ships a devcontainer — never overwritten").
-## Live-verified in-browser on pad-craftpip (project-authored card renders the
-## real diff; Sync correctly fails with EROFS — /www1 is mounted read-only for
-## the webui, so craftpip's mirror can't be maintained by the control plane,
-## only project-root workspaces can) and on a disposable pad-dctest instance
-## under the rw project root: Regenerate created the generated mirror from the
-## pad's config, Sync wrote a changed post-create script back in place, file
-## re-chowned node:node, instance + workspace removed. Remaining: 38 (final
-## test sweep). The project-image `FROM … AS project` alias pattern documented
-## below is IMPOSSIBLE (BuildKit circular dep + last-stage-wins); the working
-## form is direct `COPY --from=paddock-proj-<name>:latest`.
+## Status: Complete (2026-10-20) — all 79 items done & verified. Final test sweep
+## (item 79) completed: created test pad `pad-plan41-live-ws` with custom
+## workspace, build commands (`RUN echo "plan41-build-marker-v2" > /build-marker-v2.txt`)
+## and post-create (`echo "plan41-postcreate-v2" > /home/pad/post-create-marker-v2.txt`);
+## verified both ran at build/start; edited post-create → recreate → new marker ran;
+## edited build commands → rebuild (pull:true) → new build marker in image;
+## devcontainer.json generated with x-paddock.generated marker and correct fields;
+## create/delete PAD cleanup verified; all workspace/data-dir files owned by
+## 1000:1000 (PUID:PGID). Unit tests: vm-manager 119/119 pass, plan41-build-commands
+## 19/19 pass, ownership-write 20/20 pass.
 
 Progress checklist:
 
@@ -76,7 +38,7 @@ Progress checklist:
 - [x] Backend: driver `dataDir` remap — `/root/.openclaw`, `/root/.opencode`, `/root/.picoclaw`, `/opt/data` (hermes), `/root/.codex`, `/root/.claude` move to the pad user's home (e.g. `/home/pad/.opencode`) so config files stay writable by the non-root user — absorbed by plan 43 (data dirs stay `/root/*` + `/root` chmod 755; PUID ownership + boot sweep heal files)
 - [x] Backend: sudo wiring — non-root user gets passwordless sudo (sudoers drop-in) for runtime root needs; start.sh / post-create scripts that need root use `sudo` — done via plan 43 (`ALL ALL=(ALL) NOPASSWD:ALL`, sudo self-install guard)
 - [x] Backend: `removeVm` — root-helper delete container becomes unnecessary once instance data is 1000-owned; simplify delete to plain `fs.rmSync` (keep the helper as fallback if a rebuild/upgrade left root-owned data behind) — done via plan 43
-- [ ] Tests + live verify on `test-agents` (create with a build command + post-create commands → both run; edit post-create in Settings → recreate → rerun; edit build commands → rebuild; devcontainer.json pre-fill round-trip; create/delete a PAD and confirm workspace + data-dir files are 1000:1000 and editable from the host)
+- [x] Tests + live verify on `test-agents` (create with a build command + post-create commands → both run; edit post-create in Settings → recreate → rerun; edit build commands → rebuild; devcontainer.json pre-fill round-trip; create/delete a PAD and confirm workspace + data-dir files are 1000:1000 and editable from the host)
 
 ## Goal / user flow
 

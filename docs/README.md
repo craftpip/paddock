@@ -43,6 +43,12 @@ docs/
 
 ## Adding new docs
 
+URL views, popup history and read-only Mission restoration are documented in
+[URL navigation](reference/components/navigation.md).
+
+Shell commands for PAD lifecycle and recovery scripts are in
+[Paddock command](reference/operations/paddock-cli.md).
+
 See **[STYLE-GUIDE.md](reference/STYLE-GUIDE.md)** — it is the rulebook. In short:
 
 - **guide/** — user-facing *how-to* in plain words; every page links back to its reference detail

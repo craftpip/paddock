@@ -288,6 +288,8 @@ html {
 
 .tt:hover::after,
 .tt:hover::before,
+.tt:focus-within::after,
+.tt:focus-within::before,
 .tt:focus-visible::after,
 .tt:focus-visible::before {
   opacity: 1;
@@ -338,4 +340,59 @@ html {
   transform: translateY(-50%);
   border-top-color: transparent;
   border-right-color: var(--t-raised);
+}
+
+/* Portal-mode tooltip (Tooltip.jsx `portal`): a fixed bubble rendered in
+   document.body so an `overflow: auto` scroller cannot clip it. Visuals mirror
+   `.tt::after`; placement is inline (from the trigger's rect) because a portal
+   has no CSS anchor. */
+.tt-pop {
+  position: fixed;
+  z-index: 70;
+  width: max-content;
+  max-width: 320px;
+  padding: 5px 9px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: var(--t-ink);
+  background: var(--t-raised);
+  border: 1px solid var(--t-line);
+  border-radius: 6px;
+  box-shadow: var(--shadow-tooltip);
+  pointer-events: none;
+}
+
+.tt-pop::before {
+  content: '';
+  position: absolute;
+  border: 5px solid transparent;
+}
+
+.tt-pop[data-pos='right']::before {
+  left: -10px;
+  top: 50%;
+  transform: translateY(-50%);
+  border-right-color: var(--t-raised);
+}
+
+.tt-pop[data-pos='left']::before {
+  right: -10px;
+  top: 50%;
+  transform: translateY(-50%);
+  border-left-color: var(--t-raised);
+}
+
+.tt-pop[data-pos='top']::before {
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border-top-color: var(--t-raised);
+}
+
+.tt-pop[data-pos='bottom']::before {
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border-bottom-color: var(--t-raised);
 }

@@ -1,6 +1,8 @@
 import { useEffect, useRef } from 'react'
 import { cx } from '../../lib/cx'
 import Button from './Button'
+const openPanels = []
+const FOCUSABLE = 'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
 
 /**
  * Modal — the one dialog shell.
@@ -32,23 +34,49 @@ export function Modal({
   className,
   bodyClassName,
   panelClassName,
+  backdropClassName,
   footerClassName,
   children,
   footer,
 }) {
   const panelRef = useRef(null)
+  const openerRef = useRef(typeof document === 'undefined' ? null : document.activeElement)
+  const previousOpen = useRef(open)
+  if (open && !previousOpen.current) openerRef.current = document.activeElement
+  previousOpen.current = open
+  const closeRef = useRef(onClose)
+  closeRef.current = onClose
 
   useEffect(() => {
-    if (!open || !onClose) return
+    if (!open) return
+    const panel = panelRef.current
+    const opener = openerRef.current
+    openPanels.push(panel)
     function onKeyDown(e) {
-      if (e.key === 'Escape') {
+      if (openPanels.at(-1) !== panel) return
+      if (e.key === 'Escape' && closeRef.current) {
         e.preventDefault()
-        onClose()
+        e.stopImmediatePropagation()
+        closeRef.current()
+      } else if (e.key === 'Tab') {
+        const items = [...panel.querySelectorAll(FOCUSABLE)].filter((el) => el.offsetParent !== null)
+        const first = items[0], last = items.at(-1)
+        if (!first || (e.shiftKey && (document.activeElement === first || document.activeElement === panel)) || (!e.shiftKey && document.activeElement === last)) {
+          e.preventDefault()
+          e.stopImmediatePropagation()
+          ;(e.shiftKey ? last : first)?.focus()
+        }
       }
     }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [open, onClose])
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown, true)
+      const wasTop = openPanels.at(-1) === panel
+      const index = openPanels.indexOf(panel)
+      if (index !== -1) openPanels.splice(index, 1)
+      if (wasTop && opener?.isConnected) opener.focus()
+    }
+  }, [open])
 
   useEffect(() => {
     if (open) panelRef.current?.focus()
@@ -60,7 +88,7 @@ export function Modal({
 
   return (
     <div
-      className={cx('fixed inset-0 flex items-center justify-center bg-overlay backdrop-blur-sm p-4', z)}
+      className={cx('fixed inset-0 flex items-center justify-center bg-overlay backdrop-blur-sm p-4', z, backdropClassName)}
       onMouseDown={(e) => {
         if (e.target === e.currentTarget && onClose) onClose()
       }}

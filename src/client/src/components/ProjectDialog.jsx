@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useDirtyNavigation, useDraftState, useNavigation, popupIdentity } from '../lib/navigation'
 import { api } from '../lib/api'
 import { cx } from '../lib/cx'
 import { useMission } from '../stores/mission'
@@ -7,6 +8,7 @@ import Button from './ui/Button'
 import Choice from './ui/Choice'
 import { Input } from './ui/Input'
 import { TONES } from './ui/tone'
+import Modal from './ui/Modal'
 
 // Create / edit a project. A project IS an (agent, folder) pair, so the dialog
 // is exactly those two choices plus a name.
@@ -34,14 +36,20 @@ function defaultFolderFor(agent) {
 }
 
 export default function ProjectDialog({ project, onClose }) {
+  const { drafts } = useNavigation()
+  const prefix = `project:${project?.id || 'new'}:`
+  const saved = useRef(false)
+  const clearDrafts = () => { for (const key of drafts.keys()) if (key.startsWith(prefix)) drafts.delete(key) }
   const editing = !!project
   const allAgents = useCodingAgents()
   const { createProject, updateProject, probeFolder, folder, clearFolder } = useMission()
 
-  const [name, setName] = useState(project?.name || '')
-  const [agentName, setAgentName] = useState(project?.agent_name || '')
-  const [folderPath, setFolderPath] = useState(project?.folder || '')
-  const [plansFolder, setPlansFolder] = useState(project?.plans_folder || 'plans')
+  const [name, setName] = useDraftState(prefix + 'name', project?.name || '')
+  const [agentName, setAgentName] = useDraftState(prefix + 'agent', project?.agent_name || '')
+  const [folderPath, setFolderPath] = useDraftState(prefix + 'folder', project?.folder || '')
+  const [plansFolder, setPlansFolder] = useDraftState(prefix + 'plans', project?.plans_folder || 'plans')
+  const dirty = name !== (project?.name || '') || agentName !== (project?.agent_name || '') || folderPath !== (project?.folder || '') || plansFolder !== (project?.plans_folder || 'plans')
+  useDirtyNavigation(() => dirty && !saved.current, popupIdentity, clearDrafts)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const timer = useRef(null)
@@ -103,7 +111,9 @@ export default function ProjectDialog({ project, onClose }) {
       const payload = { name: name.trim(), agent: agentName, folder: folderPath.replace(/\/+$/, '') || '/', plansFolder: plansFolderNorm }
       if (editing) await updateProject(project.id, { name: payload.name, folder: payload.folder, plansFolder: payload.plansFolder })
       else await createProject(payload)
-      onClose()
+      saved.current = true
+      clearDrafts()
+      onClose({ saved: true })
     } catch (err) {
       setError(err?.error || err?.message || 'Could not save the project')
     } finally {
@@ -121,14 +131,8 @@ export default function ProjectDialog({ project, onClose }) {
   }, [probe, folderPath])
 
   return (
-    <div
-      className="msn-dialog-backdrop fixed inset-0 z-50 flex items-center justify-center bg-overlay p-4"
-      onMouseDown={onClose}
-    >
-      <div
-        className="msn-dialog w-full max-w-lg rounded-card border border-line bg-panel shadow-modal"
-        onMouseDown={(e) => e.stopPropagation()}
-      >
+    <Modal onClose={onClose} width="max-w-lg" backdropClassName="msn-dialog-backdrop"
+      panelClassName="msn-dialog max-h-[90dvh]" bodyClassName="p-0" bodyScroll>
         <header className="msn-dialog-header flex items-center justify-between border-b border-line-faint px-4 py-3">
           <h2 className="msn-dialog-title text-sm font-semibold text-ink">{editing ? 'Edit project' : 'New project'}</h2>
           <Button
@@ -307,8 +311,7 @@ export default function ProjectDialog({ project, onClose }) {
             </Button>
           </footer>
         </form>
-      </div>
-    </div>
+    </Modal>
   )
 }
 

@@ -38,6 +38,7 @@ const apiKeys = require('./services/api-keys');
 const containerHealth = require('./services/container-health');
 const logStore = require('./services/log-store');
 const mission = require('./services/mission');
+const { writeFileOwned } = require('./services/ownership');
 const plans = require('./services/plans');
 const padTmux = require('./services/pad-tmux');
 const { createTerminalInput } = require('./services/terminal-input');
@@ -1019,10 +1020,13 @@ app.post('/api/agents/:name/devcontainer/sync', async (req, res) => {
     const agentType = meta.AGENT || 'openclaw';
     const wsMount = vm.readWorkspaceMount(name, agentType);
     if (!wsMount) return res.status(400).json({ error: 'This agent has no custom workspace to sync' });
-    const filePath = vm.syncDevContainer(name, agentType, wsMount);
+    const filePath = await vm.syncDevContainer(name, agentType, wsMount);
     if (!filePath) return res.status(400).json({ error: 'Nothing to sync — the pad never adopted this devcontainer' });
     res.json(vm.devContainerStatus(name));
   } catch (e) {
+    if (e.code === 'pad_not_running' || e.code === 'devcontainer_write_failed') {
+      return res.status(400).json({ error: e.message, code: e.code });
+    }
     res.status(500).json({ error: e.message });
   }
 });
@@ -1035,10 +1039,13 @@ app.post('/api/agents/:name/devcontainer/regenerate', async (req, res) => {
   try {
     const meta = readMeta(name);
     if (!meta.AGENT && !meta.ROOT_PASSWORD) return res.status(404).json({ error: 'Agent not found' });
-    const filePath = vm.regenerateDevContainer(name, meta.AGENT || 'openclaw');
+    const filePath = await vm.regenerateDevContainer(name, meta.AGENT || 'openclaw');
     if (!filePath) return res.status(400).json({ error: 'This agent has no custom workspace to write to' });
     res.json(vm.devContainerStatus(name));
   } catch (e) {
+    if (e.code === 'pad_not_running' || e.code === 'devcontainer_write_failed') {
+      return res.status(400).json({ error: e.message, code: e.code });
+    }
     res.status(500).json({ error: e.message });
   }
 });
@@ -1622,7 +1629,7 @@ function readEnvFile() {
 }
 
 function writeEnvFile(lines) {
-  fs.writeFileSync(ENV_FILE, lines.join('\n') + '\n', 'utf8');
+  writeFileOwned(ENV_FILE, lines.join('\n') + '\n', { boundary: WORKSPACE });
   envCache = null;
 }
 
@@ -2099,11 +2106,11 @@ app.post('/api/agents/:name/config', (req, res) => {
     const configPath = path.join(agent.config_root, driver.configFile || 'openclaw.json');
     if ((driver.configFormat || 'json') !== 'json') {
       // YAML/text config: write verbatim, no JSON validation.
-      fs.writeFileSync(configPath, configStr.endsWith('\n') ? configStr : configStr + '\n');
+      writeFileOwned(configPath, configStr.endsWith('\n') ? configStr : configStr + '\n', { boundary: agent.config_root });
       return res.json({ ok: true });
     }
     const newConfig = JSON.parse(configStr);
-    fs.writeFileSync(configPath, JSON.stringify(newConfig, null, 2) + '\n');
+    writeFileOwned(configPath, JSON.stringify(newConfig, null, 2) + '\n', { boundary: agent.config_root });
     res.json({ ok: true });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -2446,6 +2453,30 @@ function missionProject(req, res) {
   return project;
 }
 
+/** A runner plus its project, access-checked (plan 85 §Phase 4 gap 8).
+ *  Returns { runner, project }. The runner row lives in exactly one project,
+ *  so the check runs against that project's agent — the same grant the
+ *  project-scoped create/list routes already enforce. */
+function missionRunner(req, res) {
+  const runner = mission.getRunner(req.params.id);
+  if (!runner) {
+    res.status(404).json({ error: 'Runner not found', code: 'runner_not_found' });
+    return null;
+  }
+  let project;
+  try {
+    project = mission.getProject(runner.project_id);
+  } catch (e) {
+    res.status(e.status || 400).json({ error: e.message, code: e.code });
+    return null;
+  }
+  if (!canTouchAgent(req, project.agent_name)) {
+    res.status(403).json({ error: 'Access denied' });
+    return null;
+  }
+  return { runner, project };
+}
+
 /** A session plus its project, access-checked. Returns { session, project }. */
 function missionSession(req, res) {
   let session;
@@ -2479,7 +2510,14 @@ function canTouchAgent(req, agentName) {
  *  on (mission_unsupported_agent, mission_session_locked, …). */
 function missionFail(res, e) {
   const status = e.status || 400;
-  res.status(status).json({ error: e.message, code: e.code || 'mission_error' });
+  // Plan 88 §Phase 2: a delivery outcome is a three-state, not a boolean, so a
+  // caller can offer recovery instead of guessing from the message text.
+  // `attempted` = a write reached the pane; `acceptance` = 'confirmed' |
+  // 'unknown' | 'refused'. Emitted only when the error carries them.
+  const body = { error: e.message, code: e.code || 'mission_error' };
+  if (e.attempted !== undefined) body.attempted = e.attempted;
+  if (e.acceptance !== undefined) body.acceptance = e.acceptance;
+  res.status(status).json(body);
 }
 
 app.get('/api/agents/:name/mission-folders', async (req, res) => {
@@ -2734,6 +2772,17 @@ app.post('/api/mission/projects/:id/sessions', csrfCheck, (req, res) => {
 /** One session in full: metadata + the pane's live/tuiAlive/cwd state + the
  *  last lines of its screen. This is the shape both the page and
  *  `mission_sessions(session_id)` want. */
+app.get('/api/mission/projects/:id/conversations/:conversationId', (req, res) => {
+  const project = missionProject(req, res);
+  if (!project) return;
+  try {
+    const { resolveConversationView } = require('./services/conversation-view');
+    res.json(resolveConversationView(project, registry.getAgent(project.agent_name), req.params.conversationId));
+  } catch (e) {
+    res.status(e.status || 503).json({ error: e.message, code: e.code });
+  }
+});
+
 app.get('/api/mission/sessions/:id', (req, res) => {
   const found = missionSession(req, res);
   if (!found) return;
@@ -2760,7 +2809,7 @@ app.post('/api/mission/sessions/:id/send', csrfCheck, (req, res) => {
   const found = missionSession(req, res);
   if (!found) return;
   mission.sendText(found.session.id, req.body.text, { actor: missionActorFor(req) }).then(
-    (r) => res.json({ ok: true, sent: r.sent, project: r.project, session_id: r.session_id, session: r.session, screen: r.screen }),
+    (r) => res.json({ ok: true, sent: r.sent, project: r.project, session_id: r.session_id, session: r.session, screen: r.screen, confirmed: r.confirmed, acceptance: r.acceptance }),
     (e) => missionFail(res, e)
   );
 });
@@ -2820,6 +2869,17 @@ app.delete('/api/mission/sessions/:id', csrfCheck, (req, res) => {
 
 // ─── API: Mission Runners (plan 83) ──────────────────────────
 
+/** All runners across the caller's projects, each tagged with its project —
+ *  the all-projects view merges infinite sessions into one list (plan 85). */
+app.get('/api/mission/runners', (req, res) => {
+  try {
+    const runners = mission.listAllRunners({ allow: (agentName) => canTouchAgent(req, agentName) });
+    res.json({ runners });
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
 app.get('/api/mission/projects/:id/runners', (req, res) => {
   const project = missionProject(req, res);
   if (!project) return;
@@ -2842,7 +2902,8 @@ app.post('/api/mission/projects/:id/runners', csrfCheck, async (req, res) => {
       projectId: project.id,
       name: req.body.name,
       sessionId: req.body.sessionId,
-      queueFile: req.body.queueFile || 'QUEUE.md',
+      queueFile: req.body.queueFile,
+      actor: missionActorFor(req),
       idleGraceMs: req.body.idleGraceMs,
       minNudgeIntervalMs: req.body.minNudgeIntervalMs,
       noProgressBudget: req.body.noProgressBudget,
@@ -2850,6 +2911,7 @@ app.post('/api/mission/projects/:id/runners', csrfCheck, async (req, res) => {
       longCommandThresholdMs: req.body.longCommandThresholdMs,
       recoverExited: req.body.recoverExited,
       recoveryBudget: req.body.recoveryBudget,
+      promptTemplates: req.body.promptTemplates,
     });
     res.json({ runner });
   } catch (e) {
@@ -2859,25 +2921,245 @@ app.post('/api/mission/projects/:id/runners', csrfCheck, async (req, res) => {
 
 app.get('/api/mission/runners/:id', async (req, res) => {
   try {
-    const runner = mission.getRunner(req.params.id);
-    if (!runner) return res.status(404).json({ error: 'Runner not found', code: 'runner_not_found' });
-    const project = mission.getProject(runner.project_id);
-    const agent = registry.getAgent(project.agent_name);
-    const queue = await plans.readQueue(agent, { ...project, plans_folder: project.plans_folder || 'plans' });
-    res.json({
-      runner,
-      project: project ? { id: project.id, name: project.name, folder: project.folder } : null,
-      queue: queue ? { aggregate: queue.aggregate, path: queue.path, hash: queue.hash } : null,
-    });
+    const found = missionRunner(req, res);
+    if (!found) return;
+    const detail = await mission.readRunnerQueue(found.runner.id);
+    res.json({ runner: found.runner, project: detail.project, queue: detail.queue });
   } catch (e) {
     missionFail(res, e);
   }
 });
 
-app.patch('/api/mission/runners/:id', csrfCheck, async (req, res) => {
+/** The runner's queue in full (parsed + enriched items, summary, revision),
+ *  plan 86 §Phase 1. The edit UI holds this `revision` and passes it back. */
+app.get('/api/mission/runners/:id/history', async (req, res) => {
   try {
-    const runner = await mission.updateRunner(req.params.id, {
+    const found = missionRunner(req, res);
+    if (!found) return;
+    const { before, category, limit } = req.query;
+    try {
+      res.json(require('./services/runner-history').read(found.runner.id, { before: before ?? null, category: category || 'all', limit }));
+    } catch (e) {
+      if (!(e instanceof TypeError)) throw e;
+      res.status(400).json({ error: e.message });
+    }
+  } catch (e) { missionFail(res, e); }
+});
+
+app.get('/api/mission/runners/:id/history/output/:eventId', async (req, res) => {
+  try {
+    const found = missionRunner(req, res);
+    if (!found) return;
+    const output = require('./services/runner-history').output(found.runner.id, req.params.eventId);
+    if (!output) return res.status(404).json({ error: 'Callback output not found for this runner' });
+    res.json(output);
+  } catch (e) { missionFail(res, e); }
+});
+
+app.get('/api/mission/runners/:id/queue', async (req, res) => {
+  try {
+    const found = missionRunner(req, res);
+    if (!found) return;
+    res.json(await mission.readRunnerQueue(found.runner.id));
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+/** Set the queue up: create QUEUE.md from the template when absent, refuse when
+ *  the file still will not validate. Creating and editing are separate actions
+ *  ("not set up yet" vs "edit my queue") so they get separate routes. */
+app.post('/api/mission/runners/:id/queue', csrfCheck, async (req, res) => {
+  try {
+    const found = missionRunner(req, res);
+    if (!found) return;
+    const detail = await mission.setupRunnerQueue(found.runner.id, { actor: missionActorFor(req) });
+    res.json(detail);
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+/** Canonical queue mutations: the server owns IDs and applies each change under
+ * the revision it read. Whole-array writes are deliberately not supported. */
+app.post('/api/mission/runners/:id/queue/items', csrfCheck, async (req, res) => {
+  try {
+    const found = missionRunner(req, res);
+    if (!found) return;
+    if (!Array.isArray(req.body.plans)) {
+      return res.status(400).json({ error: 'plans must be an array', code: 'queue_plans_missing' });
+    }
+    res.json(await mission.addRunnerQueueItems(found.runner.id, req.body.plans, req.body.revision, { actor: missionActorFor(req) }));
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+app.put('/api/mission/runners/:id/queue/order', csrfCheck, async (req, res) => {
+  try {
+    const found = missionRunner(req, res);
+    if (!found) return;
+    if (!Array.isArray(req.body.itemIds)) {
+      return res.status(400).json({ error: 'itemIds must be an array', code: 'queue_order_invalid' });
+    }
+    res.json(await mission.reorderRunnerQueue(found.runner.id, req.body.itemIds, req.body.revision, { actor: missionActorFor(req) }));
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+app.delete('/api/mission/runners/:id/queue/items/:itemId', csrfCheck, async (req, res) => {
+  try {
+    const found = missionRunner(req, res);
+    if (!found) return;
+    res.json(await mission.removeRunnerQueueItem(found.runner.id, req.params.itemId, req.body?.revision, { actor: missionActorFor(req) }));
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+/** Revision-protected queue-level guidance. Empty guidance removes the optional
+ * field; a nonempty draft may safely create a missing selected queue file. */
+app.put('/api/mission/runners/:id/queue/custom-instructions', csrfCheck, async (req, res) => {
+  try {
+    const found = missionRunner(req, res);
+    if (!found) return;
+    if (typeof req.body.customInstructions !== 'string') {
+      return res.status(400).json({ error: 'customInstructions must be a string', code: 'queue_custom_instructions_invalid' });
+    }
+    res.json(await mission.updateRunnerQueueCustomInstructions(found.runner.id, req.body.customInstructions, req.body.revision, { actor: missionActorFor(req) }));
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+/** The plans available in this runner's project folder (plan 86 §Phase 3) —
+ *  the candidate list for the "Add plans" picker. Same access gate as the
+ *  queue routes (runner → project → agent). */
+app.get('/api/mission/runners/:id/plans', async (req, res) => {
+  try {
+    const found = missionRunner(req, res);
+    if (!found) return;
+    res.json(await mission.listRunnerPlans(found.runner.id));
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+/** Prompt-template configuration surface (plan 91 §Phase 2): catalogue,
+ *  shipped defaults and this runner's effective set. Read-only — creates no
+ *  session, touches no queue file, enables nothing. Same gate as the rest. */
+app.get('/api/mission/runners/:id/prompts', async (req, res) => {
+  try {
+    const found = missionRunner(req, res);
+    if (!found) return;
+    res.json(mission.runnerPromptConfig(found.runner.id));
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+/** Read-only preview: validate drafts and render them against a context
+ *  without persisting anything. Never sends, starts or enables. */
+app.post('/api/mission/runners/:id/prompts/preview', csrfCheck, async (req, res) => {
+  try {
+    const found = missionRunner(req, res);
+    if (!found) return;
+    res.json(await mission.previewRunnerPrompts(found.runner.id, req.body && req.body.drafts, (req.body && req.body.overrides) || {}));
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+/** Project-scoped prompt catalogue for the create dialog (no runner yet):
+ *  engine contract only. Same project gate as create. */
+app.get('/api/mission/projects/:id/prompts', async (req, res) => {
+  try {
+    const project = missionProject(req, res);
+    if (!project) return;
+    res.json({ ...mission.promptCatalogue(), project: { id: project.id, name: project.name } });
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+/** Project-scoped preview for the create dialog (no runner yet): the same
+ *  engine over the project's real paths; runner name and item values arrive
+ *  as caller overrides and are labeled samples. Same project gate as create. */
+app.post('/api/mission/projects/:id/prompts/preview', csrfCheck, async (req, res) => {
+  try {
+    const project = missionProject(req, res);
+    if (!project) return;
+    res.json(await mission.previewProjectPrompts(project.id, req.body && req.body.drafts, (req.body && req.body.overrides) || {}));
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+// ─── API: Mission runner callbacks (plan 92 §Phase 2) ─────────────
+// Settings surface: scripts + enable flags + catalogue. Reads and saves NEVER
+// execute a script — only a fired lifecycle event does (Phase 3 executor). Same
+// runner → project → agent gate as every other runner route.
+
+app.get('/api/mission/projects/:id/callbacks/catalogue', async (req, res) => {
+  try {
+    const project = missionProject(req, res);
+    if (!project) return;
+    res.json({ ...mission.callbackCatalogue(), project: { id: project.id, name: project.name } });
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+app.get('/api/mission/runners/:id/callbacks', async (req, res) => {
+  try {
+    const found = missionRunner(req, res);
+    if (!found) return;
+    res.json(mission.getRunnerCallbacks(found.runner.id));
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+app.put('/api/mission/runners/:id/callbacks', csrfCheck, async (req, res) => {
+  try {
+    const found = missionRunner(req, res);
+    if (!found) return;
+    res.json(mission.saveRunnerCallbacks(found.runner.id, req.body && req.body.callbacks));
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+app.get('/api/mission/runners/:id/callbacks/history', async (req, res) => {
+  try {
+    const found = missionRunner(req, res);
+    if (!found) return;
+    res.json({ history: mission.runnerCallbackHistory({ runnerId: found.runner.id, limit: req.query.limit }) });
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+/** Post-destroy owner path: destroy deletes the runner row the runner-scoped
+ *  gate reads through, so history is scoped by project + runner id instead.
+ *  Same project gate as create. */
+app.get('/api/mission/projects/:id/callbacks/history', async (req, res) => {
+  try {
+    const project = missionProject(req, res);
+    if (!project) return;
+    if (!req.query.runnerId) return res.status(400).json({ error: 'runnerId is required', code: 'callback_history_unscoped' });
+    res.json({ history: mission.runnerCallbackHistory({ runnerId: req.query.runnerId, projectId: project.id, limit: req.query.limit }) });
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+app.patch('/api/mission/runners/:id', csrfCheck, async (req, res) => {  try {
+    const found = missionRunner(req, res);
+    if (!found) return;
+    const runner = await mission.updateRunner(found.runner.id, {
       name: req.body.name,
+      queueFile: req.body.queueFile,
       idleGraceMs: req.body.idleGraceMs,
       minNudgeIntervalMs: req.body.minNudgeIntervalMs,
       noProgressBudget: req.body.noProgressBudget,
@@ -2885,6 +3167,8 @@ app.patch('/api/mission/runners/:id', csrfCheck, async (req, res) => {
       longCommandThresholdMs: req.body.longCommandThresholdMs,
       recoverExited: req.body.recoverExited,
       recoveryBudget: req.body.recoveryBudget,
+      // Absent key is `undefined` → preserve; explicit null resets to defaults.
+      promptTemplates: req.body.promptTemplates,
     });
     res.json({ runner });
   } catch (e) {
@@ -2892,9 +3176,26 @@ app.patch('/api/mission/runners/:id', csrfCheck, async (req, res) => {
   }
 });
 
+/** Open a runner's worker session without touching its queue (plan 85 §Phase 1).
+ *  Clicking an unbound runner's row creates/binds its session; clicking a dead
+ *  one recovers the same conversation. Never enables dispatch, never sends a
+ *  prompt — opening a conversation and running its queue are separate actions. */
+app.post('/api/mission/runners/:id/session', csrfCheck, async (req, res) => {
+  try {
+    const found = missionRunner(req, res);
+    if (!found) return;
+    const session = await mission.ensureRunnerSession(found.runner.id, { actor: missionActorFor(req) });
+    res.json({ session });
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
 app.post('/api/mission/runners/:id/start', csrfCheck, async (req, res) => {
   try {
-    const result = await mission.startRunner(req.params.id, { actor: missionActorFor(req) });
+    const found = missionRunner(req, res);
+    if (!found) return;
+    const result = await mission.startRunner(found.runner.id, { actor: missionActorFor(req) });
     res.json(result);
   } catch (e) {
     missionFail(res, e);
@@ -2903,7 +3204,16 @@ app.post('/api/mission/runners/:id/start', csrfCheck, async (req, res) => {
 
 app.post('/api/mission/runners/:id/pause', csrfCheck, async (req, res) => {
   try {
-    const runner = await mission.pauseRunner(req.params.id, { actor: missionActorFor(req) });
+    const found = missionRunner(req, res);
+    if (!found) return;
+    // Plan 86 §Phase 4b: an explicit, validated pause mode. Omitted → the
+    // service default (`before_next_task`), preserving the old behavior; an
+    // unknown mode is rejected by pauseRunner with runner_invalid_pause_mode.
+    const mode = req.body && req.body.mode;
+    const runner = await mission.pauseRunner(found.runner.id, {
+      mode: mode === undefined ? undefined : mode,
+      actor: missionActorFor(req),
+    });
     res.json({ runner });
   } catch (e) {
     missionFail(res, e);
@@ -2912,7 +3222,33 @@ app.post('/api/mission/runners/:id/pause', csrfCheck, async (req, res) => {
 
 app.post('/api/mission/runners/:id/resume', csrfCheck, async (req, res) => {
   try {
-    const result = await mission.resumeRunner(req.params.id, { actor: missionActorFor(req) });
+    const found = missionRunner(req, res);
+    if (!found) return;
+    const result = await mission.resumeRunner(found.runner.id, { actor: missionActorFor(req) });
+    res.json(result);
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+app.post('/api/mission/runners/:id/resolve', csrfCheck, async (req, res) => {
+  try {
+    const found = missionRunner(req, res);
+    if (!found) return;
+    const { itemId, answer, revision, idempotencyKey } = req.body || {};
+    if (!itemId || !answer) return res.status(400).json({ error: 'itemId and answer are required' });
+    const result = await mission.resolveRunnerQueue(found.runner.id, itemId, answer, revision, idempotencyKey, { actor: missionActorFor(req) });
+    res.json(result);
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+app.post('/api/mission/runners/:id/reconcile', csrfCheck, async (req, res) => {
+  try {
+    const found = missionRunner(req, res);
+    if (!found) return;
+    const result = await mission.reconcileRunnerOperation(found.runner.id, { actor: missionActorFor(req) });
     res.json(result);
   } catch (e) {
     missionFail(res, e);
@@ -2921,7 +3257,9 @@ app.post('/api/mission/runners/:id/resume', csrfCheck, async (req, res) => {
 
 app.delete('/api/mission/runners/:id', csrfCheck, async (req, res) => {
   try {
-    await mission.removeRunner(req.params.id);
+    const found = missionRunner(req, res);
+    if (!found) return;
+    await mission.removeRunner(found.runner.id);
     res.json({ removed: true });
   } catch (e) {
     missionFail(res, e);
@@ -3302,6 +3640,52 @@ setImmediate(() => {
 });
 
 const server = app.listen(6789, () => console.log('VM WebUI listening on port 6789'));
+
+// Infinite-runner supervisor (plan 85 §Phase 4): one non-overlapping tick at
+// app startup. `reconcileRunners` only logs runners left enabled across the
+// restart (no auto-resume — the human presses Run). `runnerWatchTick` then
+// supervises enabled runners every 20s; the `watchRunning` flag keeps ticks
+// from overlapping, and each tick re-checks the run generation before any
+// send, so a Pause that lands mid-tick still wins.
+// 20s interval chosen to keep A→B continuation snappy while avoiding
+// unnecessary wake-ups. RevChanged path dispatches immediately on queue change
+// regardless of interval.
+mission.reconcileRunners().catch((e) => console.error('[runner reconcile]', e.message));
+// Plan 92 §Phase 3: callback rows caught `running` across the restart never
+// launched to completion — finalize them `unknown` (honest, no replay), then
+// pump whatever is pending. `pending` rows never launched, so launching them
+// now is a first launch, not a replay.
+try {
+  const orphans = mission.reconcileCallbackOutbox();
+  if (orphans) console.log(`[callbacks reconcile] ${orphans} interrupted execution(s) finalized as unknown`);
+} catch (e) {
+  console.error('[callbacks reconcile]', e.message);
+}
+mission.pumpCallbackOutbox().catch((e) => console.error('[callbacks]', e.message));
+let runnerWatchRunning = false;
+setInterval(() => {
+  if (runnerWatchRunning) return;
+  runnerWatchRunning = true;
+  mission.runnerWatchTick()
+    .catch((e) => console.error('[runner watch]', e.message))
+    .finally(() => { runnerWatchRunning = false; });
+}, 20000);
+// Callback baseline + pump on the same cadence, independently guarded: a slow
+// script must never hold up supervision, and supervision must never hold up a
+// due callback.
+let callbacksTickRunning = false;
+setInterval(() => {
+  if (callbacksTickRunning) return;
+  callbacksTickRunning = true;
+  (async () => {
+    await mission.baselineRunnerCallbacks();
+    await mission.observeRunnerQueues();
+    await mission.observeRunnerUsage();
+    await mission.pumpCallbackOutbox();
+  })()
+    .catch((e) => console.error('[callbacks tick]', e.message))
+    .finally(() => { callbacksTickRunning = false; });
+}, 20000);
 
 // Periodic capture of every existing container's logs into its persistent
 // file, so container logs survive a recreate/delete even if the Logs page was

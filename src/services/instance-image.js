@@ -19,7 +19,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { ensureOwned } = require('./ownership');
+const { mkdirOwned, writeFileOwned } = require('./ownership');
 
 /** Resolved each call so runtime env overrides (tests) take effect. */
 function instancesDir() {
@@ -68,7 +68,7 @@ function readBuildEnv(name) {
  *  keys; appends missing keys). Creates the file when absent. */
 function setBuildEnv(name, kv) {
   const dir = buildDir(name);
-  fs.mkdirSync(dir, { recursive: true });
+  mkdirOwned(dir, { boundary: instancesDir() });
   const p = buildEnvPath(name);
   let content = '';
   if (fs.existsSync(p)) {
@@ -86,8 +86,7 @@ function setBuildEnv(name, kv) {
       content = content.replace(/\s*$/, '') + '\n' + line + '\n';
     }
   }
-  fs.writeFileSync(p, content);
-  ensureOwned(p);
+  writeFileOwned(p, content, { boundary: dir });
 }
 
 /** Extract `ARG <NAME>[=<default>]` lines from a Dockerfile. Returns
@@ -123,19 +122,34 @@ function dockerfilePath(name) {
   return path.join(buildDir(name), 'Dockerfile');
 }
 
+/** A marker-shaped line — head or tail — is never part of the user's text.
+ *  Matched globally so a marker that somehow ended up INSIDE the block (an
+ *  older reader handed one back and the next save nested it) is stripped on
+ *  read instead of compounding. */
+const BUILD_BLOCK_MARKER_LINE_RE = /^#\s*\u2500\u2500 (?:END )?PADDOCK CUSTOM BUILD COMMANDS[^\n]*$/gm;
+
 /** Read the current user "Build commands" text from the instance Dockerfile.
  *  Returns the text between the markers (trimmed), or '' when the block (or the
- *  file) is absent. */
+ *  file) is absent.
+ *
+ *  The text BETWEEN the markers — not the markers themselves. The Settings box
+ *  shows this string and writes it back verbatim, so a reader that handed out
+ *  a marker line would have the next save nest a marker inside the block
+ *  (once per save). The match captures the body directly rather than stripping
+ *  the markers afterwards: the old version stripped them with `^`/`$` anchors
+ *  that only hold when the block happens to sit at the very start / very end of
+ *  the file, so in a real template (the block is injected before the
+ *  ENTRYPOINT banner, with more file after it) the head marker came back with
+ *  the text. */
 function readCustomBuild(name) {
   const p = dockerfilePath(name);
   if (!fs.existsSync(p)) return '';
   const content = fs.readFileSync(p, 'utf8');
-  const m = content.match(/(?:^|\n)#\s*\u2500\u2500 PADDOCK CUSTOM BUILD COMMANDS[\s\S]*?\n#\s*\u2500\u2500 END PADDOCK CUSTOM BUILD COMMANDS[^\n]*\n?/);
+  const m = content.match(
+    /(?:^|\n)#\s*\u2500\u2500 PADDOCK CUSTOM BUILD COMMANDS[^\n]*\n([\s\S]*?)\n#\s*\u2500\u2500 END PADDOCK CUSTOM BUILD COMMANDS[^\n]*/
+  );
   if (!m) return '';
-  return m[0]
-    .replace(/^#\s*\u2500\u2500 PADDOCK CUSTOM BUILD COMMANDS.*\n/, '')
-    .replace(/\n?#\s*\u2500\u2500 END PADDOCK CUSTOM BUILD COMMANDS[^\n]*\n?$/, '')
-    .trim();
+  return m[1].replace(BUILD_BLOCK_MARKER_LINE_RE, '').trim();
 }
 
 /** Set (or clear) the user "Build commands" block in the instance Dockerfile
@@ -145,10 +159,14 @@ function readCustomBuild(name) {
  *  the block entirely. Returns the final Dockerfile text (for tests). */
 function writeCustomBuild(name, text) {
   const p = dockerfilePath(name);
-  fs.mkdirSync(buildDir(name), { recursive: true });
+  const dir = buildDir(name);
+  mkdirOwned(dir, { boundary: instancesDir() });
   let content = fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '';
   if (!content) throw new Error(`No Dockerfile for ${name} — seed the build dir first`);
-  const blockText = String(text || '').replace(/\s*$/, '');
+  // A marker-shaped line is never build text: dropping it here means a value
+  // that came from an older reader (or from a client that echoes the markers)
+  // cannot nest a marker inside the block.
+  const blockText = String(text || '').replace(BUILD_BLOCK_MARKER_LINE_RE, '').replace(/\s*$/, '');
   const block = blockText
     ? `${BUILD_BLOCK_HEAD}\n${blockText}\n${BUILD_BLOCK_TAIL}\n\n`
     : '';
@@ -166,8 +184,7 @@ function writeCustomBuild(name, text) {
       content = content.replace(/\s*$/, '') + '\n\n' + block;
     }
   }
-  fs.writeFileSync(p, content);
-  ensureOwned(p);
+  writeFileOwned(p, content, { boundary: dir });
   return content;
 }
 

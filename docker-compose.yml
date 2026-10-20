@@ -15,7 +15,11 @@ services:
       - ./src:/app:rw
       - /www2:/www2:ro
       - /www1:/www1
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Plan 92: read-write on purpose — lifecycle callback scripts run inside
+      # this container and the human requires docker control from them
+      # (container restart, network/IP changes). A rw socket is effectively
+      # host root; recorded here deliberately, not slipped in silently.
+      - /var/run/docker.sock:/var/run/docker.sock:rw
     env_file:
       - .env
     environment:

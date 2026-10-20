@@ -1,11 +1,19 @@
 const fs = require('fs');
 const path = require('path');
-const { execFile, execFileSync } = require('child_process');
+const { execFile, execFileSync, spawn } = require('child_process');
 const { runCmdStream } = require('./cmd');
 const drivers = require('./drivers');
 const { getDriver, getDriverOr, hasDriver } = drivers;
+// The agent-type REGISTRY (type → driver module). `drivers` above is the
+// module (resolvers + helpers), NOT the registry, so `Object.keys(drivers)`
+// names the module's exports — which silently made every "is this an agent
+// type?" check built on it match nothing. The door-sweep's "holds agent data
+// dir" guard was one of them: it looked for a dir named after an agent type
+// and found none, so a legacy door dir that still held an agent's data was
+// quarantined instead of skipped.
+const AGENT_TYPES = Object.keys(drivers.drivers);
 const { imageFor, legacySharedImage, buildDir, buildEnvPath, readBuildEnv, setBuildEnv, argsFromDockerfile, readCustomBuild, writeCustomBuild } = require('./instance-image');
-const { ensureOwned, normalizeTree, isSelfManagedAgentData, USER_UID, USER_GID } = require('./ownership');
+const { ensureOwned, normalizeTree, isSelfManagedAgentData, USER_UID, USER_GID, mkdirOwned, writeFileOwned } = require('./ownership');
 const devcontainer = require('./devcontainer');
 const { inspectPeer, classifyNetworkPeer } = require('./net-peer');
 // plan 72: the host-path policy (hard-block vs bare-home-root) and the guard
@@ -547,16 +555,13 @@ function readLifecycleScript(p) {
  *  script: `#!/usr/bin/env bash` + `set -e`; empty text removes the file. */
 function writeLifecycleScript(p, text) {
   const dir = path.dirname(p);
-  fs.mkdirSync(dir, { recursive: true });
   const body = String(text || '').replace(/\r\n/g, '\n');
   if (!body.trim()) {
     if (fs.existsSync(p)) fs.rmSync(p);
     return;
   }
   const script = '#!/usr/bin/env bash\nset -e\n' + body.replace(/^\s*$/, '') + '\n';
-  fs.writeFileSync(p, script);
-  fs.chmodSync(p, 0o755);
-  ensureOwned(p);
+  writeFileOwned(p, script, { boundary: dir, mode: 0o755 });
 }
 
 /** Read the current post-create script body (without the shebang), or '' when
@@ -1133,10 +1138,19 @@ function generateWorkspaceDevContainer(name, agent, wsMount, { postCreate = '', 
  *  (runArgs/portsAttributes/remoteUser stay untouched). Skips when the pad has
  *  no workspace or the workspace devcontainer is one the pad never adopted (no
  *  generated marker, no persisted plan) — never clobbers an unknown file.
- *  Returns the synced file path, or null. Never throws. */
-function syncDevContainer(name, agent, wsMount, { onLog = () => {} } = {}) {
+ *  Webui-visible workspaces write through this process's filesystem. Host-only
+ *  workspaces (plan 70) compose the same content and write it through the pad's
+ *  own container instead — the webui sees `/www2` (etc.) read-only, but the pad
+ *  holds the identical bind mount read-write. Sync still requires the file to
+ *  be READABLE by the webui (the adoption check), which host-only `/www2/*`
+ *  mounts are; a workspace the webui cannot read at all has nothing to adopt.
+ *  Returns the synced file path (host form), or null. Throws typed errors for
+ *  the pad-write path ('pad_not_running' / 'devcontainer_write_failed').
+ *  A throw never blocks the caller — the settings apply logs and continues. */
+async function syncDevContainer(name, agent, wsMount, { onLog = () => {} } = {}) {
   if (!wsMount) return null;
-  const view = containerViewOf(wsMount.host) || path.normalize(wsMount.host);
+  const writableView = !!containerViewOf(wsMount.host);
+  const view = writableView ? containerViewOf(wsMount.host) : path.normalize(wsMount.host);
   const dc = view ? devcontainer.readDevContainer(view) : null;
   if (!dc) return null;
   const dcPlan = readDevContainerPlan(name);
@@ -1144,7 +1158,7 @@ function syncDevContainer(name, agent, wsMount, { onLog = () => {} } = {}) {
   const fields = devcontainerMirrorFields(name, agent, wsMount);
   if (!fields) return null;
   const content = dc.generated
-    ? devcontainer.syncFile(dc.filePath, fields)
+    ? devcontainer.syncFile(dc.filePath, fields, { write: writableView })
     : devcontainer.syncFile(dc.filePath, {
         // Project-authored: only the mapped fields, and only when the pad has
         // something meaningful to say. workspaceFolder is written only when the
@@ -1158,7 +1172,14 @@ function syncDevContainer(name, agent, wsMount, { onLog = () => {} } = {}) {
         ...(Object.keys(fields.environment || {}).length ? { environment: fields.environment } : {}),
         ...(fields.mounts && fields.mounts.length ? { mounts: fields.mounts } : {}),
         ...(fields.forwardPorts && fields.forwardPorts.length ? { forwardPorts: fields.forwardPorts } : {}),
-      });
+      }, { write: writableView });
+  if (!writableView) {
+    // Plan 70: through the running pad. Only the composed devcontainer bytes
+    // travel — the shell never quotes file content (stdin does).
+    await writeWorkspaceFileThroughPad(name, wsMount, path.relative(path.normalize(wsMount.host), dc.filePath), content);
+    onLog('system', `Synced workspace devcontainer through the pad (${dc.generated ? 'generated' : 'project-authored'})`);
+    return dc.filePath;
+  }
   ensureOwned(dc.filePath);
   onLog('system', `Synced workspace devcontainer (${dc.generated ? 'generated' : 'project-authored'})`);
   return dc.filePath;
@@ -1177,15 +1198,18 @@ function devContainerStatus(name) {
   let wsMount = null;
   try { wsMount = readWorkspaceMount(name, agentType); } catch {}
   if (!wsMount) {
-    return { found: false, state: 'missing', filePath: '', workspacePath: '', content: '', target: '', sync: false, regenerate: true };
+    return { found: false, state: 'missing', filePath: '', workspacePath: '', content: '', target: '', sync: false, regenerate: true, writableVia: '', writable: false, writeNote: '' };
   }
-  const view = containerViewOf(wsMount.host) || path.normalize(wsMount.host);
-  const dc = view ? devcontainer.readDevContainer(view) : null;
+  const writableView = !!containerViewOf(wsMount.host);
+  const view = writableView ? containerViewOf(wsMount.host) : path.normalize(wsMount.host);
+  let dc = null;
+  try { dc = view ? devcontainer.readDevContainer(view) : null; } catch {}
   const fields = devcontainerMirrorFields(name, agentType, wsMount);
   const target = fields
     ? devcontainer.generateDevContainer(fields)
     : '';
-  const content = dc ? fs.readFileSync(dc.filePath, 'utf8') : '';
+  let content = '';
+  try { content = dc ? fs.readFileSync(dc.filePath, 'utf8') : ''; } catch {}
   const generated = !!(dc && dc.generated);
   return {
     found: !!dc,
@@ -1200,25 +1224,121 @@ function devContainerStatus(name) {
     // applies (it creates the file when missing).
     sync: !!dc && (generated || !!readDevContainerPlan(name)),
     regenerate: true,
+    // Plan 70: where a Generate/Sync write goes. A webui-visible workspace is
+    // written by this process directly; a host-only one (/www2/user1, /www1 —
+    // the webui's mount is read-only) is written through the running pad, whose
+    // bind mount of the same folder is read-write.
+    writableVia: writableView ? 'webui' : 'pad',
+    writable: !!wsMount,
+    writeNote: writableView ? '' : 'This workspace is outside the webui container, so the mirror is written through the running pad — the pad must be up when you click.',
   };
+}
+
+/** Plan 70: the mirror still has to be written when the webui's own mount is
+ *  read-only. This module does NOT reach through the pad via orchestrator
+ *  (circular import) — it owns a small `docker exec -i` writer of its own.
+ *  Spawn, never execFile: the paddock container's docker CLI keeps a piped
+ *  stdin open under execFile (measured: a trivial `read` hangs; spawn +
+ *  `stdin.write/end` completes). Content travels on stdin so the shell never
+ *  quotes file bytes. termUserArgs drops to the pad user in user-mode pads, so
+ *  the written file is PUID-owned like the rest of the workspace; a ROOT-mode
+ *  pad chowns to USER_UID:USER_GID inside the container instead. */
+let _padWriteRunner = null;
+/** Test seam: replace the default `docker exec` runner in a suite. */
+function _setPadWriteRunner(fn) { _padWriteRunner = fn; }
+
+const dcWriteError = (code, message) => Object.assign(new Error(message), { code });
+
+/** Local alias of pad-tmux's termUserArgs: pad-tmux requires THIS module
+ *  back, so the require has to happen at call time, not module load. */
+function padTermUserArgs(vmName) {
+  return require('./pad-tmux').termUserArgs(vmName);
+}
+
+const DC_TARGET_REL = path.join(devcontainer.DEV_CONTAINER, devcontainer.DEV_CONTAINER_JSON);
+
+function defaultPadWriteRunner(name, script, input) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('docker', ['exec', '-i', ...padTermUserArgs(name), name, 'sh', '-lc', script], { stdio: ['pipe', 'ignore', 'pipe'] });
+    let stderr = '';
+    let settled = false;
+    const settle = (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (err) reject(err); else resolve();
+    };
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      settle(dcWriteError('devcontainer_write_failed', `docker exec timed out writing the devcontainer into ${name}`));
+    }, 30000);
+    timer.unref();
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('error', (e) => settle(dcWriteError('devcontainer_write_failed', e.message)));
+    child.on('close', (code) => {
+      if (code === 0) return settle();
+      const msg = String(stderr || '').trim();
+      // 125/126: docker's own CLI failures (daemon can't start the container,
+      // no such exec target) — an executable-input error, not a script error.
+      const notRunning = /no such container|not running|isn't running/i.test(msg) || code === 125;
+      settle(dcWriteError(
+        notRunning ? 'pad_not_running' : 'devcontainer_write_failed',
+        notRunning
+          ? `pad ${name} is not running — start it first, then generate again (its workspace is only writable through the pad)`
+          : (msg || `docker exec exited ${code}`)
+      ));
+    });
+    child.stdin.write(input || '');
+    child.stdin.end();
+  });
+}
+
+/** Write one file into the pad's workspace THROUGH THE PAD. `relPath` is
+ *  relative to the workspace mount; the file target is the pad-normalized
+ *  container path (promise-based; callers must await). Throws typed errors. */
+async function writeWorkspaceFileThroughPad(name, wsMount, relPath, content) {
+  // The mount validator already refuses quotes/control characters for host and
+  // container paths; normalize away any `..` trick a relative suffix could add.
+  const safeRel = path.normalize('/' + String(relPath || '')).slice(1);
+  if (!safeRel || safeRel === '.' || safeRel.startsWith('..')) {
+    throw dcWriteError('devcontainer_write_failed', `unsafe workspace write target: ${relPath}`);
+  }
+  const file = path.posix.join(String(wsMount.container), safeRel);
+  const dir = path.posix.dirname(file);
+  const rootMode = padTermUserArgs(name).length === 0;
+  const ownCmd = rootMode ? ` && chown ${USER_UID}:${USER_GID} '${file}'` : '';
+  const script = `mkdir -p '${dir}' && cat > '${file}'${ownCmd}`;
+  const runner = _padWriteRunner || defaultPadWriteRunner;
+  await runner(name, script, String(content || ''));
+  return file;
 }
 
 /** Rewrite (or create) the workspace devcontainer.json as the pad's full
  *  generated mirror (plan 41 item 20 "Regenerate"). Unlike sync, this clobbers
  *  the whole file — only a user clicking Regenerate in the card should do
- *  that. Returns the written file path, or null. Never throws. */
-function regenerateDevContainer(name, agent) {
+ *  that. Webui-visible workspaces write locally; host-only workspaces write
+ *  through the pad (plan 70 fix (a) — chosen over disabling the card, so
+ *  Generate works everywhere a workspace exists). Returns the written file
+ *  path (host form), or null when there is nothing to write. Throws typed
+ *  errors on the pad path ('pad_not_running' / 'devcontainer_write_failed'). */
+async function regenerateDevContainer(name, agent) {
   if (!agent) return null;
   let wsMount = null;
   try { wsMount = readWorkspaceMount(name, agent); } catch {}
   if (!wsMount) return null;
-  const view = containerViewOf(wsMount.host) || path.normalize(wsMount.host);
-  if (!view || !fs.existsSync(view)) return null;
+  const view = containerViewOf(wsMount.host);
+  if (view ? !fs.existsSync(view) : !fs.existsSync(wsMount.host)) return null;
   const fields = devcontainerMirrorFields(name, agent, wsMount);
   if (!fields) return null;
-  const target = devcontainer.writeGeneratedDevContainer(view, devcontainer.generateDevContainer(fields));
-  ensureOwned(target);
-  return target;
+  const content = devcontainer.generateDevContainer(fields);
+  if (view) {
+    const target = devcontainer.writeGeneratedDevContainer(view, content);
+    ensureOwned(target);
+    return target;
+  }
+  const hostPath = path.join(wsMount.host, '.devcontainer', 'devcontainer.json');
+  await writeWorkspaceFileThroughPad(name, wsMount, DC_TARGET_REL, content);
+  return hostPath;
 }
 
 /** The SSH daemon's port INSIDE the container (default 22). Stored in meta as
@@ -1675,9 +1795,9 @@ function writeInstanceCompose(name, agent, password, port, opts = {}) {
   }
   const yaml = JSON.stringify(model, null, 2) + '\n';
   const composePath = instanceComposePath(name);
-  fs.mkdirSync(path.dirname(composePath), { recursive: true });
-  fs.writeFileSync(composePath, yaml);
-  ensureOwned(composePath);
+  const dir = path.dirname(composePath);
+  mkdirOwned(dir, { boundary: INSTANCES_DIR });
+  writeFileOwned(composePath, yaml, { boundary: dir });
 }
 
 /** Set or clear one KEY=VALUE line in an instance's meta.env (preserves the
@@ -1745,8 +1865,7 @@ async function applySettings(name, opts = {}) {
   if (wsMount && wsMount.webuiVisible) {
     const view = containerViewOf(wsMount.host);
     if (view && !fs.existsSync(view)) {
-      fs.mkdirSync(view, { recursive: true });
-      ensureOwned(view);
+      mkdirOwned(view, { boundary: WORKSPACE });
     }
   }
   if (wsMount) {
@@ -1969,10 +2088,7 @@ function webHookPath(name, agent) {
  *  gone. */
 async function writeWebStartHook(name, agent, content) {
   const p = webHookPath(name, agent);
-  fs.mkdirSync(path.dirname(p), { recursive: true });
-  ensureOwned(path.dirname(p));
-  fs.writeFileSync(p, content, { mode: 0o755 });
-  ensureOwned(p);
+  writeFileOwned(p, content, { boundary: path.dirname(p), mode: 0o755 });
 }
 
 async function removeWebStartHook(name, agent) {
@@ -2588,8 +2704,7 @@ async function createVm(name, options = {}) {
   if (wsMount && wsMount.webuiVisible) {
     const view = containerViewOf(wsMount.host);
     if (view && !fs.existsSync(view)) {
-      fs.mkdirSync(view, { recursive: true });
-      ensureOwned(view);
+      mkdirOwned(view, { boundary: WORKSPACE });
       onLog('system', `Created workspace source: ${wsMount.host}`);
     }
   }
@@ -3543,7 +3658,7 @@ const STALE_DOOR_DIR = '.stale-door-dirs';
  *
  *  `containerImages` is a { name: image } map so the decision is testable
  *  without Docker. */
-function staleDoorDirActions({ instancesDir = INSTANCES_DIR, containerImages = {}, isRegisteredAgent = () => false, agentTypes = Object.keys(drivers) } = {}) {
+function staleDoorDirActions({ instancesDir = INSTANCES_DIR, containerImages = {}, isRegisteredAgent = () => false, agentTypes = AGENT_TYPES } = {}) {
   const out = [];
   let entries = [];
   try {
@@ -3623,7 +3738,7 @@ async function cleanStaleDoorDirs({ isRegisteredAgent = () => false, log = (m) =
     const from = path.join(INSTANCES_DIR, a.name);
     const to = path.join(INSTANCES_DIR, STALE_DOOR_DIR, a.name);
     try {
-      fs.mkdirSync(path.join(INSTANCES_DIR, STALE_DOOR_DIR), { recursive: true });
+      mkdirOwned(path.join(INSTANCES_DIR, STALE_DOOR_DIR), { boundary: INSTANCES_DIR });
       fs.rmSync(to, { recursive: true, force: true });
       fs.renameSync(from, to);
       ensureOwned(to);
@@ -4372,11 +4487,11 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
     // project-authored files keep their non-mapped fields. Only when something
     // actually changed; a sync failure never blocks the apply itself.
     if (ctx.changed && wsMount) {
-      try {
-        syncDevContainer(name, agentType, wsMount, { onLog });
-      } catch (e) {
-        onLog('system', `Devcontainer sync skipped: ${e.message}`);
-      }
+      // syncDevContainer is async (plan 70: the pad-write path). The apply must
+      // not await it, but a bare sync call leaves an unhandled rejection
+      // parked — route it back into the log stream.
+      Promise.resolve(syncDevContainer(name, agentType, wsMount, { onLog }))
+        .catch((e) => onLog('system', `Devcontainer sync skipped: ${e.message}`));
     }
 
     // ── 3. reset: wipe the data dir (kills the container first) ──
@@ -4852,6 +4967,7 @@ module.exports = {
   readDevContainerPlan, resolveDevContainerPlan, collectPublishedHostPorts,
   readWorkspaceDevContainer, padsOnSameWorkspace,
   effectiveUserMode, syncDevContainer, generateWorkspaceDevContainer, devContainerStatus, regenerateDevContainer,
+  _setPadWriteRunner, _testDefaultPadWriteRunner: defaultPadWriteRunner,
   imageHasDockerCli, imageHasSshPortSupport, imageHasWebStartSupport,
   imageHasPostStartHook,
   ensureUserModeBuildFiles, imageHasPadUser,

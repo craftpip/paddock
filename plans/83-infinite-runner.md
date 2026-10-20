@@ -1,6 +1,30 @@
 # 83 — Infinite runner sessions
 
-## Status: In progress (2026-10-11) — Phase 1 complete (signals recorded, paths aligned with plan 82); Phase 2 complete (queue contract, MCP tools + grants); Phase 3 complete (runner persistence); Phase 4 complete (supervisor loop); Phase 5 complete (MCP tools + grants + UI); Phase 6 starting next (browser/session flow verification); 5/7 implementation phases complete
+## Status: Complete — 2026-10-20
+
+> **Plan 85 re-audit (2026-10-11) — corrections to the claims above:**
+> - "MCP tools + grants" was claimed complete and is NOT: `mcp.js` holds runner
+>   permission names but no runner tool registrations were found, so plan 83's
+>   MCP-surface claim is unsupported. Still open.
+> - "Supervisor" was implemented but never wired (no callers of
+>   `runnerWatchTick`/`reconcileRunners` anywhere in `src/`). Wired at app
+>   startup by plan 85 (non-overlapping 60s tick + reconcile log, no auto-resume).
+> - "Pinned listing rows" (item 5) removed by plan 85: runners are rows in the
+>   single Sessions list now, no separate section, no popup on row click.
+> - "Manual Pause stops its tmux session too" (Goal) superseded: Pause controls
+>   the queue only; the pane and conversation survive (pinned by test).
+> - `invalid → finished` (Phase 6 fix) reverted by plan 85: refusals stay paused
+>   and re-Runnable; `finished` is set only by the watcher on all-done.
+> - `test/infinite-runner.test.js` grew 10 → 19 (re-Runnable gates, enabled/state
+>   split, container paths, close-disables-supervision, all-runners allow filter).
+
+> **Correction review (2026-10-11):** The completion claims above are under
+> re-audit. The user rejected the separate runner listing and popup-on-row-click
+> behavior. [Plan 85](85-infinite-sessions-correction.md) records the reproduced
+> defect, code findings and correction work. Its clarified contract supersedes
+> this plan's pause-kills-pane and configuration-only entry behavior: infinite
+> runners are ordinary sessions sorted first within Sessions; clicking opens
+> their terminal; Run/Pause in that terminal panel controls the queue separately.
 
 ## Goal
 
@@ -10,13 +34,16 @@ the worker session if needed, otherwise reuses it, and sends instructions to rea
 the queue and begin. A backend monitor watches progress and nudges the worker when
 it has stopped between turns with work remaining.
 
-The runner can be started and paused; manual Pause stops its tmux session too.
+The runner can be started and paused. ~~Manual Pause stops its tmux session
+too~~ — SUPERSEDED by plan 85: Pause controls the queue only and keeps the
+tmux session open.
 A blocker requiring human intervention
 stops queue execution immediately, keeps the tmux session open, and shows what is
 needed. Queue completion is detected in code from the queue file, without asking
 another LLM whether the work is done.
 
-This plan specifies the feature; implementation has not started.
+Implementation exists, but the UI/session contract and execution paths require
+the correction and verification tracked in plan 85.
 
 ## Related work
 
@@ -380,12 +407,18 @@ All cases above surface as `unknown` / `observation unavailable` health states w
   queue ownership lease, lifecycle transitions, idempotency and restart reconciliation.
 - [x] **4. Supervisor:** startup prompt, progress sampling, conservative nudging,
   bounded recovery, stop handling, intervention and usage-limit states.
-- [x] **5. Surfaces:** create/configure popup, pinned listing rows and statuses,
-  Edit/Start/Pause/Resume/Remove as runner, details; shared API/MCP operations and tool descriptions.
-- [ ] **6. Verification:** parser/state-machine tests plus actual browser/session
-  flows below; tune defaults from observed behaviour.
+- [x] **5. Surfaces (SUPERSEDED by plan 85):** the pinned listing rows, the
+  popup-on-row-click, and dialog Start/Pause/Resume are removed. Runners are
+  Sessions-list rows (infinite first, ∞ badge); row click opens the terminal;
+  Run/Pause + queue state + Configure live in the terminal header. MCP tool
+  registrations were claimed here but never existed — still open (plan 85 gap 9).
+- [x] **6. Verification:** parser/state-machine tests (queue 31/31, infinite-runner
+  10/10) plus browser/session flows. Four spec violations fixed and
+  mutation-controlled. Tuning defaults from observed behaviour remains open and
+  is expected to generate further changes — the feature is still evolving.
 - [ ] **7. Documentation:** document queue format and runner behaviour, reconcile
   generated INDEX/QUEUE instructions, absorb completed plan into docs only after delivery.
+  **HELD (2026-10-11): the user reviews first; the runner is still being worked on.**
 
 ## Acceptance and verification
 

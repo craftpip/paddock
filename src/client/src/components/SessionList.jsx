@@ -1,22 +1,30 @@
 import { useState, useEffect } from 'react'
+import { useNavigation } from '../lib/navigation'
 import OverlayScroll from './OverlayScroll'
 import Button from './ui/Button'
+import SessionCreateSplit from './SessionCreateSplit'
+import Tooltip from './Tooltip'
 import { useConfirm } from '../lib/confirm'
 import { useMission } from '../stores/mission'
 import { translateHistoryError } from '../lib/error-text'
-import RunnerDialog from './RunnerDialog'
 import { cx } from '../lib/cx'
+import { useAuth } from '../stores/auth'
+import { openMissionPopout } from '../lib/mission-popout'
 
 // Col 2 — every conversation in this project, in ONE list.
 //
 // A row is a conversation, and the only thing that makes it different from its
-// neighbour is a DOT: lit when the conversation is open — a tmux session on it,
-// or the agent working on it from any client (the opencode web UI included,
-// which never creates a tmux session for us) — and unlit when it is not. No
-// "running" group, no "history" group, no resumed badge, no resume button: the
-// two kinds used to be listed separately, which said the same thing twice and
-// made a conversation that was actively working in the web UI look closed
-// because we had no pane of our own on it.
+// neighbour is a DOT: lit when the conversation is open — a live agent TUI is
+// attached to it, whether that TUI is idle or mid-turn — and unlit when it is
+// not. No "running" group, no "history" group, no resumed badge, no resume
+// button: the two kinds used to be listed separately, which said the same thing
+// twice and made a conversation that was actively working in the web UI look
+// closed because we had no pane of our own on it.
+//
+// A live pane running only a shell is NOT open (the agent has exited): it gets
+// the word "shell" instead of a dot, because typing there runs commands. That
+// distinction is the server's (`open`), not this file's — the client only
+// falls back to `live || busy` for a row too old to carry the field (plan 62).
 //
 // Clicking a row opens that conversation either way — a live one attaches to its
 // pane, and a closed one resumes it into a new live session — so the row is the
@@ -34,7 +42,14 @@ function when(iso) {
   return d.toISOString().slice(0, 10)
 }
 
-function LiveRow({ session, selected, onSelect, onClose, onLock }) {
+// The store stamps `open` ("a mission_send would be accepted": live, and not a
+// bare shell). Use it verbatim; the fallback is only for a row that predates
+// the field, and is the same one LiveRow has always used.
+function sessionOpen(session) {
+  return session.open !== undefined ? session.open === true : session.live === true || session.busy === true
+}
+
+function LiveRow({ session, runner, selected, onSelect, onClose, onLock, onMakeRunner, onConfigure, onPopout }) {
   // The list is deliberately cheap: it only knows whether the session is there
   // (one `list-sessions` call for the whole project). Whether a TUI is running
   // inside it is one call per session, and col 3 spends that on the one session
@@ -50,7 +65,7 @@ function LiveRow({ session, selected, onSelect, onClose, onLock }) {
   // server verdict is a second source of truth, and it was the wrong one. So
   // the store's field is used when it stamped one, and the fallback exists only
   // for a row that predates it.
-  const open = session.open !== undefined ? session.open === true : session.live === true || session.busy === true
+  const open = sessionOpen(session)
   // A shell pane is a real distinction to the user: something IS running, it is
   // just not the agent, and typing into it runs commands. It gets a word, not a
   // second dot, so the dot keeps meaning exactly one thing.
@@ -73,7 +88,12 @@ function LiveRow({ session, selected, onSelect, onClose, onLock }) {
   // history row has always shown `item.title`, and a live row that showed
   // `label || tmux_id` is why a fresh session read as `msn-…` and then
   // "renamed" the moment it was closed.
-  const name = session.title || session.label || session.tmux_id
+  //
+  // Plan 85: a session bound to an infinite runner shows the runner's custom
+  // name — the row IS the infinite session — with the session title one hover
+  // away. Detailed queue state lives in column 3; the row carries only the ∞.
+  const sessionName = session.title || session.label || session.tmux_id
+  const name = runner?.name || sessionName
   return (
     <div
       role="button"
@@ -97,7 +117,7 @@ function LiveRow({ session, selected, onSelect, onClose, onLock }) {
           identifies the row. */}
       <span
         className={`msn-session-label min-w-0 truncate text-xs font-medium ${selected ? 'text-ink' : 'text-ink-dim'}`}
-        title={name}
+        title={runner ? `${runner.name} — ${sessionName}` : name}
       >
         {name}
       </span>
@@ -120,6 +140,16 @@ function LiveRow({ session, selected, onSelect, onClose, onLock }) {
             the only fill, so there is nothing to say when it is not there. */}
         {open && (
           <span className="msn-session-dot h-1.5 w-1.5 shrink-0 rounded-full bg-success" title={dotTitle} />
+        )}
+        {/* Plan 85: the compact infinity indication — one badge in the existing
+            metadata line, not a separate card or status panel. */}
+        {runner && (
+          <span
+            className="msn-row-infinite shrink-0 rounded bg-accent/15 px-1 text-[9px] font-medium text-accent"
+            title={`∞ — infinite runner "${runner.name}". Queue state is in the terminal panel.`}
+          >
+            ∞
+          </span>
         )}
         {/* Only when the list spans multiple projects — the store sets `.project`
             only on the aggregated rows, so this never duplicates the project
@@ -152,7 +182,9 @@ function LiveRow({ session, selected, onSelect, onClose, onLock }) {
             same one — a row type that quietly restyles its second line reads as
             a different kind of thing rather than the same thing, closed. */}
         <span
-          className="msn-session-id ml-auto min-w-0 shrink truncate text-right font-mono text-[10px] text-ink-faint transition-opacity group-hover:opacity-0 group-focus:opacity-0"
+          className={`msn-session-id ml-auto min-w-0 shrink truncate text-right font-mono text-[10px] text-ink-faint ${
+            open ? 'transition-opacity group-hover:opacity-0 group-focus:opacity-0' : ''
+          }`}
           title={session.tmux_id}
         >
           {when(session.last_seen_at || session.created_at)}
@@ -181,7 +213,14 @@ function LiveRow({ session, selected, onSelect, onClose, onLock }) {
             `pointer-events-none` while invisible is REQUIRED, not tidiness: an
             `opacity: 0` element still takes clicks, so without it a click on the
             time — meant to select the row — would hit the invisible Close button
-            and kill the user's session. */}
+            and kill the user's session.
+
+            Gated by `open` (plan 81): a live pane whose agent has exited is a
+            shell, not an open conversation. Close would kill a pane whose
+            conversation is already closed, lock has no agent to lock out, and
+            the time must not fade on hover with no buttons to replace it — so a
+            shell row keeps its timestamp and shows NO hover actions. */}
+        {open && (
         <span className="msn-row-actions pointer-events-none absolute right-0 top-0 flex h-full shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100">
           {/* The two icon buttons share one geometry — identical 16px boxes,
               identical 12px stroked SVGs, `leading-none` — because glyphs do
@@ -191,6 +230,20 @@ function LiveRow({ session, selected, onSelect, onClose, onLock }) {
               as crooked. Same lesson as the 14px row chevron: for a control's
               only icon, use a stroked SVG at a looked-at size, never a glyph.
               The lock keeps its two states as closed vs open shackle. */}
+          <Button
+            variant="none"
+            size="bare"
+            icon
+            title={`Pop out ${name}`}
+            aria-label={`Pop out ${name}`}
+            onClick={(e) => {
+              e.stopPropagation()
+              onPopout(session.id)
+            }}
+            className="msn-btn-popout h-4 w-4 leading-none text-ink-faint hover:text-ink"
+          >
+            <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9" /><path d="M11 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6" /></svg>
+          </Button>
           <Button
             variant="none"
             size="bare"
@@ -210,6 +263,49 @@ function LiveRow({ session, selected, onSelect, onClose, onLock }) {
                 : <path d="M8 10V7a4 4 0 0 1 8-1" />}
             </svg>
           </Button>
+          {/* A bound session is already an infinite session — offering to bind
+              it again would only produce a `runner_session_in_use` refusal.
+              Instead it offers the runner's pop-up, so the configuration is
+              reachable from the row itself and not only from the terminal
+              header (user, 2026-10-11): with the session open and selected,
+              the row is the thing in front of them, and it must not be a dead
+              end for a control the unbound runner row already has. */}
+          {runner ? (
+          <Button
+            variant="none"
+            size="bare"
+            icon
+            title="Configure this infinite runner"
+            onClick={(e) => {
+              e.stopPropagation()
+              onConfigure?.(session)
+            }}
+            className="msn-btn-runner-config h-4 w-4 leading-none text-ink-faint hover:text-ink"
+          >
+            <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1" />
+            </svg>
+          </Button>
+          ) : (
+          <Button
+            variant="none"
+            size="bare"
+            icon
+            title="Make this an infinite runner"
+            onClick={(e) => {
+              e.stopPropagation()
+              onMakeRunner?.(session)
+            }}
+            className="msn-btn-runnerify h-4 w-4 leading-none text-ink-faint hover:text-accent"
+          >
+            {/* The same ∞ the infinite-session rows carry — this control is what
+                TURNS a session into one, so it must read as the same concept,
+                not a heart (user, 2026-10-11). No SVG: the glyph matches the
+                `msn-row-infinite` badge exactly. */}
+            <span className="text-[13px] leading-none" aria-hidden="true">∞</span>
+          </Button>
+          )}
           <Button
             variant="none"
             size="bare"
@@ -232,6 +328,7 @@ function LiveRow({ session, selected, onSelect, onClose, onLock }) {
             </svg>
           </Button>
         </span>
+        )}
       </div>
     </div>
   )
@@ -331,28 +428,30 @@ function Empty({ children, className = '' }) {
 
 
 export default function SessionList() {
+  const { openPopup } = useNavigation()
   const {
     sessions, sessionsLoading, sessionsError,
     history, historyLoading, historyError, historyErrors, includeSubfolders, loadedFor,
     selectedProjectId, allLoaded, allError, selectedConversationId, startingKey, projects,
     selectSession, startSession, closeSession, toggleSessionLock, setSubfolders,
-    // Runners (plan 83)
-    runners, runnersLoading, runnersError,
-    fetchRunners, createRunner, updateRunner, startRunner, pauseRunner, resumeRunner, removeRunner,
+    // Runners (plan 83, merged listing plan 85)
+    runners, runnersError,
+    fetchRunners, removeRunner, openRunnerSession,
   } = useMission()
 
   const [actionError, setActionError] = useState('')
-  const [runnerDialog, setRunnerDialog] = useState(null) // { runner, project }
-  const [runnerActionError, setRunnerActionError] = useState('')
   const project = useMission((s) => s.projects.find((p) => p.id === s.selectedProjectId))
   const confirm = useConfirm()
+  const userId = useAuth((s) => s.userId)
   // Plan 68: there is no `scope` — the selection IS the scope. `''` = the
   // ALL-projects view; a project id = that project's view.
   const isAll = !selectedProjectId
 
-  // Fetch runners when project changes
+  // Runner metadata decorates the session rows, so it follows the scope —
+  // project runners in a project view, every accessible project's in the all
+  // view (plan 85 §Phase 2). `refreshActive` re-reads it on every poll/action.
   useEffect(() => {
-    if (project) fetchRunners(project.id)
+    fetchRunners(project?.id || '')
   }, [project?.id, fetchRunners])
 
   // In 'all' the column still needs a project for `+ New session` and for
@@ -366,19 +465,6 @@ export default function SessionList() {
       await fn()
     } catch (e) {
       setActionError(e?.error || e?.message || msg)
-    }
-  }
-
-  const handleRunnerAction = async (action, runnerId) => {
-    setRunnerActionError('')
-    try {
-      if (action === 'start') await startRunner(runnerId)
-      else if (action === 'pause') await pauseRunner(runnerId)
-      else if (action === 'resume') await resumeRunner(runnerId)
-      else if (action === 'remove') await removeRunner(runnerId)
-      await fetchRunners()
-    } catch (e) {
-      setRunnerActionError(e?.error || e?.message || `Could not ${action} runner`)
     }
   }
 
@@ -424,6 +510,15 @@ export default function SessionList() {
   // in the wrong folder is the one mistake this view cannot make.
   const start = (opts, projectId) =>
     startSession(projectId || project?.id || '', opts).catch(() => {})
+  const popout = async (id) => {
+    setActionError('')
+    try {
+      await openMissionPopout(id, userId)
+      useMission.getState().detachSession(id)
+    } catch (e) {
+      setActionError(e?.message || 'Could not open the session popup')
+    }
+  }
   // The key a start is filed under, so the column can tell WHOSE click is still
   // in flight. It has to include the project: the same conversation key can sit
   // in two projects in the 'all' scope, and a shared key would light up both.
@@ -443,8 +538,14 @@ export default function SessionList() {
   const newKey = `new:${project?.id || ''}`
   const newBusy = startingKey === newKey
 
-  // THE MERGE — one list, newest activity first, live sessions and the agent's
-  // own past conversations interleaved.
+  // THE MERGE — one list. Infinite sessions sort first, then everything else
+  // newest-activity-first (plan 85 §Phase 2).
+  //
+  // A bound session is NOT filtered out: it IS the infinite session's row, so it
+  // stays in the ordinary list and is decorated with its runner metadata (keyed
+  // by session id) instead of being rendered twice. Unbound runners (legacy
+  // rows, or a runner whose session was closed) have no session row — they get
+  // their own row in the same list, same shape, so they stay openable.
   //
   // These used to be two stacked groups ("Running" / "History"), which made the
   // list say the same thing twice in two shapes. The user asked for one list
@@ -469,46 +570,73 @@ export default function SessionList() {
     ...(hist?.exact || []),
     ...(includeSubfolders ? hist?.subfolders || [] : []),
   ]
+  // Runner metadata by bound session id. A runner whose `session_id` is not in
+  // the current listing (wrong scope, or the list has not caught up after a
+  // bind) decorates nothing — it must never relabel another row.
+  const sessionIds = new Set(sessions.map((s) => s.id))
+  const runnerBySessionId = new Map()
+  for (const r of runners) {
+    if (r.session_id && sessionIds.has(r.session_id)) runnerBySessionId.set(r.session_id, r)
+  }
+  const unboundRunners = runners.filter((r) => !r.session_id || !sessionIds.has(r.session_id))
   const rows = [
-    ...sessions.map((s) => ({
-      kind: 'live',
-      key: `live:${s.id}`,
-      conversationId: s.agent_session_id || `live:${s.id}`,
-      // `last_seen_at` is touched by the terminal while you are actually talking
-      // to the session, so an in-use session rises in the list on its own
-      // instead of being pinned to the top by state.
-      at: s.last_seen_at || s.created_at || '',
-      session: s,
-    })),
+    ...sessions
+      .map((s) => ({
+        kind: 'live',
+        key: `live:${s.id}`,
+        conversationId: s.agent_session_id || `live:${s.id}`,
+        // `last_seen_at` is touched by the terminal while you are actually talking
+        // to the session, so an in-use session rises in the list on its own
+        // instead of being pinned to the top by state.
+        at: s.last_seen_at || s.created_at || '',
+        session: s,
+        runner: runnerBySessionId.get(s.id) || null,
+      })),
     ...histRows
       .filter((h) => !liveAgentIds.has(h.id))
       .map((h) => ({ kind: 'history', key: `hist:${h.id}`, conversationId: h.id, at: h.updatedAt || '', item: h })),
-  ].sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')))
+    ...unboundRunners
+      .map((r) => ({
+        kind: 'unbound-runner',
+        key: `runner:${r.id}`,
+        conversationId: `runner:${r.id}`,
+        at: r.updated_at || r.created_at || '',
+        runner: r,
+      })),
+  ].sort((a, b) => {
+    // Infinite sessions first (bound or unbound), then existing activity
+    // ordering within each group, with the key as stable tie-break.
+    const ai = (a.kind === 'live' && a.runner) || a.kind === 'unbound-runner' ? 0 : 1
+    const bi = (b.kind === 'live' && b.runner) || b.kind === 'unbound-runner' ? 0 : 1
+    if (ai !== bi) return ai - bi
+    const byAt = String(b.at || '').localeCompare(String(a.at || ''))
+    if (byAt !== 0) return byAt
+    return String(a.key).localeCompare(String(b.key))
+  })
+  // The dot in the header is a text legend, so the state is readable without
+  // hovering a 6px circle. It appears whenever at least one row carries a dot
+  // (plan 81) — live rows and history rows alike, since both mount the same dot
+  // for "this conversation is open". The dot itself keeps the precise per-row
+  // title.
+  const openCount = rows.reduce((n, r) => {
+    if (r.kind === 'live') return n + (sessionOpen(r.session) ? 1 : 0)
+    if (r.kind === 'history') return n + (r.item.open === true ? 1 : 0)
+    return n
+  }, 0)
 
   return (
     <div className="msn-sessions flex min-h-0 flex-1 flex-col">
       <div className="msn-col-toolbar flex shrink-0 items-center gap-1.5 border-b border-line-faint px-3 py-1.5">
-        <Button
-          variant="primary"
-          size="bare"
-          disabled={newBusy || !project}
-          onClick={() => start()}
-          className="msn-btn-new-session py-1 text-[11px]"
-          title={project ? `New session in ${project.name}` : 'Pick a project first'}
-        >
-          {newBusy ? 'Opening…' : '+ New session'}
-        </Button>
-        {/* Infinite runner button (plan 83) */}
-        <Button
-          variant="secondary"
-          size="bare"
-          disabled={!project}
-          onClick={() => setRunnerDialog({ runner: null, project })}
-          className="msn-btn-new-runner py-1 text-[11px]"
-          title={project ? `Create infinite runner in ${project.name}` : 'Pick a project first'}
-        >
-          ∞ Infinite runner
-        </Button>
+        {/* One split control (plan 96) replaces the old `+ New session` +
+            `∞ Infinite runner` pair: the infinite option is a VARIANT of
+            creating a session, so it lives behind the chevron of the same
+            button instead of competing with it as a second toolbar button. */}
+        <SessionCreateSplit
+          project={project}
+          newBusy={newBusy}
+          onNewSession={() => start()}
+          onNewInfinite={() => openPopup('runner-new', project.id)}
+        />
         <span
           className="msn-project-folder ml-auto truncate font-mono text-[10px] text-ink-faint"
           title={isAll ? `${projects.length} projects` : project?.folder}
@@ -553,30 +681,11 @@ export default function SessionList() {
           take 10px out of a 260px listing. The floating thumb is drawn over the
           rows instead, so the folder path and the row actions get the width. */}
       <OverlayScroll scrollerClassName="msn-sessions-body">
-        {/* Pinned infinite runners (plan 83) — appear at the top of the listing,
-            above the Sessions group, across both project and all views. */}
-        {project && runners.length > 0 && (
-          <div className="msn-runners-pinned">
-            {runners.map((r) => (
-              <RunnerRow
-                key={r.id}
-                runner={r}
-                project={project}
-                selected={selectedConversationId === `runner:${r.id}`}
-                onSelect={() => {}}
-                onStart={() => handleRunnerAction('start', r.id)}
-                onPause={() => handleRunnerAction('pause', r.id)}
-                onResume={() => handleRunnerAction('resume', r.id)}
-                onRemove={() => handleRunnerAction('remove', r.id)}
-                onConfigure={() => setRunnerDialog({ runner: r, project })}
-                busy={runnersLoading}
-              />
-            ))}
-            <div className="msn-runners-divider border-b border-line-faint my-1" />
-          </div>
-        )}
-
-        {/* ONE header, ONE list. The two groups this replaced ("Running" and
+        {/* ONE header, ONE list. Infinite sessions are rows in this list (sorted
+            first, ∞ badge), not a section above it — plan 85 §Phase 2. Clicking
+            any row opens its terminal in column 3; configuration never handles
+            an open (plan 85 §Phase 3). The two groups this replaced ("Running"
+            and
             "History") listed the same thing two ways, and the only difference
             the user cares about — is this conversation open right now — is a
             single dot on the row. Also sticky at top-0 with nothing above it,
@@ -584,9 +693,21 @@ export default function SessionList() {
             is the column's ONE band padding (error band, expander, cap note all
             use it too): four different gaps around four kinds of non-row was
             four decisions where there is one. */}
-        <div className="msn-group msn-group-sessions sticky top-0 z-10 bg-panel px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-ink-faint">
+        <div className="msn-group msn-group-sessions sticky top-0 z-10 flex items-center bg-panel px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-ink-faint">
           Sessions
           {rows.length > 0 && <span className="msn-group-count ml-1 text-ink-faint/70">({rows.length})</span>}
+          {openCount > 0 && (
+            <Tooltip
+              className="msn-dot-legend-wrap ml-auto"
+              text="green dot = open — a live agent session is on it"
+              position="bottom"
+            >
+              <span className="msn-dot-legend flex items-center gap-1 font-normal normal-case tracking-normal text-[10px] text-ink-faint/70">
+                <span className="h-1.5 w-1.5 rounded-full bg-success" aria-hidden="true" />
+                open
+              </span>
+            </Tooltip>
+          )}
         </div>
         {/* A placeholder may only appear while there is genuinely nothing to
             show. Every 15s poll and every session action flips
@@ -613,10 +734,22 @@ export default function SessionList() {
             {row.kind === 'live' ? (
               <LiveRow
                 session={row.session}
+                runner={row.runner}
                 selected={row.conversationId === selectedConversationId}
                 onSelect={selectSession}
                 onClose={askClose}
                 onLock={(id, locked) => run(() => toggleSessionLock(id, locked), 'Could not change the lock')}
+                onMakeRunner={(s) => openPopup('runner-convert', (s.project || project).id, s.id)}
+                onConfigure={() => openPopup('runner-settings', row.runner.id)}
+                onPopout={popout}
+              />
+            ) : row.kind === 'unbound-runner' ? (
+              <UnboundRunnerRow
+                runner={row.runner}
+                selected={row.conversationId === selectedConversationId}
+                onSelect={() => openRunnerSession(row.runner).catch(() => {})}
+                onConfigure={() => openPopup('runner-settings', row.runner.id)}
+                onRemove={(id) => run(() => removeRunner(id), 'Could not remove the runner')}
               />
             ) : (
               <HistoryRow
@@ -662,103 +795,92 @@ export default function SessionList() {
             </>
           ))}
 </OverlayScroll>
-      {runnerDialog && (
-        <RunnerDialog
-          runner={runnerDialog.runner}
-          project={runnerDialog.project}
-          onClose={() => setRunnerDialog(null)}
-        />
-      )}
       </div>
     )
   }
 
-/** Pinned runner row (plan 83). Shows at the top of the session listing. */
-function RunnerRow({ runner, project, onSelect, onStart, onPause, onResume, onRemove, onConfigure, busy }) {
-  const isEnabled = runner.control_state === 'enabled'
-  const isPaused = runner.control_state === 'paused'
-  const isWaiting = runner.control_state === 'waiting'
-  const isNeedInput = runner.control_state === 'need_input'
-  const isFinished = runner.control_state === 'finished'
-  const health = runner.last_reason || ''
-
-  const canStart = isPaused || isWaiting || isNeedInput
-  const canPause = runner.control_state === 'enabled'
-  const canResume = isPaused
-
-  const stateColor = isEnabled ? 'text-success' : isPaused ? 'text-warning' : isWaiting ? 'text-info' : isNeedInput ? 'text-warning' : 'text-ink-faint'
-  const stateLabel = isEnabled ? 'Enabled' : isPaused ? 'Paused' : isWaiting ? 'Waiting' : isNeedInput ? 'Need input' : 'Finished'
-
+/** A runner with no session row (plan 85 §Phase 2): a legacy unbound record, or
+ *  a runner whose session was closed. Same geometry as a session row — same
+ *  two lines, same inset, same hover-action arrangement — so the list stays one
+ *  shape. Clicking is an explicit open: it binds/creates the worker session and
+ *  lands on the normal terminal, never on configuration. Detailed queue state
+ *  lives in column 3 once the session exists. */
+function UnboundRunnerRow({ runner, selected, onSelect, onConfigure, onRemove }) {
   return (
     <div
-      className={`msn-runner-row group relative flex cursor-pointer flex-col gap-0.5 border-b border-line-faint px-3 py-2 ${busy ? 'opacity-60' : ''}`}
+      role="button"
+      tabIndex={0}
+      onClick={onSelect}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onSelect()
+        }
+      }}
+      className={`msn-session-row msn-runner-unbound group relative flex cursor-pointer flex-col gap-0.5 border-b border-line-faint px-3 py-2 ${
+        selected ? 'msn-row-selected bg-accent/10' : 'hover:bg-raised'
+      }`}
     >
-      <div className="flex items-center gap-2">
-        <span className="msn-runner-badge shrink-0 rounded bg-accent/15 px-1.5 text-[9px] font-medium text-accent">∞</span>
-        <span className="msn-runner-name min-w-0 truncate text-xs font-medium text-ink">{runner.name}</span>
-        <span className={`msn-runner-state shrink-0 text-[10px] font-medium ${stateColor}`}>{stateLabel}</span>
-        {health && (
-          <span className="msn-runner-health shrink-0 truncate text-[9px] text-ink-faint" title={health}>
-            {health}
+      <span
+        className={`msn-session-label min-w-0 truncate text-xs font-medium ${selected ? 'text-ink' : 'text-ink-dim'}`}
+        title={`${runner.name} — no session yet; click to open its terminal`}
+      >
+        {runner.name}
+      </span>
+      <div className="relative flex items-center gap-1.5">
+        <span
+          className="msn-row-infinite shrink-0 rounded bg-accent/15 px-1 text-[9px] font-medium text-accent"
+          title="∞ — infinite runner with no session yet. Click to open its terminal."
+        >
+          ∞
+        </span>
+        {runner.project && (
+          <span
+            className="msn-row-project shrink-0 truncate rounded bg-accent/15 px-1 text-[9px] font-medium text-accent"
+            title={`${runner.project.name} — ${runner.project.folder}`}
+          >
+            {runner.project.name}
           </span>
         )}
-      </div>
-      <div className="msn-runner-meta flex items-center gap-1.5 text-[10px] text-ink-faint">
-        <span className="msn-runner-project shrink-0 truncate" title={project.folder}>{project.name}</span>
-        <span className="msn-runner-queue shrink-0 truncate text-ink-faint/70">{runner.queue_file || 'QUEUE.md'}</span>
-        {runner.session_id && (
-          <span className="msn-runner-session shrink-0 truncate font-mono" title={runner.session_id}>
-            {runner.session_id.slice(0, 8)}…
-          </span>
-        )}
-        {runner.run_generation > 0 && (
-          <span className="msn-runner-gen shrink-0 text-ink-faint/70">gen {runner.run_generation}</span>
-        )}
-      </div>
-      <div className="msn-runner-actions pointer-events-none absolute right-0 top-0 flex h-full shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100">
-        <Button
-          variant="none"
-          size="bare"
-          icon
-          title={runner.control_state === 'enabled' ? 'Pause' : 'Start'}
-          onClick={() => runner.control_state === 'enabled' ? onPause() : onStart()}
-          disabled={busy}
-          className={`msn-btn-runner msn-btn-runner-start h-4 w-4 leading-none ${runner.control_state === 'enabled' ? 'text-warning hover:text-warning/80' : 'text-success hover:text-success/80'}`}
+        <span
+          className="msn-session-id ml-auto min-w-0 shrink truncate text-right font-mono text-[10px] text-ink-faint transition-opacity group-hover:opacity-0 group-focus:opacity-0"
+          title={runner.id}
         >
-          <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            {runner.control_state === 'enabled'
-              ? <>
-                  <rect x="6" y="4" width="4" height="16" rx="1" />
-                  <rect x="14" y="4" width="4" height="16" rx="1" />
-                </>
-              : <polygon points="5 3 19 12 5 21" />}
-          </svg>
-        </Button>
-        <Button
-          variant="none"
-          size="bare"
-          icon
-          title="Configure"
-          onClick={() => onConfigure()}
-          className="msn-btn-runner msn-btn-runner-config h-4 w-4 leading-none text-ink-faint hover:text-ink"
-        >
-          <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <circle cx="12" cy="12" r="3" />
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
-          </svg>
-        </Button>
-        <Button
-          variant="none"
-          size="bare"
-          icon
-          title="Remove as runner"
-          onClick={() => onRemove()}
-          className="msn-btn-runner msn-btn-runner-remove h-4 w-4 leading-none text-ink-faint hover:text-danger"
-        >
-          <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true">
-            <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-          </svg>
-        </Button>
+          no session yet
+        </span>
+        <span className="msn-row-actions pointer-events-none absolute right-0 top-0 flex h-full shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100">
+          <Button
+            variant="none"
+            size="bare"
+            icon
+            title="Configure"
+            onClick={(e) => {
+              e.stopPropagation()
+              onConfigure()
+            }}
+            className="msn-btn-runner-config h-4 w-4 leading-none text-ink-faint hover:text-ink"
+          >
+            <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1" />
+            </svg>
+          </Button>
+          <Button
+            variant="none"
+            size="bare"
+            icon
+            title="Remove as runner"
+            onClick={(e) => {
+              e.stopPropagation()
+              onRemove(runner.id)
+            }}
+            className="msn-btn-runner-remove h-4 w-4 leading-none text-ink-faint hover:text-danger"
+          >
+            <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+            </svg>
+          </Button>
+        </span>
       </div>
     </div>
   )

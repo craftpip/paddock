@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { usePopup, useDirtyNavigation, useNavigation, useDraftState, popupIdentity } from '../lib/navigation'
 import { useParams, useNavigate } from 'react-router-dom'
 import { api } from '../lib/api'
 import { useAuth } from '../stores/auth'
@@ -83,6 +84,7 @@ export default function Profile() {
   }, [navigate])
 
   function selectTab(id) {
+    if (id === tab) return
     navigate(id === 'general' ? '/profile' : `/profile/${id === 'keys' ? 'mcp-keys' : id}`)
   }
 
@@ -110,13 +112,34 @@ export default function Profile() {
 
   const [users, setUsers] = useState([])
   const [usersLoading, setUsersLoading] = useState(true)
-  const [showCreate, setShowCreate] = useState(false)
-  const [newUser, setNewUser] = useState({ username: '', password: '', role: 'user' })
+  const [usersReadError, setUsersReadError] = useState('')
+  const [createPopup, openCreate, closeCreate] = usePopup('user-new')
+  const showCreate = !!createPopup && role === 'admin'
+  const setShowCreate = (on) => on ? openCreate() : closeCreate()
+  const [newUser, setNewUser] = useDraftState('profile:user-new', { username: '', password: '', role: 'user' })
   const [usernameNote, setUsernameNote] = useState('')
-  const [resetPwUser, setResetPwUser] = useState(null)
-  const [resetPassword, setResetPassword] = useState('')
-  const [resetCurrentPassword, setResetCurrentPassword] = useState('')
+  const [passwordPopup, openPassword, closePassword] = usePopup('user-password')
+  const resetPwUser = passwordPopup && users.find((u) => String(u.id) === passwordPopup.args[0]) || null
+  const setResetPwUser = (user) => user ? openPassword(String(user.id)) : closePassword()
+  const [resetPassword, setResetPassword] = useDraftState(`profile:password:${passwordPopup?.args[0] || ''}`, '')
+  const [resetCurrentPassword, setResetCurrentPassword] = useDraftState(`profile:current-password:${passwordPopup?.args[0] || ''}`, '')
   const [usersError, setUsersError] = useState('')
+  const { drafts: profileDrafts } = useNavigation()
+  useEffect(() => {
+    if (createPopup && role !== 'admin') {
+      closeCreate({ saved: true })
+      setUsersError('User creation is unavailable for this account.')
+      alert({ title: 'View unavailable', message: 'User creation is unavailable for this account.' })
+    }
+    if (passwordPopup && ((role !== 'admin') || (!usersLoading && !usersReadError && !resetPwUser))) {
+      closePassword({ saved: true })
+      setUsersError('This user is unavailable.')
+      alert({ title: 'View unavailable', message: 'This user is unavailable.' })
+    }
+  }, [role, createPopup?.value, passwordPopup?.value, usersLoading, usersReadError, resetPwUser])
+  useDirtyNavigation((showCreate && !!(newUser.username || newUser.password)) || (resetPwUser && !!(resetPassword || resetCurrentPassword)), popupIdentity, () => {
+    profileDrafts.delete('profile:user-new'); setNewUser({ username: '', password: '', role: 'user' }); setResetPassword(''); setResetCurrentPassword('')
+  })
 
   useEffect(() => {
     api('/api/profile')
@@ -201,7 +224,8 @@ export default function Profile() {
     try {
       const data = await api('/api/users')
       setUsers(data.users || [])
-    } catch {}
+      setUsersReadError('')
+    } catch (e) { setUsersReadError(e?.error || 'Could not load users') }
     setUsersLoading(false)
   }
 
@@ -211,7 +235,7 @@ export default function Profile() {
     if (newUser.password.length < 4) { setUsersError('Password must be at least 4 characters'); return }
     try {
       await api('/api/users', { method: 'POST', body: newUser })
-      setShowCreate(false)
+      closeCreate({ saved: true })
       setNewUser({ username: '', password: '', role: 'user' })
       setUsernameNote('')
       loadUsers()
@@ -225,7 +249,7 @@ export default function Profile() {
     if (isSelf && !resetCurrentPassword) { setUsersError('Current password is required'); return }
     try {
       await api(`/api/users/${resetPwUser.id}/reset-password`, { method: 'POST', body: { password: resetPassword, current_password: isSelf ? resetCurrentPassword : undefined } })
-      setResetPwUser(null)
+      closePassword({ saved: true })
       setResetPassword('')
       setResetCurrentPassword('')
     } catch (err) { setUsersError(err?.error || 'Failed to reset password') }
@@ -594,7 +618,7 @@ export default function Profile() {
                             <Button
                               variant="secondary"
                               size="sm"
-                              onClick={() => { setUsersError(''); setResetPassword(''); setResetCurrentPassword(''); setResetPwUser(u) }}
+                              onClick={() => { setUsersError(''); setResetPwUser(u) }}
                             >
                               Reset PW
                             </Button>
@@ -704,11 +728,16 @@ export default function Profile() {
         </Modal>
       )}
 
+      {passwordPopup && role === 'admin' && !resetPwUser && (
+        <Modal title={usersReadError ? 'Could not load this user' : 'Loading user…'} onClose={() => closePassword()}>
+          {usersReadError ? <><p>{usersReadError}</p><Button onClick={loadUsers}>Retry</Button></> : 'Loading authorized user records…'}
+        </Modal>
+      )}
       {resetPwUser && (
         <Modal
           open
           title="Reset Password"
-          onClose={() => { setResetPwUser(null); setResetPassword(''); setResetCurrentPassword(''); setUsersError('') }}
+          onClose={() => setResetPwUser(null)}
         >
           <p className="text-sm text-ink-faint mb-4">
             {resetPwUser.id === userId ? `Set a new password for your account.` : `Set a new password for ${resetPwUser.username}.`}
@@ -739,7 +768,7 @@ export default function Profile() {
             </Field>
             {/* Strategy (a): the submit button stays INSIDE the form. */}
             <div className="flex gap-2 pt-4">
-              <Button variant="ghost" size="lg" className="flex-1" onClick={() => { setResetPwUser(null); setResetPassword(''); setResetCurrentPassword(''); setUsersError('') }}>Cancel</Button>
+              <Button variant="ghost" size="lg" className="flex-1" onClick={() => setResetPwUser(null)}>Cancel</Button>
               <Button type="submit" variant="primary" size="lg" className="flex-1">Reset</Button>
             </div>
           </form>

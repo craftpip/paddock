@@ -15,6 +15,8 @@ RUN npm install
 
 COPY . .
 
+RUN chmod +x /app/bin/paddock && ln -s /app/bin/paddock /usr/local/bin/paddock
+
 RUN mkdir -p /app/data /app/views/partials && chown node:node /home
 
 EXPOSE 6789

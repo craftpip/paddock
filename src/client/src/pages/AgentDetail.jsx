@@ -1,4 +1,6 @@
 import { useEffect, useState, useRef, useCallback, useLayoutEffect } from 'react'
+import { useNavigation, useDirtyNavigation } from '../lib/navigation'
+import { parsePopups } from '../lib/url-state'
 import { useParams, useNavigate, Link, useSearchParams } from 'react-router-dom'
 import { useAgents } from '../stores/agents'
 import { api, getCsrfToken } from '../lib/api'
@@ -297,7 +299,7 @@ export default function AgentDetail() {
               key={m.id}
               variant="ghost"
               size="md"
-              onClick={() => navigate(`/agents/${agent.name}/${m.id}`, { replace: true })}
+              onClick={() => { if (m.id !== mode) navigate(`/agents/${agent.name}/${m.id}`) }}
               className={cx(
                 mode === m.id ? 'bg-panel' : 'hover:bg-panel/50',
                 m.id === 'commands'
@@ -398,8 +400,12 @@ export default function AgentDetail() {
 // ─── Workspace ───────────────────────────────────────────────
 
 function WorkspaceTab({ agent }) {
+  const { location, openPopup, closePopup, patch, drafts } = useNavigation()
+  const stack = parsePopups(location.search, location.pathname)
+  const filePopup = stack.find((p) => p.type === 'file')
+  const movePopup = stack.find((p) => p.type === 'file-move')
   const confirm = useConfirm()
-  const [searchParams, setSearchParams] = useSearchParams()
+  const [searchParams] = useSearchParams()
   const normalizePath = (p) => {
     if (!p) return '/'
     const clean = String(p).replace(/\/+/g, '/').replace(/\/+$/, '')
@@ -464,34 +470,38 @@ function WorkspaceTab({ agent }) {
   }
 
   const navigateWorkspace = useCallback((sc, p, { replace = false } = {}) => {
-    setSearchParams({ scope: sc, path: p }, { replace })
-  }, [setSearchParams])
+    patch({ scope: sc, path: p }, { replace })
+  }, [patch])
   const [pathDraft, setPathDraft] = useState('')
   const [listing, setListing] = useState(null)
   const [error, setError] = useState('')
   const [uploading, setUploading] = useState(false)
   const [uploadPct, setUploadPct] = useState(0)
   const [fileModal, setFileModal] = useState(null)
-  const [moveTarget, setMoveTarget] = useState(null)
+  const moveTarget = movePopup ? { path: movePopup.args[0] } : null
+  const setMoveTarget = (target) => target ? openPopup('file-move', target.path) : closePopup({ saved: true })
   const [loading, setLoading] = useState(false)
   const pathInputRef = useRef(null)
   const navScrollRef = useRef(false)
   const pathDraftRef = useRef('')
+  const listingToken = useRef(0)
 
   const homePath = scope === 'container' ? workspaceDir : `${hostRoot}/workspace`
   const isNavRoot = scope === 'container' ? path === '/' : path === hostRoot
 
   const load = useCallback((p, sc) => {
+    const token = ++listingToken.current
     setError('')
     setLoading(true)
     api(`/api/agents/${agent.name}/workspace?path=${encodeURIComponent(p)}&scope=${sc}`).then((d) => {
+      if (token !== listingToken.current) return
       if (d.entries) {
         setListing(d)
         if (d.path && normalizePath(d.path) !== normalizePath(p)) navigateWorkspace(sc, d.path, { replace: true })
       }
       else if (d.error) setError(d.error)
-    }).catch(() => setError('Failed to load workspace'))
-    .finally(() => setLoading(false))
+    }).catch(() => { if (token === listingToken.current) setError('Failed to load workspace') })
+    .finally(() => { if (token === listingToken.current) setLoading(false) })
   }, [agent.name, navigateWorkspace])
 
   useEffect(() => {
@@ -625,7 +635,7 @@ function WorkspaceTab({ agent }) {
     if (!dst || dst === src) { setMoveTarget(null); return }
     try {
       await api(`/api/agents/${agent.name}/workspace/move`, { method: 'POST', body: { path: src, to: dst, scope } })
-      setMoveTarget(null)
+      patch({ popup: null }, { replace: true, saved: true, expectedPopup: movePopup?.value })
       load(path, scope)
     } catch (err) { setError(toMsg(err)) }
   }
@@ -653,22 +663,48 @@ function WorkspaceTab({ agent }) {
     return null
   }
 
-  async function openFile(entry, entryPath) {
-    try {
-      const media = mediaTypeOf(entry?.name || entryPath.split('/').pop())
-      if (media) {
-        setFileModal({ name: entryPath.split('/').pop(), path: entryPath, size: entry?.size, size_hr: entry?.size_hr, media, mediaUrl: `/api/agents/${agent.name}/workspace/media?path=${encodeURIComponent(entryPath)}&scope=${scope}` })
-        return
-      }
-      const d = await api(`/api/agents/${agent.name}/workspace/file?path=` + encodeURIComponent(entryPath) + `&scope=${scope}`)
-      if (d.error) { setError(d.error); return }
-      setFileModal({ ...d, path: entryPath })
-    } catch (err) { setError('Failed to load file') }
-  }
+  function openFile(entry, entryPath) { openPopup('file', entryPath) }
 
   const [fileDirty, setFileDirty] = useState(false)
   const [fileSaved, setFileSaved] = useState(false)
   const [jsonError, setJsonError] = useState('')
+  const fileKey = `file:${agent.name}:${scope}:${filePopup?.args[0] || ''}`
+  const activeFile = useRef(null)
+  activeFile.current = { key: fileKey, content: fileModal?.content }
+  const fileIdentity = (l) => `${l.pathname}:${new URLSearchParams(l.search).get('scope') || scope}:${parsePopups(l.search, l.pathname).find((p) => p.type === 'file')?.value || ''}`
+  useDirtyNavigation(fileDirty, fileIdentity, () => { drafts.delete(fileKey); setFileDirty(false) })
+  useEffect(() => {
+    let live = true
+    setFileModal(null)
+    setFileDirty(false)
+    if (!filePopup) return
+    const entryPath = filePopup.args[0]
+    const loadFile = async () => {
+      try {
+        const media = mediaTypeOf(entryPath.split('/').pop())
+        // Revalidate even media links using the authorized listing endpoint.
+        const d = media
+          ? await api(`/api/agents/${agent.name}/workspace?path=${encodeURIComponent(entryPath.split('/').slice(0, -1).join('/') || '/')}&scope=${scope}`)
+          : await api(`/api/agents/${agent.name}/workspace/file?path=${encodeURIComponent(entryPath)}&scope=${scope}`)
+        if (!live) return
+        if (d.error) throw { error: d.error }
+        if (media && !(d.entries || []).some((e) => e.name === entryPath.split('/').pop())) throw { error: 'File not found' }
+        const draft = drafts.get(fileKey)
+        setFileModal(media
+          ? { name: entryPath.split('/').pop(), path: entryPath, media, mediaUrl: `/api/agents/${agent.name}/workspace/media?path=${encodeURIComponent(entryPath)}&scope=${scope}` }
+          : { ...d, path: entryPath, content: draft ?? d.content })
+        setFileDirty(!media && draft !== undefined && draft !== d.content)
+      } catch (e) {
+        if (live) {
+          const message = e?.error || e?.message || 'Failed to load file'
+          setError(message)
+          setFileModal({ name: entryPath.split('/').pop(), path: entryPath, unavailable: true, content: message })
+        }
+      }
+    }
+    loadFile()
+    return () => { live = false }
+  }, [filePopup?.value, agent.name, scope])
 
   function getJsonLine(content, error) {
     const match = error.message.match(/position\s+(\d+)/i)
@@ -690,6 +726,10 @@ function WorkspaceTab({ agent }) {
     }
     try {
       await api(`/api/agents/${agent.name}/workspace/save`, { method: 'POST', body: { path: fileModal.path || fileModal.name, content, scope } })
+      // The write was explicit, but its response must not clear a newer edit or
+      // replace a different file selected while it was in flight.
+      if (drafts.get(fileKey) === content) drafts.delete(fileKey)
+      if (activeFile.current?.key !== fileKey || activeFile.current?.content !== content) return
       setFileModal({ ...fileModal, content })
       setFileDirty(false)
       setFileSaved(true)
@@ -698,22 +738,11 @@ function WorkspaceTab({ agent }) {
   }
 
   async function closeFileModal() {
-    if (fileDirty) {
-      const ok = await confirm({
-        title: 'Discard changes',
-        message: 'You have unsaved changes. Discard?',
-        danger: true,
-        confirmText: 'Discard',
-      })
-      if (!ok) return
-    }
-    setFileModal(null)
-    setFileDirty(false)
-    setFileSaved(false)
+    closePopup()
   }
 
   const ext = fileModal ? '.' + (fileModal.name || '').split('.').pop()?.toLowerCase() : ''
-  const editable = !!fileModal && !/[\u0000]/.test((fileModal.content || '').slice(0, 4096))
+  const editable = !!fileModal && !fileModal.unavailable && !fileModal.media && !/[\u0000]/.test((fileModal.content || '').slice(0, 4096))
 
   // No window Escape listener here any more: Modal owns Escape and routes it to
   // onClose (= closeFileModal). Leaving both in place would call closeFileModal
@@ -877,7 +906,7 @@ function WorkspaceTab({ agent }) {
                   {jsonError || (fileSaved ? 'Saved' : fileDirty ? 'Unsaved' : '')}
                 </span>
               )}
-              {!editable && !fileModal.media && (
+              {!editable && !fileModal.media && !fileModal.unavailable && (
                 <span className="text-xs font-normal text-ink-dim ml-2">Binary file — read-only</span>
               )}
             </span>
@@ -914,7 +943,7 @@ function WorkspaceTab({ agent }) {
               id="file-editor"
               mono
               value={fileModal.content}
-              onChange={(e) => { setFileModal({ ...fileModal, content: e.target.value }); setFileDirty(true); setFileSaved(false); setJsonError('') }}
+              onChange={(e) => { drafts.set(fileKey, e.target.value); setFileModal({ ...fileModal, content: e.target.value }); setFileDirty(true); setFileSaved(false); setJsonError('') }}
               className="h-full resize-none"
               style={{ minHeight: '100%' }}
             />
@@ -926,6 +955,7 @@ function WorkspaceTab({ agent }) {
 
       {moveTarget && (
         <PromptModal
+          z="z-[75]"
           title="Move"
           message={`Current location:\n${moveTarget.path}`}
           initialValue={moveTarget.path}
@@ -941,8 +971,11 @@ function WorkspaceTab({ agent }) {
 // ─── Logs ────────────────────────────────────────────────────
 
 function LogsTab({ agent }) {
+  const { location, patch } = useNavigation()
   const [logs, setLogs] = useState('')
-  const [tail, setTail] = useState(100)
+  const requestedTail = Number(new URLSearchParams(location.search).get('tail'))
+  const tail = [50, 100, 500, 1000].includes(requestedTail) ? requestedTail : 100
+  const setTail = (value) => patch({ tail: value })
   const [autoScroll, setAutoScroll] = useState(true)
   const preRef = useRef(null)
 
@@ -1104,6 +1137,7 @@ function ConfigTab({ agent }) {
   const [msg, setMsg] = useState('')
   const [configFile, setConfigFile] = useState('config.json')
   const [configFormat, setConfigFormat] = useState('json')
+  useDirtyNavigation(!saved, (l) => l.pathname)
 
   useEffect(() => {
     api(`/api/agents/${agent.name}/config`).then((d) => {

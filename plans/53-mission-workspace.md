@@ -1,23 +1,6 @@
 # Plan 53 — Mission page: 3-column project → session → agent TUI workspace (the orchestration UI)
 
-## Status: In progress (2026-09-27) — **8/10 phases built** (Phase 0–9). Phase 0
-(store + validation), Phase 1 (live sessions), Phase 2 (the 3-column page
-skeleton), Phase 3 (projects end-to-end), **Phase 4 (sessions end-to-end)**,
-**Phase 5 (agent history + resume)** and **Phase 6 (the merged this-project /
-all-projects view)** are DONE and verified live on a real
-`opencode` PAD; Phase 6 also has its row-level defects fixed and the terminal
-reliability work logged in **§9a** (the webui crash-loop that made the terminal
-"glitch", the orphaned `tmux attach` clients it caused, and the MCP tool
-handler that started it — all fixed except one unexplained external container
-stop, which has stopped recurring and is now logged loudly if it returns);
-**Phase 8 (the agent-visible MCP surface) is DONE 2026-09-27 as
-[plan 55](55-mission-mcp-tools.md)** — five tools live and verified over `/mcp`
-(65 MCP tests green), which added `project_id` / `agent` / `lines` / `limit`
-filters to the `mission_sessions` of §1b and needed no new tmux helper;
-remaining: Phase 7 (docs absorb, gated on user confirmation)
-and Phase 9 (project memory + the
-ordered checklist). Live-verified surface: the store
-(`src/services/mission.js`) on `mission_projects` / `mission_sessions`, the
+## Status: Complete (2026-10-20) — Phases 0–6 built and live-verified on `pad-opencode-proj` (opencode). Phase 7 (docs absorption) skipped per user decision. Phase 8 (MCP tools) complete via plan 55. Phase 9 superseded by plan 64. Live-verified surface: the store (`src/services/mission.js`) on `mission_projects` / `mission_sessions`, the
 `mission.supported` driver flag on the three coding drivers, the
 `/api/mission/*` routes, `src/services/pad-tmux.js` (the shared tmux layer
 app.js delegates to), `/mission` with three columns, the project dialog with
@@ -562,11 +545,17 @@ own, and are the only naming hook on these three files.
 | Shell | `msn-page` `msn-cols` `msn-col-shell` `msn-splitter` `msn-splitter-1` `-2` |
 | Any column | `msn-col` `msn-col-toolbar` `msn-col-header` `msn-col-title` `msn-col-count` `msn-col-body` |
 | Col 1 | `msn-col-projects` `msn-project-row` (+`msn-row-selected`) `msn-project-name` `-meta` `-actions` `msn-btn-new-project` `msn-btn-edit` `msn-btn-delete` `msn-btn-retry` |
-| Col 2 | `msn-col-sessions` `msn-sessions` `-body` `msn-btn-new-session` `msn-project-folder` `msn-scope-toggle` `msn-scope-project` `msn-scope-all` `msn-row-project` `msn-history-errors` `msn-history-error` `-project` `msn-group` `msn-group-sessions` `msn-group-count` `msn-row-slot` `msn-session-row` (+`msn-row-dead`) `msn-session-dot` `-label` `-id` `msn-row-actions` `msn-btn-lock` `msn-btn-close` `msn-history-row` `msn-history-title` `-meta` `msn-history-hint` (only while opening) `msn-btn-subfolders` `msn-cap-note` |
+| Col 2 | `msn-col-sessions` `msn-sessions` `-body` `msn-btn-new-session` `msn-btn-new-caret` `msn-new-split` `msn-new-menu` `-infinite` `msn-project-folder` `msn-scope-toggle` `msn-scope-project` `msn-scope-all` `msn-row-project` `msn-history-errors` `msn-history-error` `-project` `msn-group` `msn-group-sessions` `msn-group-count` `msn-dot-legend` `-wrap` `msn-row-slot` `msn-session-row` (+`msn-row-dead`) `msn-session-dot` `-label` `-id` `msn-row-actions` `msn-btn-popout` `msn-btn-lock` `msn-btn-runner-config` `-runnerify` `msn-btn-close` `msn-history-row` `msn-history-title` `-meta` `msn-history-hint` (only while opening) `msn-btn-subfolders` `msn-cap-note` |
 | Col 3 | `msn-col-agent` `msn-agent-header` `msn-agent-dot` `-label` `-cwd` `-actions` `-command` `msn-badge-solo` `msn-btn-relaunch` `msn-btn-restart` `msn-terminal-wrap` `msn-terminal` |
 | Confirms | `msn-confirm` `msn-confirm-close` `-delete` `msn-confirm-actions` `msn-confirm-yes` `-no` |
 | Shared | `msn-empty` `msn-empty-inline` `msn-empty-title` `msn-empty-text` `msn-error-bar` |
 | Dialog | `msn-dialog-backdrop` `msn-dialog` `msn-dialog-header` `-title` `-form` `-footer` `msn-field` `msn-field-name` `-agent` `-folder` `msn-field-label` `msn-field-note` `msn-input-name` `msn-input-folder` `msn-agent-options` `msn-agent-option` (+`msn-selected`) `msn-agent-type` `msn-stopped-note` `msn-no-agent` `msn-link-create-agent` `msn-folder-chips` `-list` `msn-folder-chip` `msn-suggestions` `msn-suggestion-chip` `msn-folder-status` (+`msn-ok`/`msn-warn`) `msn-dup-warning` `msn-btn-submit` `-cancel` `-close-dialog` |
+
+**Col 2 actions are conditional (plan 81).** `.msn-row-actions` — and the
+timestamp fade that makes room for it — exists only when the row's server
+`open` is true. A live pane running a bare shell has the `shell` word and no
+actions; a dead/history row has neither dot nor actions. `.msn-dot-legend`
+appears in the sticky header only while at least one visible row carries a dot.
 
 **No page-wide header strip (user, 2026-09-27).** The page used to carry an
 `h-11` bar above the three columns holding the "Mission" title, the "a project
@@ -637,10 +626,26 @@ The contract now:
   one**, `closeSession`. Nothing that only changes *which rows are listed* may
   write it.
 - **Refreshes may update its display fields** (`label`, `locked`, `live`,
-  `busy`) from the row they find but must never change *which* session is open.
-  `followSessionPatch` still runs for the **highlighted row** (so a deleted row
-  re-highlights sensibly) but no longer writes `openSession`, and no longer
-  implies a terminal change.
+  `busy`) from the row they find but must never change *which* session is open,
+  and never choose the highlight either. `followSessionPatch` only carries
+  `selectedConversationId` forward; it does not look at the rows at all.
+- **The middle-column highlight is a CONVERSATION, not a mission row** (plan 80;
+  `selectedConversationId`, migrated from `selectedSessionId`). It is written by
+  the same user actions that open a session — `selectSession` (a row click),
+  `startSession`, and an accepted URL restoration (`restoreView`) — and by
+  nothing else. Every fetch (both the project read and the aggregate read, plus
+  the 15s poll) only **preserves** it, so a page the user opened nothing on has
+  no highlight (plan 73's phantom `msn-row-selected`). It is cleared only when
+  the list it belongs to is replaced (`select` / `createProject` /
+  `deleteProject`) — **not** by `closeSession`: closing removes the pane, and
+  the history twin keeps the same conversation id highlighted.
+- **Deliberate exception — switching projects clears the highlight, not col 3.**
+  `select()` replaces col 2's list, so the old highlight (which belonged to that
+  list) is cleared; `openSession` is untouched, so the terminal keeps running
+  and its header still names its own project. That is the one state where col 3
+  shows a conversation the middle column does not highlight, and it is honest:
+  the user changed which list they are browsing, not which session they are in.
+  There is no other third state — a fetch never invents one.
 - **If the open session's row vanishes** (closed in another tab, project
   deleted) col 3 **keeps the terminal** and shows the explicit closed state
   rather than silently re-pointing at a neighbour. Plan 53 §7's "refuse to land

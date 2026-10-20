@@ -119,6 +119,47 @@ substitute `/workspace/instances/...` and route through `Q`.
 conclusion either survives a second, independent occurrence, or is corrected by
 it. One occurrence with a control is a hypothesis; two are a finding.
 
+## Live Capture — 2026-10-19
+
+Implementation status: detection and queue dispatch stop verified live; notification
+script setup is blocked on the user's script or notification command. Actual quota
+reset/recovery has not occurred yet and remains unverified.
+
+Captured directly from the Mission terminal DOM using Navigator `chromium`, before
+any retry, restart, dismissal, or input to the worker.
+
+- PAD: `pad-opencode-proj`; project: `prj_f34d6ccdb9bbc303`.
+- Mission session: `msn_8e6e804094a6b215`; runner: `run_9e972939037a6168`.
+- Agent conversation id: `ses_eaeb2cf1fffe6977DJWwiNgmh6`; tmux: `msn-e7518998`.
+- Read-only store capture: newest assistant `msg_154a4ebe1001e7y7n18GAxq9cq`,
+  parent `msg_154a3cfef001gRCvft4fYEY5M7`, created `1792421456865`, zero tokens,
+  no completed timestamp and no error. Previous assistant step completed with
+  `finish: tool-calls`, output 183, total 95557. This is NOT the old newest-user signature.
+- OpenCode version visible in terminal: `1.19.0`.
+- Model label visible: `DeepSeek V4.1 Flash Free`, provider label `OpenCode`.
+- Modal title: `Free limit reached`.
+- Modal body: `Subscribe to OpenCode Go for reliable access to the best open-source models for $10/month.`
+- Modal link: `https://opencode.ai/go`; actions: `don't show again`, `subscribe`.
+- Terminal status: `Free usage exceeded, subscribe to Go [retrying in 8h 58m attempt #1]`.
+- Mission UI still shows `∞ Running` / `Running`, `27/35 done`.
+
+This captures the previously missing subscription notice. It does not yet establish
+its persisted store signature, recovery behavior, or callback execution.
+
+Implementation for this occurrence: `services/provider-limit.js` recognizes the
+captured terminal retry notice. `observeRunnerUsage` reads the exact bound pane,
+stops enabled dispatch with `stop_cause: usage_exhausted`, and feeds the existing
+episode-deduplicated callback outbox. Explicit quota evidence does not require the
+provider's retrying turn to become idle. The live runner has no saved callback
+script and its event is disabled; notification setup needs the user's script.
+
+Verification: provider-limit tests 2/2, callback tests 38/38, runner-turn tests
+17/17, dispatch tests 22/22. Chromium shows `∞ Need input`, `Run queue`, and the
+runner badge title `OpenCode free usage limit reached — subscribe to Go or wait for
+quota reset`. The original retry notice remains visible. No provider request,
+worker restart, or notice dismissal was used. The empty newest assistant now
+returns unknown for recovery, preventing episode re-arming during quota retries.
+
 ## 1. The one question, and why the answer picks the architecture
 
 > When the model provider's subscription/plan is exhausted, **does anything land

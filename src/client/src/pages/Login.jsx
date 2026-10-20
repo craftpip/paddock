@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
+import { safeReturnTo } from '../lib/url-state'
 import { useAuth } from '../stores/auth'
 import { toggleTheme, getTheme } from '../lib/theme'
 import Button from '../components/ui/Button'
@@ -15,6 +16,7 @@ export default function Login() {
   const error = useAuth((s) => s.error)
   const login = useAuth((s) => s.login)
   const navigate = useNavigate()
+  const [params] = useSearchParams()
 
   function handleToggleTheme() {
     setTheme(toggleTheme())
@@ -25,7 +27,7 @@ export default function Login() {
     setSubmitting(true)
     const ok = await login(username, password)
     setSubmitting(false)
-    if (ok) navigate('/agents', { replace: true })
+    if (ok) navigate(safeReturnTo(params.get('returnTo')), { replace: true })
   }
 
   return (

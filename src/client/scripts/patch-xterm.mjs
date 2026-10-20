@@ -58,7 +58,8 @@ const libTargets = [
 ]
 
 const screenRule = '.xterm .xterm-screen {\n    position: relative;\n}'
-const paddedScreenRule = '.xterm .xterm-screen {\n    position: relative;\n    padding: 9px;\n}'
+const verticallyPaddedScreenRule = '.xterm .xterm-screen {\n    position: relative;\n    padding: 9px;\n}'
+const paddedScreenRule = '.xterm .xterm-screen {\n    position: relative;\n    padding: 0 9px;\n}'
 
 let failures = 0
 
@@ -145,12 +146,15 @@ try {
   const css = readFileSync(cssFile, 'utf8')
   if (css.includes(paddedScreenRule)) {
     console.log(`[patch-xterm] ${cssFile}: screen padding already patched, nothing to do.`)
+  } else if (css.includes(verticallyPaddedScreenRule)) {
+    writeFileSync(cssFile, css.replace(verticallyPaddedScreenRule, paddedScreenRule), 'utf8')
+    console.log(`[patch-xterm] ${cssFile}: removed vertical terminal screen padding.`)
   } else if (!css.includes(screenRule)) {
     console.error(`[patch-xterm] ${cssFile}: screen rule not found in expected shape; aborting without changes.`)
     failures++
   } else {
     writeFileSync(cssFile, css.replace(screenRule, paddedScreenRule), 'utf8')
-    console.log(`[patch-xterm] ${cssFile}: added 9px terminal screen padding.`)
+    console.log(`[patch-xterm] ${cssFile}: added horizontal terminal screen padding.`)
   }
 } catch (err) {
   console.error(`[patch-xterm] cannot read ${cssFile}: ${err.message}`)

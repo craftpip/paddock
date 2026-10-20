@@ -1345,13 +1345,29 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   edits back-to-front, or collect all ranges first), and `lastIndexOf('/**')` to
   pick up a doc comment reaches back past *other functions* and deletes their
   bodies. `node --check` is not a sufficient control here — only the suite is.
-- **Dev container sync/regenerate write into the workspace THROUGH the webui
-  container** (plan 41): it works only for workspaces the paddock container
-  mounts read-write (project root /www2/paddock). Workspaces mounted
-  read-only into paddock (e.g. `/www1` → craftpip) fail with
-  `EROFS: read-only file system` — the card shows the diff, but Sync/
-  Regenerate error out; only the auto-sync inside a settings apply would too.
-  That's by design (the webui can't clobber external workspaces), not a bug.
+- **Devcontainer mirror writes for host-only workspaces go THROUGH THE PAD**
+  (plan 41, fixed by plan 70). Used to be a refusal-shaped bug: the webui's
+  `/www2` mount is read-only, so Generate on `/www2/user1` or `/www1`
+  workspace pads died with `ENOENT: mkdir '/www2/user1/.devcontainer'` —
+  **read-only surfaces as ENOENT, not only EROFS**. Fix:
+  `containerViewOf(host) == null` → the webui composes the JSON and
+  `vm-manager`'s own `docker exec -i` writer delivers it (`spawn` +
+  `stdin.write/end`, NEVER execFile — the docker CLI keeps a piped stdin open
+  and a `read` hangs; content is never shell-quoted; `termUserArgs` drops to
+  the pad user, root-mode pads get an explicit chown).
+  `syncDevContainer`/`regenerateDevContainer` are async — REST awaits, the
+  settings-apply write-back needs
+  `Promise.resolve(syncDevContainer(...)).catch(log)`. A stopped pad refuses
+  with typed `pad_not_running` (→ 400 "start it first"); the card shows the
+  "written through the running pad" note from `devContainerStatus.writableVia`, and
+  `_setPadWriteRunner` is the test seam.
+- **vm-manager suites prefixed `/var/padtest-*` (and any test mkdir under
+  `/workspace` or `/var`) EACCES from non-root shells** — a uid-1000 run of
+  `vm-manager.test.js` shows ~29 environment failures (door sweep, workspace
+  guards, devcontainer plan items), all `EACCES: mkdir '/var/padtest-*'`. Not
+  a code regression: re-run as root before suspecting the change. The plan-70
+  subtests use a self-contained `withTmpA` on `/tmp/padtest70-*` + a fixture
+  under `/www2/paddock-fixture-70` and run anywhere.
 - **JSX/CSS edits need `cd src/client && npm run build` + `docker restart
   paddock`** — the SPA serves the built bundle from `src/public/`.
 - **A hand-written SVG `d` with a run-together arc flag silently kills the whole
@@ -1575,6 +1591,13 @@ The loop, in order:
   todo list updated one by one as items complete. The user may repeat or
   clarify an item later — that's a steer, not a new task.
 - Plans go in `plans/` as separate `.md` files.
+- **Plans must be executable by less capable models without follow-up prompting.**
+  Spell out the full user journey, exact visible states/actions, affected files,
+  service/data contracts, errors and edge cases, ordered implementation steps,
+  and concrete test/browser assertions. Infer basic UX needs (setup, discoverable
+  controls, current/next work, progress, blockers, recovery) instead of making the
+  user specify each one. Completion requires the real end-to-end outcome; opening
+  a page, rendering buttons or passing CRUD tests is not proof the feature works.
 - **Plan workflow (always):** the user says "create a plan" → a new `.md` plan
   file goes in `plans/`. Then we start working on it. Then, only after the plan
   is **complete** (all work built + verified), we **absorb it into `docs/`**

@@ -9,7 +9,7 @@ const FORM_ID = 'paddock-prompt-modal-form'
  * Self-contained prompt dialog (replaces window.prompt).
  * Renders a single text input and resolves through onCancel / onSubmit.
  */
-export default function PromptModal({ title, message, initialValue = '', placeholder, confirmText = 'OK', danger, onCancel, onSubmit }) {
+export default function PromptModal({ title, message, initialValue = '', placeholder, confirmText = 'OK', danger, onCancel, onSubmit, z }) {
   const [value, setValue] = useState(initialValue)
   const inputRef = useRef(null)
 
@@ -21,6 +21,7 @@ export default function PromptModal({ title, message, initialValue = '', placeho
   return (
     <Modal
       open
+      z={z}
       onClose={onCancel}
       title={title || 'Enter value'}
       tone={danger ? 'danger' : undefined}

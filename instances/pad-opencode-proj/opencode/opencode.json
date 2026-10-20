@@ -16,7 +16,7 @@
       "url": "http://10.69.1.164:48674/mcp",
       "enabled": false
     },
-    "browser": {
+    "navigator": {
       "type": "remote",
       "url": "http://10.69.1.164:1994/mcp",
       "enabled": true,

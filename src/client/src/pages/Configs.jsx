@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { useDirtyNavigation } from '../lib/navigation'
 import { api } from '../lib/api'
 import { useToast } from '../lib/toast'
 import { useConfirm } from '../lib/confirm'
@@ -310,6 +311,7 @@ export default function Configs() {
   useEffect(() => { loadVars() }, [loadVars])
 
   function handleChange(key, value) {
+    if (key === undefined) { loadVars(); return }
     setVars((prev) => prev.map((v) => v.key === key ? { ...v, value } : v))
   }
 
@@ -318,6 +320,7 @@ export default function Configs() {
   }
 
   const anyDirty = vars.some((v, i) => originalVars[i] && v.value !== originalVars[i].value)
+  useDirtyNavigation(anyDirty, (l) => l.pathname)
 
   return (
     <div className="max-w-3xl mx-auto px-4 sm:px-6 py-8">

@@ -1,6 +1,6 @@
 # Settings Tab
 
-> Last updated: 2026-09-27
+> Last updated: 2026-10-19
 
 Container-level operations for an agent: recreate/update, health checkup, docker access, network routing, custom workspace + extra volumes, build & lifecycle commands, dev container sync, and delete. Lives at the end of the tab bar in the agent detail page.
 
@@ -179,19 +179,44 @@ Four textareas for the per-PAD Dockerfile and lifecycle hooks:
 - **Post-attach commands (bash)** — runs on every terminal attach inside the
   PAD. No image change needed.
 
-### 5f. Dev Container (plan 41 item 20)
+### 5f. Dev Container (plan 41 item 20, plan 70)
 
 The workspace's `devcontainer.json` is the portable mirror of this pad. The card
 shows the file path, a state badge (generated / project-authored / not found),
 and both sides of the diff preview (current file vs what Paddock would write
-now from the pad's effective config).
+now from the pad's effective config). When the workspace is outside the webui
+container the card shows a note: "This workspace is outside the webui
+container, so the mirror is written through the running pad — the pad must be
+up when you click."
 
 - **Sync** — writes the mapped fields (workspace folder, lifecycle commands,
   env, volumes, ports) from the pad's settings into the workspace
   `devcontainer.json` in place (project-authored fields survive). No container
+  recreate. Still requires the pad to have ADOPTED the file (generated, or a
+  persisted `DC_PLAN`); an unadopted file is never written.
+- **Regenerate / Generate** — rewrites (or creates) the `devcontainer.json` as
+  the pad's full generated mirror (marked `x-paddock.generated`). No container
   recreate.
-- **Regenerate** — rewrites (or creates) the `devcontainer.json` as the pad's
-  full generated mirror (marked `x-paddock.generated`). No container recreate.
+
+**Where the write goes (plan 70).** `devContainerStatus` reports
+`writableVia: 'webui' | 'pad'` (plus `writable` and a `writeNote`). A
+webui-visible workspace is written by the webui process directly
+(`containerViewOf` resolves the host path to the webui's own bind mount). A
+host-only workspace (`/www2/user1`, `/www1` — the webui's mount of `/www2` is
+read-only, and containerViewOf returns null) is written **through the running
+pad**: `vm-manager`'s own `docker exec -i` writer spawns `sh` with a
+`mkdir -p && cat > <file>` script and pushes the JSON content on **stdin**
+(spawn + `stdin.write/end` — execFile hangs on a piped stdin, AGENTS.md
+lesson). `termUserArgs` drops exec to the pad user in user-mode pads, so the
+file is PUID-owned like the rest of the workspace; root-mode pads get an
+explicit `chown` instead. `syncDevContainer`/`regenerateDevContainer` are
+therefore **async**; callers await (REST) or `Promise.resolve(...).catch`
+(the settings-apply write-back, which logs and continues — a sync failure
+never blocks an apply). A stopped pad refuses with the typed code
+`pad_not_running` (mapped to a 400 with the message "pad X is not running —
+start it first"); other write failures surface `devcontainer_write_failed`.
+`vm-manager._setPadWriteRunner(fn)` is the test seam that replaces the
+`docker exec` runner in the suite.
 
 ### 6. Danger Zone — Delete Container
 

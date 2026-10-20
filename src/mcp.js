@@ -578,7 +578,11 @@ async function plansCall(fn) {
  *  lost — put it in the text explicitly. */
 function missionFail(err) {
   if (err instanceof mission.MissionError) {
-    throw new McpError(ErrorCode.InvalidRequest, `${err.code}: ${err.message}`);
+    // Plan 88 §Phase 2: carry the structured delivery outcome so the LLM can
+    // branch on "written but unobserved" (attempted + acceptance:unknown) vs a
+    // pre-write refusal, without parsing prose. Only appended when present.
+    const meta = err.acceptance ? ` [attempted=${!!err.attempted} acceptance=${err.acceptance}]` : '';
+    throw new McpError(ErrorCode.InvalidRequest, `${err.code}: ${err.message}${meta}`);
   }
   if (err instanceof McpError) throw err;
   console.error('[mcp] mission tool failed:', err?.message || err);
@@ -2459,6 +2463,10 @@ function registerTools(server) {
       return textResult({
         ok: true,
         sent: r.sent,
+        // Plan 88 §Phase 2: `acceptance: 'confirmed'` means the pane observed the
+        // write. A resolution alone is not proof beyond what the pane showed.
+        confirmed: r.confirmed,
+        acceptance: r.acceptance,
         // Echo where the text went (plan 62 1i): an operator-set `label` is
         // often empty or stale, and a write that does not say which project it
         // landed in cannot be checked afterwards.
@@ -2468,6 +2476,14 @@ function registerTools(server) {
         // The pane's screen after the write, so "the TUI took it" is visible
         // rather than asserted (1h).
         screen: r.screen,
+        // Plan 88 §Phase 3: operation status for caller reconciliation.
+        operation: r.operation_id ? {
+          id: r.operation_id,
+          generation: r.operation_generation,
+          status: r.operation_status,
+          started_at: r.operation_started_at,
+          confirmed_at: r.operation_confirmed_at,
+        } : null,
         hint: 'The text was typed into the TUI. Read it back with mission_sessions {session_id} to see the answer.',
       });
     }
@@ -2735,30 +2751,29 @@ function registerTools(server) {
   registerToolBound(
     'queue_read',
     {
-      title: 'Read the plan queue for a Mission project',
-      description: "Read the QUEUE.md for a project and return the parsed queue, aggregate state, and revision hash. The queue controls execution order for the infinite runner. Requires a project scope (project_id or folder).",
+      title: 'Read a canonical Mission runner queue',
+      description: "Read the server-owned queue for one Mission runner. QUEUE.md is only its generated worker projection; it is never the source of truth.",
       inputSchema: {
+        runner_id: z.string().describe('Runner id from the Mission runner list'),
         project_id: z.string().optional().describe("A Mission project id (from mission_projects); its queue is at <project.folder>/<plans_folder>/QUEUE.md. Refused if it matches nothing, or nothing your key can see."),
         folder: z.string().optional().describe("Select a Mission project by its folder (e.g. \"/www2/paddock\"). A folder matching zero or several projects is refused with the candidates."),
       },
     },
-    async ({ project_id, folder }) => {
+    async ({ project_id, folder, runner_id }) => {
       const scope = await resolvePlansScope(currentUser(), 'queue_read', { project_id, folder });
       return plansCall(async () => {
-        const row = plans.requireAgent(scope.padName);
         const project = scope.project;
-        const { parsed, aggregate, path, hash } = await plans.readQueue(row, project);
+        const runner = mission.getRunner(runner_id);
+        if (!runner || runner.project_id !== project.id) throw new plans.PlansError('runner_not_found', `Runner ${runner_id} does not belong to this project.`);
+        const detail = await mission.readRunnerQueue(runner.id);
         return textResult({
           agent: scope.padName,
           project_id: project.id,
           project: project.name,
           folder: project.folder,
           plans_folder: project.plans_folder || 'plans',
-          path,
-          hash,
-          version: parsed.version,
-          items: parsed.items,
-          aggregate,
+          runner_id: runner.id,
+          queue: detail.queue,
         });
       });
     }
@@ -2767,34 +2782,31 @@ function registerTools(server) {
   registerToolBound(
     'queue_write',
     {
-      title: 'Write or update the plan queue for a Mission project',
-      description: "Write the QUEUE.md for a project with compare-and-swap (CAS) on the revision hash. Pass the items array and the expected hash from a prior queue_read. Returns the new hash on success. Requires a project scope (project_id or folder).",
+      title: 'Add plans to a canonical Mission runner queue',
+      description: "Add plan paths to the server-owned queue with revision CAS. The server assigns item IDs and regenerates QUEUE.md; callers cannot write the projection directly.",
       inputSchema: {
+        runner_id: z.string().describe('Runner id from the Mission runner list'),
         project_id: z.string().optional().describe("A Mission project id; write into its queue. Refused if it matches nothing, or nothing your key can see."),
         folder: z.string().optional().describe("Select a Mission project by its folder. A folder matching zero or several projects is refused with the candidates."),
-        items: z.array(z.object({
-          id: z.string().describe('Unique stable id for this item'),
-          plan: z.string().describe('Plan file path relative to the plans folder'),
-          status: z.enum(['new', 'in progress', 'need input', 'done']).describe('Item status'),
-          reason: z.string().describe('Required. Nonempty only for "need input"; empty string otherwise.'),
-        })).describe('Queue items in order. At most one "in progress".'),
-        expected_hash: z.string().describe('The hash from a prior queue_read — write fails if queue changed.'),
+        plans: z.array(z.string()).min(1).describe('Plan paths relative to the project plans folder'),
+        revision: z.number().int().describe('Revision returned by queue_read'),
       },
     },
-    async ({ project_id, folder, items, expected_hash }) => {
+    async ({ project_id, folder, runner_id, plans: planPaths, revision }) => {
       const scope = await resolvePlansScope(currentUser(), 'queue_write', { project_id, folder });
       return plansCall(async () => {
-        const row = plans.requireAgent(scope.padName);
         const project = scope.project;
-        const { hash, path } = await plans.writeQueue(row, project, items, expected_hash);
+        const runner = mission.getRunner(runner_id);
+        if (!runner || runner.project_id !== project.id) throw new plans.PlansError('runner_not_found', `Runner ${runner_id} does not belong to this project.`);
+        const detail = await mission.addRunnerQueueItems(runner.id, planPaths, revision, { actor: missionActor(currentUser()) });
         return textResult({
           agent: scope.padName,
           project_id: project.id,
           project: project.name,
           folder: project.folder,
           plans_folder: project.plans_folder || 'plans',
-          path,
-          hash,
+          runner_id: runner.id,
+          queue: detail.queue,
         });
       });
     }
@@ -2803,29 +2815,29 @@ function registerTools(server) {
   registerToolBound(
     'queue_ensure',
     {
-      title: 'Ensure the plan queue exists for a Mission project',
-      description: "Create the QUEUE.md from the template if it does not exist. Returns whether it was created and the revision hash. Requires a project scope (project_id or folder).",
+      title: 'Ensure a canonical Mission runner queue exists',
+      description: "Create the canonical queue and regenerate its worker projection for one Mission runner.",
       inputSchema: {
+        runner_id: z.string().describe('Runner id from the Mission runner list'),
         project_id: z.string().optional().describe("A Mission project id; ensure its queue. Refused if it matches nothing, or nothing your key can see."),
         folder: z.string().optional().describe("Select a Mission project by its folder. A folder matching zero or several projects is refused with the candidates."),
       },
     },
-    async ({ project_id, folder }) => {
+    async ({ project_id, folder, runner_id }) => {
       const scope = await resolvePlansScope(currentUser(), 'queue_ensure', { project_id, folder });
       return plansCall(async () => {
-        const row = plans.requireAgent(scope.padName);
         const project = scope.project;
-        const { created, path, hash, invalid } = await plans.ensureQueue(row, project);
+        const runner = mission.getRunner(runner_id);
+        if (!runner || runner.project_id !== project.id) throw new plans.PlansError('runner_not_found', `Runner ${runner_id} does not belong to this project.`);
+        const detail = await mission.setupRunnerQueue(runner.id, { actor: missionActor(currentUser()) });
         return textResult({
           agent: scope.padName,
           project_id: project.id,
           project: project.name,
           folder: project.folder,
           plans_folder: project.plans_folder || 'plans',
-          path,
-          hash,
-          created,
-          invalid: !!invalid,
+          runner_id: runner.id,
+          queue: detail.queue,
         });
       });
     }

@@ -125,6 +125,19 @@ describe('pad-tmux - session creation', () => {
 });
 
 describe('pad-tmux - send-keys', () => {
+  it('quota recovery pastes one atomic buffer before Enter rather than flooding literal key events', async () => {
+    const { calls, fake } = recorder();
+    padTmux._setForTests({ runCmd: fake });
+    await padTmux.sendText('pad-x', 'msn-abcd1234', 'continue $(literal)', { paste: true });
+    const set = calls.findIndex((c) => c.args.includes('set-buffer'));
+    const paste = calls.findIndex((c) => c.args.includes('paste-buffer'));
+    const enter = calls.findIndex((c) => c.args[c.args.length - 1] === 'Enter');
+    assert.ok(set >= 0 && paste > set && enter > paste);
+    assert.equal(calls[set].args.at(-1), 'continue $(literal)');
+    assert.ok(calls[paste].args.includes('-p'));
+    assert.ok(calls[paste].args.includes('-d'));
+    assert.ok(!calls.some((c) => c.args.includes('-l')));
+  });
   it('sends text literally, as argv, then a separate Enter', async () => {
     const { calls, fake } = recorder();
     padTmux._setForTests({ runCmd: fake });

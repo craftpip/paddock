@@ -157,6 +157,61 @@ describe('plan 80: a fetch never invents a highlight', () => {
     assert.strictEqual(store.getState().selectedConversationId, 'ses_x', 'the highlight survives a refresh');
   });
 
+  it('the PROJECT-scoped fetch invents nothing either (the other spread site)', async () => {
+    store = await freshStore();
+    route(/^\/api\/mission\/projects\/prj_a\/sessions$/, {
+      sessions: [{ id: 'msn_y', live: true, agent_session_id: 'ses_y', project: { id: 'prj_a' } }],
+    });
+    store.setState({ selectedProjectId: 'prj_a' });
+    await store.getState().fetchSessions('prj_a');
+    await settle();
+
+    assert.strictEqual(store.getState().selectedConversationId, '',
+      'a project list landing must not adopt its first live row either');
+  });
+
+  it('selectSession is the user action that owns BOTH the highlight and col 3', async () => {
+    store = await freshStore();
+    store.setState({
+      selectedProjectId: '',
+      sessions: [{
+        id: 'msn_x',
+        live: true,
+        agent_session_id: 'ses_x',
+        label: 'row',
+        project: { id: 'prj_a', name: 'alpha', agent_name: 'pad-a', folder: '/www2/a' },
+      }],
+    });
+    store.getState().selectSession('msn_x');
+    await settle();
+
+    assert.strictEqual(store.getState().selectedConversationId, 'ses_x');
+    assert.strictEqual(store.getState().openSession?.id, 'msn_x');
+    assert.strictEqual(store.getState().openSession?.projectId, 'prj_a');
+  });
+
+  it('a row vanishing on refetch clears NEITHER the highlight nor col 3 (plan 80)', async () => {
+    // Plan 73 was written before plan 80 made the highlight a CONVERSATION:
+    // a close drops the live row but the history twin carries the same id, and
+    // a read is never allowed to move either selection. So the plan's original
+    // "row vanishes → highlight clears" expectation is superseded on purpose.
+    store = await freshStore();
+    route(/^\/api\/mission\/sessions$/, { sessions: [] });
+    store.setState({
+      selectedProjectId: '',
+      selectedConversationId: 'ses_x',
+      openSession: { id: 'msn_x', agentSessionId: 'ses_x', projectId: 'prj_a' },
+      sessions: [{ id: 'msn_x', live: true, agent_session_id: 'ses_x' }],
+    });
+    await store.getState().fetchAll();
+    await settle();
+
+    assert.strictEqual(store.getState().selectedConversationId, 'ses_x',
+      'the selection is the user\'s conversation and survives the row going away');
+    assert.strictEqual(store.getState().openSession?.id, 'msn_x',
+      'a read must not move col 3 either');
+  });
+
   it('close does NOT clear the highlight — the conversation stays selected', async () => {
     store = await freshStore();
     route(/^\/api\/mission\/sessions\/msn_x$/, {}, 204);
@@ -175,6 +230,24 @@ describe('plan 80: a fetch never invents a highlight', () => {
   });
 });
 
+describe('Mission popout handoff', () => {
+  it('detaches only the matching embedded view without issuing a destructive request', async () => {
+    store = await freshStore();
+    store.setState({
+      selectedConversationId: 'ses_x',
+      openSession: { id: 'msn_x', agentSessionId: 'ses_x', projectId: 'prj_a' },
+      sessionState: { live: true },
+    });
+    assert.strictEqual(store.getState().detachSession('msn_other'), false);
+    assert.strictEqual(store.getState().openSession.id, 'msn_x', 'another popup cannot displace the embedded session');
+    assert.strictEqual(store.getState().detachSession('msn_x'), true);
+    assert.strictEqual(store.getState().openSession, null);
+    assert.strictEqual(store.getState().sessionState, null);
+    assert.strictEqual(store.getState().selectedConversationId, 'ses_x', 'detaching a view does not unselect its conversation');
+    assert.ok(!calls.some((call) => call.startsWith('DELETE ') || call.includes('/restart')), 'handoff does not end or restart a session');
+  });
+});
+
 describe('plan 68: the view persists and hydrates (Idea 2)', () => {
   function seedStorage(view) {
     const box = {};
@@ -187,13 +260,29 @@ describe('plan 68: the view persists and hydrates (Idea 2)', () => {
     return box;
   }
 
-  it('hydrates the three view fields from localStorage on store creation', async () => {
+  it('exposes the persisted view for the URL bootstrap, and restoreView applies it', async () => {
+    // Plan 93 moved hydration out of store creation: the store exposes the
+    // parsed blob as `persistedView`, the navigation hook seeds the URL from it,
+    // and `restoreView` is what applies (and revalidates) it. The fact is the
+    // same — a refresh keeps the view — so the assertion follows its new home.
     seedStorage({
       selectedProjectId: 'prj_a',
       selectedConversationId: 'ses_z',
       openSession: { id: 'msn_z', agentSessionId: 'ses_z', projectId: 'prj_a', agentName: 'pad-opencode-proj', folder: '/www2/alpha' },
     });
     store = await freshStore();
+    await settle();
+
+    const persisted = store.getState().persistedView;
+    assert.strictEqual(persisted.selectedProjectId, 'prj_a');
+    assert.strictEqual(persisted.selectedConversationId, 'ses_z');
+    assert.strictEqual(persisted.openSession?.id, 'msn_z');
+
+    route(/^\/api\/mission\/sessions\/msn_z$/, {
+      session: { id: 'msn_z', agent_session_id: 'ses_z', project_id: 'prj_a', title: 'z' },
+      project: PROJECTS[0],
+    });
+    await store.getState().restoreView({ project: 'prj_a', session: 'msn_z' }, { fresh: true });
     await settle();
 
     assert.strictEqual(store.getState().selectedProjectId, 'prj_a');
@@ -213,7 +302,10 @@ describe('plan 68: the view persists and hydrates (Idea 2)', () => {
     store = await freshStore();
     await settle();
 
-    assert.strictEqual(store.getState().selectedConversationId, 'ses_z',
+    // The fallback lives in the persisted-view reader now (plan 93 moved the
+    // application to the URL bootstrap); the highlight still survives the
+    // rename, which is the fact that matters.
+    assert.strictEqual(store.getState().persistedView.selectedConversationId, 'ses_z',
       'the highlight survives the rename by falling back to the snapshot conversation');
   });
 
@@ -241,22 +333,27 @@ describe('plan 68: the view persists and hydrates (Idea 2)', () => {
     assert.strictEqual(saved.openSession, null);
   });
 
-  it('clears an open session whose project has vanished (validation on fetch)', async () => {
+  it('refuses to restore a snapshot whose row no longer resolves (plan 93)', async () => {
+    // Plan 93 replaced the old "the project listing clears the snapshot" rule
+    // with the stronger one: a LISTING is not authority over a pinned terminal;
+    // only a resolution verdict from the row's own read clears/refuses it. The
+    // guarantee — a vanished project cannot render a terminal — is asserted at
+    // the new source instead.
     seedStorage({
       selectedProjectId: 'prj_a',
       selectedConversationId: 'ses_z',
       openSession: { id: 'msn_z', agentSessionId: 'ses_z', projectId: 'prj_gone', agentName: 'pad-opencode-proj', folder: '/www2/gone' },
     });
     store = await freshStore();
-    route(/^\/api\/mission\/projects$/, { projects: PROJECTS });
-    await store.getState().fetchProjects();
+    route(/^\/api\/mission\/sessions\/msn_z$/, { error: 'not found' }, 404);
+    await store.getState().restoreView({ project: '', session: 'msn_z' }, { fresh: true });
     await settle();
 
     assert.strictEqual(store.getState().openSession, null,
-      'a snapshot whose project is deleted cannot render a terminal — it must be dropped');
-    assert.strictEqual(store.getState().sessionState, null);
-    // The selection itself also survives only while its project does.
-    assert.strictEqual(store.getState().selectedProjectId, 'prj_a', 'the SELECTED project still exists, so it survives');
+      'a snapshot that cannot resolve cannot render a terminal');
+    assert.strictEqual(store.getState().viewUnavailable, true,
+      'a 404 is the verdict that makes it unavailable (not a transient read failure)');
+    assert.ok(store.getState().viewError, 'and the column can say why');
   });
 
   it('a corrupt persisted blob is ignored, not fatal to the store', async () => {

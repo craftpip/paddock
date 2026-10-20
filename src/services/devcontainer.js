@@ -13,12 +13,15 @@
  *   - write-back sync of the 1:1 mapped fields into an existing file (project-
  *     authored files keep every non-mapped field).
  *
- * It must stay dependency-free (fs/path only) so vm-manager, the create form
- * and the Settings UI can require it without circular imports.
+ * It must stay free of service cycles (vm-manager, the create form and the
+ * Settings UI all require it). It may use ownership primitives: that module
+ * only depends on fs/path/crypto, so it cannot introduce a cycle, and plan 95
+ * requires the generated file AND its directory to be normalized at write time.
  */
 
 const fs = require('fs');
 const path = require('path');
+const { writeFileOwned } = require('./ownership');
 
 const DEV_CONTAINER = '.devcontainer';
 const DEV_CONTAINER_JSON = 'devcontainer.json';
@@ -202,16 +205,18 @@ function generateDevContainer({ workspaceFolder = '/workspace', postCreate = '',
  *  generated file; never touches a project-authored one (guard at caller). */
 function writeGeneratedDevContainer(dir, content) {
   const target = path.join(dir, DEV_CONTAINER, DEV_CONTAINER_JSON);
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  fs.writeFileSync(target, content);
+  writeFileOwned(target, content, { boundary: dir });
   return target;
 }
 
 /** Sync the 1:1 mapped fields from a pad into an existing devcontainer.json
  *  in place (write-back on pad Settings changes). Project-authored files keep
- *  every non-mapped field; generated files are rewritten wholesale. Returns
- *  the updated content. */
-function syncFile(filePath, fields = {}) {
+ *  every non-mapped field; generated files are rewritten wholesale. With
+ *  `{ write: false }` it composes the updated content WITHOUT touching the
+ *  file — a caller that cannot use this process's filesystem (plan 70: a
+ *  host-only workspace whose mirror is written through the pad) still needs
+ *  the composed bytes. Returns the updated content. */
+function syncFile(filePath, fields = {}, { write = true } = {}) {
   const parsed = parseDevContainer(filePath);
   const doc = parsed ? parsed.raw : {};
   if (parsed && parsed.generated) {
@@ -229,7 +234,7 @@ function syncFile(filePath, fields = {}) {
       portsAttributes: fields.portsAttributes,
       remoteUser: fields.remoteUser,
     });
-    fs.writeFileSync(filePath, content);
+    if (write) writeFileOwned(filePath, content, { boundary: path.dirname(filePath) });
     return content;
   }
   // Project-authored: update only the mapped fields, preserve everything else.
@@ -266,8 +271,9 @@ function syncFile(filePath, fields = {}) {
   if (fields.postCreate !== undefined && !fields.postCreate) delete out.postCreateCommand;
   if (fields.postStart !== undefined && !fields.postStart) delete out.postStartCommand;
   if (fields.postAttach !== undefined && !fields.postAttach) delete out.postAttachCommand;
-  fs.writeFileSync(filePath, JSON.stringify(out, null, 2) + '\n');
-  return JSON.stringify(out, null, 2) + '\n';
+  const finalJson = JSON.stringify(out, null, 2) + '\n';
+  if (write) writeFileOwned(filePath, finalJson, { boundary: path.dirname(filePath) });
+  return finalJson;
 }
 
 module.exports = {

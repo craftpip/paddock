@@ -892,6 +892,44 @@ describe('project-rooted plans folder (plan 82)', () => {
     );
   });
 
+  it('resolves a project folder OUTSIDE the pad workspace mount (no phantom /www1/www2 tree)', () => {
+    // The production bug (plan 86): pad-opencode-proj's workspace is /www1, but
+    // the `paddock` project's folder is /www2/paddock (= PROJECT). The old
+    // fallback joined the raw folder onto the mount view, producing the phantom
+    // `/www1/www2/paddock/plans` — a path the webui never had. The folder must be
+    // resolved in the WEBUI's OWN view: the project-root mapping HOST_WORKSPACE →
+    // WORKSPACE, i.e. `/workspace/plans`, which is rw.
+    const a = {
+      ...padRow(PAD),
+      workspace_mount: { host: '/www1', container: '/www1', webuiVisible: true, hostBrowsable: true },
+    };
+    const view = require('../services/vm-manager').containerViewOf(PROJECT);
+    assert.ok(view, 'the project root has a webui view in-container');
+    const got = plans.projectPlansRoot(a, project({ folder: PROJECT }));
+    assert.equal(got, path.join(view, 'plans'));
+    assert.ok(!got.includes('/www1/www2'), 'never the phantom /www1/www2 path');
+    assert.equal(
+      plans.projectPlansRoot(a, project({ folder: path.join(PROJECT, 'sub') })),
+      path.join(view, 'sub', 'plans')
+    );
+  });
+
+  it('reports a folder the webui sees read-only as plan_workspace_read_only', () => {
+    // /www2 itself is mounted `:ro` into the webui and is NOT under the
+    // project-root mapping, so a project pointed at it must fail LOUDLY with the
+    // read-only code — not silently write a phantom path, and not a generic error.
+    const a = {
+      ...padRow(PAD),
+      workspace_mount: { host: '/www1', container: '/www1', webuiVisible: true, hostBrowsable: true },
+    };
+    const ro = require('../services/vm-manager').webuiMountViewOf('/www2');
+    assert.ok(ro && ro.readonly, 'the test host mounts /www2 read-only into the webui');
+    assert.throws(
+      () => plans.projectPlansRoot(a, project({ folder: '/www2' })),
+      (e) => e.code === 'plan_workspace_read_only' && /read-only/.test(e.message)
+    );
+  });
+
   it('reserved entry files are refused as plan paths, on read and on write', () => {
     for (const name of ['INDEX.md', 'index.md', 'README.md', 'QUEUE.md']) {
       assert.throws(

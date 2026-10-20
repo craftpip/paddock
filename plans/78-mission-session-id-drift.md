@@ -1,6 +1,6 @@
 # Plan 78 — Mission: a fresh session's agent id drifts after chatting, reopening loops
 
-## Status: In progress (2026-10-09) — reproduced the "id changes" half; the "Session not found" loop is NOT reproducible from current data (all 36 stored ids resolve). Need the user's specific pad/project/session to pin it.
+## Status: Skipped (2026-10-20) — reproduced the "id changes" half (NULL-id rows drift, 8 on pad-opencode-proj, 2 on pad-opencode-user1); the "Session not found" loop NOT reproduced from current data (all 36 stored ids resolve, directory-match). Skipped per user decision — needs specific user case to fix the reopen loop.
 
 ## Report (as observed by the user)
 

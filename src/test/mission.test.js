@@ -1259,17 +1259,22 @@ describe('Mission - send refuses what it cannot type into (plan 62 1b/1c/1h)', (
     assert.match(r.screen, /waiting/);
   });
 
-  // 1h: the pane existing is not an acknowledgement. A live TUI that never
-  // repaints did not take the text, and a bare `ok: true` for it is the exact
-  // failure this item is about — the caller then waits for an answer that was
-  // never going to come.
-  it('refuses a live pane that never changes after the write, instead of a bare ok', async () => {
+  // 1h, revised by plan 88 §Phase 2: a live TUI that never repaints did not
+  // PROVE it took the text — but absence of a repaint is not proof it did not
+  // either (a long line takes ~3-5s to paint). The truthful outcome is
+  // `unknown`, carried as structured metadata, NOT a bare ok AND NOT a false
+  // "did not receive it" that strands a worker behind a stuck Run button.
+  it('reports an unknown delivery (not a bare ok, not a false non-delivery) when the pane stays quiet', async () => {
     const p = mission.createProject({ name: 'blackhole', agent: 'pad-msn-oc', folder: '/www1/a' });
     const s = mission.createSession(p.id, { tmuxId: 'msn-4444dddd' });
     padTmux.sendText = async () => ({ lines: 1 }); // typed, echoed by nothing
     await assert.rejects(
       () => mission.sendText(s.id, 'anyone there?'),
-      (e) => e.code === 'mission_tui_not_ready' && /never changed/.test(e.message)
+      (e) => e.code === 'mission_send_unconfirmed'
+        && e.attempted === true
+        && e.acceptance === 'unknown'
+        && /unconfirmed/.test(e.message)
+        && !/did not receive/.test(e.message)
     );
   });
 
@@ -1326,7 +1331,87 @@ describe('Mission - send refuses what it cannot type into (plan 62 1b/1c/1h)', (
     const p = mission.createProject({ name: 'vanish', agent: 'pad-msn-oc', folder: '/www1/a' });
     const s = mission.createSession(p.id, { tmuxId: 'msn-4444dddd' });
     padTmux.captureScreen = async () => ({ text: '', live: false });
-    await assert.rejects(() => mission.sendText(s.id, 'anyone there?'), (e) => e.code === 'mission_tui_not_ready');
+    await assert.rejects(
+      () => mission.sendText(s.id, 'anyone there?'),
+      // A pane that died after the write is its own case from "pane alive but
+      // quiet": the text may have been typed, but nothing is observable — the
+      // write is recorded as attempted and the outcome as unknown.
+      (e) => e.code === 'mission_tui_not_ready' && e.attempted === true && e.acceptance === 'unknown'
+    );
+  });
+
+  // Plan 91 §Phase 5 live finding (2026-10-12): a startup "confirmed" by a
+  // repaint sat 12 idle minutes with a worker that never responded — the
+  // repaint was the TUI boot banner on a FRESH conversation id, and the old
+  // fallback accepted any repaint when the store had no activity yet. A known
+  // store layout with no transcript for the conversation must not confirm on
+  // repaint; only a store layout the webui cannot see at all keeps the
+  // repaint fallback. These tests stub `agentStore.readActivity` and restore
+  // the exact original reference afterwards (a bound copy would wedge the
+  // module for every later suite).
+  it('a repaint with no transcript for a known store is unconfirmed, not acceptance', async () => {
+    const agentStore = require('../services/agent-store');
+    const realRead = agentStore.readActivity;
+    // Known layout (a path was located), conversation absent, stays absent:
+    // the boot banner repaints, our input never lands in any transcript.
+    agentStore.readActivity = async () => ({
+      session: 'ses_fresh', store: { path: '/ws/data/opencode/opencode.db', driver: 'opencode', available: false, reason: 'no-store', detail: 'no transcript' },
+      lastMessage: null, lastToolCall: null, lastActivityAt: null,
+    });
+    try {
+      const p = mission.createProject({ name: 'freshconv', agent: 'pad-msn-oc', folder: '/www1/a' });
+      const s = mission.createSession(p.id, { tmuxId: 'msn-88881111', agentSessionId: 'ses_fresh' });
+      await assert.rejects(
+        () => mission.sendText(s.id, 'start working'),
+        (e) => e.code === 'mission_send_unconfirmed'
+          && e.acceptance === 'unknown'
+          && /no new activity/.test(e.message)
+      );
+    } finally {
+      agentStore.readActivity = realRead;
+    }
+  });
+
+  it('the same fresh conversation confirms once its input actually lands in the store', async () => {
+    const agentStore = require('../services/agent-store');
+    const realRead = agentStore.readActivity;
+    // First read (baseline): nothing yet. Later reads: the input landed.
+    let calls = 0;
+    agentStore.readActivity = async () => {
+      calls++;
+      const landed = calls >= 3;
+      return {
+        session: 'ses_landing', store: { path: '/ws/data/opencode/opencode.db', driver: 'opencode', available: landed, reason: landed ? null : 'no-store' },
+        lastMessage: null, lastToolCall: null, lastActivityAt: landed ? new Date().toISOString() : null,
+      };
+    };
+    try {
+      const p = mission.createProject({ name: 'landing', agent: 'pad-msn-oc', folder: '/www1/a' });
+      const s = mission.createSession(p.id, { tmuxId: 'msn-88882222', agentSessionId: 'ses_landing' });
+      const r = await mission.sendText(s.id, 'start working');
+      assert.strictEqual(r.confirmed, true, 'a genuinely-landed input still confirms');
+      assert.strictEqual(r.acceptance, 'confirmed');
+    } finally {
+      agentStore.readActivity = realRead;
+    }
+  });
+
+  it('an unlocatable store keeps the repaint fallback (unknown layout, nothing to correlate)', async () => {
+    const agentStore = require('../services/agent-store');
+    const realRead = agentStore.readActivity;
+    // Unsupported driver / missing base: no path, so there is nothing to poll.
+    agentStore.readActivity = async () => ({
+      session: 'ses_nostore', store: { path: null, driver: 'codex', available: false, reason: 'no-store', detail: 'no readable store' },
+      lastMessage: null, lastToolCall: null, lastActivityAt: null,
+    });
+    try {
+      const p = mission.createProject({ name: 'nostore', agent: 'pad-msn-oc', folder: '/www1/a' });
+      const s = mission.createSession(p.id, { tmuxId: 'msn-88883333', agentSessionId: 'ses_nostore' });
+      const r = await mission.sendText(s.id, 'start working');
+      assert.strictEqual(r.confirmed, true, 'repaint remains the only signal where no store exists');
+    } finally {
+      agentStore.readActivity = realRead;
+    }
   });
 
   it('answers "Allow always" never — that is the human\'s durable policy call', async () => {

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { usePopup, useDirtyNavigation } from '../../lib/navigation'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../../lib/api'
 import { hostSourceIssue } from '../../lib/workspace-guards'
@@ -101,7 +102,9 @@ export default function SettingsTab({ agent }) {
   const [loadError, setLoadError] = useState('')
   const [saving, setSaving] = useState(false)
   const [modal, setModal] = useState(null)
-  const [healthModal, setHealthModal] = useState(null)
+  const [healthPopup, openHealthPopup, closeHealthPopup] = usePopup('health-info')
+  const healthModal = healthPopup?.args[0] === agent.name ? { key: healthPopup.value } : null
+  const setHealthModal = (value) => value ? openHealthPopup(agent.name) : closeHealthPopup()
   const [healthStatus, setHealthStatus] = useState(null)
   const [healthCounts, setHealthCounts] = useState(null)
   const [healthLoading, setHealthLoading] = useState(false)
@@ -122,8 +125,11 @@ export default function SettingsTab({ agent }) {
   const [postCreateDirty, setPostCreateDirty] = useState(false)
   const [postStartDirty, setPostStartDirty] = useState(false)
   const [postAttachDirty, setPostAttachDirty] = useState(false)
+  useDirtyNavigation(volDirty || buildDirty || postCreateDirty || postStartDirty || postAttachDirty, (l) => l.pathname)
   const [recreateInfo, setRecreateInfo] = useState(null)
-  const [containerInfoModal, setContainerInfoModal] = useState(null)
+  const [infoPopup, openInfoPopup, closeInfoPopup] = usePopup('container-info')
+  const containerInfoModal = infoPopup?.args[0] === agent.name ? { key: infoPopup.value } : null
+  const setContainerInfoModal = (value) => value ? openInfoPopup(agent.name) : closeInfoPopup()
   // Plan 41 item 20: the "Dev Container" card state
   const [dcInfo, setDcInfo] = useState(null)
   const [dcLoading, setDcLoading] = useState(false)
@@ -1254,8 +1260,10 @@ export default function SettingsTab({ agent }) {
             variant="secondary"
             size="sm"
             onClick={handleDcSync}
-            disabled={saving || dcAction !== '' || !dcInfo?.sync || !dcInfo?.found}
-            title={!dcInfo?.sync || !dcInfo?.found ? 'Nothing to sync — the pad never adopted this devcontainer' : undefined}
+            disabled={saving || dcAction !== '' || !dcInfo?.sync || !dcInfo?.found || dcInfo?.writable === false}
+            title={dcInfo?.writable === false
+              ? 'The mirror cannot be written from this workspace'
+              : !dcInfo?.sync || !dcInfo?.found ? 'Nothing to sync — the pad never adopted this devcontainer' : undefined}
           >
             {dcAction === 'sync' ? 'Syncing…' : 'Sync'}
           </Button>
@@ -1263,10 +1271,14 @@ export default function SettingsTab({ agent }) {
             variant="primary"
             size="sm"
             onClick={handleDcRegenerate}
-            disabled={saving || dcAction !== '' || !dcInfo?.workspacePath}
+            disabled={saving || dcAction !== '' || !dcInfo?.workspacePath || dcInfo?.writable === false}
+            title={dcInfo?.writable === false ? dcInfo?.writeNote || 'The mirror cannot be written from this workspace' : undefined}
           >
             {dcAction === 'regenerate' ? 'Working…' : dcInfo?.found ? 'Regenerate' : 'Generate'}
           </Button>
+          {dcInfo?.writableVia === 'pad' && (
+            <span className="text-[11px] text-ink-faint">{dcInfo?.writeNote}</span>
+          )}
           {dcInfo?.state === 'project-authored' && (
             <span className="text-xs text-ink-dim">Sync preserves your custom fields — Regenerate overwrites them.</span>
           )}

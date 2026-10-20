@@ -392,7 +392,7 @@ selected column back to the aggregate (the old `refreshActive` froze
 all-projects after any selected-project mutation).
 
 **The view persists across a refresh (plan 68).** `selectedProjectId`,
-`selectedSessionId` and the whole `openSession` snapshot persist to
+`selectedConversationId` and the whole `openSession` snapshot persist to
 `localStorage['pad-mission-view']` on every state change and hydrate once at
 store creation. On load each field is validated: a project that no longer
 exists → `''`, an `openSession` whose project is gone → `null`. A refresh
@@ -403,10 +403,48 @@ key**, because `JSON.stringify` drops `undefined` and an absent key rehydrates
 to `undefined` again (first-visit store state must be `null`); and a corrupt
 blob is ignored (`''`/`''`/`null`), never thrown.
 
-**`"+ New session"` is disabled until a project is selected** — in the all view
-it shows the tooltip "Pick a project first" and the label never varies ("+ New
-session", not "+ New in \<project\>"). New sessions are created per selected
-project.
+**A fetch never invents a highlight (plan 73).** The middle-column highlight is
+the conversation the user opened (`selectedConversationId`), carried forward by
+every refetch and poll and kept across a close; it is cleared only when the list
+it belongs to is replaced (project switch, new project, delete project). So a
+fresh page with nothing opened shows **zero** `.msn-row-selected` rows while col
+3 shows "No session selected" — the two always agree.
+
+**A green dot means "open", and the header says so (plan 81).** The dot is
+mounted only when the server says `open` — a live agent TUI is attached, idle or
+mid-turn — so it is not a "working" light. A live pane whose agent exited is a
+different state: the row shows the word `shell` and no dot, because typing there
+runs shell commands. Whenever at least one row carries a dot, the sticky
+`Sessions` header shows a `● open` legend (with tooltip) so the meaning is
+readable without hovering a 6px circle; the per-row dot keeps the precise
+busy/idle `title`. The same `open` gates the row's hover actions
+(`.msn-row-actions`: pop out, solo lock, runner, close): a shell row has none —
+close would kill a pane whose conversation is already closed, lock has no agent
+to lock out, and its timestamp must not fade to reveal buttons that do not
+exist. Dead (history) rows have no actions either. `sessionOpen()` in
+`SessionList.jsx` is the one server-first derivation used by both the row and
+the legend (the `live || busy` fallback exists only for a row too old to carry
+`open`).
+
+**One split button creates a session (plan 96).** Col 2's toolbar carries a
+single joined control, `[ + New session | ▾ ]`: the left half starts an ordinary
+session in the selected project (the old `+ New session` behavior, including the
+`Opening…` busy label), and the chevron opens a dropdown whose only item is
+`∞ New infinite session` ("Runs QUEUE.md until done"), which opens the same
+RunnerDialog create popup the old standalone `∞ Infinite runner` button did
+(`openPopup('runner-new', project.id)` — a create, no runner bound until saved).
+The left click never opens the menu, and the chevron never starts a session.
+Hooks: `.msn-btn-new-session` stays on the left half, `.msn-btn-new-caret` is the
+chevron (stroked 14px SVG, never a `▾` glyph), `.msn-new-menu` is the panel and
+`.msn-new-menu-infinite` its item; `.msn-btn-new-runner` is gone. The menu's
+`open` state is local to `SessionCreateSplit.jsx` on purpose — a 15s listing poll
+re-renders the toolbar and must not close it. It closes on `Esc` (focus returns
+to the chevron), an outside `mousedown`, focus leaving the group, or selecting
+the item; opening moves focus to the item. `newBusy` (from `startingKey ===
+'new:<projectId>'`) disables BOTH halves — one in-flight ordinary start must not
+queue a second start or an infinite create — and with no project selected both
+halves are disabled with the title "Pick a project first". The row-level ∞
+actions and the terminal-header `RunnerControls` are unchanged.
 
 **History probe errors live in the error band, not the list (plan 68).**
 Per-project history reads that fail (e.g. "agent is not running") surface as a
@@ -418,6 +456,15 @@ anywhere a backend error string needs to become UI prose.
 
 ## Frontend Conventions and Gotchas
 
+- **Tooltips are the shared `Tooltip` primitive, never a native `title`**
+  (`src/client/src/components/Tooltip.jsx`) — it reveals on hover and on
+  keyboard focus (`.tt:focus-within`), and clamps itself inside the viewport.
+  Use `portal` when the trigger sits in an `overflow: auto` scroller (the
+  collapsed project rail): a pseudo-element tooltip is clipped by the
+  scrollport, so the portal renders the bubble in `document.body` and places it
+  from the trigger's rect. The portal's focus handler checks
+  `e.target.matches(':focus-visible')` because a mouse click also focuses the
+  button — without it the bubble would stick after the pointer leaves.
 - **JSX/CSS edits need a build.** The SPA serves the built bundle from
   `src/public/`, so editing a `.jsx` file alone does nothing until
   `cd src/client && npm run build` + `docker restart paddock`. Symptom: a new

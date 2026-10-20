@@ -1,5 +1,7 @@
 import { useEffect } from 'react'
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { createBrowserRouter, createRoutesFromElements, RouterProvider, Outlet, Route, Navigate, useLocation } from 'react-router-dom'
+import { NavigationProvider } from './lib/navigation'
+import { safeReturnTo } from './lib/url-state'
 import { useAuth } from './stores/auth'
 import { ToastProvider } from './lib/toast'
 import { ConfirmProvider } from './lib/confirm'
@@ -14,6 +16,7 @@ import Vault from './pages/Vault'
 import GlobalBackups from './pages/GlobalBackups'
 import Configs from './pages/Configs'
 import Mission from './pages/Mission'
+import MissionSessionPopout from './pages/MissionSessionPopout'
 import Onboard from './pages/Onboard'
 import Profile from './pages/Profile'
 import DashboardLayout from './components/DashboardLayout'
@@ -21,9 +24,10 @@ import DashboardLayout from './components/DashboardLayout'
 function RequireAuth({ children }) {
   const authenticated = useAuth((s) => s.authenticated)
   const loading = useAuth((s) => s.loading)
+  const location = useLocation()
 
   if (loading) return null
-  if (!authenticated) return <Navigate to="/login" replace />
+  if (!authenticated) return <Navigate to={`/login?returnTo=${encodeURIComponent(safeReturnTo(location.pathname + location.search + location.hash))}`} replace />
   return children
 }
 
@@ -47,35 +51,36 @@ function AuthPage({ children, ...layoutProps }) {
   )
 }
 
+const router = createBrowserRouter(createRoutesFromElements(
+  <Route element={<AuthGate><NavigationProvider><Outlet /></NavigationProvider></AuthGate>}>
+    <Route path="/login" element={<Login />} />
+    <Route path="/setup" element={<Setup />} />
+    <Route path="/agents" element={<AuthPage><Dashboard /></AuthPage>} />
+    <Route path="/agents/create" element={<AuthPage><CreateAgent /></AuthPage>} />
+    <Route path="/agents/create/:name" element={<AuthPage><CreateAgent /></AuthPage>} />
+    <Route path="/agents/:agentId/onboard" element={<AuthPage><Onboard /></AuthPage>} />
+    <Route path="/agents/:agentId/:tab" element={<AuthPage fullHeight><AgentDetail /></AuthPage>} />
+    <Route path="/agents/:agentId" element={<AuthPage fullHeight><AgentDetail /></AuthPage>} />
+    <Route path="/vault" element={<AuthPage><Vault /></AuthPage>} />
+    <Route path="/backups" element={<AuthPage><GlobalBackups /></AuthPage>} />
+    <Route path="/configs" element={<AuthPage><Configs /></AuthPage>} />
+    <Route path="/mission" element={<AuthPage fullHeight><Mission /></AuthPage>} />
+    <Route path="/mission/session/:sessionId" element={<RequireAuth><MissionSessionPopout /></RequireAuth>} />
+    <Route path="/profile" element={<AuthPage><Profile /></AuthPage>} />
+    <Route path="/profile/:tab" element={<AuthPage><Profile /></AuthPage>} />
+    <Route path="/credentials" element={<Navigate to="/vault" replace />} />
+    <Route path="/" element={<Navigate to="/agents" replace />} />
+    <Route path="*" element={<Navigate to="/agents" replace />} />
+  </Route>
+))
+
 export default function App() {
   return (
     <ToastProvider>
       <ConfirmProvider>
         <PromptProvider>
           <AlertProvider>
-          <BrowserRouter>
-          <AuthGate>
-            <Routes>
-              <Route path="/login" element={<Login />} />
-              <Route path="/setup" element={<Setup />} />
-              <Route path="/agents" element={<AuthPage><Dashboard /></AuthPage>} />
-              <Route path="/agents/create" element={<AuthPage><CreateAgent /></AuthPage>} />
-              <Route path="/agents/create/:name" element={<AuthPage><CreateAgent /></AuthPage>} />
-              <Route path="/agents/:agentId/onboard" element={<AuthPage><Onboard /></AuthPage>} />
-              <Route path="/agents/:agentId/:tab" element={<AuthPage fullHeight><AgentDetail /></AuthPage>} />
-              <Route path="/agents/:agentId" element={<AuthPage fullHeight><AgentDetail /></AuthPage>} />
-              <Route path="/vault" element={<AuthPage><Vault /></AuthPage>} />
-              <Route path="/backups" element={<AuthPage><GlobalBackups /></AuthPage>} />
-              <Route path="/configs" element={<AuthPage><Configs /></AuthPage>} />
-              <Route path="/mission" element={<AuthPage fullHeight><Mission /></AuthPage>} />
-              <Route path="/profile" element={<AuthPage><Profile /></AuthPage>} />
-              <Route path="/profile/:tab" element={<AuthPage><Profile /></AuthPage>} />
-              <Route path="/credentials" element={<Navigate to="/vault" replace />} />
-              <Route path="/" element={<Navigate to="/agents" replace />} />
-              <Route path="*" element={<Navigate to="/agents" replace />} />
-            </Routes>
-          </AuthGate>
-        </BrowserRouter>
+           <RouterProvider router={router} />
         </AlertProvider>
         </PromptProvider>
       </ConfirmProvider>

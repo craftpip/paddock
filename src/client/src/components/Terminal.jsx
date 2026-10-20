@@ -1095,20 +1095,20 @@ const Terminal = forwardRef(function Terminal(
                 }}
                 onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); switchSession(s.name) } }}
                 title={tabTitle ? `${s.name} — ${tabTitle}` : `Session ${s.name}`}
-                className={`terminal-tab group relative -mb-px first:ml-2 flex min-w-0 max-w-48 shrink-0 cursor-pointer items-center gap-1 border-b-2 pl-3 pr-1.5 text-xs font-mono transition-colors outline-none ${isCur ? 'bg-sunken text-ink border-accent' : 'text-ink-dim border-transparent hover:text-ink hover:bg-raised'}`}
+                className={`terminal-tab group relative -mb-px first:ml-2 flex min-w-24 max-w-48 shrink-0 cursor-pointer items-center border-b-2 pl-3 pr-2 text-xs font-mono transition-colors outline-none ${isCur ? 'bg-sunken text-ink border-accent' : 'text-ink-dim border-transparent hover:text-ink hover:bg-raised'}`}
               >
-                <span className={`terminal-tab-label min-w-0 flex-1 truncate ${sessionsLoading && !sessionsLoaded ? 'animate-pulse' : ''}`}>
+                <span className={`terminal-tab-label min-w-0 flex-1 truncate ${sessionsLoading && !sessionsLoaded ? 'animate-pulse' : ''} ${isCur ? '[mask-image:linear-gradient(to_right,#000_calc(100%_-_2.25rem),transparent)]' : 'group-hover:[mask-image:linear-gradient(to_right,#000_calc(100%_-_2.25rem),transparent)] group-focus-within:[mask-image:linear-gradient(to_right,#000_calc(100%_-_2.25rem),transparent)]'}`}>
                   {tabTitle || s.name}
                 </span>
                 <Button
-                  variant="dangerLink"
+                  variant="ghost"
                   size="bare"
                   onClick={(e) => { e.stopPropagation(); closeSession(s.name) }}
                   title={`Close session ${s.name}`}
                   aria-label={`Close session ${s.name}`}
-                  className={`h-4.5 w-4.5 shrink-0 rounded-full p-0 text-ink-faint hover:text-danger hover:bg-danger-soft leading-none ${isCur ? '' : 'opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto'}`}
+                  className={`absolute right-1 top-1/2 h-8 w-8 -translate-y-1/2 shrink-0 rounded-full p-0 leading-none ${isCur ? '' : 'opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto'}`}
                 >
-                  <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" aria-hidden="true">
+                  <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" aria-hidden="true">
                     <path d="m5 5 14 14M19 5 5 19" />
                   </svg>
                 </Button>
@@ -1122,7 +1122,7 @@ const Terminal = forwardRef(function Terminal(
             onClick={newSession}
             title="New terminal tab"
             aria-label="New terminal tab"
-            className="self-center mx-2 h-7 w-7 shrink-0 rounded-full border border-line-faint p-0 text-lg leading-none text-ink-dim hover:text-accent-text hover:bg-raised"
+            className="self-center mx-2 h-8 w-8 shrink-0 rounded-full border border-line-faint p-0 text-lg leading-none text-ink-dim hover:text-accent-text hover:bg-raised"
           >
             +
           </Button>

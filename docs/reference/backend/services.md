@@ -1,6 +1,22 @@
 # Backend Services
 
-> Last updated: 2026-10-16
+> Last updated: 2026-10-19
+
+## OpenCode Free Quota Detection (provider-limit.js)
+
+`screenUsageEvidence` recognizes the measured OpenCode 1.19.0 live-terminal status
+`Free usage exceeded, subscribe to Go [retrying in … attempt #…]`. A generic 429,
+empty assistant message, or idle worker is not this explicit terminal signal.
+
+`mission.observeRunnerUsage` captures the runner's bound tmux pane. An explicit quota
+notice disables queue dispatch, sets `control_state: need_input` and
+`stop_cause: usage_exhausted`, and passes evidence to the episode-deduplicated
+`usage_exhausted` callback outbox even if the provider is still retrying its turn.
+The worker process is not restarted or interrupted by this observation.
+
+The callback must have a saved script and be enabled. Empty assistant steps do not
+establish recovery or re-arm the callback. Real output is required. A terminal
+capture that is missing the notice does not itself prove recovery.
 
 ## PAD Discovery (agent-registry.js)
 
@@ -649,18 +665,40 @@ Business logic: See `overview/business-logic.md` — Backup and Restore.
 
 The webui container runs as **root** (plan 43), so every file it writes is
 root-owned by default — but the user's files must stay `PUID:PGID`-owned. This
-module is the chown-on-create discipline that keeps user files owned by the
-user despite the root process.
+module keeps user-facing files owned by the user despite the root process.
+Plan 95 moved the user-facing write paths from "chown after create" to
+**write-time ownership**: the primitive that creates a directory, writes a file
+or atomically replaces one also verifies the result, so a failed correction is
+an honest error rather than a silent success.
 
 **Functions:**
-- `ensureOwned(p)` — `fs.chownSync(p, USER_UID, USER_GID)` when not already
-  owned (cheap `stat` compare). No-op on missing paths, never throws. Called
-  right after every webui create site (instance dir, `meta.env`,
-  `docker-compose.yml`, `web.json`, publish state files, `logs/`,
-  `src/data/app.db*`) — one call after each create, never batched, so a crash
-  between create and chown cannot leave a root-owned file.
+- `ensureOwned(p)` — best-effort `fs.chownSync(p, USER_UID, USER_GID)` when not
+  already owned. `lstat`-based, so a symlink is skipped (never chowned through);
+  no-op on missing paths, never throws. Kept for background repairs and older
+  create sites (instance dir, `meta.env`, `docker-compose.yml`, `web.json`,
+  publish state files, `logs/`, `src/data/app.db*`).
+- `ensureOwnedStrict(p, { contentWritten })` — verifies uid/gid, chowns when
+  this process may, then re-reads to verify. Throws `OwnershipError` with a
+  machine `code` (`ownership_chown_denied`, `ownership_chown_failed`,
+  `ownership_verify_failed`, `ownership_target_missing`,
+  `ownership_symlink_refused`, …). The message and metadata carry only
+  path/uid/gid, never file content. `contentWritten: true` distinguishes "the
+  bytes landed but ownership did not" so a caller does not blindly rewrite.
+- `mkdirOwned(p, { boundary, mode? })` — resolves the path through existing
+  symlinks, rejects a target outside `boundary` (`ownership_path_escape`) or a
+  symlink leaf, creates missing parents, and normalizes **only the directories
+  this call created**; pre-existing ancestors are never chowned.
+- `writeFileOwned(p, content, { boundary, exclusive?, mode? })` — symlink/clobber
+  checks, `mkdirOwned` on the parent, write, then `ensureOwnedStrict`.
+  `exclusive` keeps the queue's create-only contract; an existing file's mode is
+  preserved, and a restrictive mode is never widened to make a write succeed.
+- `atomicWriteOwned(p, content, { boundary, mode? })` — allocates a temp inode,
+  writes and **normalizes it before the rename**, preserves the existing mode,
+  renames, then verifies the final path. Used by the queue CAS writer.
 - `normalizeTree(root, skipDir?)` — recursive chown of a tree. Symlinks are
   never followed. `skipDir` (predicate, called on each dir) prunes a subtree.
+  This and the boot sweep remain compatibility backstops, not the primary
+  ownership mechanism.
 - `ensureDataOwned()` / `ensureDbOwned()` — normalize `src/data/`; the latter
   re-runs after the DB is opened because a fresh `app.db*` from a root process
   is root-owned.
@@ -675,14 +713,36 @@ user despite the root process.
 **User-mode agent processes.** In a PAD configured `USER_MODE=user`, every
 *managed agent process* runs as the pad user (`PUID:PGID`, `HOME=/root`), not
 root: the published agent server (the web hook above), every control-plane
-`docker exec` (`task-runner`, `orchestrator.execInPad`, the MCP `exec` tool),
-and the Mission TUI. The shared primitive is `pad-tmux.termUserArgs(name)` —
+`docker exec` (`task-runner`, `orchestrator.execInPad`, the MCP `exec` tool,
+and `workspace.containerExec` since plan 95), and the Mission TUI. The shared
+primitive is `pad-tmux.termUserArgs(name)` —
 `['-u', '<uid>:<gid>', '-e', 'HOME=/root']` for a user-mode pad, `[]` for
 root-mode — and every exec/spawn site splices it in. This matters because a root
 process plants root-owned files in the pad's `HOME` that the pad user can never
 reclaim; plan 89 closed the last *managed* root launch — the published server
 (§ `buildWebHook`) — so only a human-run root `opencode` (host `docker exec` or
 SSH) can still plant them. A root-mode PAD is unchanged.
+
+**Where write-time ownership is enforced (plan 95).** Plans, plan `INDEX.md`,
+`QUEUE.md` and the `QUEUE.paused` marker; host-scope workspace create/write/
+upload (bounded by the agent's browsable root); generated and synced
+`.devcontainer/` files; config saves (JSON and text/YAML); `.env`; instance
+`build.env`/custom Dockerfile; compose/lifecycle/web-hook writes; and the
+stale-door quarantine directory. Ordinary plan-file writes and the queue's
+atomic replacement now own the temp inode before the rename, so a crash cannot
+leave a root-owned queue. The boot sweep (§ below) remains a backstop for older
+files, not the mechanism these paths rely on.
+
+**Container-side workspace helper.** `workspace.containerExec` runs through
+`termUserArgs(name)` and passes `PUID`/`PGID` as structured payload fields (never
+shell-interpolated source). In a user-mode PAD the helper is already uid 1000 and
+verifies inheritance; in a root-mode PAD it chowns only the outputs it created
+(`save`, `create`, `writeB64`, `mkdir`, `mkdirp` and the directories those create)
+and verifies them. Read-only operations never chown, and a rename/move preserves
+the moved data's existing ownership rather than recursively retaking a tree.
+Agent-daemon output remains outside this boundary: a root-mode agent writing its
+own files is not a Paddock writer, and the boot sweep does not chase arbitrary
+workspace source files.
 
 `app.js` runs `ensureDataOwned()` + DB init at boot, then a background
 `normalizeTree(INSTANCES_DIR, hermes-skip)` — the automatic replacement for the

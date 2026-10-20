@@ -88,6 +88,148 @@ function migrate(db) {
       FOREIGN KEY (agent_id) REFERENCES agents(id)
     );
 
+    -- Plan 92 §Phase 2: lifecycle callback scripts. Settings keyed by
+    -- (runner, event); absent row (or absent file) is a DISABLED callback, so
+    -- existing runners need no data migration. History carries plain-text
+    -- runner/project identity with deliberately NO foreign key to
+    -- infinite_runners: destroy deletes that row, and history plus script
+    -- files must survive it.
+    CREATE TABLE IF NOT EXISTS runner_callbacks (
+      runner_id TEXT NOT NULL,
+      event TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 0,
+      revision TEXT,
+      updated_at TEXT,
+      PRIMARY KEY (runner_id, event)
+    );
+    CREATE TABLE IF NOT EXISTS runner_callback_history (
+      id TEXT PRIMARY KEY,
+      runner_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      runner_name TEXT NOT NULL,
+      event TEXT NOT NULL,
+      script_revision TEXT,
+      status TEXT NOT NULL,
+      exit_code INTEGER,
+      stdout TEXT,
+      stderr TEXT,
+      truncated INTEGER NOT NULL DEFAULT 0,
+      cwd TEXT,
+      started_at TEXT,
+      ended_at TEXT,
+      created_at TEXT NOT NULL
+    );
+    -- Plan 92 §Phase 3: durable callback outbox. Rows are NEVER deleted (they
+    -- are the dedup record and the audit trail); finished rows mirror into
+    -- history for owner-scoped reads. dedup_key is the one uniqueness guard:
+    -- runner:event for init/destroy, runner:event:item:attempt for plan
+    -- events, runner:event:episode for usage exhaustion.
+    CREATE TABLE IF NOT EXISTS runner_callback_outbox (
+      id TEXT PRIMARY KEY,
+      runner_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      runner_name TEXT NOT NULL,
+      project_name TEXT NOT NULL,
+      agent_name TEXT NOT NULL,
+      session_id TEXT,
+      event TEXT NOT NULL,
+      item_id TEXT,
+      item_attempt TEXT,
+      plan_path TEXT,
+      queue_path TEXT,
+      usage_reason TEXT,
+      cwd TEXT NOT NULL,
+      script_revision TEXT NOT NULL,
+      script_body TEXT NOT NULL,
+      operation_id TEXT,
+      dedup_key TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL DEFAULT 'pending',
+      exit_code INTEGER,
+      stdout TEXT,
+      stderr TEXT,
+      truncated INTEGER NOT NULL DEFAULT 0,
+      started_at TEXT,
+      ended_at TEXT,
+      created_at TEXT NOT NULL
+    );
+    -- Plan 92 §Phase 3: durable per-item queue observation. A worker edits
+    -- QUEUE.md with its own tools, bypassing every Paddock gate, so
+    -- plan_started / plan_completed fire on OBSERVED transitions (by stable
+    -- item id) rather than on a privileged write. attempt counts observed
+    -- entries into "in progress": a first/next item earns a new attempt and a
+    -- fresh event, a resume/restart of the SAME in-progress item is no
+    -- transition, and an explicit requeue (in progress -> new -> in progress)
+    -- earns attempt+1. Rows are never deleted (they are the event identity).
+    CREATE TABLE IF NOT EXISTS runner_queue_observations (
+      runner_id TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      plan_path TEXT,
+      last_status TEXT,
+      attempt INTEGER NOT NULL DEFAULT 0,
+      last_seen_at TEXT,
+      started_at TEXT,
+      PRIMARY KEY (runner_id, item_id)
+    );
+    -- Plan 92 §Phase 3: per-runner usage-exhaustion episode state. The measured
+    -- rule (plan 75 row 8) is "newest message is user AND not busy AND
+    -- tokens_output == 0". episode_seq counts CONFIRMED exhaustion episodes:
+    -- it increments only when the signature is read AND the conversation is not
+    -- busy, so a transient limit or a live turn never arms an episode, and an
+    -- unreadable probe never clears one. Only measured recovery (the last input
+    -- getting a real reply) resets state to clear, which re-arms the counter so
+    -- a later exhaustion is a NEW episode with a new dedup key.
+    CREATE TABLE IF NOT EXISTS runner_usage_state (
+      runner_id TEXT PRIMARY KEY,
+      episode_seq INTEGER NOT NULL DEFAULT 0,
+      state TEXT NOT NULL DEFAULT 'clear',
+      reason TEXT,
+      evidence TEXT,
+      observed_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS runner_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      runner_id TEXT NOT NULL,
+      session_id TEXT,
+      type TEXT NOT NULL,
+      category TEXT NOT NULL,
+      severity TEXT NOT NULL DEFAULT 'info',
+      actor TEXT NOT NULL,
+      group_id TEXT,
+      event_key TEXT UNIQUE,
+      details TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_runner_history_runner_id ON runner_history(runner_id, id);
+
+    CREATE TABLE IF NOT EXISTS runner_quota_recoveries (
+      event_id TEXT PRIMARY KEY,
+      runner_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      conversation_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      container_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      error TEXT,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS runner_resolutions (
+      id TEXT PRIMARY KEY,
+      runner_id TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      answer TEXT NOT NULL,
+      idempotency_key TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      error TEXT,
+      created_at TEXT NOT NULL,
+      delivered_at TEXT,
+      requeued_at TEXT,
+      resumed_at TEXT,
+      FOREIGN KEY (runner_id) REFERENCES infinite_runners(id) ON DELETE CASCADE,
+      UNIQUE (runner_id, idempotency_key)
+    );
+
     CREATE TABLE IF NOT EXISTS vault_items (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL UNIQUE,
@@ -208,19 +350,86 @@ function migrate(db) {
       last_progress_at TEXT,
       last_nudge_at TEXT,
       retry_count INTEGER NOT NULL DEFAULT 0,
+      last_dispatch_at TEXT,
+      last_dispatch_revision TEXT,
       last_reason TEXT,
+      pause_mode TEXT,
+      pause_state TEXT NOT NULL DEFAULT 'none',
+      pause_target_item TEXT,
+      pause_requested_at TEXT,
+      stop_cause TEXT,
+      stop_origin TEXT,
+      stop_at TEXT,
+      marker_sync_error TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (project_id) REFERENCES mission_projects(id) ON DELETE CASCADE,
       FOREIGN KEY (session_id) REFERENCES mission_sessions(id) ON DELETE SET NULL
     );
 
+    -- Plan 113: Mission queues are server-owned rows. QUEUE.md is generated
+    -- from these tables and is never read back as queue authority.
+    CREATE TABLE IF NOT EXISTS runner_queues (
+      id TEXT PRIMARY KEY,
+      runner_id TEXT NOT NULL UNIQUE,
+      revision INTEGER NOT NULL DEFAULT 0,
+      custom_instructions TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (runner_id) REFERENCES infinite_runners(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS runner_queue_items (
+      id TEXT PRIMARY KEY,
+      queue_id TEXT NOT NULL,
+      position INTEGER NOT NULL,
+      plan TEXT NOT NULL,
+      status TEXT NOT NULL,
+      reason TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (queue_id, position),
+      FOREIGN KEY (queue_id) REFERENCES runner_queues(id) ON DELETE CASCADE
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_runner_queue_items_queue_item
+      ON runner_queue_items(queue_id, id);
+    CREATE TABLE IF NOT EXISTS runner_queue_events (
+      id TEXT PRIMARY KEY,
+      queue_id TEXT NOT NULL,
+      item_id TEXT,
+      actor TEXT,
+      action TEXT NOT NULL,
+      before_json TEXT,
+      after_json TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (queue_id) REFERENCES runner_queues(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS runner_transitions (
+      id TEXT PRIMARY KEY,
+      runner_id TEXT NOT NULL,
+      from_state TEXT NOT NULL,
+      to_state TEXT NOT NULL,
+      event TEXT NOT NULL,
+      actor TEXT,
+      details TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (runner_id) REFERENCES infinite_runners(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_runner_transitions_runner_created
+      ON runner_transitions(runner_id, created_at);
+
     CREATE INDEX IF NOT EXISTS idx_mission_projects_agent ON mission_projects(agent_name);
     CREATE INDEX IF NOT EXISTS idx_mission_sessions_project ON mission_sessions(project_id);
     CREATE INDEX IF NOT EXISTS idx_infinite_runners_project ON infinite_runners(project_id);
+    CREATE INDEX IF NOT EXISTS idx_runner_queue_items_queue_position ON runner_queue_items(queue_id, position);
+    CREATE INDEX IF NOT EXISTS idx_runner_queue_events_queue_created ON runner_queue_events(queue_id, created_at);
 
     CREATE INDEX IF NOT EXISTS idx_activity_agent ON activity_events(agent_id);
     CREATE INDEX IF NOT EXISTS idx_activity_ts ON activity_events(timestamp);
+    CREATE INDEX IF NOT EXISTS idx_runner_callbacks_runner ON runner_callbacks(runner_id);
+    CREATE INDEX IF NOT EXISTS idx_runner_callback_history_runner ON runner_callback_history(runner_id);
+    CREATE INDEX IF NOT EXISTS idx_runner_callback_history_project ON runner_callback_history(project_id);
+    CREATE INDEX IF NOT EXISTS idx_runner_callback_outbox_status ON runner_callback_outbox(status);
+    CREATE INDEX IF NOT EXISTS idx_runner_callback_outbox_runner ON runner_callback_outbox(runner_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id);
     CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_vault_name ON vault_items(name);
@@ -352,6 +561,59 @@ function migrate(db) {
   }
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_mission_sessions_idem
     ON mission_sessions(project_id, idempotency_key) WHERE idempotency_key IS NOT NULL`);
+
+  // Plan 86: dispatch lease columns for the supervisor's one-task-per-turn design.
+  // Plan 88 §Phase 3: durable per-run operation tracking (idempotency, pending/unconfirmed state).
+  for (const table of ['runner_callbacks', 'runner_callback_outbox']) {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
+    if (!cols.includes('recreate_resume')) db.exec(`ALTER TABLE ${table} ADD COLUMN recreate_resume INTEGER NOT NULL DEFAULT 0`);
+  }
+  const runnerCols = db.prepare("PRAGMA table_info(infinite_runners)").all().map(c => c.name);
+  for (const [col, decl] of [
+    ['queue_file', "TEXT NOT NULL DEFAULT 'QUEUE.md'"],
+    ['last_dispatch_at', 'TEXT'],
+    ['last_dispatch_revision', 'TEXT'],
+    // Plan 86 §Phase 4b: two pause modes need to persist which mode was
+    // requested, whether the worker has confirmed it, which item was targeted,
+    // and when — so a refresh/restart mid-pause does not lose the pending
+    // request and never shows a false "Paused" for a request still in flight.
+    ['pause_mode', 'TEXT'],
+    ['pause_state', "TEXT NOT NULL DEFAULT 'none'"],
+    ['pause_target_item', 'TEXT'],
+    ['pause_requested_at', 'TEXT'],
+    // Plan 88 §Phase 3: durable operation identity for idempotency and
+    // send/ack reconciliation. An operation is created BEFORE dispatch,
+    // tracked through pending → unconfirmed/confirmed/ended/invalidated.
+    ['operation_id', 'TEXT'],
+    ['operation_generation', 'INTEGER NOT NULL DEFAULT 0'],
+    ['operation_status', "TEXT NOT NULL DEFAULT 'none'"],
+    ['operation_started_at', 'TEXT'],
+    ['operation_confirmed_at', 'TEXT'],
+    ['operation_session_id', 'TEXT'],
+    ['operation_prompt_hash', 'TEXT'],
+    ['operation_baseline_user_id', 'TEXT'],
+    ['operation_receipt_user_id', 'TEXT'],
+    ['worker_state', "TEXT NOT NULL DEFAULT 'unknown'"],
+    ['worker_turn_id', 'TEXT'],
+    ['idle_since', 'TEXT'],
+    ['scheduler_decision', 'TEXT'],
+    ['scheduler_reason', 'TEXT'],
+    ['recovery_count', 'INTEGER NOT NULL DEFAULT 0'],
+    // Plan 91 §Phase 2: editable runner-to-LLM prompt templates. Nullable TEXT
+    // holding the validated set as JSON; NULL means the shipped default set, so
+    // existing rows are never rewritten by the migration.
+    ['prompt_templates_json', 'TEXT'],
+    // Plan 97: stop provenance and marker sync tracking
+    ['stop_cause', 'TEXT'],
+    ['stop_origin', 'TEXT'],
+    ['stop_at', 'TEXT'],
+    ['marker_sync_error', 'TEXT'],
+  ]) {
+    if (!runnerCols.includes(col)) db.exec(`ALTER TABLE infinite_runners ADD COLUMN ${col} ${decl}`);
+  }
+  // Plan 92 §Phase 3: past-run cwd display on history rows predating the column.
+  const histCols = db.prepare('PRAGMA table_info(runner_callback_history)').all().map((c) => c.name);
+  if (!histCols.includes('cwd')) db.exec('ALTER TABLE runner_callback_history ADD COLUMN cwd TEXT');
 }
 
 function close() {

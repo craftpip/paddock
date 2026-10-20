@@ -193,13 +193,26 @@ The header tab strip lists the PAD's active tmux sessions (`GET
 Space selects a tab. `+` opens the next free `term-N`; repeated clicks are
 serialized so each request creates a distinct session before the next starts.
 
-Tabs have no vertical padding inset, with an 8px left margin before the first tab. Only the selected
-tab has a visible bottom border; there are no top or side tab borders. Each
+Tabs have no vertical padding inset, with an 8px left margin before the first
+tab. The bar has no vertical padding of its own: tabs own the height and stretch
+to its bottom, so the selected tab's 2px accent border sits on the bar's
+`border-b` (tabs use `-mb-px`). Only the selected tab has a visible bottom
+border; there are no top or side tab borders. Tabs are 96–192px wide; each
 label renders once and truncates with an ellipsis. Its tooltip contains the
-session id and full title. The old repeating marquee is removed. The `+` button
-is circular and follows the last tab when there is room. The list shrinks when
-it overflows, keeping `+` outside the scroller at the right edge of the tab bar.
-On narrow layouts, the tab bar takes its own full-width row above the controls.
+session id and full title. The old repeating marquee is removed.
+
+Close (`×`) and `+` are both 32×32 circular `ghost` icon buttons. The close
+button is an **absolute overlay** at the tab's right edge, so it reserves no
+layout width and the label never reflows when it appears: it is always visible
+on the selected tab and revealed on hover/`focus-within` for the others, with
+`pointer-events-none` while hidden so a click aimed at the label cannot hit it.
+The label end is faded with a CSS mask under the overlay instead of running
+under the glyph. The button stays in the tab order (opacity, never
+`display:none`), and its key events do not also select the parent tab. The `+`
+button is circular and follows the last tab when there is room. The list shrinks
+when it overflows, keeping `+` outside the scroller at the right edge of the tab
+bar. On narrow layouts, the tab bar takes its own full-width row above the
+controls.
 
 A tab starts with its **session name** (`main`, `term-N`). For OpenCode,
 the server can report a TUI title (`OC | …`) through the initial listing and
@@ -219,8 +232,6 @@ Close with `×` or middle-click. Middle-button `mousedown` prevents autoscroll,
 and `auxclick` calls the same close flow as `×`: `DELETE` removes the tmux
 session. Closing the selected tab falls back to its previous neighbour, or
 `main` if none exists; closing an inactive tab keeps the current selection.
-The close button remains keyboard-accessible, and its key events do not also
-select its parent tab.
 
 The connection dot sits between the tabs and controls, with status in its
 tooltip. The selected session is persisted in `localStorage`

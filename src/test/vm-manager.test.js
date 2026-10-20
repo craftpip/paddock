@@ -1260,6 +1260,29 @@ describe('vm-manager - devcontainer plan (plan 41 items 12-16)', () => {
     }
   }
 
+  // Plan 70: syncDevContainer/regenerateDevContainer are async (the pad-write
+  // path), so subtests that call them need an awaiting wrapper — sync cleanup
+  // in the finally would rm the tmp tree before the promise ever ran.
+  // TMP prefix stays /tmp (writable to non-root shells); /var/padtest-* needs
+  // root to create and is the reason the sibling withTmp suites EACCES here.
+  async function withTmpA(fn) {
+    const TMP = '/tmp/padtest70-' + Date.now() + '-' + Math.floor(Math.random() * 1e6);
+    const prevWs = process.env.WORKSPACE_ROOT;
+    const prevHost = process.env.HOST_WORKSPACE_ROOT;
+    process.env.WORKSPACE_ROOT = TMP;
+    process.env.HOST_WORKSPACE_ROOT = TMP;
+    delete require.cache[require.resolve('../services/vm-manager')];
+    const vm = require('../services/vm-manager');
+    try {
+      await fn(TMP, vm);
+    } finally {
+      fs.rmSync(TMP, { recursive: true, force: true });
+      process.env.WORKSPACE_ROOT = prevWs;
+      process.env.HOST_WORKSPACE_ROOT = prevHost;
+      delete require.cache[require.resolve('../services/vm-manager')];
+    }
+  }
+
   function makeWorkspace(TMP, extra) {
     const ws = path.join(TMP, 'ws');
     fs.mkdirSync(path.join(ws, '.devcontainer'), { recursive: true });
@@ -1456,8 +1479,8 @@ describe('vm-manager - devcontainer plan (plan 41 items 12-16)', () => {
     });
   });
 
-  it('syncDevContainer regenerates a generated mirror wholesale after pad changes (item 19)', () => {
-    withTmp((TMP, vm) => {
+  it('syncDevContainer regenerates a generated mirror wholesale after pad changes (item 19)', async () => {
+    await withTmpA(async (TMP, vm) => {
       const ws = path.join(TMP, 'ws');
       fs.mkdirSync(ws, { recursive: true });
       fs.mkdirSync(path.join(TMP, 'instances', 'pad-dc'), { recursive: true });
@@ -1475,7 +1498,7 @@ describe('vm-manager - devcontainer plan (plan 41 items 12-16)', () => {
       fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'),
         `AGENT=opencode\nUSER_MODE=user\nWORKSPACE_HOST=${ws}\nWORKSPACE_DIR=/root/.opencode/workspace\nEXTRA_VOLUMES=${JSON.stringify(extraVols)}\nEXTRA_PORTS=${JSON.stringify(extraPs)}\n`);
 
-      const synced = vm.syncDevContainer('pad-dc', 'opencode', wsMount);
+      const synced = await vm.syncDevContainer('pad-dc', 'opencode', wsMount);
       assert.strictEqual(synced, dcFile);
       const doc = JSON.parse(fs.readFileSync(dcFile, 'utf8'));
       assert.strictEqual(doc['x-paddock'].generated, true);
@@ -1488,8 +1511,8 @@ describe('vm-manager - devcontainer plan (plan 41 items 12-16)', () => {
     });
   });
 
-  it('syncDevContainer updates mapped fields on a project-authored file and preserves the rest', () => {
-    withTmp((TMP, vm) => {
+  it('syncDevContainer updates mapped fields on a project-authored file and preserves the rest', async () => {
+    await withTmpA(async (TMP, vm) => {
       const ws = makeWorkspace(TMP, {
         name: 'project',
         features: { 'ghcr.io/devcontainers/features/node:1': {} },
@@ -1509,7 +1532,7 @@ describe('vm-manager - devcontainer plan (plan 41 items 12-16)', () => {
       fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'),
         `AGENT=opencode\nWORKSPACE_HOST=${ws}\nWORKSPACE_DIR=/root/.opencode/workspace\nDC_PLAN=${JSON.stringify(plan)}\nEXTRA_VOLUMES=${JSON.stringify(extraVols)}\nEXTRA_PORTS=${JSON.stringify(extraPs)}\n`);
 
-      vm.syncDevContainer('pad-dc', 'opencode', wsMount);
+      await vm.syncDevContainer('pad-dc', 'opencode', wsMount);
       const doc = JSON.parse(fs.readFileSync(dcFile, 'utf8'));
       assert.strictEqual(doc.postCreateCommand, 'npm ci', 'edited lifecycle command written back');
       assert.strictEqual(doc.name, 'project', 'non-mapped field preserved');
@@ -1522,14 +1545,14 @@ describe('vm-manager - devcontainer plan (plan 41 items 12-16)', () => {
 
       // Clearing the pad's post-create removes the mapped field.
       vm.writePostCreateScript('pad-dc', '');
-      vm.syncDevContainer('pad-dc', 'opencode', wsMount);
+      await vm.syncDevContainer('pad-dc', 'opencode', wsMount);
       const doc2 = JSON.parse(fs.readFileSync(dcFile, 'utf8'));
       assert.strictEqual(doc2.postCreateCommand, undefined, 'cleared lifecycle command removed from the mirror');
     });
   });
 
-  it('syncDevContainer leaves a devcontainer the pad never adopted untouched', () => {
-    withTmp((TMP, vm) => {
+  it('syncDevContainer leaves a devcontainer the pad never adopted untouched', async () => {
+    await withTmpA(async (TMP, vm) => {
       const ws = makeWorkspace(TMP);
       fs.mkdirSync(path.join(TMP, 'instances', 'pad-dc'), { recursive: true });
       fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'),
@@ -1537,7 +1560,7 @@ describe('vm-manager - devcontainer plan (plan 41 items 12-16)', () => {
       const wsMount = vm.validateWorkspaceMount('pad-dc', 'opencode', ws, '/root/.opencode/workspace');
       const dcFile = path.join(ws, '.devcontainer', 'devcontainer.json');
       const before = fs.readFileSync(dcFile, 'utf8');
-      assert.strictEqual(vm.syncDevContainer('pad-dc', 'opencode', wsMount), null, 'no DC_PLAN + not generated → skip');
+      assert.strictEqual(await vm.syncDevContainer('pad-dc', 'opencode', wsMount), null, 'no DC_PLAN + not generated → skip');
       assert.strictEqual(fs.readFileSync(dcFile, 'utf8'), before, 'file untouched');
     });
   });
@@ -1627,8 +1650,8 @@ describe('vm-manager - devcontainer plan (plan 41 items 12-16)', () => {
     });
   });
 
-  it('regenerateDevContainer creates or rewrites the mirror wholesale (item 20)', () => {
-    withTmp((TMP, vm) => {
+  it('regenerateDevContainer creates or rewrites the mirror wholesale (item 20)', async () => {
+    await withTmpA(async (TMP, vm) => {
       const ws = path.join(TMP, 'ws');
       fs.mkdirSync(ws, { recursive: true });
       fs.mkdirSync(path.join(TMP, 'instances', 'pad-dc'), { recursive: true });
@@ -1637,7 +1660,7 @@ describe('vm-manager - devcontainer plan (plan 41 items 12-16)', () => {
       const wsMount = vm.validateWorkspaceMount('pad-dc', 'opencode', ws, '/root/.opencode/workspace');
 
       // Creates the file when missing.
-      const created = vm.regenerateDevContainer('pad-dc', 'opencode');
+      const created = await vm.regenerateDevContainer('pad-dc', 'opencode');
       assert.strictEqual(created, path.join(ws, '.devcontainer', 'devcontainer.json'));
       let doc = JSON.parse(fs.readFileSync(created, 'utf8'));
       assert.strictEqual(doc['x-paddock'].generated, true);
@@ -1655,7 +1678,7 @@ describe('vm-manager - devcontainer plan (plan 41 items 12-16)', () => {
       const projectMount = vm.validateWorkspaceMount('pad-dc', 'opencode', projectWs, '/root/.opencode/workspace');
       fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'),
         `AGENT=opencode\nUSER_MODE=user\nWORKSPACE_HOST=${projectWs}\nWORKSPACE_DIR=/root/.opencode/workspace\n`);
-      const rewritten = vm.regenerateDevContainer('pad-dc', 'opencode');
+      const rewritten = await vm.regenerateDevContainer('pad-dc', 'opencode');
       assert.strictEqual(rewritten, path.join(projectWs, '.devcontainer', 'devcontainer.json'));
       doc = JSON.parse(fs.readFileSync(rewritten, 'utf8'));
       assert.strictEqual(doc.name, 'Paddock agent workspace', 'custom name replaced');
@@ -1666,10 +1689,10 @@ describe('vm-manager - devcontainer plan (plan 41 items 12-16)', () => {
     });
   });
 
-  it('devcontainer flow works for every custom-workspace agent type (fixed + editable)', () => {
+  it('devcontainer flow works for every custom-workspace agent type (fixed + editable)', async () => {
     const types = ['openclaw', 'picoclaw', 'opencode', 'codex', 'claude'];
     const { getDriver } = require('../services/drivers');
-    withTmp((TMP, vm) => {
+    await withTmpA(async (TMP, vm) => {
       for (const agent of types) {
         const dir = getDriver(agent).workspaceDir;
         const ws = path.join(TMP, `ws-${agent}`);
@@ -1684,7 +1707,7 @@ describe('vm-manager - devcontainer plan (plan 41 items 12-16)', () => {
         let st = vm.devContainerStatus('pad-dc');
         assert.strictEqual(st.state, 'missing', `${agent}: no devcontainer yet`);
         assert.strictEqual(st.workspacePath, ws, `${agent}: workspace resolved`);
-        const created = vm.regenerateDevContainer('pad-dc', agent);
+        const created = await vm.regenerateDevContainer('pad-dc', agent);
         assert.strictEqual(created, path.join(ws, '.devcontainer', 'devcontainer.json'), `${agent}: mirror created`);
         let doc = JSON.parse(fs.readFileSync(created, 'utf8'));
         assert.strictEqual(doc['x-paddock'].generated, true, `${agent}: marked generated`);
@@ -1695,7 +1718,7 @@ describe('vm-manager - devcontainer plan (plan 41 items 12-16)', () => {
         st = vm.devContainerStatus('pad-dc');
         assert.strictEqual(st.state, 'generated', `${agent}: generated state`);
         assert.ok(st.target.includes(`echo ${agent}`), `${agent}: target reflects the pad now`);
-        const synced = vm.syncDevContainer('pad-dc', agent, wsMount);
+        const synced = await vm.syncDevContainer('pad-dc', agent, wsMount);
         assert.strictEqual(synced, created, `${agent}: sync wrote the file`);
         doc = JSON.parse(fs.readFileSync(created, 'utf8'));
         assert.strictEqual(doc.postCreateCommand, `echo ${agent}`, `${agent}: lifecycle command written back`);
@@ -1705,8 +1728,8 @@ describe('vm-manager - devcontainer plan (plan 41 items 12-16)', () => {
     });
   });
 
-  it('hermes (workspaceCapability none) degrades gracefully — no workspace, no mirror', () => {
-    withTmp((TMP, vm) => {
+  it('hermes (workspaceCapability none) degrades gracefully — no workspace, no mirror', async () => {
+    await withTmpA(async (TMP, vm) => {
       fs.mkdirSync(path.join(TMP, 'instances', 'pad-dc'), { recursive: true });
       fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'), 'AGENT=hermes\n');
 
@@ -1715,8 +1738,139 @@ describe('vm-manager - devcontainer plan (plan 41 items 12-16)', () => {
       assert.strictEqual(st.workspacePath, '', 'hermes has no workspace mount at all');
       assert.strictEqual(st.filePath, '');
       assert.strictEqual(st.sync, false, 'nothing to sync');
-      assert.strictEqual(vm.regenerateDevContainer('pad-dc', 'hermes'), null, 'regenerate no-ops');
-      assert.strictEqual(vm.syncDevContainer('pad-dc', 'hermes', null), null, 'sync no-ops');
+      assert.strictEqual(await vm.regenerateDevContainer('pad-dc', 'hermes'), null, 'regenerate no-ops');
+      assert.strictEqual(await vm.syncDevContainer('pad-dc', 'hermes', null), null, 'sync no-ops');
+    });
+  });
+
+  // ── Plan 70: host-only workspaces write the mirror through the pad ──
+
+  /** A workspace the webui can read but does NOT map (outside HOST_WORKSPACE_
+   *  ROOT, like the real /www2/user1 and /www1 pads): containerViewOf → null,
+   *  so the mirror write must go through the pad. Lives under /www2 — the
+   *  workspace guards hard-block /var-style system dirs and /www2 is where
+   *  real host-only workspaces actually sit. */
+  function makeHostOnlyWs(instanceDir) {
+    const host = '/www2/paddock-fixture-70/ws';
+    fs.mkdirSync(host, { recursive: true });
+    fs.writeFileSync(path.join(instanceDir, 'meta.env'),
+      `AGENT=opencode\nWORKSPACE_HOST=${host}\nWORKSPACE_DIR=/root/.opencode/workspace\n`);
+    return host;
+  }
+
+  it('plan 70: status reports the pad-write route for a host-only workspace', async () => {
+    await withTmpA(async (TMP, vm) => {
+      fs.mkdirSync(path.join(TMP, 'instances', 'pad-dc'), { recursive: true });
+      const host = makeHostOnlyWs(path.join(TMP, 'instances', 'pad-dc'));
+      const st = vm.devContainerStatus('pad-dc');
+      assert.strictEqual(st.writableVia, 'pad', 'host-only → written through the pad');
+      assert.strictEqual(st.writable, true, 'the pad route is always available to a mounted workspace');
+      assert.ok(st.writeNote.includes('through the running pad'), 'note explains the pad must be up');
+      // A webui-visible workspace keeps the local route and no note.
+      const localws = path.join(TMP, 'ws');
+      fs.mkdirSync(localws, { recursive: true });
+      fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'),
+        `AGENT=opencode\nWORKSPACE_HOST=${localws}\nWORKSPACE_DIR=/root/.opencode/workspace\n`);
+      const local = vm.devContainerStatus('pad-dc');
+      assert.strictEqual(local.writableVia, 'webui');
+      assert.strictEqual(local.writeNote, '');
+    });
+  });
+
+  it('plan 70: Generate for a host-only workspace composes locally and writes through the pad', async () => {
+    await withTmpA(async (TMP, vm) => {
+      fs.mkdirSync(path.join(TMP, 'instances', 'pad-dc'), { recursive: true });
+      const host = makeHostOnlyWs(path.join(TMP, 'instances', 'pad-dc'));
+      vm.writePostCreateScript('pad-dc', 'npm install');
+      const calls = [];
+      // The fake emulates the real runner's container-side effect: mkdir |
+      // `cat >` land the bytes at the workspace's HOST twin (/www2/...), which
+      // is exactly what a running pad does to the same bind mount.
+      const fakePadWrite = (name, script, input) => {
+        calls.push({ name, script, input });
+        fs.mkdirSync(path.join('/www2/paddock-fixture-70/ws', '.devcontainer'), { recursive: true });
+        fs.writeFileSync(path.join('/www2/paddock-fixture-70/ws', '.devcontainer', 'devcontainer.json'), input || '');
+      };
+      vm._setPadWriteRunner(fakePadWrite);
+      try {
+        const written = await vm.regenerateDevContainer('pad-dc', 'opencode');
+        assert.strictEqual(written, path.join(host, '.devcontainer', 'devcontainer.json'), 'returns the HOST path');
+        assert.strictEqual(calls.length, 1, 'one pad write');
+        assert.strictEqual(calls[0].name, 'pad-dc');
+        assert.ok(calls[0].script.includes(`mkdir -p '/root/.opencode/workspace/.devcontainer'`), 'mkdir of the mirror dir');
+        assert.ok(calls[0].script.includes(`cat > '/root/.opencode/workspace/.devcontainer/devcontainer.json'`), 'cat to the mirror file');
+        assert.ok(!calls[0].script.includes(JSON.stringify(calls[0].input).slice(1, 30)), 'content travels on stdin, never in the script');
+        const doc = JSON.parse(fs.readFileSync(written, 'utf8'));
+        assert.strictEqual(doc['x-paddock'].generated, true, 'host file is the generated mirror');
+        assert.strictEqual(doc.workspaceFolder, '/root/.opencode/workspace');
+        assert.strictEqual(doc.postCreateCommand, 'npm install', 'stdin content landed on disk');
+      } finally {
+        vm._setPadWriteRunner(null);
+        fs.rmSync('/www2/paddock-fixture-70', { recursive: true, force: true });
+      }
+    });
+  });
+
+  it('plan 70: the default pad-write runner maps "No such container" to a typed pad_not_running refusal', async () => {
+    await withTmpA(async (TMP, vm) => {
+      // REAL control: spawn docker exec against a container that cannot exist
+      // (nothing created, nothing tagged) and assert the error lands typed —
+      // exactly what a stopped-pad Generate surfaces to the card toast.
+      await assert.rejects(
+        () => vm._testDefaultPadWriteRunner('pad-no-such-container-xyz', "cat > '/tmp/nope'", 'x'),
+        (e) => e.code === 'pad_not_running' || e.code === 'devcontainer_write_failed',
+        'docker unavailable here counts as failed, not silent success'
+      );
+    });
+  });
+
+  it('plan 70: sync for a host-only workspace keeps pulling the mapped fs + pad content through the pad itself; not-yet-adopted files are never written', async () => {
+    await withTmpA(async (TMP, vm) => {
+      fs.mkdirSync(path.join(TMP, 'instances', 'pad-dc'), { recursive: true });
+      const host = makeHostOnlyWs(path.join(TMP, 'instances', 'pad-dc'));
+      const wsMount = vm.validateWorkspaceMount('pad-dc', 'opencode', host, '/root/.opencode/workspace');
+      // Project-authored file: sync only applies once the pad adopted it.
+      fs.mkdirSync(path.join(host, '.devcontainer'), { recursive: true });
+      fs.writeFileSync(path.join(host, '.devcontainer', 'devcontainer.json'), JSON.stringify({ name: 'project', workspaceFolder: '/workspace' }));
+      const before = fs.readFileSync(path.join(host, '.devcontainer', 'devcontainer.json'), 'utf8');
+      const calls = [];
+      // Same container-side emulation as the Generate test above.
+      const fakePadWrite = (name, script, input) => {
+        calls.push({ name, script, input });
+        fs.mkdirSync(path.join(host, '.devcontainer'), { recursive: true });
+        fs.writeFileSync(path.join(host, '.devcontainer', 'devcontainer.json'), input || '');
+      };
+      vm._setPadWriteRunner(fakePadWrite);
+      try {
+        assert.strictEqual(await vm.syncDevContainer('pad-dc', 'opencode', wsMount), null, 'not adopted → nothing written');
+        assert.strictEqual(calls.length, 0, 'no pad write for an unadopted file');
+        assert.strictEqual(fs.readFileSync(path.join(host, '.devcontainer', 'devcontainer.json'), 'utf8'), before, 'file untouched');
+
+        // Adopt it → sync composes mapped fields locally, hands them to the pad.
+        const plan = vm.resolveDevContainerPlan('pad-dc', 'opencode', wsMount, { allocatePorts: false });
+        fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'),
+          `AGENT=opencode\nWORKSPACE_HOST=${host}\nWORKSPACE_DIR=/root/.opencode/workspace\nDC_PLAN=${JSON.stringify(plan)}\n`);
+        vm.writePostCreateScript('pad-dc', 'npm ci');
+        const synced = await vm.syncDevContainer('pad-dc', 'opencode', wsMount);
+        assert.strictEqual(synced, path.join(host, '.devcontainer', 'devcontainer.json'));
+        assert.strictEqual(calls.length, 1, 'one pad write on adoption');
+        const doc = JSON.parse(calls[0].input);
+        assert.strictEqual(doc.name, 'project', 'non-mapped field preserved');
+        assert.strictEqual(doc.postCreateCommand, 'npm ci', 'mapped lifecycle written');
+        assert.strictEqual(doc['x-paddock'], undefined, 'not marked generated');
+        assert.deepStrictEqual(JSON.parse(fs.readFileSync(synced, 'utf8')), doc, 'file on disk matches the composed stdin');
+
+        // And the refusal type surfaces: a stopped pad surfaces a typed error.
+        vm._setPadWriteRunner(async () => {
+          const e = new Error("Error response from daemon: No such container: pad-dc");
+          e.code = 'pad_not_running';
+          throw e;
+        });
+        await assert.rejects(() => vm.syncDevContainer('pad-dc', 'opencode', wsMount), (e) => e.code === 'pad_not_running', 'stopped pad → typed refusal');
+      } finally {
+        vm._setPadWriteRunner(null, null);
+        fs.rmSync('/www2/paddock-fixture-70', { recursive: true, force: true });
+      }
     });
   });
 
@@ -1946,6 +2100,19 @@ describe('vm-manager - create-time web request', () => {
   process.env.HOST_WORKSPACE_ROOT = '/workspace';
   const vm = require('../services/vm-manager');
 
+  /** A host port nobody holds RIGHT NOW. A hardcoded port is a landmine here:
+   *  the allocator checks the LIVE docker fleet, so a foreign container that
+   *  owns the port fails the test for a reason that has nothing to do with the
+   *  code under test (a container publishing 8123 made this suite red on a
+   *  host that had never run it). Probe the OS AND the fleet, and retry. */
+  async function freeHostPort() {
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const port = String(40000 + Math.floor(Math.random() * 20000));
+      if (!(await vm.hostPortInUse(port, 'pad-a'))) return port;
+    }
+    throw new Error('no free host port found for the test');
+  }
+
   it('no web option → nothing to publish', async () => {
     assert.strictEqual(await vm.resolveWebRequest('pad-a', 'openclaw', undefined), null);
     assert.strictEqual(await vm.resolveWebRequest('pad-a', 'openclaw', null), null);
@@ -1977,23 +2144,26 @@ describe('vm-manager - create-time web request', () => {
   });
 
   it('openclaw refuses to publish without a gateway token (it binds non-loopback)', async () => {
+    const hostPort = await freeHostPort();
     await assert.rejects(
-      () => vm.resolveWebRequest('pad-a', 'openclaw', { active: true, hostPort: '45999' }),
+      () => vm.resolveWebRequest('pad-a', 'openclaw', { active: true, hostPort }),
       /gateway token is required/
     );
   });
 
   it('openclaw ignores a caller container port and uses its fixed gateway port', async () => {
+    const hostPort = await freeHostPort();
     const req = await vm.resolveWebRequest('pad-a', 'openclaw', {
-      active: true, hostPort: '45998', containerPort: 9999, password: 'secret-token',
+      active: true, hostPort, containerPort: 9999, password: 'secret-token',
     });
     assert.notStrictEqual(req.containerPort, 9999, 'fixed-port driver ignores the caller port');
     assert.strictEqual(req.authToken, 'secret-token', 'the token doubles as the auth token');
   });
 
   it('a token-less driver keeps authToken empty', async () => {
-    const req = await vm.resolveWebRequest('pad-a', 'picoclaw', { active: true, hostPort: '8123' });
+    const hostPort = await freeHostPort();
+    const req = await vm.resolveWebRequest('pad-a', 'picoclaw', { active: true, hostPort });
     assert.strictEqual(req.authToken, '', 'no token for a driver without url-token auth');
-    assert.strictEqual(req.hostPort, '8123');
+    assert.strictEqual(req.hostPort, hostPort);
   });
 });

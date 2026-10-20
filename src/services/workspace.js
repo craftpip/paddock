@@ -2,7 +2,8 @@ const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
 const registry = require('./agent-registry');
-const { ensureOwned } = require('./ownership');
+const { termUserArgs } = require('./pad-tmux');
+const { USER_UID, USER_GID, mkdirOwned, writeFileOwned } = require('./ownership');
 
 const MAX_UPLOAD_SIZE = 100 * 1024 * 1024; // 100MB
 
@@ -235,6 +236,11 @@ try{
     return fs.readdirSync(p,{withFileTypes:true}).map(e=>{const es=st(path.join(p,e.name))||{};
       return{name:e.name,type:e.isDirectory()?'directory':'file',size:es.size||0,size_hr:hr(es.size),modified:es.mtime?new Date(es.mtime).toISOString():null};})
       .sort((a,b)=>a.type!==b.type?(a.type==='directory'?-1:1):a.name.localeCompare(b.name));};
+  // Plan 95: host ownership is enforced at write time. The helper runs as the
+  // PAD user in user-mode pads (files inherit that owner) and as root in
+  // root-mode pads (targeted chown of only what this call created).
+  const own=t=>{if(!Number.isInteger(q.uid)||!Number.isInteger(q.gid))throw new Error('Ownership configuration missing');const st=fs.lstatSync(t);if(st.isSymbolicLink())throw new Error('Ownership check refused: '+t+' is a symlink');if(st.uid===q.uid&&st.gid===q.gid)return;if(typeof process.getuid==='function'&&process.getuid()===0){fs.chownSync(t,q.uid,q.gid);const v=fs.lstatSync(t);if(v.uid!==q.uid||v.gid!==q.gid)throw new Error('Ownership verification failed: '+t);return;}throw new Error('Ownership check failed: '+t+' expected '+q.uid+':'+q.gid+' found '+st.uid+':'+st.gid+' (content was already written)');};
+  const mkdirOwnedIn=t=>{const missing=[];let cur=path.resolve(t);for(;;){let st;try{st=fs.lstatSync(cur)}catch(e){if(e.code!=='ENOENT')throw e;missing.push(cur);const parent=path.dirname(cur);if(parent===cur)throw e;cur=parent;continue;}if(!st.isDirectory())throw new Error('Not a directory: '+cur);break;}for(const d of missing.reverse()){try{fs.mkdirSync(d)}catch(e){if(e.code!=='EEXIST')throw e;continue;}own(d);}};
   switch(q.op){
     case 'list':out={path:p,entries:lst(p)};break;
     case 'folders':{const stat=st(p);
@@ -245,17 +251,17 @@ try{
         .map(e=>e.name).sort((a,b)=>a.localeCompare(b)).slice(0,200)};break;}
     case 'read':{const stat=st(p);if(!stat)throw new Error('File not found');if(stat.isDirectory())throw new Error('Cannot read directory');
       out={content:fs.readFileSync(p,'utf8'),size:stat.size,size_hr:hr(stat.size),modified:new Date(stat.mtime).toISOString(),name:path.basename(p)};break;}
-    case 'save':{fs.writeFileSync(p,q.content||'','utf8');const stat=fs.statSync(p);
+    case 'save':{fs.writeFileSync(p,q.content||'','utf8');own(p);const stat=fs.statSync(p);
       out={ok:true,name:path.basename(p),size:Buffer.byteLength(q.content||'','utf8'),modified:new Date(stat.mtime).toISOString()};break;}
-    case 'mkdir':fs.mkdirSync(path.join(p,q.name),{recursive:false});out={ok:true};break;
-    case 'mkdirp':fs.mkdirSync(p,{recursive:true});out={ok:true};break;
-    case 'create':fs.writeFileSync(path.join(p,q.name),'');out={ok:true};break;
+    case 'mkdir':{const t=path.join(p,q.name);fs.mkdirSync(t,{recursive:false});own(t);out={ok:true};break;}
+    case 'mkdirp':mkdirOwnedIn(p);out={ok:true};break;
+    case 'create':{const t=path.join(p,q.name);fs.writeFileSync(t,'');own(t);out={ok:true};break;}
     case 'rename':{const t=path.join(path.dirname(p),q.name);if(st(t))throw new Error('Name already taken');fs.renameSync(p,t);out={ok:true};break;}
     case 'move':{const dp=st(path.dirname(q.to));if(st(q.to))throw new Error('Destination already exists');if(!dp||!dp.isDirectory())throw new Error('Destination directory not found');fs.renameSync(p,q.to);out={ok:true};break;}
     case 'delete':fs.rmSync(p,{recursive:true,force:true});out={ok:true};break;
     case 'readB64':{const stat=st(p);if(!stat)throw new Error('File not found');if(stat.isDirectory())throw new Error('Cannot download directory');
       out={content:fs.readFileSync(p).toString('base64'),name:path.basename(p),size:stat.size};break;}
-    case 'writeB64':fs.writeFileSync(p,Buffer.from(q.content||'','base64'));out={ok:true};break;
+    case 'writeB64':fs.writeFileSync(p,Buffer.from(q.content||'','base64'));own(p);out={ok:true};break;
     case 'agentSessions':out=agentSessions(q);break;
     default:throw new Error('Unknown op');
   }
@@ -263,15 +269,19 @@ try{
 process.stdout.write(JSON.stringify(out));
 });`;
 
+function containerDockerArgs(agentName) {
+  return ['exec', '-i', ...termUserArgs(agentName), agentName, 'node', '-e', CONTAINER_HELPER];
+}
+
 function containerExec(agentName, payload, timeout = 30000) {
   return new Promise((resolve, reject) => {
-    const child = execFile('docker', ['exec', '-i', agentName, 'node', '-e', CONTAINER_HELPER],
+    const child = execFile('docker', containerDockerArgs(agentName),
       { timeout, maxBuffer: 512 * 1024 * 1024 }, (err, stdout) => {
       if (err) return reject(new Error('Container is not running'));
       try { resolve(JSON.parse(stdout)); }
       catch { reject(new Error('Unexpected container response')); }
     });
-    child.stdin.write(JSON.stringify(payload));
+    child.stdin.write(JSON.stringify({ ...payload, uid: USER_UID, gid: USER_GID }));
     child.stdin.end();
   });
 }
@@ -411,13 +421,13 @@ async function writeFile(agentId, relativePath, content, scope) {
     return containerExec(agent.name, { op: 'save', path: relativePath, content });
   }
   requireHostBrowsable(agent);
-  const absPath = resolveHostPath(hostBrowseRoot(agent), relativePath);
+  const root = hostBrowseRoot(agent);
+  const absPath = resolveHostPath(root, relativePath);
   if (fs.existsSync(absPath)) {
     const stat = fs.statSync(absPath);
     if (stat.isDirectory()) throw new Error('Cannot write to directory');
   }
-  fs.writeFileSync(absPath, content, 'utf8');
-  ensureOwned(absPath);
+  writeFileOwned(absPath, content, { boundary: root });
   return {
     name: path.basename(absPath),
     size: Buffer.byteLength(content, 'utf8'),
@@ -451,9 +461,9 @@ async function writeFileB64(agentId, dirPath, fileName, buffer, scope) {
     return containerExec(agent.name, { op: 'writeB64', path: target, content: buffer.toString('base64') });
   }
   requireHostBrowsable(agent);
-  const destDir = resolveHostPath(hostBrowseRoot(agent), dirPath || '/');
-  fs.writeFileSync(path.join(destDir, safeName), buffer);
-  ensureOwned(path.join(destDir, safeName));
+  const root = hostBrowseRoot(agent);
+  const destDir = resolveHostPath(root, dirPath || '/');
+  writeFileOwned(path.join(destDir, safeName), buffer, { boundary: root });
   return { ok: true };
 }
 
@@ -481,9 +491,9 @@ async function createDirectories(agentId, dirPath, scope) {
     return containerExec(agent.name, { op: 'mkdirp', path: dirPath });
   }
   requireHostBrowsable(agent);
-  const absPath = resolveHostPath(hostBrowseRoot(agent), dirPath || '/');
-  fs.mkdirSync(absPath, { recursive: true });
-  ensureOwned(absPath);
+  const root = hostBrowseRoot(agent);
+  const absPath = resolveHostPath(root, dirPath || '/');
+  mkdirOwned(absPath, { boundary: root });
   return { ok: true };
 }
 
@@ -493,13 +503,13 @@ async function createFolder(agentId, relativePath, folderName, scope) {
     return containerExec(agent.name, { op: 'mkdir', path: relativePath || '/', name: folderName });
   }
   requireHostBrowsable(agent);
-  const parentPath = resolveHostPath(hostBrowseRoot(agent), relativePath || '');
+  const root = hostBrowseRoot(agent);
+  const parentPath = resolveHostPath(root, relativePath || '');
   const safeName = path.basename(folderName);
   if (!safeName || safeName.startsWith('.')) throw new Error('Invalid folder name');
   const target = path.join(parentPath, safeName);
   if (fs.existsSync(target)) throw new Error('Folder already exists');
-  fs.mkdirSync(target, { recursive: true });
-  ensureOwned(target);
+  mkdirOwned(target, { boundary: root });
   return { path: path.join(relativePath || '/', safeName) };
 }
 
@@ -699,6 +709,7 @@ module.exports = {
   isPreviewable,
   getMimeType,
   resolveSafePath,
+  containerDockerArgs,
   resolveHostPath,
   requireHostBrowsable,
   hostBrowseRoot,

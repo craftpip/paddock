@@ -220,12 +220,16 @@ async function createSession(vmName, session, { cwd = '', cols = 0, rows = 0 } =
  *  run as argv, never through a shell, so quotes and `$(…)` in the prompt are
  *  inert. Multi-line text is sent line by line, each followed by Enter.
  *  Returns the line count so the caller can record it. */
-async function sendText(vmName, session, text, { enter = true } = {}) {
+async function sendText(vmName, session, text, { enter = true, paste = false } = {}) {
   const name = assertSessionName(session);
   if (typeof text !== 'string' || !text) return { lines: 0 };
   const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
   for (const line of lines) {
-    if (line) await tmuxExec(vmName, ['send-keys', '-t', name, '-l', '--', line], { timeout: 15000, check: false });
+    if (line && paste) {
+      const buffer = `paddock-${require('crypto').randomUUID()}`;
+      await tmuxExec(vmName, ['set-buffer', '-b', buffer, '--', line], { timeout: 15000 });
+      await tmuxExec(vmName, ['paste-buffer', '-p', '-d', '-b', buffer, '-t', name], { timeout: 15000 });
+    } else if (line) await tmuxExec(vmName, ['send-keys', '-t', name, '-l', '--', line], { timeout: 15000, check: false });
     if (enter) await tmuxExec(vmName, ['send-keys', '-t', name, 'Enter'], { timeout: 15000, check: false });
   }
   return { lines: lines.length };

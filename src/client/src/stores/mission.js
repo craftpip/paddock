@@ -23,6 +23,13 @@ function errText(e, fallback = 'Something went wrong') {
   return e?.message || e?.error || fallback
 }
 
+// Every queue endpoint answers with the envelope `{ runner, project, queue,
+// updatedAt }` (plan 86 §Phase 1); the panel renders the inner `queue`. Accept a
+// bare queue object too, so the store is not coupled to the envelope's wrapper.
+function queueOf(data) {
+  return data && typeof data === 'object' && data.queue ? data.queue : data
+}
+
 /* Idea 2 (plan 68): a refresh keeps the page state. Column widths and the
  * folded state already persist; what reset were the three things that LIVE in
  * this store — the selected project, the highlighted session, and the open
@@ -141,6 +148,19 @@ function snapshotOf(row, projects) {
 // one can resolve last — it must then leave the newer one's selection and busy
 // state alone. Module scope on purpose: it is per page load, not per component.
 let startToken = 0
+// Guards the runner listing against out-of-order fetches: a project response
+// that lands after a scope switch must not overwrite the new scope's rows.
+let runnerToken = 0
+// Guards the open runner's QUEUE read (plan 86 §Phase 2): the queue must follow
+// col 3, so when the open session changes while a read is in flight the stale
+// answer must not become the new conversation's queue. Module scope like the
+// other tokens — per page load, not per component.
+let queueToken = 0
+let viewToken = 0
+let listToken = 0
+let historyToken = 0
+let projectToken = 0
+let paneToken = 0
 
 export const useMission = create((set, get) => {
   // Idea 2 (plan 68) hydrate: read the persisted view ONCE at store creation.
@@ -150,15 +170,38 @@ export const useMission = create((set, get) => {
   projects: [],
   loading: true,
   error: '',
-  // Runners (plan 83)
+  // Runners (plan 83, merged listing plan 85)
   runners: [],
+  runnersFor: '',
   runnersLoading: false,
   runnersError: '',
+  // The OPEN session's queue (plan 86 §Phase 2). `queueForRunner` is the runner
+  // the snapshot belongs to, so a snapshot taken for one conversation is never
+  // rendered under another. `queueStale` means the snapshot survived a FAILED
+  // refresh — it is the last known good and the panel says so, rather than
+  // claiming the current state. `queueAction` names the running mutation so
+  // setup and update are busy individually instead of a shared global.
+queue: null,
+   queueForRunner: '',
+   queueLoading: false,
+   queueError: '',
+   queueStale: false,
+   queueAction: '',
+   // Centralized feedback for queue operations (plan 98 §Phase 1).
+   // Keyed by runnerId; holds the latest operation feedback for the queue panel.
+   // Cleared on successful recovery, retained for dismissal by user.
+   operationFeedback: {},
   // `''` = no selection = the ALL-projects view. A project id = that project's
   // view. There is no third state (plan 68 removed `scope`): what col 2 shows
   // is derived from this one field, so a selection change can never leave the
   // column showing a list from the other scope.
-  selectedProjectId: restored.selectedProjectId,
+   selectedProjectId: '',
+   persistedView: restored,
+   navigateView: null,
+   viewLoading: false,
+   viewError: '',
+   viewUnavailable: false,
+   historyView: null,
   // Live tmux sessions of the selected project, and the agent's own history in
   // its folder.
   sessions: [],
@@ -178,13 +221,13 @@ export const useMission = create((set, get) => {
   // stopped PAD must not hide the others, and a probe failure is not a
   // conversation.
   historyErrors: [],
-  selectedConversationId: restored.selectedConversationId,
+   selectedConversationId: '',
   // The conversation col 3 is showing — a snapshot taken when it was opened, NOT
   // derived from `sessions`. See `snapshotOf`: this is what keeps a scope switch
   // or a poll from tearing the terminal down. Restored from localStorage on
   // load (plan 68 Idea 2) so a refresh re-attaches instead of dropping you on
   // the empty state.
-  openSession: restored.openSession,
+   openSession: null,
   // Pane state of the open session (live / tuiAlive / cwd), see fetchSessionState.
   sessionState: null,
   // The session currently being auto-reopened (plan 68), keyed by id so only
@@ -201,9 +244,55 @@ export const useMission = create((set, get) => {
   // Folder probe for the dialog: { agent, path, exists, isDir, entries, checking, error }
   folder: null,
 
+  // Restoration is a READ, independent of the listing. Only an accepted fresh
+  // row-click navigation may opt into recovery; POP/reload never does.
+  restoreView: async ({ project = '', session = '', conversation = '', terminalProject = '', subfolders = false }, { autoReopen = false, fresh = false } = {}) => {
+    const token = ++viewToken
+    ++startToken
+    const changedScope = project !== get().selectedProjectId || subfolders !== get().includeSubfolders
+    if (changedScope) {
+      ++listToken
+      ++historyToken
+      set({ selectedProjectId: project, includeSubfolders: subfolders, sessions: [], history: null, loadedFor: '', allLoaded: false })
+      get().refreshActive()
+      if (project) get().fetchHistory(project, subfolders)
+    }
+    // Popup/list navigation for the same terminal must not reset its pane state.
+    if (!fresh && session && get().openSession?.id === session && !get().viewError) return
+    set({ viewLoading: !!(session || conversation), viewError: '', viewUnavailable: false, historyView: null })
+    if (!session && !conversation) {
+      set({ openSession: null, sessionState: null, selectedConversationId: '', viewLoading: false })
+      return
+    }
+    set({ openSession: null, sessionState: null, reopenFor: null, reopenError: '' })
+    try {
+      if (session) {
+        const data = await api(`/api/mission/sessions/${encodeURIComponent(session)}`)
+        const owner = data.project || (await api(`/api/mission/projects/${encodeURIComponent(data.session.project_id)}`)).project
+        if (token !== viewToken) return
+        const snapshot = snapshotOf({ ...data.session, project: owner }, get().projects)
+        set({ openSession: { ...snapshot, runner: data.runner || null }, sessionState: data.state || null,
+          selectedConversationId: snapshot.agentSessionId || session, viewLoading: false })
+        get().fetchOpenRunnerQueue()
+        if (autoReopen) get().fetchSessionState(session, { autoReopen: true })
+      } else {
+        if (!terminalProject) throw { status: 404, error: 'This history link has no owner project.' }
+        const data = await api(`/api/mission/projects/${encodeURIComponent(terminalProject)}/conversations/${encodeURIComponent(conversation)}`)
+        if (token !== viewToken) return
+        set({ historyView: { conversation, project: data.project, metadata: data.conversation }, selectedConversationId: conversation, viewLoading: false })
+      }
+    } catch (e) {
+      if (token !== viewToken) return
+      const unavailable = [403, 404].includes(e?.status)
+      set({ viewLoading: false, viewError: errText(e, 'Could not restore this view'), viewUnavailable: unavailable })
+    }
+  },
+
   fetchProjects: async () => {
+    const token = ++projectToken
     try {
       const data = await api('/api/mission/projects')
+      if (token !== projectToken) return
       const projects = data.projects || []
       set((s) => {
         const patch = {
@@ -214,18 +303,12 @@ export const useMission = create((set, get) => {
           // gone (deleted elsewhere), THAT becomes the no-selection / all view —
           // plan 68 did away with the "always one selected" fallback (Finding A),
           // and restoring it would be the same dead-end the finding named.
-          selectedProjectId: projects.some((p) => p.id === s.selectedProjectId)
+          selectedProjectId: s.navigateView || projects.some((p) => p.id === s.selectedProjectId)
             ? s.selectedProjectId
             : '',
         }
-        // An open session whose project has vanished cannot render, and worse,
-        // would attach a terminal against a deleted row: drop it back to the
-        // empty state. The session row itself is whatever col 3 says it is once
-        // its own read runs — this only clears the SNAPSHOT.
-        if (s.openSession?.projectId && !projects.some((p) => p.id === s.openSession.projectId)) {
-          patch.openSession = null
-          patch.sessionState = null
-        }
+        // The open terminal is resolved by its OWN detail read. A listing is
+        // not authority to clear another view's pinned snapshot.
         return patch
       })
       // No selection = the all view — and with it the column's entire read. A
@@ -240,6 +323,7 @@ export const useMission = create((set, get) => {
         get().fetchHistory(sel, get().includeSubfolders)
       }
     } catch (e) {
+      if (token !== projectToken) return
       set({ loading: false, error: errText(e, 'Could not load projects') })
     }
   },
@@ -256,6 +340,7 @@ export const useMission = create((set, get) => {
    *  names the open session's own project in its header, so col 1/col 2 and
    *  col 3 pointing at different projects is legible rather than confusing. */
   select: (projectId) => {
+    if (get().navigateView) return get().navigateView({ project: get().selectedProjectId === projectId ? '' : projectId })
     if (get().selectedProjectId === projectId) {
       set({ selectedProjectId: '', selectedConversationId: '', sessions: [], history: null, loadedFor: '' })
       get().fetchAll()
@@ -273,6 +358,7 @@ export const useMission = create((set, get) => {
    *  project's own — expanding must not quietly show one project's subfolders
    *  under a heading that claims to cover all of them. */
   setSubfolders: (on) => {
+    if (get().navigateView) return get().navigateView({ subfolders: on })
     set({ includeSubfolders: on })
     if (!get().selectedProjectId) return get().fetchAll()
     return get().fetchHistory(get().selectedProjectId, on)
@@ -284,6 +370,17 @@ export const useMission = create((set, get) => {
    *  that while the user is looking at the aggregate list would leave the
    *  visible list stale after every action. */
   refreshActive: () => {
+    // Runner metadata refreshes with the listing (plan 85 §Phase 2): the ∞
+    // badges and queue states decorate the session rows, so a poll that
+    // refreshes sessions must refresh them too. Unawaited on purpose — the
+    // listing must not wait on it, and the token guard drops a stale answer.
+    // It never touches `openSession`, so the terminal cannot move.
+    // The queue follows col 3, so the open runner's queue refreshes with the
+    // cadence too (plan 86 §Phase 2) — a Run/Pause that `refreshActive`s gets
+    // the post-write queue as well. Unawaited like fetchRunners: the listing
+    // must not wait on it, and the token guard drops a stale answer.
+    get().fetchRunners()
+    get().fetchOpenRunnerQueue()
     if (!get().selectedProjectId) return get().fetchAll()
     return get().fetchSessions()
   },
@@ -293,6 +390,8 @@ export const useMission = create((set, get) => {
    *  sessions list and the history list are not the same data, and a dead PAD
    *  for one project must not blank the other. */
   fetchAll: async () => {
+    const token = ++listToken
+    const ht = ++historyToken
     const sub = get().includeSubfolders
     // A per-project cap, not one global cap: "the latest 50" across every
     // project would let one chatty project hide every other project entirely.
@@ -302,6 +401,7 @@ export const useMission = create((set, get) => {
       api('/api/mission/sessions'),
       api(`/api/mission/history?limit=${perProject}${sub ? '&subfolders=1' : ''}`),
     ])
+    if (token !== listToken || ht !== historyToken || get().selectedProjectId) return
 
     if (sessionsRes.status === 'fulfilled') {
       const sessions = sessionsRes.value.sessions || []
@@ -309,11 +409,11 @@ export const useMission = create((set, get) => {
         sessions,
         sessionsLoading: false,
         allLoaded: true,
-        // Same rule as the project scope: keep the open session, else follow a
-        // live one. The shared helper highlights the row only — it cannot move
-        // the col-1 selection here, because this IS the no-selection view and
-        // a followed row's project must not turn it into a one-project view
-        // (plan 68 Idea 1).
+        // The fetch PRESERVES the user's highlight and never picks a row: this
+        // IS the no-selection view, and inventing a highlight here is exactly
+        // plan 73's phantom `msn-row-selected`. The helper cannot move the col-1
+        // selection either, because a row's project must not turn the aggregate
+        // view into a one-project view (plan 68 Idea 1).
         ...followSessionPatch(sessions, s.selectedConversationId),
       }))
     } else {
@@ -353,9 +453,11 @@ export const useMission = create((set, get) => {
   fetchSessions: async (projectId) => {
     const id = projectId || get().selectedProjectId
     if (!id) return
+    const token = ++listToken
     set({ sessionsLoading: true, sessionsError: '' })
     try {
       const data = await api(`/api/mission/projects/${id}/sessions`)
+      if (token !== listToken || get().selectedProjectId !== id) return
       const sessions = data.sessions || []
       set((s) => ({
         sessions,
@@ -365,11 +467,14 @@ export const useMission = create((set, get) => {
         // ("keep showing what we have"). Marking it up front would make the
         // placeholder impossible to ever show.
         loadedFor: id,
-        // Keep the open session if it is still there, else follow the first
-        // live one — landing on a dead pane with no way back is a dead end.
+        // Preserve the user's highlight; a refetch is a READ and must never
+        // adopt a row on its own (plan 73). The old "else follow the first live
+        // one" fallback only made sense while col 3 derived from this list; the
+        // `openSession` snapshot is why a dead pane no longer needs chasing.
         ...followSessionPatch(sessions, s.selectedConversationId),
       }))
     } catch (e) {
+      if (token !== listToken || get().selectedProjectId !== id) return
       // The project can be deleted from under an open page (another tab, the
       // agent, a test run). Parking the error would leave col 2 permanently
       // broken with nothing to click — re-read the list instead, which reselects
@@ -394,6 +499,7 @@ export const useMission = create((set, get) => {
   fetchHistory: async (projectId, includeSubfolders) => {
     const id = projectId || get().selectedProjectId
     if (!id) return
+    const token = ++historyToken
     const sub = includeSubfolders === undefined ? get().includeSubfolders : includeSubfolders
     set({ historyLoading: true, historyError: '' })
     try {
@@ -405,8 +511,10 @@ export const useMission = create((set, get) => {
       const data = await api(
         `/api/mission/projects/${id}/history?limit=${limit}${sub ? '&subfolders=1' : ''}`
       )
+      if (token !== historyToken || get().selectedProjectId !== id) return
       set({ history: data, historyLoading: false, includeSubfolders: sub, historyErrors: [] })
     } catch (e) {
+      if (token !== historyToken || get().selectedProjectId !== id) return
       set({ historyLoading: false, historyError: errText(e, 'Could not load the agent history') })
     }
   },
@@ -461,13 +569,14 @@ export const useMission = create((set, get) => {
         // A start whose pane somehow did not come up reopens rather than showing
         // the closed notice, for the same reason a row click does.
         get().fetchSessionState(data.session.id, { autoReopen: true })
+        get().navigateView?.({ session: data.session.id })
       }
       return data.session
     } catch (e) {
       if (token === startToken) set({ sessionsError: errText(e, 'Could not open the session') })
       throw e
     } finally {
-      if (token === startToken) set({ starting: false, startingKey: null })
+      if (get().startingKey === key) set({ starting: false, startingKey: null })
     }
   },
 
@@ -484,6 +593,7 @@ export const useMission = create((set, get) => {
    *  `startSession`). Nothing else does, which is what makes col 3 immune to
    *  every refresh path. */
   selectSession: (sessionId) => {
+    if (get().navigateView) return get().navigateView({ session: sessionId }, { explicitOpen: true })
     const row = get().sessions.find((s) => s.id === sessionId)
     set({
       // Highlight the CONVERSATION (plan 80), not the mission row: when the pane
@@ -517,9 +627,12 @@ export const useMission = create((set, get) => {
   fetchSessionState: async (sessionId, { autoReopen = false } = {}) => {
     const id = sessionId || get().openSession?.id
     if (!id) return null
+    const token = ++paneToken
+    const generation = viewToken
     let state = null
     try {
       const data = await api(`/api/mission/sessions/${id}`)
+      if (token !== paneToken || generation !== viewToken) return null
       state = data.state || null
       // The user may have clicked another row while this was in flight.
       // Alongside the pane state, refresh the snapshot's DISPLAY title from the
@@ -527,10 +640,26 @@ export const useMission = create((set, get) => {
       // and col 3's header must follow it. This updates a display field only:
       // which session is OPEN is untouched, exactly the plan 58 contract.
       set((s) => (s.openSession?.id === id
-        ? { sessionState: state, openSession: { ...s.openSession, title: data.session?.title || s.openSession.title } }
+        ? {
+          sessionState: state,
+          openSession: {
+            ...s.openSession,
+            title: data.session?.title || s.openSession.title,
+            // Plan 85 §Phase 3: the open session's OWN runner binding, read
+            // from the detail response — this is what the terminal header's
+            // Run/Pause + queue state render from, so they follow the session
+            // col 3 is showing and never the project col 1 has selected.
+            runner: data.runner || null,
+          },
+        }
         : s))
-    } catch {
-      set((s) => (s.openSession?.id === id ? { sessionState: null } : s))
+    } catch (e) {
+      if (token !== paneToken || generation !== viewToken) return null
+      set((s) => (s.openSession?.id === id ? {
+        viewError: errText(e, 'Could not read session state'),
+        viewUnavailable: [403, 404].includes(e?.status),
+        ...([403, 404].includes(e?.status) ? { openSession: null, sessionState: null } : {}),
+      } : s))
       return null
     }
     if (!autoReopen || !state || state.live !== false) return state
@@ -590,9 +719,20 @@ export const useMission = create((set, get) => {
    *  to stay selected. Clearing here is what made a closed session look like a
    *  different, unselected item. */
   closeSession: async (sessionId) => {
+    const before = get().openSession
     await api(`/api/mission/sessions/${sessionId}`, { method: 'DELETE' })
     set((s) => (s.openSession?.id === sessionId ? { openSession: null, sessionState: null } : {}))
+    get().navigateView?.({ closedSession: sessionId, conversation: before?.agentSessionId || '', terminalProject: before?.projectId || '' }, { replace: true })
     await get().refreshActive()
+  },
+
+  // A popout hands the VIEW to another window. It must not affect the pane,
+  // runner or conversation; only clear the embedded snapshot when it matches.
+  detachSession: (sessionId) => {
+    if (get().openSession?.id !== sessionId) return false
+    set({ openSession: null, sessionState: null, reopenFor: null, reopenError: '' })
+    get().navigateView?.({ session: null }, { replace: true })
+    return true
   },
 
   toggleSessionLock: async (sessionId, locked) => {
@@ -611,6 +751,7 @@ export const useMission = create((set, get) => {
       set({ selectedProjectId: data.project.id, selectedConversationId: '', sessions: [], history: null, loadedFor: '' })
       get().fetchSessions(data.project.id)
       get().fetchHistory(data.project.id, get().includeSubfolders)
+      get().navigateView?.({ project: data.project.id }, { replace: true })
     }
     return data.project
   },
@@ -679,21 +820,253 @@ export const useMission = create((set, get) => {
 
   clearFolder: () => set({ folder: null }),
 
-  // Runners (plan 83)
+  // Runners (plan 83, merged listing plan 85). One array for the visible
+  // scope: the selected project's runners, or EVERY accessible project's in
+  // the all view. `runnersFor` is the scope the response belongs to — a slow
+  // project response that lands after a scope switch must not relabel another
+  // scope's rows (plan 85 §Phase 2).
   fetchRunners: async (projectId) => {
-    const id = projectId || get().selectedProjectId
-    if (!id) return
+    const id = projectId || get().selectedProjectId || ''
+    const token = ++runnerToken
     set({ runnersLoading: true, runnersError: '' })
     try {
-      const data = await api(`/api/mission/projects/${id}/runners`)
-      set({ runners: data.runners || [], runnersLoading: false, runnersError: '' })
+      const data = await api(id ? `/api/mission/projects/${id}/runners` : '/api/mission/runners')
+      if (token !== runnerToken) return
+      // Tag each row with the scope it was read for. The project route returns
+      // bare rows; the all route already tags them.
+      const runners = (data.runners || []).map((r) => (r.project ? r : { ...r, scopeProjectId: id }))
+      set({ runners, runnersFor: id, runnersLoading: false, runnersError: '' })
     } catch (e) {
+      if (token !== runnerToken) return
       set({ runnersLoading: false, runnersError: errText(e, 'Could not load runners') })
     }
   },
 
+  // The runner col 3 is showing. Col 3 belongs to the OPEN session, never to
+  // col 1's selection (plan 85), so this resolves from the open snapshot:
+  // prefer the runners row bound to the open session (fresh state on every
+  // poll), fall back to the runner embedded in the snapshot itself (usable the
+  // instant a restored session opens, before the runners list has landed).
+  openRunner: () => {
+    const open = get().openSession
+    if (!open) return null
+    const bound = get().runners.find((r) => r.session_id === open.id || r.session_id === open.session_id)
+    return bound || open.runner || null
+  },
+
+  // Plan 86 §Phase 2: the queue of the open runner, fetched independently of
+  // the column-1 selection and folded into the existing refresh cadence (no
+  // timer per row, no fleet scan). Two guards keep it honest:
+  //  - `queueToken`: an answer that lands after the open session changed is
+  //    dropped WITHOUT touching the new conversation's snapshot.
+  //  - a FAILED refresh keeps the last snapshot but marks it `queueStale` — a
+  //    failed read is never presented as a fresh current/next claim.
+  fetchOpenRunnerQueue: async () => {
+    const runner = get().openRunner()
+    const id = runner?.id || ''
+    if (!id) {
+      set({ queue: null, queueForRunner: '', queueLoading: false, queueError: '', queueStale: false })
+      return
+    }
+    const token = ++queueToken
+    // Background refreshes of the SAME runner keep the current snapshot on
+    // screen (no loading flicker per poll); only a conversation switch
+    // shows loading.
+    if (get().queueForRunner !== id) set({ queueLoading: true, queueError: '' })
+    try {
+      const data = await api(`/api/mission/runners/${id}/queue`)
+      if (token !== queueToken) return
+      if ((get().openRunner()?.id || '') !== id) return
+      set({ queue: queueOf(data), queueForRunner: id, queueLoading: false, queueError: '', queueStale: false })
+    } catch (e) {
+      if (token !== queueToken) return
+      const retained = get().queueForRunner === id
+      set({ queueLoading: false, queueError: errText(e, 'Could not read the queue'), queueStale: retained })
+    }
+  },
+
+  // Setup creates only the ABSENT file with instructions (plan 86 §1/2) — it
+  // never starts execution and never overwrites an existing queue.
+  setupRunnerQueue: async (runnerId) => {
+    if (get().queueAction) return
+    set({ queueAction: 'setup', queueError: '' })
+    get().clearOperationFeedback(runnerId)
+    try {
+      const data = await api(`/api/mission/runners/${runnerId}/queue`, { method: 'POST' })
+      set({ queue: queueOf(data), queueForRunner: runnerId, queueLoading: false, queueError: '', queueStale: false })
+      get().refreshActive()
+      get().setOperationFeedback(runnerId, { severity: 'success', message: 'Queue set up successfully' })
+      return data
+    } catch (e) {
+      set({ queueAction: '', queueError: errText(e, 'Could not set up the queue') })
+      get().setOperationFeedback(runnerId, { severity: 'error', message: errText(e, 'Could not set up the queue') })
+      throw e
+    } finally {
+      set({ queueAction: '' })
+    }
+  },
+
+  // CAS write (plan 86 §Phase 1): the server refuses a stale revision, so the
+  // caller here surfaces the conflict as Reload queue — never an automatic
+  // overwrite or retry of an edit that raced the worker.
+  updateRunnerQueue: async (runnerId, items, revision) => {
+    if (get().queueAction) return
+    set({ queueAction: 'update', queueError: '' })
+    get().clearOperationFeedback(runnerId)
+    try {
+      const data = await api(`/api/mission/runners/${runnerId}/queue`, {
+        method: 'PUT',
+        body: { items, revision },
+      })
+      set({ queue: queueOf(data), queueForRunner: runnerId, queueLoading: false, queueError: '', queueStale: false })
+      get().refreshActive()
+      get().setOperationFeedback(runnerId, { severity: 'success', message: 'Queue updated' })
+      return data
+    } catch (e) {
+      // Both = the server refused the write because our revision no longer
+      // matches (or we could not supply one at all) — show Reload queue.
+      if (e?.code === 'queue_revision_conflict' || e?.code === 'queue_revision_required') {
+        set({ queueError: errText(e, 'The queue changed elsewhere'), queueStale: true })
+        get().setOperationFeedback(runnerId, { severity: 'warning', message: 'The queue changed elsewhere — reload and retry' })
+      } else {
+        set({ queueError: errText(e, 'Could not update the queue') })
+        get().setOperationFeedback(runnerId, { severity: 'error', message: errText(e, 'Could not update the queue') })
+      }
+      throw e
+    } finally {
+      set({ queueAction: '' })
+    }
+  },
+
+  addRunnerQueueItems: async (runnerId, plans, revision) => {
+    if (get().queueAction) return
+    set({ queueAction: 'add', queueError: '' })
+    try {
+      const data = await api(`/api/mission/runners/${runnerId}/queue/items`, { method: 'POST', body: { plans, revision } })
+      set({ queue: queueOf(data), queueForRunner: runnerId, queueLoading: false, queueError: '', queueStale: false })
+      return data
+    } finally {
+      set({ queueAction: '' })
+    }
+  },
+
+  reorderRunnerQueue: async (runnerId, itemIds, revision) => {
+    if (get().queueAction) return
+    set({ queueAction: 'reorder', queueError: '' })
+    try {
+      const data = await api(`/api/mission/runners/${runnerId}/queue/order`, { method: 'PUT', body: { itemIds, revision } })
+      set({ queue: queueOf(data), queueForRunner: runnerId, queueLoading: false, queueError: '', queueStale: false })
+      return data
+    } finally {
+      set({ queueAction: '' })
+    }
+  },
+
+  removeRunnerQueueItem: async (runnerId, itemId, revision) => {
+    if (get().queueAction) return
+    set({ queueAction: 'remove', queueError: '' })
+    try {
+      const data = await api(`/api/mission/runners/${runnerId}/queue/items/${encodeURIComponent(itemId)}`, { method: 'DELETE', body: { revision } })
+      set({ queue: queueOf(data), queueForRunner: runnerId, queueLoading: false, queueError: '', queueStale: false })
+      return data
+    } finally {
+      set({ queueAction: '' })
+    }
+  },
+
+  getRunnerQueue: async (runnerId) => api(`/api/mission/runners/${runnerId}/queue`),
+
+  updateRunnerQueueCustomInstructions: async (runnerId, customInstructions, revision) => {
+    return api(`/api/mission/runners/${runnerId}/queue/custom-instructions`, {
+      method: 'PUT',
+      body: { customInstructions, revision },
+    })
+  },
+
+  // Resolve a blocked queue item: POST to /resolve, then reload queue.
+  // Uses operationFeedback (not queueError) so the panel banner reports success/failure.
+  resolveRunnerQueue: async (runnerId, { itemId, answer, revision }) => {
+    if (get().queueAction) return
+    set({ queueAction: 'resolve', queueError: '' })
+    get().clearOperationFeedback(runnerId)
+    try {
+      const result = await api(`/api/mission/runners/${runnerId}/resolve`, {
+        method: 'POST',
+        body: { itemId, answer, revision },
+      })
+      get().setOperationFeedback(runnerId, { severity: 'success', message: 'Answer sent — queue resumed' })
+      await get().reloadRunnerQueue()
+      return result
+    } catch (e) {
+      get().setOperationFeedback(runnerId, {
+        severity: e?.code === 'queue_revision_conflict' ? 'warning' : 'error',
+        message: errText(e, 'Could not send the answer'),
+      })
+      throw e
+    } finally {
+      set({ queueAction: '' })
+    }
+  },
+
+  // Reconcile an unconfirmed runner operation: check the agent's store for
+  // the exact receipt and transition the operation state accordingly.
+  reconcileRunnerOperation: async (runnerId) => {
+    if (get().queueAction) return
+    set({ queueAction: 'reconcile', queueError: '' })
+    get().clearOperationFeedback(runnerId)
+    try {
+      const result = await api(`/api/mission/runners/${runnerId}/reconcile`, {
+        method: 'POST',
+      })
+      // Reload queue and runner to reflect the new state
+      await get().reloadRunnerQueue()
+      await get().fetchRunners()
+      if (result.confirmed) {
+        get().setOperationFeedback(runnerId, { severity: 'success', message: 'Instruction confirmed — queue resumed' })
+      } else if (result.held) {
+        get().setOperationFeedback(runnerId, { severity: 'warning', message: result.reason || 'No response received — operation held' })
+      } else if (result.awaiting) {
+        get().setOperationFeedback(runnerId, { severity: 'info', message: 'Instruction still unconfirmed — worker may be processing' })
+      }
+      return result
+    } catch (e) {
+      get().setOperationFeedback(runnerId, {
+        severity: 'error',
+        message: errText(e, 'Could not reconcile the operation'),
+      })
+      throw e
+    } finally {
+      set({ queueAction: '' })
+    }
+  },
+
+  reloadRunnerQueue: () => get().fetchOpenRunnerQueue(),
+
+  // Centralized feedback for queue operations (plan 98 §Phase 1).
+  setOperationFeedback: (runnerId, feedback) => {
+    set((s) => ({
+      operationFeedback: { ...s.operationFeedback, [runnerId]: feedback }
+    }))
+  },
+
+  clearOperationFeedback: (runnerId) => {
+    set((s) => {
+      const next = { ...s.operationFeedback }
+      delete next[runnerId]
+      return { operationFeedback: next }
+    })
+  },
+
+  // After every runner mutation the ACTIVE listing is re-read (plan 85
+  // §Phase 2/3): the ∞ badges decorate the session rows, and a Run may have
+  // created/recovered the bound session — refreshing only the runner array
+  // would leave the worker row stale until the next poll. `refreshActive`
+  // never moves `openSession`, so the terminal keeps its identity.
   createRunner: async (payload) => {
-    const id = get().selectedProjectId
+    // Explicit project identity (plan 85 §Phase 3): the dialog submits the
+    // project the runner belongs to — in the all view col 1 selects nothing,
+    // and the old `selectedProjectId` read silently created nowhere.
+    const id = payload?.projectId || get().selectedProjectId
     if (!id) return null
     set({ runnersLoading: true, runnersError: '' })
     try {
@@ -701,7 +1074,7 @@ export const useMission = create((set, get) => {
         method: 'POST',
         body: payload,
       })
-      await get().fetchRunners()
+      await get().refreshActive()
       return data.runner
     } catch (e) {
       set({ runnersLoading: false, runnersError: errText(e, 'Could not create runner') })
@@ -716,7 +1089,7 @@ export const useMission = create((set, get) => {
         method: 'PATCH',
         body: payload,
       })
-      await get().fetchRunners()
+      await get().refreshActive()
       return data.runner
     } catch (e) {
       set({ runnersLoading: false, runnersError: errText(e, 'Could not update runner') })
@@ -725,54 +1098,67 @@ export const useMission = create((set, get) => {
   },
 
   startRunner: async (runnerId) => {
+    get().clearOperationFeedback(runnerId)
     set({ runnersLoading: true, runnersError: '' })
     try {
       const data = await api(`/api/mission/runners/${runnerId}/start`, {
         method: 'POST',
       })
-      await get().fetchRunners()
+      await get().refreshActive()
+      get().setOperationFeedback(runnerId, { severity: 'success', message: data.recovering ? 'Quota recovery started — running your callback before restoring the session' : 'Runner started' })
       return data
     } catch (e) {
       set({ runnersLoading: false, runnersError: errText(e, 'Could not start runner') })
+      get().setOperationFeedback(runnerId, { severity: 'error', message: errText(e, 'Could not start runner') })
       throw e
     }
   },
 
-  pauseRunner: async (runnerId) => {
+  pauseRunner: async (runnerId, mode) => {
+    get().clearOperationFeedback(runnerId)
     set({ runnersLoading: true, runnersError: '' })
     try {
       const data = await api(`/api/mission/runners/${runnerId}/pause`, {
         method: 'POST',
+        body: mode ? { mode } : undefined,
       })
-      await get().fetchRunners()
+      await get().refreshActive()
+      get().setOperationFeedback(runnerId, { severity: 'warning', message: `Runner paused (${mode || 'before_next_task'})` })
       return data
     } catch (e) {
       set({ runnersLoading: false, runnersError: errText(e, 'Could not pause runner') })
+      get().setOperationFeedback(runnerId, { severity: 'error', message: errText(e, 'Could not pause runner') })
       throw e
     }
   },
 
   resumeRunner: async (runnerId) => {
+    get().clearOperationFeedback(runnerId)
     set({ runnersLoading: true, runnersError: '' })
     try {
       const data = await api(`/api/mission/runners/${runnerId}/resume`, {
         method: 'POST',
       })
-      await get().fetchRunners()
+      await get().refreshActive()
+      get().setOperationFeedback(runnerId, { severity: 'success', message: 'Runner resumed' })
       return data
     } catch (e) {
       set({ runnersLoading: false, runnersError: errText(e, 'Could not resume runner') })
+      get().setOperationFeedback(runnerId, { severity: 'error', message: errText(e, 'Could not resume runner') })
       throw e
     }
   },
 
   removeRunner: async (runnerId) => {
+    get().clearOperationFeedback(runnerId)
     set({ runnersLoading: true, runnersError: '' })
     try {
       await api(`/api/mission/runners/${runnerId}`, { method: 'DELETE' })
-      await get().fetchRunners()
+      await get().refreshActive()
+      get().setOperationFeedback(runnerId, { severity: 'success', message: 'Runner removed' })
     } catch (e) {
       set({ runnersLoading: false, runnersError: errText(e, 'Could not remove runner') })
+      get().setOperationFeedback(runnerId, { severity: 'error', message: errText(e, 'Could not remove runner') })
       throw e
     }
   },
@@ -784,6 +1170,88 @@ export const useMission = create((set, get) => {
       return data.runner
     } catch (e) {
       set({ runnersLoading: false, runnersError: errText(e, 'Could not load runner') })
+      throw e
+    } finally {
+      set({ runnersLoading: false })
+    }
+  },
+
+  // Plan 91 §Phase 3: prompt-template configuration reads. One-shot fetches —
+  // the dialog holds drafts locally, so nothing lands in store state. Preview
+  // never sends, starts a session or changes queue state (server-enforced).
+  getPromptConfig: async (runnerId) => {
+    const data = await api(`/api/mission/runners/${runnerId}/prompts`)
+    return data
+  },
+
+  previewRunnerPrompts: async (runnerId, drafts, overrides) => {
+    const data = await api(`/api/mission/runners/${runnerId}/prompts/preview`, {
+      method: 'POST',
+      body: { drafts, overrides },
+    })
+    return data
+  },
+
+  previewProjectPrompts: async (projectId, drafts, overrides) => {
+    const data = await api(`/api/mission/projects/${projectId}/prompts/preview`, {
+      method: 'POST',
+      body: { drafts, overrides },
+    })
+    return data
+  },
+
+  getProjectPromptCatalogue: async (projectId) => {
+    const data = await api(`/api/mission/projects/${projectId}/prompts`)
+    return data
+  },
+
+  // Plan 92 §Phase 4: lifecycle-callback settings reads/writes. One-shot
+  // fetches — the dialog holds drafts locally. Saving never executes a
+  // script (server-enforced; no executor exists yet).
+  getRunnerCallbacks: async (runnerId) => {
+    const data = await api(`/api/mission/runners/${runnerId}/callbacks`)
+    return data
+  },
+
+  saveRunnerCallbacks: async (runnerId, callbacks) => {
+    const data = await api(`/api/mission/runners/${runnerId}/callbacks`, {
+      method: 'PUT',
+      body: { callbacks },
+    })
+    return data
+  },
+
+  getRunnerCallbackHistory: async (runnerId) => {
+    const data = await api(`/api/mission/runners/${runnerId}/callbacks/history`)
+    return data
+  },
+
+  getProjectCallbackCatalogue: async (projectId) => {
+    const data = await api(`/api/mission/projects/${projectId}/callbacks/catalogue`)
+    return data
+  },
+
+  /** Open a runner's worker session (plan 85 §Phase 3): clicking an infinite
+   *  row opens that session's normal terminal, whatever the queue is doing.
+   *  For a BOUND session this is just `selectSession` — the same flow, the same
+   *  recovery, and it never enables the queue. For a LEGACY UNBOUND runner
+   *  there is no row to select, so the explicit open binds/creates the session
+   *  first (the one place unbound records resolve, never list reads/polling),
+   *  then selects it. Configuration never handles an open. */
+  openRunnerSession: async (runner) => {
+    if (!runner) return null
+    if (runner.session_id) {
+      get().selectSession(runner.session_id)
+      return runner.session_id
+    }
+    set({ runnersLoading: true, runnersError: '' })
+    try {
+      const data = await api(`/api/mission/runners/${runner.id}/session`, { method: 'POST' })
+      await get().refreshActive()
+      if (data?.session?.id) get().selectSession(data.session.id)
+      return data?.session?.id || null
+    } catch (e) {
+      set({ runnersLoading: false, runnersError: errText(e, 'Could not open the runner session') })
       throw e
     } finally {
       set({ runnersLoading: false })

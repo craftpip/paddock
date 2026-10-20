@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const fs = require('fs');
 const path = require('path');
 
 const { getDb } = require('./db');
@@ -8,6 +9,11 @@ const registry = require('./agent-registry');
 const workspace = require('./workspace');
 const agentStore = require('./agent-store');
 const plans = require('./plans');
+const promptTemplates = require('./prompt-templates');
+const runnerCallbacks = require('./runner-callbacks');
+const runnerHistory = require('./runner-history');
+const runnerQueue = require('./runner-queue');
+const runnerTransition = require('./runner-transition');
 
 /** Look up a PAD by name, throwing if not found (shared with plans.js). */
 function requireAgent(name) {
@@ -29,10 +35,16 @@ function requireAgent(name) {
 /** An error with a machine-readable code, so routes and MCP tools can answer
  *  with the same shape the UI and the LLM both branch on. */
 class MissionError extends Error {
-  constructor(code, message, status = 400) {
+  constructor(code, message, status = 400, meta = null) {
     super(message || code);
     this.code = code;
     this.status = status;
+    // Plan 88 §Phase 2: a delivery outcome is not a boolean. `attempted` says
+    // whether input was written to the pane; `acceptance` says whether we could
+    // CONFIRM receipt ('confirmed' | 'unknown' | 'refused'). Serialized verbatim
+    // by the REST and MCP error paths so a caller can offer recovery without
+    // guessing from the message text.
+    if (meta && typeof meta === 'object') Object.assign(this, meta);
   }
 }
 
@@ -773,7 +785,7 @@ async function startSession(projectId, { label = '', origin = 'human', cols = 0,
 /** Re-launch the TUI in a session whose TUI exited (the pane dropped back to
  *  the shell). Refuses when a TUI is already running — retyping the command
  *  would start a second conversation in the same pane. */
-async function relaunchTui(sessionId, { actor = null } = {}) {
+async function relaunchTui(sessionId, { actor = null, beforeLaunch = null } = {}) {
   const { session, project, driver, vmName } = sessionTarget(sessionId);
   const state = await padTmux.paneState(vmName, session.tmux_id);
   if (!state.live) {
@@ -794,6 +806,7 @@ async function relaunchTui(sessionId, { actor = null } = {}) {
   // CommandsPane pastes them into whatever pane the user is in — so the cd
   // belongs here, in the machine path, and only when the pane is off-target.
   const cmd = state.cwd && state.cwd !== project.folder ? `cd ${shq(project.folder)} && ${launch}` : launch;
+  if (beforeLaunch) beforeLaunch();
   await padTmux.sendCommand(vmName, session.tmux_id, cmd);
   audit(project, 'session_relaunch', { actor, session });
   return { session: getSession(session.id), state: await padTmux.paneState(vmName, session.tmux_id) };
@@ -807,7 +820,7 @@ async function relaunchTui(sessionId, { actor = null } = {}) {
  *  directory. Relaunch is for "the TUI exited"; this is for "the tmux session
  *  died", and the two are not interchangeable — relaunch refuses a dead
  *  session on purpose rather than resurrecting it in the wrong folder. */
-async function restartSession(sessionId, { actor = null } = {}) {
+async function restartSession(sessionId, { actor = null, beforeLaunch = null } = {}) {
   const { session, project, driver, vmName } = sessionTarget(sessionId);
   assertPadRunning(project.agent_name);
   const state = await padTmux.paneState(vmName, session.tmux_id);
@@ -824,11 +837,13 @@ async function restartSession(sessionId, { actor = null } = {}) {
       409
     );
   }
+  if (beforeLaunch) beforeLaunch();
   if (state.live) await padTmux.killSession(vmName, session.tmux_id);
   await padTmux.createSession(vmName, session.tmux_id, { cwd: project.folder });
   const launch = session.agent_session_id
     ? driver.tuiLaunch.resume({ sessionId: session.agent_session_id, cwd: project.folder })
     : driver.tuiLaunch.fresh({ cwd: project.folder });
+  if (beforeLaunch) beforeLaunch();
   await padTmux.sendCommand(vmName, session.tmux_id, launch);
   touchSession(session.id);
   // The resurrection clears the death (plan 65 1b). The liveness pass would do
@@ -902,12 +917,55 @@ function sendVerdict(session, perm) {
   return { canSend: true };
 }
 
+/**
+ * Poll the agent's store for new activity after a baseline timestamp.
+ * Returns true if new activity (user message, assistant message, or tool call)
+ * is detected within the deadline. This correlates acceptance to the EXACT
+ * conversation, avoiding false positives from unrelated pane repaints.
+ *
+ * Plan 91 §Phase 5: the poll gets its own budget, granted at poll time — the
+ * repaint wait consumed time meant for repainting, and a leftover deadline
+ * would false-negative a message whose store write lagged the repaint.
+ */
+const STORE_CONFIRM_BUDGET_MS = 15000;
+async function confirmDeliveryViaStore(agentName, agentSessionId, baselineActivityAt, deadline) {
+  if (!agentSessionId) return false;
+  while (Date.now() < deadline) {
+    try {
+      const activity = await agentStore.readActivity(agentName, agentSessionId);
+      if (activity?.store?.available && activity.lastActivityAt) {
+        const latest = Date.parse(activity.lastActivityAt);
+        const baseline = baselineActivityAt ? Date.parse(baselineActivityAt) : 0;
+        if (Number.isFinite(latest) && latest > baseline) {
+          return true;
+        }
+      }
+    } catch {
+      // Store read failed; treat as unknown (caller decides)
+      return false;
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  return false;
+}
+
 /** Type into a live session. The one writer path for the agent (mission_send)
  *  AND the API, so the solo lock is honoured in exactly one place.
  *  Plan 62: refuses a shell pane (1b, `mission_not_an_agent`), refuses a
  *  permission dialog (1c, `mission_permission_pending`), and confirms the pane
- *  took the text instead of a bare ok (1h, `mission_tui_not_ready`). */
-async function sendText(sessionId, text, { actor = null } = {}) {
+ *  took the text instead of a bare ok (1h, `mission_tui_not_ready`).
+ *  Plan 88 §Phase 2: the outcome is a three-state, not a boolean. A pre-write
+ *  refusal throws a refusal code; a write we OBSERVED throws nothing and returns
+ *  `acceptance: 'confirmed'`; a write we could not observe throws
+ *  `mission_send_unconfirmed` with `{ attempted: true, acceptance: 'unknown' }`.
+ *  Absence of a repaint is NOT non-delivery, so the last case must never be
+ *  phrased as "the TUI did not receive it" and must never invite a blind resend.
+ *  Acceptance is confirmed ONLY when the agent's store shows new activity for
+ *  this exact conversation after the write — pane repaint alone is not enough,
+ *  and a repaint with no transcript for the conversation is unconfirmed (a
+ *  booting TUI repaints for itself). The single exception is a store layout
+ *  the webui cannot see at all, where repaint is the only signal available. */
+async function sendText(sessionId, text, { actor = null, beforeWrite = null, paste = false } = {}) {
   const { session, project, vmName } = sessionTarget(sessionId);
   const where = ` [project:${project.name} (${project.id}) session:${session.id}]`;
   const body = String(text || '');
@@ -929,7 +987,29 @@ async function sendText(sessionId, text, { actor = null } = {}) {
     const cut = verdict.refusal.indexOf(': ');
     throw new MissionError(verdict.refusal.slice(0, cut), `${verdict.refusal.slice(cut + 2)}${where}`, 409);
   }
-  const sent = await padTmux.sendText(vmName, session.tmux_id, body);
+  // Capture baseline store activity for store-correlated acceptance (Plan 88 §Phase 2).
+  // We record the store's lastActivityAt BEFORE the write, then poll for new
+  // activity after. This correlates acceptance to the EXACT conversation,
+  // avoiding false positives from unrelated pane repaints or another client's turn.
+  // `known` tracks whether the store LAYOUT is visible (a path was located),
+  // independently of whether THIS conversation has activity yet — the two
+  // answers decide what a repaint is allowed to prove (see below).
+  let storeBaseline = null;
+  if (session.agent_session_id) {
+    try {
+      const baselineActivity = await agentStore.readActivity(project.agent_name, session.agent_session_id);
+      storeBaseline = {
+        at: baselineActivity?.lastActivityAt || null,
+        known: !!(baselineActivity?.store?.path),
+      };
+    } catch {
+      storeBaseline = null;
+    }
+  }
+  // Runner generation/turn checks belong at the actual write boundary, after
+  // the asynchronous pane probes. Pause or a human turn may have landed meanwhile.
+  if (beforeWrite) beforeWrite();
+  const sent = await padTmux.sendText(vmName, session.tmux_id, body, { paste });
   // Post-write confirmation (1h): prove the PANE CHANGED. Checking only that it
   // still exists is what produced `ok: true` for text that went nowhere — a live
   // pane is not an acknowledgement, and a TUI that is mid-turn repaints for its
@@ -937,27 +1017,69 @@ async function sendText(sessionId, text, { actor = null } = {}) {
   // This doubles as the post-send repaint wait (1g): the new content IS the
   // evidence, so there is no separate "force a repaint" step to get wrong.
   const baseline = before.text;
-  const deadline = Date.now() + 1500;
+  // The pane-change confirmation must outlast the TUI's repaint, which is slow
+  // for a long line: measured ~3-5s for a ~1200-char message on the opencode
+  // TUI (the composer fills, then Enter submits and the turn paints). A fixed
+  // 1.5s window false-negatives on a message we DID deliver — and a false "did
+  // not receive it" is as wrong as a false "received". Scale the wait with the
+  // text and cap it so a genuinely dead TUI still fails in bounded time. The
+  // loop returns the instant the pane changes, so a live TUI stays fast; only
+  // the dead-pane case pays the full budget.
+  const deadline = Date.now() + Math.min(12000, 2000 + body.length * 4);
   let after = await padTmux.captureScreen(vmName, session.tmux_id, 20);
   while (!after.live && Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 200));
     after = await padTmux.captureScreen(vmName, session.tmux_id, 20);
   }
   if (!after.live) {
-    throw new MissionError('mission_tui_not_ready', `The pane did not take the text (session gone after write)${where}`, 409);
+    throw new MissionError('mission_tui_not_ready', `The pane did not take the text (session gone after write)${where}`, 409, { attempted: true, acceptance: 'unknown' });
   }
   while (after.text === baseline && Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 200));
     after = await padTmux.captureScreen(vmName, session.tmux_id, 20);
     if (!after.live) {
-      throw new MissionError('mission_tui_not_ready', `The pane did not take the text (session gone after write)${where}`, 409);
+      throw new MissionError('mission_tui_not_ready', `The pane did not take the text (session gone after write)${where}`, 409, { attempted: true, acceptance: 'unknown' });
     }
   }
   if (after.text === baseline) {
+    // Plan 88 §Phase 2: a WRITTEN message we could not OBSERVE is UNKNOWN, not a
+    // refusal. Absence of a pane change is not proof of non-delivery — a slow or
+    // quiet TUI may still have taken it — so this must never read "the TUI did
+    // not receive it". The write already happened (`sent`), the pane is still
+    // live, and the honest answer is "unconfirmed": the caller reconciles or
+    // offers recovery, and no consumer may blindly resend on it.
     throw new MissionError(
-      'mission_tui_not_ready',
-      `The pane never changed after the write, so the TUI did not receive it — the session is live but not reading input${where}`,
-      409
+      'mission_send_unconfirmed',
+      `The message was written but the pane showed no change, so delivery is unconfirmed — the session is live; reconcile or retry${where}`,
+      409,
+      { attempted: true, acceptance: 'unknown' }
+    );
+  }
+  // Pane repaint observed. The store decides whenever its layout is known —
+  // a repaint on a fresh conversation is most often the TUI booting, not our
+  // input landing (proven live 2026-10-12: a "confirmed" startup whose prompt
+  // never reached the conversation's store, followed by 12 idle minutes).
+  // Only a store the webui cannot see at all (unknown layout: unsupported
+  // driver, missing base) still falls back to repaint = confirmed, because
+  // there is nothing to correlate against. A known-but-unreadable store polls
+  // and fails honestly instead of confirming blind.
+  // The store poll gets its own budget: the repaint wait above consumed time
+  // meant for repainting, and a leftover deadline would false-negative a
+  // message whose store write lagged the repaint by a second.
+  const storeKnown = !!storeBaseline?.known;
+  let storeConfirmed = !storeKnown;
+  if (storeKnown && session.agent_session_id) {
+    storeConfirmed = await confirmDeliveryViaStore(project.agent_name, session.agent_session_id, storeBaseline.at, Date.now() + STORE_CONFIRM_BUDGET_MS);
+  }
+  const acceptance = storeConfirmed ? 'confirmed' : 'unknown';
+  if (!storeConfirmed) {
+    // Pane changed but store shows no new activity for this conversation.
+    // Delivery is unconfirmed — the caller must reconcile or retry.
+    throw new MissionError(
+      'mission_send_unconfirmed',
+      `The message was written and the pane changed, but the agent's store shows no new activity for this conversation, so delivery is unconfirmed — reconcile or retry${where}`,
+      409,
+      { attempted: true, acceptance: 'unknown' }
     );
   }
   touchSession(session.id);
@@ -968,13 +1090,23 @@ async function sendText(sessionId, text, { actor = null } = {}) {
   // nothing — the evidence must not be writable by the failed request.
   audit(project, 'send', { actor, session, details: `${sent.lines} line(s), ${body.length} chars` });
   const fresh = getSession(session.id);
+  // Plan 88 §Phase 3: include runner operation status for caller reconciliation.
+  const runner = getDb().prepare('SELECT operation_id, operation_generation, operation_status, operation_started_at, operation_confirmed_at FROM infinite_runners WHERE session_id = ?').get(session.id) || null;
   return {
     session: { ...fresh, title: await sessionTitle(project, session) },
     project: { id: project.id, name: project.name },
     session_id: fresh.id,
     sent,
     confirmed: true,
+    acceptance: 'confirmed',
     screen: after.text,
+    operation: runner ? {
+      id: runner.operation_id,
+      generation: runner.operation_generation,
+      status: runner.operation_status,
+      started_at: runner.operation_started_at,
+      confirmed_at: runner.operation_confirmed_at,
+    } : null,
   };
 }
 
@@ -1091,9 +1223,25 @@ async function screen(sessionId, lines = 40) {
   // Absent (`screenFrom: 'none'`) when nothing was ever captured — never a
   // silently empty string standing in for a screen.
   const stored = session.last_screen;
+  // Plan 85 §Phase 3: the terminal header needs the OPEN session's runner
+  // metadata (Run/Pause, queue state) from the session ITSELF, never from
+  // whichever project col 1 happens to have selected. One cheap indexed read
+  // on the detail path both the page and the MCP already take.
+  const boundRunner = getDb().prepare('SELECT * FROM infinite_runners WHERE session_id = ?').get(session.id) || null;
+  // Plan 88 §Phase 3: include operation status for caller reconciliation.
+  // Plan 91 §Phase 2: include effective prompt templates for the Configure dialog.
+  const runnerOut = boundRunner ? withPromptTemplates({
+    ...boundRunner,
+    operation_id: boundRunner.operation_id || null,
+    operation_generation: boundRunner.operation_generation || 0,
+    operation_status: boundRunner.operation_status || 'none',
+    operation_started_at: boundRunner.operation_started_at || null,
+    operation_confirmed_at: boundRunner.operation_confirmed_at || null,
+  }) : null;
   const out = {
     session: { ...row, title: await sessionTitle(project, session) },
     state,
+    runner: runnerOut,
     screen: captured.live ? captured.text : (stored || ''),
     live: captured.live,
     ...verdict,
@@ -1504,8 +1652,24 @@ async function withAgentBusyProjects(projects) {
 
 /** Stop a session for good: kill the tmux session first, then drop the row, so
  *  a delete never leaves a TUI running in a PAD. */
+/** Disable any runner bound to a session before the session is closed.
+ *  Plan 85 §Phase 1: an explicit Close disables supervision FIRST — the row is
+ *  deleted, the FK nulls the binding, and without this the watcher would see a
+ *  dead pane on the next tick and resurrect a session the human just closed.
+ *  The runner CONFIGURATION survives (unbound); Run on it binds a new session. */
+function disableRunnerForSession(sessionId) {
+  const bound = getDb().prepare('SELECT id FROM infinite_runners WHERE session_id = ?').get(sessionId);
+  if (!bound) return;
+  incrementRunGeneration(bound.id);
+  getDb().prepare("UPDATE infinite_runners SET enabled = 0, control_state = ?, operation_status = 'invalidated', last_reason = ?, updated_at = ? WHERE id = ?")
+    .run('paused', 'Session closed — supervision stopped. Press Run to bind a new session.', new Date().toISOString(), bound.id);
+  // Paused → create the pause marker.
+  syncQueuePausedMarker(bound.id, true);
+}
+
 async function closeSession(sessionId, { actor = null } = {}) {
   const { session, project, vmName } = sessionTarget(sessionId);
+  disableRunnerForSession(session.id);
   await padTmux.killSession(vmName, session.tmux_id);
   // Audited even though the row is about to be deleted: the DELETION is the
   // thing that cannot be reconstructed afterwards, so it is the one action here
@@ -1700,40 +1864,477 @@ async function assertStepSession(sessionId) {
 /* ---------------------------------------------------------------- */
 
 const RUNNER_CONTROL_STATES = Object.freeze(['enabled', 'paused', 'waiting', 'need_input', 'finished']);
+// Plan 86 §Phase 4b: the two explicit Pause modes. `before_next_task` lets the
+// worker finish the plan it is on and only blocks the NEXT item; `current_task`
+// also asks the worker to stop the plan it is on at the earliest safe
+// checkpoint. An omitted mode is backward-compatible with the old single
+// finish-current-plan behavior.
+const RUNNER_PAUSE_MODES = Object.freeze(['before_next_task', 'current_task']);
 const RUNNER_HEALTH_STATES = Object.freeze([
   'working', 'waiting_for_tool', 'compacting', 'recovering',
   'suspected_stuck', 'usage_exhausted', 'auth_expired',
   'rate_limited', 'observation_unavailable', 'invalid_queue'
 ]);
 
+function queueMissionError(error) {
+  if (error instanceof runnerQueue.RunnerQueueError) throw new MissionError(error.code, error.message);
+  throw error;
+}
+
+function canonicalQueueProjection(runner, project, agent, snapshot) {
+  const file = runner.queue_file || 'QUEUE.md';
+  const pathOnHost = plans.queuePath(agent, { ...project, plans_folder: project.plans_folder || 'plans' }, file);
+  const expected = plans.queueProjection(snapshot.items, snapshot.customInstructions);
+  let condition = 'ok';
+  let error = null;
+  try {
+    if (!fs.existsSync(pathOnHost) || fs.readFileSync(pathOnHost, 'utf8') !== expected) {
+      condition = 'projection_error';
+      error = 'Generated QUEUE.md differs from the canonical queue. Regenerate the projection before running work.';
+    }
+  } catch (e) {
+    condition = 'projection_error';
+    error = `Could not verify generated QUEUE.md: ${e.message}`;
+  }
+  const items = snapshot.items.map((item) => ({ ...item, status: item.status.replace('_', ' ') }));
+  const parsed = { version: plans.QUEUE_VERSION, items, customInstructions: snapshot.customInstructions };
+  const aggregate = plans.queueAggregateState(parsed);
+  return {
+    parsed,
+    aggregate,
+    condition,
+    summary: plans.queueSummary(parsed),
+    path: pathOnHost,
+    hash: snapshot.revision,
+    error,
+  };
+}
+
+function writeCanonicalQueueProjection(runner, project, agent, snapshot) {
+  return plans.writeQueueProjection(
+    agent,
+    { ...project, plans_folder: project.plans_folder || 'plans' },
+    snapshot.items,
+    snapshot.customInstructions,
+    runner.queue_file || 'QUEUE.md'
+  );
+}
+
 /** Generate a runner id. */
 function newRunnerId() {
   return 'run_' + crypto.randomBytes(8).toString('hex');
 }
 
-/** Create a runner configuration. */
+/** Create a runner configuration.
+ *  When `sessionId` is given (plan 83: "set up an existing session as a
+ *  runner"), it is validated before persist: the session must exist, must
+ *  belong to THIS project (a runner row lives in exactly one project, and a
+ *  session elsewhere would be started / no-progressed by a runner that has no
+ *  right to it), and must not already be bound to another runner (the runner
+ *  row IS that session; two rows pinned for one session would both drive it).
+ *  The FK does not enforce any of these — it only keeps the id from dangling —
+ *  so the checks are explicit and each asks a different question.
+ *
+ *  Plan 85: when NO `sessionId` is given, the worker session is created HERE —
+ *  an infinite runner IS a session, and the row must open a real terminal
+ *  immediately, independently of whether its queue is running. A stopped PAD or
+ *  a missing folder fails the whole create (ordinary session errors), never a
+ *  half-created configuration row. */
 async function createRunner({ projectId, name, sessionId, queueFile = 'QUEUE.md',
   idleGraceMs = 120000, minNudgeIntervalMs = 120000, noProgressBudget = 3,
   compactionGraceMs = 300000, longCommandThresholdMs = 1800000,
-  recoverExited = true, recoveryBudget = 3 }) {
+  recoverExited = true, recoveryBudget = 3, promptTemplates = undefined, actor = null } = {}) {
   const project = getProject(projectId);
+  let normalizedQueueFile;
+  try {
+    normalizedQueueFile = plans.normalizeQueueFile(requireAgent(project.agent_name), project, queueFile);
+  } catch (e) {
+    if (e instanceof plans.PlansError) throw new MissionError(e.code, e.message);
+    throw e;
+  }
+  // Plan 91 §Phase 2: prompt templates are validated BEFORE anything is
+  // persisted or any session minted — a bad set must not leave a runner behind.
+  // Omitted input stores NULL (shipped defaults), never the preserve sentinel.
+  const promptInput = parsePromptTemplatesInput(promptTemplates);
+  const promptTemplatesJson = promptInput === PROMPT_TEMPLATES_PRESERVE ? null : promptInput;
   const id = newRunnerId();
-  const now = new Date().toISOString();
   const db = getDb();
-  db.prepare(`
-    INSERT INTO infinite_runners (id, name, project_id, session_id, queue_file,
-      enabled, control_state, idle_grace_ms, min_nudge_interval_ms, no_progress_budget,
-      compaction_grace_ms, long_command_threshold_ms, recover_exited, recovery_budget,
-      run_generation, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, 0, 'paused', ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
-  `).run(
-    id, name, projectId, sessionId || null, queueFile,
-    idleGraceMs, minNudgeIntervalMs, noProgressBudget,
-    compactionGraceMs, longCommandThresholdMs,
-    recoverExited ? 1 : 0, recoveryBudget,
-    now, now
-  );
-  return getRunner(id);
+  let boundSessionId = null;
+  if (sessionId) {
+    let session;
+    try {
+      session = getSession(sessionId);
+    } catch (e) {
+      throw new MissionError('runner_session_not_found', `Session ${sessionId} does not exist`);
+    }
+    if (String(session.project_id) !== String(projectId)) {
+      throw new MissionError('runner_session_wrong_project', `Session ${sessionId} belongs to another project`);
+    }
+    const taken = db.prepare('SELECT id FROM infinite_runners WHERE session_id = ? AND id != ?').get(sessionId, id);
+    if (taken) {
+      throw new MissionError('runner_session_in_use', `Session ${sessionId} is already the worker of runner ${taken.id}`);
+    }
+    boundSessionId = session.id;
+  } else {
+    const created = await startSession(projectId, {
+      label: `Runner: ${name}`,
+      origin: 'human',
+      createdBy: actor,
+    });
+    boundSessionId = created.session.id;
+  }
+  const now = new Date().toISOString();
+  try {
+    db.prepare(`
+      INSERT INTO infinite_runners (id, name, project_id, session_id, queue_file,
+        enabled, control_state, idle_grace_ms, min_nudge_interval_ms, no_progress_budget,
+        compaction_grace_ms, long_command_threshold_ms, recover_exited, recovery_budget,
+        prompt_templates_json, run_generation, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, 0, 'paused', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+    `).run(
+      id, name, projectId, boundSessionId, normalizedQueueFile,
+      idleGraceMs, minNudgeIntervalMs, noProgressBudget,
+      compactionGraceMs, longCommandThresholdMs,
+      recoverExited ? 1 : 0, recoveryBudget,
+      promptTemplatesJson,
+      now, now
+    );
+  } catch (e) {
+    // The session was just created for this runner — do not leave it orphaned
+    // when the row cannot be persisted. Best effort: a failed create must not
+    // plant a stray TUI the user never asked to keep.
+    if (!sessionId && boundSessionId) {
+      try { await closeSession(boundSessionId, { actor }); } catch { /* best effort */ }
+    }
+    throw e;
+  }
+  // Create one canonical queue immediately. The generated worker file is a
+  // projection; no runner starts with a file that the worker may author.
+  try {
+    const createdQueue = runnerQueue.ensure(id, { actor });
+    writeCanonicalQueueProjection(getRunner(id), project, requireAgent(project.agent_name), createdQueue);
+  } catch (e) {
+    queueMissionError(e);
+  }
+  // New runner starts paused (enabled=0) — create the pause marker.
+  syncQueuePausedMarker(id, true);
+  return withPromptTemplates(getRunner(id));
+}
+
+/** Plan 91 §Phase 2 — prompt-template persistence contract.
+ *
+ * Input (`promptTemplates` on create/update) is a COMPLETE five-key object or
+ * nothing: `undefined` preserves current values (omitted on update, defaults
+ * on create), explicit `null` resets the whole saved set to defaults, and any
+ * other shape is a field-specific 400. Returns the TEXT to store (`JSON` or
+ * `null` for defaults) or the sentinel `PRESERVE` when the caller omitted it.
+ * Validated before any session is minted or row written. */
+const PROMPT_TEMPLATES_PRESERVE = Symbol('preserve');
+function parsePromptTemplatesInput(value) {
+  if (value === undefined) return PROMPT_TEMPLATES_PRESERVE;
+  if (value === null) return null;
+  const v = promptTemplates.validateTemplateSet(value);
+  if (!v.ok) {
+    const first = v.errors[0];
+    throw new MissionError(first.code, `promptTemplates: ${first.message}`);
+  }
+  return JSON.stringify(value);
+}
+
+/** Content hash identifying an effective template set (the "version" the
+ *  configuration surface and, later, operation metadata carry). */
+function promptTemplateVersion(templatesObj) {
+  return crypto.createHash('sha256').update(JSON.stringify(templatesObj), 'utf8').digest('hex');
+}
+
+/** Effective templates for a runner row: stored custom set, or the shipped
+ *  defaults when the column is NULL (existing rows are never rewritten).
+ *  Corrupt stored JSON is an explicit failure (`error`), never a silent
+ *  default fallback — a misconfigured runner withholds sends (Phase 4) while
+ *  editing/repair stays available. */
+function effectivePromptTemplates(row) {
+  const raw = row ? row.prompt_templates_json : null;
+  if (raw === null || raw === undefined) {
+    return {
+      templates: { ...promptTemplates.DEFAULT_TEMPLATES },
+      version: promptTemplateVersion(promptTemplates.DEFAULT_TEMPLATES),
+      custom: false,
+      error: null,
+    };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    return { templates: null, version: null, custom: true, error: { code: 'prompt_templates_corrupt', message: `Saved prompt templates are not valid JSON: ${e.message}` } };
+  }
+  const v = promptTemplates.validateTemplateSet(parsed);
+  if (!v.ok) {
+    return { templates: null, version: null, custom: true, error: { code: v.errors[0].code, message: `Saved prompt templates are invalid: ${v.errors[0].message}` } };
+  }
+  return { templates: parsed, version: promptTemplateVersion(parsed), custom: true, error: null };
+}
+
+/** Enrich a runner row for configuration responses: effective templates, its
+ *  content-hash version, default/custom status, and any corruption failure.
+ *  The raw row (and its stored column) pass through untouched. */
+function withPromptTemplates(row) {
+  if (!row) return row;
+  const eff = effectivePromptTemplates(row);
+  return {
+    ...row,
+    promptTemplates: eff.templates,
+    promptTemplateVersion: eff.version,
+    promptTemplatesCustom: eff.custom,
+    promptTemplatesError: eff.error,
+  };
+}
+
+/** Static callback-engine catalogue for surfaces with no runner yet (the
+ *  create dialog). No database, no session — just the contract. */
+function callbackCatalogue() {
+  return runnerCallbacks.callbackCatalogue();
+}
+
+/** Plan 92 §Phase 2 — lifecycle callback settings surface. Reads the five
+ *  events' scripts + flags plus the catalogue (meanings, env vars, limits).
+ *  Reads never execute. CallbackError surfaces as a MissionError code. */
+function getRunnerCallbacks(id) {
+  const runner = getRunner(id);
+  if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
+  try {
+    return {
+      runner: { id: runner.id, name: runner.name },
+      callbacks: runnerCallbacks.listCallbacks(id),
+      catalogue: runnerCallbacks.callbackCatalogue(),
+    };
+  } catch (e) {
+    if (e instanceof runnerCallbacks.CallbackError) throw new MissionError(e.code, e.message);
+    throw e;
+  }
+}
+
+/** Save a PARTIAL callback map: `{ event: { script, enabled } }`. Omitted
+ *  events preserve their saved values; every supplied event validates fully
+ *  before anything is written, then saves per event (file + row atomically).
+ *  Saving never executes. */
+function saveRunnerCallbacks(id, map) {
+  const runner = getRunner(id);
+  if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
+  if (!map || typeof map !== 'object' || Array.isArray(map) || !Object.keys(map).length) {
+    throw new MissionError('callback_map_missing', 'Callback update needs a callbacks object with at least one event.');
+  }
+  try {
+    for (const event of Object.keys(map)) {
+      const entry = map[event];
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+        throw new runnerCallbacks.CallbackError('callback_entry_invalid', `Callback \`${event}\` must be an object with script and enabled.`);
+      }
+      runnerCallbacks.validateEventKey(event);
+      if (typeof entry.script !== 'string') {
+        throw new runnerCallbacks.CallbackError('callback_script_missing', `Callback \`${event}\` needs a script string.`);
+      }
+      if (entry.enabled !== undefined && typeof entry.enabled !== 'boolean') {
+        throw new runnerCallbacks.CallbackError('callback_enabled_invalid', `Callback \`${event}\` enabled must be a boolean.`);
+      }
+      if (entry.recreateResume !== undefined && (typeof entry.recreateResume !== 'boolean' || (entry.recreateResume && event !== 'usage_exhausted'))) {
+        throw new runnerCallbacks.CallbackError('callback_recovery_invalid', 'Recreate and resume is only available for usage_exhausted.');
+      }
+    }
+    const saved = [];
+    for (const event of Object.keys(map)) {
+      saved.push(runnerCallbacks.saveCallback(id, event, { script: map[event].script, enabled: map[event].enabled, recreateResume: map[event].recreateResume }));
+    }
+    return { runner: { id: runner.id, name: runner.name }, saved, callbacks: runnerCallbacks.listCallbacks(id) };
+  } catch (e) {
+    if (e instanceof runnerCallbacks.CallbackError) throw new MissionError(e.code, e.message);
+    throw e;
+  }
+}
+
+/** Execution history reads (writes arrive with the Phase 3 executor).
+ *  Runner-scoped for live runners; project-scoped (`projectId` + `runnerId`)
+ *  is the post-destroy owner path, since destroy deletes the runner row the
+ *  runner-scoped gate reads through. */
+function runnerCallbackHistory({ runnerId = null, projectId = null, limit = 50 } = {}) {
+  // Project scope is the post-destroy owner path: it must NOT require the
+  // runner row destroy deleted. Runner-only scope keeps requiring it (nothing
+  // to gate a removed runner through).
+  if (projectId) getProject(projectId);
+  if (runnerId && !projectId) {
+    const runner = getRunner(runnerId);
+    if (!runner) throw new MissionError('runner_not_found', `Runner ${runnerId} not found`);
+  }
+  if (!runnerId && !projectId) {
+    throw new MissionError('callback_history_unscoped', 'History needs a runnerId, a projectId, or both.');
+  }
+  return runnerCallbacks.listCallbackHistory({ runnerId, projectId, limit });
+}
+
+/** Static prompt-engine catalogue for surfaces with no runner yet (the create
+ *  dialog). No database, no session, no queue — just the contract. */
+function promptCatalogue() {  return {
+    keys: [...promptTemplates.TEMPLATE_KEYS],
+    catalogue: promptTemplates.VARIABLE_CATALOGUE,
+    limits: promptTemplates.TEMPLATE_LIMITS,
+    defaults: { ...promptTemplates.DEFAULT_TEMPLATES },
+  };
+}
+
+/** Read-only prompt configuration surface: catalogue, shipped defaults,
+ *  budgets and this runner's effective set. Creates no session, touches no
+ *  queue file, enables nothing. */
+function runnerPromptConfig(id) {
+  const runner = getRunner(id);
+  if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
+  const eff = effectivePromptTemplates(runner);
+  return {
+    runner: { id: runner.id, name: runner.name },
+    keys: [...promptTemplates.TEMPLATE_KEYS],
+    catalogue: promptTemplates.VARIABLE_CATALOGUE,
+    limits: promptTemplates.TEMPLATE_LIMITS,
+    defaults: { ...promptTemplates.DEFAULT_TEMPLATES },
+    effective: eff.templates,
+    version: eff.version,
+    custom: eff.custom,
+    error: eff.error,
+  };
+}
+
+/** Build the render context for prompt preview/dispatch from REAL project data:
+ *  container paths from the existing resolver, current/blocker from the live
+ *  queue summary when one is readable. Caller overrides win per key, so the
+ *  dialog can preview hypothetical values; every key records its provenance
+ *  (`real` | `sample` | `empty`) so the UI labels sample values honestly.
+ *  Read-only: a queue read failure degrades item context to absent, never to a
+ *  throw that would take preview offline. */
+function buildPromptContext(project, { queueFile = 'QUEUE.md', queue = null, runnerName = undefined, overrides = {} } = {}) {
+  const paths = runnerContainerPaths(project, queueFile);
+  const clean = {};
+  for (const [k, v] of Object.entries(overrides || {})) {
+    if (v !== undefined) clean[k] = v;
+  }
+  const summary = (queue && queue.summary) || {};
+  const base = {
+    runner_name: runnerName,
+    project_name: project.name,
+    project_path: project.folder,
+    plans_path: paths.queue.slice(0, paths.queue.lastIndexOf('/')),
+    queue_path: paths.queue,
+    index_path: paths.index,
+    paused_path: paths.paused,
+    current_plan: summary.current ? summary.current.plan : undefined,
+    current_item_status: summary.current ? summary.current.status : undefined,
+    blocker_reason: summary.blocked ? summary.blocked.reason : undefined,
+  };
+  const context = {};
+  const sources = {};
+  for (const key of Object.keys(promptTemplates.VARIABLE_CATALOGUE)) {
+    if (Object.prototype.hasOwnProperty.call(clean, key)) {
+      context[key] = clean[key];
+      sources[key] = 'sample';
+    } else if (base[key] !== undefined && base[key] !== null && base[key] !== '') {
+      context[key] = base[key];
+      sources[key] = 'real';
+    } else {
+      sources[key] = 'empty';
+    }
+  }
+  return { context, sources };
+}
+
+/** Shared draft validate+render core for both preview routes. Preview shows the
+ *  EXACT submitted text: drafts render, then normalize to one logical terminal
+ *  submission, and `normalizedKeys` names every kind whose text changed so the
+ *  dialog explains the normalization instead of hiding it. */
+function renderPromptDrafts(drafts, context) {
+  if (!drafts || typeof drafts !== 'object' || Array.isArray(drafts) || !Object.keys(drafts).length) {
+    throw new MissionError('prompt_drafts_missing', 'Preview needs a drafts object with at least one template key.');
+  }
+  const errors = [];
+  const rendered = {};
+  const normalizedKeys = [];
+  for (const key of Object.keys(drafts)) {
+    if (!promptTemplates.TEMPLATE_KEYS.includes(key)) {
+      errors.push({ key, code: 'prompt_unknown_key', message: `Unknown template key \`${key}\`.` });
+      continue;
+    }
+    if (typeof drafts[key] !== 'string') {
+      errors.push({ key, code: 'prompt_not_string', message: `Template \`${key}\` must be a string.` });
+      continue;
+    }
+    const v = promptTemplates.validateTemplate(drafts[key]);
+    if (!v.ok) {
+      for (const e of v.errors) errors.push({ key, code: e.code, message: e.message, line: e.line, column: e.column });
+      continue;
+    }
+    try {
+      const raw = promptTemplates.renderTemplate(drafts[key], context);
+      const normalized = promptTemplates.normalizePromptForSend(raw);
+      rendered[key] = normalized;
+      if (normalized !== raw) normalizedKeys.push(key);
+    } catch (e) {
+      errors.push({ key, code: e.code || 'prompt_render_failed', message: e.message });
+    }
+  }
+  return { ok: errors.length === 0, rendered, errors, normalizedKeys };
+}
+
+/** Plan 91 §Phase 4 — the ONE way a runner-to-LLM message is produced. Renders
+ *  the saved template for `kind` against real dispatch context, then
+ *  normalizes to one logical terminal submission. A misconfigured set or a
+ *  missing required value is an actionable MissionError naming the repair —
+ *  never `undefined` in a sent prompt and never a silent default fallback.
+ *  `extra` overrides context per key (e.g. the pause target's plan). Returns
+ *  `{ text, version }`: the version (content hash) travels with the operation
+ *  via the existing `operation_prompt_hash`, so an outstanding send stays
+ *  identifiable across edits and restarts without new columns. */
+function renderRunnerPrompt(runner, project, queue, kind, extra = {}) {
+  const eff = effectivePromptTemplates(runner);
+  if (eff.error) {
+    throw new MissionError('runner_prompts_misconfigured', `Prompt templates misconfigured: ${eff.error.message} Repair them in Configure → Prompts, then retry.`);
+  }
+  const { context } = buildPromptContext(project, { queueFile: runner.queue_file, queue, runnerName: runner.name, overrides: extra });
+  let rendered;
+  try {
+    rendered = promptTemplates.renderTemplate(eff.templates[kind], context);
+  } catch (e) {
+    throw new MissionError(e.code || 'prompt_render_failed', `Cannot render the ${kind} prompt: ${e.message}`);
+  }
+  const guidance = queue?.parsed?.customInstructions || '';
+  const text = guidance
+    ? `${rendered}\n\n=== QUEUE CUSTOM INSTRUCTIONS ===\n${guidance}\n=== END QUEUE CUSTOM INSTRUCTIONS ===`
+    : rendered;
+  return { text: promptTemplates.normalizePromptForSend(text), version: eff.version };
+}
+
+/** Read-only preview for an existing runner: real container paths and live
+ *  queue item context, caller overrides labeled as samples. Validates supplied
+ *  drafts and renders them WITHOUT persisting anything. Never sends, starts,
+ *  enables or touches the queue file. */
+async function previewRunnerPrompts(id, drafts, overrides = {}) {
+  const runner = getRunner(id);
+  if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
+  const project = getProject(runner.project_id);
+  let queue = null;
+  try {
+    const agent = requireAgent(project.agent_name);
+    queue = canonicalQueueProjection(runner, project, agent, runnerQueue.snapshot(runner.id));
+  } catch { /* item context degrades to absent; paths still preview */ }
+  const { context, sources } = buildPromptContext(project, { queueFile: runner.queue_file, queue, runnerName: runner.name, overrides });
+  return { ...renderPromptDrafts(drafts, context), contextSources: sources };
+}
+
+/** Read-only preview for a project with no runner yet (the create dialog):
+ *  same engine, same real paths; the runner name and item context come from
+ *  caller overrides and are labeled samples. */
+async function previewProjectPrompts(projectId, drafts, overrides = {}) {
+  const project = getProject(projectId);
+  // A project with no runner has no canonical queue yet. Preview remains useful
+  // with empty item context; it must not fall back to a worker projection.
+  const queue = null;
+  const { context, sources } = buildPromptContext(project, { queue, overrides });
+  return { ...renderPromptDrafts(drafts, context), contextSources: sources };
 }
 
 /** Get a runner by id. */
@@ -1752,14 +2353,49 @@ function getActiveRunnerForProject(projectId) {
 
 /** List runners for a project. */
 function listRunnersForProject(projectId) {
-  return getDb().prepare('SELECT * FROM infinite_runners WHERE project_id = ? ORDER BY created_at DESC').all(projectId);
+  return getDb().prepare('SELECT * FROM infinite_runners WHERE project_id = ? ORDER BY created_at DESC').all(projectId)
+    .map(withPromptTemplates);
 }
 
-/** Update runner settings (not state). */
+/** Every runner across every project the caller may see, each tagged with its
+ *  project (plan 85 §Phase 2: the all-projects view merges infinite sessions
+ *  into the same list, so it needs runners from every project, not just the
+ *  selected one). Same `allow` contract as `listAllSessions`. */
+function listAllRunners({ allow = null } = {}) {
+  const projects = listProjects();
+  const byId = new Map(projects.map((p) => [p.id, p]));
+  const visible = (p) => p && (!allow || allow(p.agent_name));
+  return getDb().prepare('SELECT * FROM infinite_runners ORDER BY created_at DESC').all()
+    .filter((r) => visible(byId.get(r.project_id)))
+    .map((r) => withPromptTemplates({ ...r, project: projectTag(byId.get(r.project_id)) }));
+}
+
+/** Update runner settings (not state). `promptTemplates` follows the create
+ *  contract: omitted preserves, explicit null resets to defaults, a complete
+ *  object replaces after validation. */
 async function updateRunner(id, { name, idleGraceMs, minNudgeIntervalMs, noProgressBudget,
-  compactionGraceMs, longCommandThresholdMs, recoverExited, recoveryBudget }) {
+  queueFile = undefined, compactionGraceMs, longCommandThresholdMs, recoverExited, recoveryBudget, promptTemplates = undefined }) {
   const runner = getRunner(id);
   if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
+  if (queueFile !== undefined) {
+    const project = getProject(runner.project_id);
+    let normalized;
+    try {
+      normalized = plans.normalizeQueueFile(requireAgent(project.agent_name), project, queueFile);
+    } catch (e) {
+      if (e instanceof plans.PlansError) throw new MissionError(e.code, e.message);
+      throw e;
+    }
+    if (normalized !== (runner.queue_file || 'QUEUE.md')) {
+      const changed = getDb().prepare(
+        `UPDATE infinite_runners SET queue_file = ?, updated_at = ?
+         WHERE id = ? AND enabled = 0 AND operation_status NOT IN ('pending', 'unconfirmed', 'confirmed')`
+      ).run(normalized, new Date().toISOString(), id);
+      if (!changed.changes) {
+        throw new MissionError('runner_queue_file_busy', 'Pause supervision and wait for the active instruction to finish before changing the queue file.');
+      }
+    }
+  }
   const updates = [];
   const params = [];
   if (name !== undefined) { updates.push('name = ?'); params.push(name); }
@@ -1770,30 +2406,134 @@ async function updateRunner(id, { name, idleGraceMs, minNudgeIntervalMs, noProgr
   if (longCommandThresholdMs !== undefined) { updates.push('long_command_threshold_ms = ?'); params.push(longCommandThresholdMs); }
   if (recoverExited !== undefined) { updates.push('recover_exited = ?'); params.push(recoverExited ? 1 : 0); }
   if (recoveryBudget !== undefined) { updates.push('recovery_budget = ?'); params.push(recoveryBudget); }
-  if (!updates.length) return getRunner(id);
+  const promptJson = parsePromptTemplatesInput(promptTemplates);
+  if (promptJson !== PROMPT_TEMPLATES_PRESERVE) { updates.push('prompt_templates_json = ?'); params.push(promptJson); }
+  if (!updates.length) return withPromptTemplates(getRunner(id));
   updates.push('updated_at = ?');
   params.push(new Date().toISOString());
   params.push(id);
   getDb().prepare(`UPDATE infinite_runners SET ${updates.join(', ')} WHERE id = ?`).run(...params);
-  return getRunner(id);
+  return withPromptTemplates(getRunner(id));
 }
 
-/** Set runner control state (enabled/paused/waiting/need_input/finished). */
+/** Set runner control state (enabled/paused/waiting/need_input/finished).
+ *  Now uses the canonical runner transition service. */
 async function setRunnerControlState(id, controlState) {
   if (!RUNNER_CONTROL_STATES.includes(controlState)) {
     throw new MissionError('runner_invalid_state', `Invalid control state: ${controlState}`);
   }
   const runner = getRunner(id);
   if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
-  getDb().prepare('UPDATE infinite_runners SET control_state = ?, updated_at = ? WHERE id = ?')
-    .run(controlState, new Date().toISOString(), id);
-  return getRunner(id);
+
+  const canonical = runnerTransition.getRunnerCanonicalState(runner);
+  let result = null;
+
+  switch (controlState) {
+    case 'paused':
+      if (canonical !== 'paused') {
+        result = await runnerTransition.applyPause(id);
+      }
+      break;
+    case 'waiting':
+      if (canonical !== 'paused') {
+        result = await runnerTransition.applyPause(id);
+      }
+      break;
+    case 'need_input':
+      if (['dispatching', 'awaiting_receipt', 'running'].includes(canonical)) {
+        result = await runnerTransition.applyNeedInput(id);
+      }
+      break;
+    case 'finished':
+      if (['dispatching', 'awaiting_receipt', 'running'].includes(canonical)) {
+        result = await runnerTransition.applyComplete(id);
+      }
+      break;
+    case 'enabled':
+      if (['paused', 'held', 'complete'].includes(canonical)) {
+        result = await runnerTransition.applyRun(id);
+      }
+      break;
+  }
+  if (result?.markerRequired !== undefined) {
+    syncQueuePausedMarker(id, result.markerRequired);
+  }
+  return result?.runner || getRunner(id);
+}
+
+/** Enable or disable queue dispatch — the ONE place `enabled` is written
+ *  (plan 85 §Phase 4). Now uses the canonical runner transition service. */
+async function setRunnerEnabled(id, on) {
+  const runner = getRunner(id);
+  if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
+
+  let result = null;
+  if (on) {
+    result = await runnerTransition.applyRun(id);
+  } else {
+    result = await runnerTransition.applyPause(id);
+  }
+  if (result?.markerRequired !== undefined) {
+    syncQueuePausedMarker(id, result.markerRequired);
+  }
+  return result?.runner || getRunner(id);
+}
+
+/** Record the actionable reason a runner stopped or is waiting (shown in the
+ *  terminal header). A refusal to Run writes this, never the runner's content. */
+function setRunnerReason(id, reason) {
+  getDb().prepare('UPDATE infinite_runners SET last_reason = ?, updated_at = ? WHERE id = ?')
+    .run(reason || null, new Date().toISOString(), id);
+}
+
+/** Container-visible queue/index/paused paths for the worker (plan 85 §Phase 4 gap 7).
+ *  `project.folder` IS the container path (checked inside the PAD at session
+ *  start), and `plans_folder` is the subfolder beneath it — so the worker
+ *  reaches its queue at `<folder>/<plans_folder>/<queue_file>`. The
+ *  host-resolved `plans.queuePath` is for the webui's own reads; putting it in
+ *  a prompt tells the worker a path that does not exist in its namespace. */
+function runnerContainerPaths(project, queueFile) {
+  const pf = String(project.plans_folder || 'plans').replace(/\/+$/, '') || 'plans';
+  const qf = String(queueFile || 'QUEUE.md');
+  const base = `${String(project.folder || '').replace(/\/+$/, '')}/${pf}`;
+  return {
+    queue: `${base}/${qf}`,
+    index: `${base}/INDEX.md`,
+    paused: `${base}/QUEUE.paused`,
+  };
+}
+
+/** Sync the QUEUE.paused marker to match runner.enabled (best-effort). */
+function syncQueuePausedMarker(runnerId, paused) {
+  try {
+    const runner = getRunner(runnerId);
+    if (!runner) return;
+    const project = getProject(runner.project_id);
+    if (!project) return;
+    const agent = requireAgent(project.agent_name);
+    plans.setQueuePausedMarker(agent, { ...project, plans_folder: project.plans_folder || 'plans' }, paused);
+    // Clear any previous marker sync error on success
+    getDb().prepare('UPDATE infinite_runners SET marker_sync_error = NULL WHERE id = ?').run(runnerId);
+  } catch (e) {
+    console.warn(`[runner] queue pause marker sync ${runnerId}:`, e.message);
+    // Record the sync error for UI visibility
+    getDb().prepare('UPDATE infinite_runners SET marker_sync_error = ? WHERE id = ?').run(e.message, runnerId);
+  }
 }
 
 /** Increment run generation (for Start idempotency and restart reconciliation). */
 function incrementRunGeneration(id) {
   getDb().prepare('UPDATE infinite_runners SET run_generation = run_generation + 1, updated_at = ? WHERE id = ?')
     .run(new Date().toISOString(), id);
+}
+
+/** Record stop provenance: cause, origin (automatic/explicit), and timestamp. */
+function recordStopProvenance(id, cause, origin, details = null) {
+  const now = new Date().toISOString();
+  const detailsJson = details ? JSON.stringify(details) : null;
+  getDb().prepare(
+    `UPDATE infinite_runners SET stop_cause = ?, stop_origin = ?, stop_at = ?, last_reason = ?, updated_at = ? WHERE id = ?`
+  ).run(cause, origin, now, detailsJson, now, id);
 }
 
 /** Get runner with project and session details for supervision. */
@@ -1804,100 +2544,718 @@ async function getRunnerForSupervision(id) {
   const agent = requireAgent(project.agent_name);
   let session = null;
   if (runner.session_id) session = getSession(runner.session_id);
-  const queue = await plans.readQueue(agent, { ...project, plans_folder: project.plans_folder || 'plans' });
+  let queue;
+  try {
+    queue = canonicalQueueProjection(runner, project, agent, runnerQueue.snapshot(runner.id));
+  } catch (e) {
+    queueMissionError(e);
+  }
   return { runner, project, agent, session, queue };
 }
 
-/** Start (or resume) a runner. Validates queue, binds/creates worker session, sends startup message. */
+/** A queue item with the plan's own display metadata attached (plan 86 §Phase 1).
+ *  The queue file names a plan path; the panel shows its TITLE and plan Status,
+ *  so a named plan that no longer exists is visible as such (`exists: false`)
+ *  rather than a bare path nobody can read. One failing plan must never blank
+ *  the whole queue list. */
+function enrichRunnerQueueItem(item, agent, project) {
+  const out = {
+    id: item.id,
+    plan: item.plan,
+    status: item.status,
+    reason: item.reason || '',
+  };
+  try {
+    const plan = plans.readPlan(agent, item.plan, { project });
+    if (plan) {
+      out.exists = true;
+      out.title = plan.title;
+      out.planStatus = plan.status;
+      out.planStatusRaw = plan.statusRaw;
+    } else {
+      out.exists = false;
+    }
+  } catch (e) {
+    out.exists = false;
+  }
+  return out;
+}
+
+/** Plan 86 §Phase 4b: decide a pending pause's next state from OBSERVATION,
+ *  never from the enabled flag or a conversational claim. Purely:
+ *   - `before_next_task`: confirmed once the target item is no longer
+ *     `in progress` (the worker finished it), or there was no target at all.
+ *     While the target is still `in progress`, the pause is still being applied.
+ *   - `current_task`: confirmed ONLY once the worker is observed IDLE
+ *     (`workerBusyKnown && !workerBusy`) — it stopped its turn mid-plan and kept
+ *     the item `in progress` (its checkpoint). Without a KNOWN-idle observation
+ *     we stay `requested` and never claim a stop we did not see.
+ *  Returns 'confirmed' | 'requested' | null (null = no pending pause). */
+function pauseConfirmation(runner, { targetStatus = null, workerBusy = null, workerBusyKnown = false } = {}) {
+  if (!runner || runner.pause_state !== 'requested' || !runner.pause_mode) return null;
+  if (runner.pause_mode === 'before_next_task') {
+    return (!runner.pause_target_item || targetStatus !== 'in progress') ? 'confirmed' : 'requested';
+  }
+  return (workerBusyKnown && workerBusy === false) ? 'confirmed' : 'requested';
+}
+
+/** Apply pauseConfirmation to a runner using an already-read queue: a
+ *  `before_next_task` need only the queue file; a `current_task` reads the
+ *  worker conversation's own store for a known-idle observation. The update is
+ *  guarded on `pause_state = 'requested'` so a concurrent Resume/Remove wins.
+ *  Returns the (possibly refreshed) runner row. */
+async function reconcileRunnerPause(runner, project, queue) {
+  if (!runner || runner.pause_state !== 'requested' || !runner.pause_mode) return runner;
+  const target = ((queue && queue.parsed && queue.parsed.items) || [])
+    .find((it) => it.id === runner.pause_target_item) || null;
+  let workerBusy = null;
+  let workerBusyKnown = false;
+  if (runner.pause_mode === 'current_task' && runner.session_id) {
+    try {
+      const session = getSession(runner.session_id);
+      if (session && session.agent_session_id) {
+        const turn = agentStore.readTurn(project.agent_name, session.agent_session_id);
+        workerBusy = turn.state === 'working';
+        workerBusyKnown = turn.state !== 'unknown';
+      }
+    } catch { /* session gone — cannot observe idle; stay requested */ }
+  }
+  const next = pauseConfirmation(runner, { targetStatus: target ? target.status : null, workerBusy, workerBusyKnown });
+  if (next !== 'confirmed') return runner;
+  getDb().prepare(
+    "UPDATE infinite_runners SET pause_state = 'confirmed', last_reason = ?, updated_at = ? WHERE id = ? AND pause_state = 'requested' AND run_generation = ?"
+  ).run(
+    runner.pause_mode === 'current_task'
+      ? `Paused current task — ${target ? target.plan : 'the plan'} stopped at its checkpoint.`
+      : 'Paused — next task will not start.',
+    new Date().toISOString(), runner.id, runner.run_generation
+  );
+  return getRunner(runner.id);
+}
+
+/** A queue can be repaired outside Paddock while its runner still carries the
+ * automatic invalid-queue stop from the earlier read. Clear only that stale
+ * diagnosis on a successful parse; remain paused so repairing a file never runs
+ * work without the user's next Run action. */
+function reconcileInvalidQueueRepair(runner, queue) {
+  if (!runner || queue.condition !== 'ok' || runner.stop_cause !== 'invalid_queue') return runner;
+  const changed = getDb().prepare(
+    "UPDATE infinite_runners SET control_state = 'paused', last_reason = ?, stop_cause = NULL, stop_origin = NULL, stop_at = NULL, scheduler_decision = 'paused', scheduler_reason = ?, updated_at = ? WHERE id = ? AND enabled = 0 AND stop_cause = 'invalid_queue'"
+  ).run('Queue repaired — press Run queue to continue.', 'Queue repaired; waiting for explicit Run.', new Date().toISOString(), runner.id);
+  if (!changed.changes) return runner;
+  syncQueuePausedMarker(runner.id, true);
+  return getRunner(runner.id);
+}
+
+/** The full queue picture for one runner (plan 86 §Phase 1): the parsed items
+ *  (not just validator facts), each enriched with its plan's title/status, the
+ *  one shared `summary` projection, the physical + worker-visible paths, the
+ *  revision hash the panel must echo back when it edits, and a `condition`
+ *  ('ok' | 'missing' | 'unreadable' | 'malformed') so "not set up yet" and
+ *  "your queue file is broken" are different states instead of one `invalid`. */
+async function readRunnerQueue(id) {
+  const runner = getRunner(id);
+  if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
+  return readRunnerQueueFor(runner);
+}
+
+async function readRunnerQueueFor(runner) {
+  const project = getProject(runner.project_id);
+  const agent = requireAgent(project.agent_name);
+  let q;
+  try {
+    q = canonicalQueueProjection(runner, project, agent, runnerQueue.snapshot(runner.id));
+  } catch (e) {
+    if (e instanceof runnerQueue.RunnerQueueError && e.code === 'queue_not_found') {
+      q = {
+        parsed: { version: plans.QUEUE_VERSION, items: [], customInstructions: '' },
+        aggregate: { state: 'invalid', reason: 'Canonical queue has not been set up.' },
+        condition: 'missing', summary: plans.queueSummary({ items: [] }), path: plans.queuePath(agent, { ...project, plans_folder: project.plans_folder || 'plans' }, runner.queue_file), hash: null, error: 'Canonical queue has not been set up.',
+      };
+    } else queueMissionError(e);
+  }
+  // Plan 86 §Phase 4b: a pending pause is confirmed from observation here — the
+  // panel polls this read, so "Pausing…" becomes a truthful "Paused" once the
+  // worker is seen to have stopped, and never before.
+  const repaired = reconcileInvalidQueueRepair(runner, q);
+  const current = await reconcileRunnerPause(repaired, project, q);
+  const worker = current.session_id ? getSession(current.session_id) : null;
+  const turn = agentStore.readTurn(agent, worker?.agent_session_id);
+  const now = Date.now();
+  const idleSince = turn.state === 'idle'
+    ? (current.worker_state === 'idle' && current.worker_turn_id === turn.userId ? current.idle_since : turn.completedAt || new Date(now).toISOString())
+    : null;
+  const scheduler = computeSchedulerState({ ...current, idle_since: idleSince }, q, turn, now);
+  // Plan 91 §Phase 2: the Configure dialog reads saved prompts from this same
+  // detail read, so the subset carries the effective set (never the raw column).
+  const eff = effectivePromptTemplates(current);
+  return {
+    runner: { id: current.id, name: current.name, control_state: current.control_state, pause_mode: current.pause_mode, pause_state: current.pause_state, queue_file: current.queue_file, session_id: current.session_id, promptTemplates: eff.templates, promptTemplateVersion: eff.version, promptTemplatesCustom: eff.custom, promptTemplatesError: eff.error },
+    project: projectTag(project),
+    queue: {
+      state: q.condition === 'projection_error' ? 'projection_error' : q.aggregate.state,
+      reason: q.error || q.aggregate.reason,
+      condition: q.condition,
+      revision: q.hash,
+      path: q.path,
+      workerPath: runnerContainerPaths(project, current.queue_file).queue,
+      items: (q.parsed.items || []).map((it) => enrichRunnerQueueItem(it, agent, project)),
+      repairItems: q.repairItems || [],
+      repairDuplicateIds: q.repairDuplicateIds || [],
+      customInstructions: q.parsed.customInstructions || '',
+      summary: q.summary,
+      error: q.condition === 'ok' ? null : (q.error || q.aggregate.reason),
+      scheduler: {
+        ...scheduler,
+        deadline: scheduler.nextCheckMs === null ? null : new Date(now + scheduler.nextCheckMs).toISOString(),
+        observedAt: new Date(now).toISOString(),
+      },
+    },
+    updatedAt: current.updated_at,
+  };
+}
+
+/** Set a runner's queue up: create QUEUE.md from the template if it does not
+ *  exist, then refuse if the file still will not validate. Concurrent creates
+ *  are race-safe (`ensureQueue` writes with `wx` and re-reads a loser). */
+async function setupRunnerQueue(id, { actor = null } = {}) {
+  const runner = getRunner(id);
+  if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
+  const project = getProject(runner.project_id);
+  const agent = requireAgent(project.agent_name);
+  let queue;
+  try {
+    queue = runnerQueue.ensure(id, { actor });
+    writeCanonicalQueueProjection(runner, project, agent, queue);
+  } catch (e) {
+    queueMissionError(e);
+  }
+  audit(project, 'runner_queue_setup', { actor: actor ? (actor.name || actor) : null });
+  // Sync marker to current enabled state (enabled=0 → paused marker exists).
+  syncQueuePausedMarker(id, !runner.enabled);
+  return readRunnerQueueFor(runner);
+}
+
+/** The plans available in a runner's project folder (plan 86 §Phase 3) —
+ *  candidate rows for "Add plans". Scoped to the runner's OWN project folder
+ *  (never another project's), with the folder's entry files (README/INDEX/
+ *  QUEUE) and archived plans already excluded by `plans.listPlans`. The panel
+ *  filters out plans already in the queue; this read just answers "what plans
+ *  exist here". */
+async function listRunnerPlans(id) {
+  const runner = getRunner(id);
+  if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
+  const project = getProject(runner.project_id);
+  const agent = requireAgent(project.agent_name);
+  const plansProject = { ...project, plans_folder: project.plans_folder || 'plans' };
+  const rows = plans.listPlans(agent, { project: plansProject }) || [];
+  return {
+    runner: { id: runner.id, name: runner.name },
+    project: projectTag(project),
+    plans: rows.map((r) => ({
+      path: r.path,
+      title: r.title || null,
+      status: r.status || null,
+      statusRaw: r.statusRaw || null,
+      done: !!r.done,
+      session: r.session || null,
+      created: r.created || null,
+      lastActivity: r.last_activity || null,
+      unreadable: r.unreadable || null,
+    })),
+  };
+}
+
+/** Legacy whole-array writes were the path that accepted browser-generated IDs.
+ * Queue mutation is now explicit so the authority allocates and preserves IDs. */
+async function updateRunnerQueue(id, _items, _revision, { actor = null } = {}) {
+  throw new MissionError('queue_operation_required', 'Use add, reorder, remove, or item update operations; whole-queue writes are no longer supported.');
+}
+
+async function mutateCanonicalQueue(id, revision, actor, mutate) {
+  const runner = getRunner(id);
+  if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
+  const project = getProject(runner.project_id);
+  const agent = requireAgent(project.agent_name);
+  let queue;
+  try {
+    queue = mutate();
+    writeCanonicalQueueProjection(runner, project, agent, queue);
+  } catch (e) {
+    queueMissionError(e);
+  }
+  audit(project, 'runner_queue_update', { actor: actor ? (actor.name || actor) : null });
+  return readRunnerQueueFor(runner);
+}
+
+async function addRunnerQueueItems(id, plansToAdd, revision, { actor = null } = {}) {
+  return mutateCanonicalQueue(id, revision, actor, () => runnerQueue.addPlans(id, plansToAdd, revision, { actor }));
+}
+
+async function reorderRunnerQueue(id, itemIds, revision, { actor = null } = {}) {
+  return mutateCanonicalQueue(id, revision, actor, () => runnerQueue.reorder(id, itemIds, revision, { actor }));
+}
+
+async function removeRunnerQueueItem(id, itemId, revision, { actor = null } = {}) {
+  return mutateCanonicalQueue(id, revision, actor, () => runnerQueue.remove(id, itemId, revision, { actor }));
+}
+
+/** Revision-protected queue-level guidance edit. The queue file, rather than a
+ * runner/database column, remains the sole editable source of truth. */
+async function updateRunnerQueueCustomInstructions(id, customInstructions, revision, { actor = null } = {}) {
+  return mutateCanonicalQueue(id, revision, actor, () => runnerQueue.setCustomInstructions(id, customInstructions, revision, { actor }));
+}
+
+/** Resolve a need-input blocker: deliver the answer, requeue the item, and enable supervision.
+ *  This is a SINGLE server-owned operation that replaces the client's send->requeue->start
+ *  sequence, which fails because the answer makes the worker busy and startRunner then
+ *  refuses with "worker not idle".
+ *  Plan 97: atomic resolution with marker lift and supervision enable.
+ */
+async function resolveRunnerQueue(id, itemId, answer, revision, idempotencyKey, { actor = null } = {}) {
+  const runner = getRunner(id);
+  if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
+  if (runner.control_state !== 'need_input' && runner.control_state !== 'paused') {
+    throw new MissionError('runner_invalid_state', `Runner must be paused or need_input to resolve (current: ${runner.control_state})`);
+  }
+  const { project, agent, session, queue } = await getRunnerForSupervision(id);
+  if (!session) throw new MissionError('runner_no_session', 'Runner has no bound session');
+  if (queue.aggregate.state !== 'need input') {
+    throw new MissionError('runner_no_need_input', 'Queue is not blocked on input');
+  }
+  const item = (queue.parsed.items || []).find((it) => it.id === itemId);
+  if (!item) throw new MissionError('runner_item_not_found', `Item ${itemId} not found in queue`);
+  if (item.status !== 'need input') {
+    throw new MissionError('runner_item_not_blocked', `Item ${itemId} is not a need-input blocker`);
+  }
+  if (queue.hash !== revision) {
+    throw new MissionError('queue_revision_conflict', 'Queue was modified since you loaded it — reload and retry');
+  }
+
+  // Idempotency check: if this exact key was used before, return the existing result
+  if (idempotencyKey) {
+    const existing = getDb().prepare('SELECT * FROM runner_resolutions WHERE runner_id = ? AND idempotency_key = ?').get(id, idempotencyKey);
+    if (existing) return { delivered: existing.delivered_at, requeued: existing.requeued_at, resumed: existing.resumed_at };
+  }
+
+  const agentObj = requireAgent(project.agent_name);
+
+  // Reserve resolution ownership - prevent concurrent resolutions
+  const resolutionId = crypto.randomUUID();
+  const nowIso = new Date().toISOString();
+  try {
+    getDb().prepare(
+      `INSERT INTO runner_resolutions (id, runner_id, item_id, answer, idempotency_key, status, created_at)
+       VALUES (?, ?, ?, ?, ?, 'pending', ?)`
+    ).run(resolutionId, id, itemId, answer, idempotencyKey || null, nowIso);
+  } catch (e) {
+    if (e.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+      throw new MissionError('resolution_already_pending', 'Another resolution is in progress for this item');
+    }
+    throw e;
+  }
+
+  try {
+    // 1. Deliver the answer to the worker's bound conversation
+    runnerHistory.record(runner, 'answer_submitted', { actor: actor || 'user', groupId: `answer:${resolutionId}`, key: `${resolutionId}:submitted`, itemId, plan: item.plan, characters: String(answer).length });
+    const answerText = `Resolution for "${item.plan}": ${answer}`;
+    let reconciled = false;
+    try {
+      await sendText(session.id, answerText, { actor: actor || 'runner' });
+    } catch (e) {
+      if (!e?.attempted || e?.acceptance !== 'unknown') throw e;
+
+      // The pane can fail to repaint after accepting input. Never resend that
+      // answer: the same item's queue transition is the only safe evidence that
+      // this write reached the worker and it moved on.
+        const observed = canonicalQueueProjection(runner, project, agentObj, runnerQueue.snapshot(runner.id));
+      const observedItem = (observed.parsed.items || []).find((it) => it.id === itemId);
+      if (!observedItem || observedItem.status === 'need input') throw e;
+      reconciled = true;
+    }
+
+    // 2. Requeue the item with empty reason (clears the blocker), unless the
+    // worker already advanced that same item while confirming the write failed.
+    if (!reconciled) {
+      const updatedQueue = runnerQueue.updateItem(id, itemId, { status: 'new', reason: '' }, queue.hash, { actor });
+      writeCanonicalQueueProjection(runner, project, agentObj, updatedQueue);
+    }
+
+    // 3. Lift the QUEUE.paused marker BEFORE enabling supervision
+    syncQueuePausedMarker(id, false);
+
+    // 4. Enable supervision WITHOUT sending a startup message
+    // The worker already received the answer and will continue from its checkpoint
+    getDb().prepare(
+      `UPDATE infinite_runners SET enabled = 1, control_state = 'enabled', pause_mode = NULL, pause_state = 'none',
+       pause_target_item = NULL, pause_requested_at = NULL, scheduler_reason = 'Resumed after resolution',
+       scheduler_decision = 'wait_turn_end', updated_at = ? WHERE id = ? AND run_generation = ?`
+    ).run(nowIso, id, runner.run_generation);
+
+    // Mark resolution as complete
+    getDb().prepare('UPDATE runner_resolutions SET status = ?, delivered_at = ?, requeued_at = ?, resumed_at = ? WHERE id = ?')
+      .run('completed', nowIso, nowIso, nowIso, resolutionId);
+    runnerHistory.record(runner, 'answer_accepted', { actor: actor || 'user', groupId: `answer:${resolutionId}`, key: `${resolutionId}:accepted`, itemId, plan: item.plan });
+
+    return { delivered: nowIso, requeued: nowIso, resumed: nowIso, reconciled };
+  } catch (e) {
+    // On failure, restore the marker if the runner wasn't already enabled
+    if (runner.enabled === 0) syncQueuePausedMarker(id, true);
+    getDb().prepare('UPDATE runner_resolutions SET status = ?, error = ? WHERE id = ?')
+      .run('failed', e.message, resolutionId);
+    runnerHistory.record(runner, 'answer_failed', { actor: actor || 'user', groupId: `answer:${resolutionId}`, key: `${resolutionId}:failed`, itemId, plan: item.plan, severity: 'warning', code: e.code || 'resolution_failed' });
+    throw e;
+  }
+}
+
+/** In-flight session ensures, one per runner. Concurrent opens of the same
+ *  unbound runner must not mint two sessions (two TUIs, two conversations). */
+const runnerEnsureInflight = new Map();
+
+/** Idempotent worker-session ensure (plan 85 §Phase 1). Binds or resolves
+ *  exactly one Mission session WITHOUT enabling queue execution or sending
+ *  queue instructions. Unbound → create and bind; dead pane → restart the same
+ *  conversation; bare shell → relaunch the TUI. The binding is retained even
+ *  if a later step fails (a half-opened session is still the runner's session).
+ *  Called only from explicit user actions (open, create, Run) — never from
+ *  list reads or polling. */
+async function ensureRunnerSession(id, { actor = null, origin = 'human', createdBy = null, beforeLaunch = null } = {}) {
+  const prior = runnerEnsureInflight.get(id);
+  if (prior) return prior;
+  const run = (async () => {
+    const runner = getRunner(id);
+    if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
+    let bound = null;
+    if (runner.session_id) {
+      try {
+        bound = getSession(runner.session_id);
+      } catch {
+        bound = null; // row gone despite the FK — treat as unbound, rebind below
+      }
+    }
+    if (!bound) {
+      const created = await startSession(runner.project_id, {
+        label: `Runner: ${runner.name}`,
+        origin,
+        createdBy: createdBy || actor,
+        idempotencyKey: `runner-bind:${id}:${runner.run_generation}`,
+      });
+      bound = created.session;
+      getDb().prepare('UPDATE infinite_runners SET session_id = ?, updated_at = ? WHERE id = ?')
+        .run(bound.id, new Date().toISOString(), id);
+      return getSession(bound.id);
+    }
+    const pre = await padTmux.paneState((getProject(runner.project_id)).agent_name, bound.tmux_id);
+    if (!pre.live) {
+      await restartSession(bound.id, { actor, beforeLaunch });
+      return getSession(bound.id);
+    }
+    if (pre.tuiAlive === false) {
+      await relaunchTui(bound.id, { actor, beforeLaunch });
+      return getSession(bound.id);
+    }
+    return bound;
+  })();
+  runnerEnsureInflight.set(id, run);
+  try {
+    return await run;
+  } finally {
+    if (runnerEnsureInflight.get(id) === run) runnerEnsureInflight.delete(id);
+  }
+}
+
+/** Start (or resume) a runner. Validates queue, binds/creates worker session, sends startup message.
+ *  Plan 85: a runner that stopped for a fixable reason stays re-Runnable on the
+ *  SAME session — `invalid`, `need input` and empty/all-done queues refuse with
+ *  an actionable reason and leave the runner paused, never `finished`. Fixing
+ *  the file and pressing Run again must work without creating another
+ *  runner/session. */
 async function startRunner(id, { actor = null } = {}) {
   const runner = getRunner(id);
   if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
+  runnerHistory.record(runner, 'run_requested', { actor: actor || 'user' });
+  try {
   if (!RUNNER_CONTROL_STATES.includes(runner.control_state)) {
     throw new MissionError('runner_invalid_state', `Runner in invalid control state: ${runner.control_state}`);
   }
-  if (runner.control_state === 'finished') {
-    throw new MissionError('runner_finished', 'This runner has finished; create a new one to continue');
+  let { project, agent, session, queue } = await getRunnerForSupervision(id);
+  const refuse = async (code, reason) => {
+    setRunnerReason(id, reason);
+    throw new MissionError(code, reason);
+  };
+  // Validate queue. Check `invalid` BEFORE the empty check: readQueue returns
+  // items:[] for a missing/malformed file too, so the empty branch would report
+  // "nothing to do" for a queue that could not be read at all — the same silent
+  // maybe, one layer up. A missing queue is an error the user must fix (create
+  // it), an EMPTY queue is a valid "nothing left to do".
+  if (!queue || queue.condition !== 'ok' || queue.aggregate.state === 'invalid') {
+    await refuse('runner_invalid_queue', `Queue is invalid: ${queue?.error || (queue && queue.aggregate ? queue.aggregate.reason : 'unavailable')}`);
   }
-  // Increment run generation for idempotency
-  incrementRunGeneration(id);
-  const fresh = getRunner(id);
-  const { project, agent, session, queue } = await getRunnerForSupervision(id);
-  // Validate queue
-  if (!queue || !queue.parsed || queue.parsed.items.length === 0) {
-    // Empty queue → nothing to do, just mark finished
-    await setRunnerControlState(id, 'finished');
+  if (queue.aggregate.state === 'need input') {
+    await refuse('runner_need_input', `Queue is blocked on input: ${queue.aggregate.reason || 'see the need-input item'}`);
+  }
+  if (queue.aggregate.state === 'done') {
+    // Nothing to do — report it, stay paused. New work added later Runs again
+    // on this same runner and session.
+    setRunnerReason(id, queue.aggregate.reason || 'Queue is done.');
     return { started: false, reason: 'empty_queue', runner: getRunner(id) };
   }
-  if (queue.aggregate.state === 'invalid') {
-    await setRunnerControlState(id, 'finished');
-    throw new MissionError('runner_invalid_queue', `Queue is invalid: ${queue.aggregate.reason}`);
+  if (!runner.enabled && runner.stop_cause === 'usage_exhausted') {
+    const callback = runnerCallbacks.getCallback(id, 'usage_exhausted');
+    if (!callback.enabled || !callback.recreateResume) {
+      throw new MissionError('quota_recovery_not_configured', 'Quota is exhausted. Enable the usage_exhausted callback and resume-after-success option before retrying recovery.');
+    }
+    const event = getDb().transaction(() => {
+      const active = getDb().prepare(`SELECT id FROM runner_callback_outbox WHERE runner_id = ? AND event = 'usage_exhausted' AND status IN ('pending', 'running')
+        UNION SELECT event_id AS id FROM runner_quota_recoveries WHERE runner_id = ? AND status IN ('script_running', 'restoring') LIMIT 1`).get(id, id);
+      if (active) return { id: active.id, existing: true };
+      const fresh = getRunner(id);
+      if (!fresh || fresh.enabled || fresh.run_generation !== runner.run_generation || fresh.stop_cause !== 'usage_exhausted') {
+        throw new MissionError('quota_recovery_superseded', 'Runner state changed before recovery could be queued');
+      }
+      incrementRunGeneration(id);
+      const updated = getRunner(id);
+      const episode = getDb().prepare('SELECT episode_seq FROM runner_usage_state WHERE runner_id = ?').get(id);
+      const recorded = runnerCallbacks.recordCallbackEvent(updated, project, 'usage_exhausted', {
+        episodeKey: `${episode?.episode_seq || 0}:explicit:${updated.run_generation}`,
+        cwd: project.folder,
+        usageReason: 'Explicit Run requested quota recovery',
+        actor: actor || 'user',
+      });
+      if (!recorded) throw new MissionError('quota_recovery_not_configured', 'Quota recovery callback could not be queued');
+      return { id: recorded.id, existing: false };
+    }).immediate();
+    runnerHistory.record(runner, 'recovery_requested', { actor: actor || 'user', groupId: event.id, key: `${event.id}:requested`, reason: 'Explicit Run requested quota recovery' });
+    runnerCallbacks.pumpCallbackOutbox().catch((e) => console.error('[quota recovery]', e.message));
+    return { started: false, recovering: true, reason: 'quota_recovery_started', eventId: event.id, runner: getRunner(id) };
   }
-  // Resolve worker session
-  let workerSession = session;
-  if (!workerSession) {
-    // No session bound yet — create one
-    const startResult = await startSession(runner.project_id, {
-      label: `Runner: ${runner.name}`,
-      origin: 'agent',
-      createdBy: actor || 'runner',
-    });
-    workerSession = fresh.session = startResult.session;
-    getDb().prepare('UPDATE infinite_runners SET session_id = ? WHERE id = ?').run(workerSession.id, id);
-  } else if (!workerSession.live) {
-    // Bound session is dead — restart it
-    await restartSession(workerSession.id, { actor });
-    workerSession = getSession(workerSession.id);
-  } else if (workerSession.tuiAlive === false) {
-    // Bare shell — relaunch TUI
-    await relaunchTui(workerSession.id, { actor });
-    workerSession = getSession(workerSession.id);
+  // A resolution can write successfully but lack a pane/store confirmation. If
+  // its worker already moved the same queue forward, an explicit Run adopts that
+  // verified active turn instead of sending a duplicate startup instruction.
+  if (!runner.enabled && queue.aggregate.state === 'in progress' && session?.agent_session_id) {
+    const activeTurn = agentStore.readTurn(agent, session.agent_session_id);
+    if (activeTurn.state === 'working') {
+      syncQueuePausedMarker(id, false);
+      getDb().prepare(
+        "UPDATE infinite_runners SET enabled = 1, control_state = 'enabled', scheduler_reason = 'Resumed active worker after resolution', scheduler_decision = 'wait_turn_end', updated_at = ? WHERE id = ? AND run_generation = ? AND enabled = 0"
+      ).run(new Date().toISOString(), id, runner.run_generation);
+      runnerHistory.record(runner, 'runner_started', { actor: actor || 'user', key: `started:${runner.run_generation}`, reason: 'Supervision resumed around the active worker' });
+      return { started: true, reason: 'adopted_active_turn', runner: getRunner(id), session, queue: queue.aggregate };
+    }
   }
-  // Verify session is ready for send (not busy, not locked, not permission)
-  const pre = await padTmux.paneState(project.agent_name, workerSession.tmux_id);
-  const perm = detectPermission((await padTmux.captureScreen(project.agent_name, workerSession.tmux_id, 20)).text);
-  const verdict = sendVerdict({ ...workerSession, live: pre.live, tuiAlive: pre.tuiAlive, command: pre.command }, perm);
-  if (!verdict.canSend) {
-    await setRunnerControlState(id, 'waiting');
-    throw new MissionError('runner_session_not_ready', `Worker session not ready: ${verdict.refusal}`);
+  // An interrupted turn leaves supervision enabled so no other mutation can
+  // race its observation, but automatic dispatch is deliberately withheld.
+  // Run is the one explicit recovery path: it must re-observe below before it
+  // can acquire a new delivery lease.
+  const startTurn = runner.enabled && session?.agent_session_id
+    ? agentStore.readTurn(agent, session.agent_session_id)
+    : null;
+  const interruptedTurn = startTurn?.state === 'idle' && startTurn.outcome === 'error';
+  if (runner.enabled && !interruptedTurn) return { started: false, reason: 'already_running', runner: getRunner(id) };
+  await ensureRunnerIndex(agent, project);
+  // Plan 91 §Phase 4: check template health explicitly BEFORE the eligibility
+  // gate, so a corrupt set refuses with its own code — the worker may be
+  // perfectly idle, and `runner_worker_not_idle` would blame the wrong half.
+  // canDispatch re-checks anyway for the paths that share it.
+  const promptHealth = effectivePromptTemplates(getRunner(id));
+  if (promptHealth.error) {
+    await refuse('runner_prompts_misconfigured', `Prompt templates misconfigured: ${promptHealth.error.message} Repair them in Configure → Prompts, then retry.`);
   }
-  // Enable runner and send startup message
-  await setRunnerControlState(id, 'enabled');
-  // Compose startup message
-  const queuePath = plans.queuePath(requireAgent(project.agent_name), { ...project, plans_folder: project.plans_folder || 'plans' });
-  const indexPath = queuePath.replace('QUEUE.md', 'INDEX.md');
-  const startupMsg = [
-    '=== INFINITE RUNNER STARTUP ===',
-    `Runner: ${runner.name} (${id})`,
-    `Queue: ${queuePath}`,
-    `Index: ${indexPath}`,
-    '',
-    'Read QUEUE.md and INDEX.md completely before acting.',
-    'Work one item at a time, in array order.',
-    'If ANY item is "need input", stop immediately and explain the reason.',
-    'Resume the "in progress" item first, otherwise take the first "new" item.',
-    'Write "in progress" BEFORE doing work. At most one item in progress.',
-    'Follow the plan lifecycle from INDEX.md. Mark "done" only when work AND verification are complete.',
-    'When blocked, set item to "need input" with the exact question in reason. Then STOP.',
-    'After finishing an item, re-read QUEUE.md and continue. When all done, report completion and wait.',
-    '=== END STARTUP ==='
-  ].join('\n');
-  await sendText(workerSession.id, startupMsg, { actor });
-  // Update runner with fresh generation and session
+  if (!session) session = await ensureRunnerSession(id, { actor, origin: 'agent', createdBy: actor || 'runner' });
+  if (interruptedTurn && runner.operation_id && ['pending', 'unconfirmed', 'confirmed'].includes(runner.operation_status)) {
+    // This exact, completed error turn conclusively ends the old instruction.
+    // Bind the update to its observed operation id so a second recovery click
+    // cannot release the new operation another caller has already acquired.
+    getDb().prepare("UPDATE infinite_runners SET operation_status = 'ended' WHERE id = ? AND operation_id = ? AND operation_status IN ('pending', 'unconfirmed', 'confirmed')")
+      .run(id, runner.operation_id);
+  }
+  const can = await canDispatch(id, { session, project, agent, queue, kind: 'start', gen: runner.run_generation });
+  if (!can.allowed) await refuse('runner_worker_not_idle', can.reason);
+  // Send the startup message FIRST, enable dispatch only after it lands. It is
+  // ONE logical submission: Mission types line by line with an Enter each, so
+  // a multiline banner would land as a dozen separate user messages. Paths are
+  // container-visible (project.folder IS the container path); the host-resolved
+  // path the webui reads does not exist in the worker's namespace.
+  //
+  // Order is the point: enabling first and sending second leaves an ENABLED
+  // runner whose startup never arrived (a fresh TUI still booting refuses the
+  // write while the pane looks live) — "Running" with an error, and no startup
+  // to work from. A failed send stays paused with the reason recorded, and Run
+  // again retries cleanly.
+  //
+  // Plan 91 §Phase 4: the message is the rendered `start` template — or the
+  // full `resume` template after a CURRENT-TASK pause (the checkpoint lives in
+  // the plan file the worker wrote when it stopped; a second Run must not
+  // re-append anything). No hardcoded prompt fragments remain here.
+  const resumingCurrentTask = runner.pause_mode === 'current_task' && !!runner.pause_target_item;
+  const resumeTarget = resumingCurrentTask
+    ? ((queue.parsed && queue.parsed.items) || []).find((it) => it.id === runner.pause_target_item) || null
+    : null;
+  let startup;
+  try {
+    startup = renderRunnerPrompt(runner, project, queue, resumingCurrentTask ? 'resume' : 'start',
+      resumeTarget ? { current_plan: resumeTarget.plan } : {});
+  } catch (e) {
+    await refuse(e.code || 'prompt_render_failed', e.message);
+  }
+  const fullMsg = startup.text;
+  // Plan 86 §Phase 4b fix (live-proven): the worker's FIRST action is queue rule
+  // 7 — check that `QUEUE.paused` does not exist. A startup/continuation sent
+  // while the marker is still present therefore makes the worker refuse its own
+  // instruction and stop (a current-task RESUME immediately re-stopped). Lift
+  // the marker BEFORE the message lands. Dispatch (`enabled`) stays 0 until the
+  // send is confirmed below, so the supervisor dispatches nothing in the gap; a
+  // failed send restores the marker so `disabled ⟺ marker present` still holds.
+  const lease = acquireDispatchOwnership(id, runner.run_generation, 'start', can.queue.hash, session, fullMsg, can.turn.userId);
+  if (!lease) await refuse('runner_dispatch_pending', 'Another instruction already owns this runner — no duplicate startup sent');
+  syncQueuePausedMarker(id, false);
+  let workerSession;
+  try {
+    const beforeLaunch = () => {
+      const fresh = getRunner(id);
+      if (!fresh || fresh.run_generation !== lease.gen || fresh.operation_id !== lease.operationId || fresh.operation_status !== 'pending') throw new MissionError('runner_dispatch_superseded', 'Startup cancelled by Pause/Close', 409);
+    };
+    beforeLaunch();
+    workerSession = await ensureRunnerSession(id, { actor, origin: 'agent', createdBy: actor || 'runner', beforeLaunch });
+    if (workerSession.agent_session_id !== session.agent_session_id) throw new MissionError('runner_identity_changed', 'Worker conversation changed during startup', 409);
+    const result = await deliverRunnerInstruction(id, workerSession, project, agent, can.queue, fullMsg, lease, can.turn, 'start', actor);
+    if (!result) return { started: false, reason: 'superseded', runner: getRunner(id) };
+  } catch (e) {
+    if (getRunner(id)?.run_generation === lease.gen) {
+      const isUnconfirmed = e.code === 'mission_send_unconfirmed' || e.acceptance === 'unknown';
+      const status = isUnconfirmed ? 'unconfirmed' : 'ended';
+      const reason = isUnconfirmed
+        ? 'Instruction delivery unconfirmed — automatic resend withheld; waiting for the exact input receipt'
+        : e.message;
+      getDb().prepare("UPDATE infinite_runners SET operation_status = ?, last_reason = ? WHERE id = ? AND run_generation = ? AND operation_id = ? AND operation_status = 'pending'")
+        .run(status, reason, id, lease.gen, lease.operationId);
+      // Only restore the pause marker for true failures, NOT for unconfirmed deliveries.
+      // An unconfirmed write may have landed; restoring the marker would make a
+      // successfully reached worker stop. Keep the marker absent while the exact
+      // receipt is still eligible (Plan 112).
+      if (!isUnconfirmed) {
+        syncQueuePausedMarker(id, true);
+      }
+    }
+    throw e;
+  }
+  // Any successful Run/Resume consumes the pause record — a Resume continues and
+  // a fresh Run has nothing to pause. Clearing only for `current_task` left a
+  // `before_next_task` record behind, so the dropdown badge read a false
+  // "Paused" while the queue was visibly running (found live, 2026-10-11).
+  // The `current_task` branch still needs its continuation sentence above; the
+  // record itself is cleared in both cases here.
+  getDb().prepare(
+    "UPDATE infinite_runners SET enabled = 1, control_state = 'enabled', pause_mode = NULL, pause_state = 'none', pause_target_item = NULL, pause_requested_at = NULL, scheduler_reason = 'Waiting for current turn', scheduler_decision = 'wait_turn_end', updated_at = ? WHERE id = ? AND run_generation = ? AND operation_id = ? AND operation_status = 'confirmed'"
+  ).run(new Date().toISOString(), id, lease.gen, lease.operationId);
   const updated = getRunner(id);
+  runnerHistory.record(updated, 'runner_started', { actor: actor || 'user', key: `started:${updated.run_generation}` });
   return { started: true, runner: updated, session: workerSession, queue: queue.aggregate };
+  } catch (e) {
+    runnerHistory.record(runner, 'run_failed', { actor: actor || 'user', severity: 'warning', code: e.code || 'run_failed' });
+    throw e;
+  }
 }
 
-/** Pause a runner (disable nudges, end tmux session). */
-async function pauseRunner(id, { actor = null } = {}) {
+/** Pause a runner: disable queue dispatch, keep the conversation.
+ *  Plan 85: Pause controls the QUEUE, not the terminal. It invalidates the run
+ *  generation first (any in-flight nudge/recovery aborts) and disables dispatch,
+ *  but leaves the tmux pane and the conversation alone — the user may be
+ *  watching it in column 3. An already-running turn may finish; Pause claims
+ *  nothing about killing that turn or its background commands.
+ *
+ *  Plan 86 §Phase 4b adds two explicit modes. Both stop dispatch immediately and
+ *  rely on the `QUEUE.paused` marker to stop the worker taking the NEXT item;
+ *  they differ only in whether the worker is ALSO asked to stop mid-turn:
+ *   - `before_next_task` (default; omitted mode is backward-compatible): finish
+ *     the plan in flight, then wait. Resume continues the remaining queue in the
+ *     same conversation.
+ *   - `current_task`: send ONE logical message asking the worker to stop the plan
+ *     it is on at the earliest safe checkpoint, saving progress, remaining work
+ *     and resume instructions in that plan file and keeping its queue item
+ *     `in progress`. Recorded as REQUESTED, never a confirmed pause — a false
+ *     "Paused" claim would hide a worker still developing. If nothing is
+ *     `in progress` (between items, or an unreadable queue) it degrades to
+ *     `before_next_task`, because there is nothing to interrupt.
+ *  Unknown modes are rejected. */
+async function pauseRunner(id, { mode = 'before_next_task', actor = null } = {}) {
+  if (!RUNNER_PAUSE_MODES.includes(mode)) {
+    throw new MissionError('runner_invalid_pause_mode', `Invalid pause mode: ${mode}`);
+  }
   const runner = getRunner(id);
   if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
-  if (runner.session_id) {
-    // End the tmux session but keep the conversation (stamp-and-keep)
-    await endSession(runner.session_id, { actor });
-  }
-  await setRunnerControlState(id, 'paused');
-  // Invalidate run generation so any in-flight nudge/recovery aborts
+  runnerHistory.record(runner, 'pause_requested', { actor: actor || 'user', mode });
+  // Stop dispatch first, for BOTH modes: no nudge/recovery may fire from here on,
+  // and the QUEUE.paused marker stops the worker from taking the next plan.
   incrementRunGeneration(id);
+  await setRunnerEnabled(id, false);
+  runnerHistory.record(runner, 'pause_applied', { actor: actor || 'user', mode, reason: 'Future dispatch stopped; an active task may still be finishing' });
+
+  // Record explicit pause provenance
+  recordStopProvenance(id, 'explicit_pause', 'explicit', { mode });
+
+  // Resolve the in-progress item so a current-task pause can name its target.
+  // A queue/session read failure is not fatal to Pause — it just means there is
+  // no target, which degrades current_task to before_next_task.
+  let sup = null;
+  let targetItem = null;
+  try {
+    sup = await getRunnerForSupervision(id);
+    targetItem = ((sup.queue && sup.queue.parsed && sup.queue.parsed.items) || []).find((it) => it.status === 'in progress') || null;
+  } catch { /* queue/session unavailable — treat as no target */ }
+
+  const nowIso = new Date().toISOString();
+  // Plan 88 §Phase 3: Pause/Close invalidates any pending/unconfirmed operation.
+  // Late receipt/acknowledgment cannot override the user's explicit stop.
+  getDb().prepare(
+    `UPDATE infinite_runners SET operation_status = 'invalidated', updated_at = ? WHERE id = ?`
+  ).run(nowIso, id);
+
+  const writePause = (pauseMode, pauseState, targetId) => {
+    getDb().prepare(
+      'UPDATE infinite_runners SET pause_mode = ?, pause_state = ?, pause_target_item = ?, pause_requested_at = ?, updated_at = ? WHERE id = ?'
+    ).run(pauseMode, pauseState, targetId, nowIso, nowIso, id);
+  };
+
+  if (mode === 'current_task' && targetItem) {
+    let reason;
+    if (sup && sup.session) {
+      // Plan 91 §Phase 4: the stop request is the rendered `pause` template
+      // naming the actual target plan. Dispatch was already disabled and the
+      // operation invalidated above, so a template failure here must not undo
+      // the Pause — it only withholds the cooperative message with a repair
+      // reason, and the QUEUE.paused marker still stops the next item.
+      let msg;
+      try {
+        msg = renderRunnerPrompt(runner, sup.project, sup.queue, 'pause', { current_plan: targetItem.plan }).text;
+      } catch (e) {
+        reason = `Pause requested — stop message not sent: ${e.message}`;
+      }
+      if (msg) {
+        try {
+          await sendText(sup.session.id, msg, { actor });
+          reason = `Pausing current task — ${targetItem.plan}`;
+        } catch (e) {
+          // Plan 88 §Phase 2: an unobserved write is unconfirmed, not a failure.
+          reason = e.acceptance === 'unknown'
+            ? 'Pause requested — delivery unconfirmed: the stop message was written but the pane showed no change'
+            : `Pause requested — not confirmed: ${e.message}`;
+        }
+      }
+    } else {
+      reason = 'Pause requested — not confirmed: no worker session';
+    }
+    writePause('current_task', 'requested', targetItem.id);
+    setRunnerReason(id, reason);
+    return getRunner(id);
+  }
+
+  // before_next_task, or a current_task request with nothing to interrupt.
+  const targetPlan = targetItem ? targetItem.plan : null;
+  writePause('before_next_task', 'requested', targetItem ? targetItem.id : null);
+  setRunnerReason(id, targetPlan
+    ? `Pausing after current task — ${targetPlan}`
+    : 'Paused — next task will not start.');
   return getRunner(id);
 }
 
@@ -1908,26 +3266,180 @@ async function resumeRunner(id, { actor = null } = {}) {
   if (runner.control_state !== 'paused') {
     throw new MissionError('runner_not_paused', 'Runner is not paused');
   }
+  // Clear stop provenance on successful resume
+  getDb().prepare('UPDATE infinite_runners SET stop_cause = NULL, stop_origin = NULL, stop_at = NULL WHERE id = ?').run(id);
   return startRunner(id, { actor });
 }
 
-/** Remove runner (disable supervision, release binding, keep session/queue). */
+// A receipt can arrive after the callback's bounded confirmation window. Resolve
+// that exact persisted attempt without rerunning either the script or the send.
+function reconcileQuotaReceipt(runner, session, agent, stillExhausted) {
+  const recovery = getDb().prepare("SELECT * FROM runner_quota_recoveries WHERE runner_id = ? AND status = 'failed' AND error = 'Restored conversation has not acknowledged the continuation; no resend made' ORDER BY updated_at DESC LIMIT 1").get(runner.id);
+  if (!recovery || runner.run_generation !== recovery.generation + 1 ||
+      session.id !== recovery.session_id || session.agent_session_id !== recovery.conversation_id ||
+      runner.operation_status !== 'unconfirmed') return;
+  const turn = agentStore.readTurn(agent, session.agent_session_id);
+  if (!turn.userId || turn.userId === runner.operation_baseline_user_id || turn.inputHash !== runner.operation_prompt_hash) return;
+  const changed = getDb().prepare("UPDATE infinite_runners SET operation_status = 'confirmed', operation_receipt_user_id = ?, enabled = ?, control_state = ?, last_reason = ?, stop_cause = ? WHERE id = ? AND run_generation = ? AND operation_id = ? AND operation_status = 'unconfirmed'")
+    .run(turn.userId, stillExhausted ? 0 : 1, stillExhausted ? 'need_input' : 'enabled', stillExhausted ? 'Recovery continuation accepted, but provider quota is still exhausted' : null, stillExhausted ? 'usage_exhausted' : null, runner.id, runner.run_generation, runner.operation_id);
+  if (changed.changes) {
+    getDb().prepare('UPDATE runner_quota_recoveries SET status = ?, error = NULL, updated_at = ? WHERE event_id = ?')
+      .run(stillExhausted ? 'exhausted_again' : 'resumed', new Date().toISOString(), recovery.event_id);
+    runnerHistory.record(runner, 'continuation_accepted', { groupId: recovery.event_id, key: `${recovery.event_id}:receipt` });
+    runnerHistory.record(runner, stillExhausted ? 'quota_remains' : 'recovery_resumed', { groupId: recovery.event_id, key: `${recovery.event_id}:late-result`, severity: stillExhausted ? 'warning' : 'info' });
+    if (!stillExhausted) syncQueuePausedMarker(runner.id, false);
+  }
+}
+
+/** Explicit quota-recovery scripts may recreate a PAD and authorize one new
+ * instruction in the SAME conversation. Old store liveness belongs to the killed
+ * process, so it cannot gate the first continuation in the replacement process. */
+async function resumeQuotaRecovery(context) {
+  const owns = () => {
+    const r = getRunner(context.runner_id);
+    const s = r && getSession(r.session_id);
+    if (!r || r.enabled || r.run_generation !== context.generation || r.stop_cause !== 'usage_exhausted' ||
+        r.session_id !== context.session_id || s?.agent_session_id !== context.conversation_id || s.locked) {
+      throw new MissionError('quota_recovery_superseded', 'Recovery cancelled by Pause, Close, lock, or changed conversation');
+    }
+    return r;
+  };
+  const runner = owns();
+  let sup = await getRunnerForSupervision(runner.id);
+  if (sup.queue.condition !== 'ok' || ['need input', 'done'].includes(sup.queue.aggregate.state)) {
+    throw new MissionError('quota_recovery_queue_blocked', 'Queue is blocked or complete; no continuation sent');
+  }
+  // The script already proved container replacement. Clear only the dead
+  // process's outstanding operation, then restore its saved TUI identity.
+  owns();
+  const deadline = Date.now() + 60000;
+  let session;
+  while (!session) {
+    owns();
+    try {
+      session = await ensureRunnerSession(runner.id, { actor: 'quota-recovery', beforeLaunch: owns });
+    } catch (e) {
+      if (e.code === 'quota_recovery_superseded' || Date.now() >= deadline) throw e;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  }
+  while (true) {
+    owns();
+    const pane = await padTmux.paneState(sup.project.agent_name, session.tmux_id);
+    const screen = pane.live && pane.tuiAlive
+      ? await padTmux.captureScreen(sup.project.agent_name, session.tmux_id, 12) : null;
+    // Foreground process existence precedes OpenCode's input handlers. Its
+    // bottom command footer establishes that the interactive UI has mounted.
+    const inputReady = sup.agent.agent_type !== 'opencode' || /ctrl\+p\s+commands/.test(screen?.text || '');
+    if (pane.live && pane.tuiAlive && inputReady) break;
+    if (Date.now() >= deadline) throw new MissionError('quota_recovery_not_ready', 'Restored TUI did not become ready within 60 seconds');
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  owns();
+  sup = await getRunnerForSupervision(runner.id);
+  runnerHistory.record(runner, 'session_restored', { groupId: context.event_id, key: `${context.event_id}:restored` });
+  const message = renderRunnerPrompt(runner, sup.project, sup.queue, 'recovery').text;
+  const baseline = agentStore.readTurn(sup.agent, session.agent_session_id);
+  getDb().prepare("UPDATE infinite_runners SET operation_status = 'ended' WHERE id = ? AND run_generation = ? AND enabled = 0")
+    .run(runner.id, context.generation);
+  const lease = acquireDispatchOwnership(runner.id, context.generation, 'start', sup.queue.hash, session, message, baseline.userId);
+  if (!lease) throw new MissionError('quota_recovery_owned', 'Another operation already owns recovery');
+  const beforeWrite = () => {
+    const current = getRunner(runner.id);
+    if (!current || current.run_generation !== lease.gen || current.operation_id !== lease.operationId || current.operation_status !== 'pending' || getSession(session.id).locked) {
+      throw new MissionError('quota_recovery_superseded', 'Recovery continuation cancelled by newer control action');
+    }
+    const turn = agentStore.readTurn(sup.agent, session.agent_session_id);
+    if (turn.userId !== baseline.userId) throw new MissionError('quota_recovery_superseded', 'A new human turn arrived during recovery');
+  };
+  syncQueuePausedMarker(runner.id, false);
+  try {
+    await sendText(session.id, message, { actor: 'quota-recovery', beforeWrite, paste: true });
+  } catch (e) {
+    if (!e.attempted || e.acceptance !== 'unknown') {
+      getDb().prepare("UPDATE infinite_runners SET operation_status = 'ended', last_reason = ? WHERE id = ? AND operation_id = ?").run(e.message, runner.id, lease.operationId);
+      syncQueuePausedMarker(runner.id, true);
+      throw e;
+    }
+    // A missing repaint is not non-delivery. Check the exact input below.
+  }
+  runnerHistory.record(runner, 'continuation_sent', { groupId: context.event_id, key: `${context.event_id}:sent` });
+  const expectedInput = crypto.createHash('sha256').update(message.trimEnd()).digest('hex');
+  const receiptDeadline = Date.now() + 20000;
+  let receipt = null;
+  do {
+    const turn = agentStore.readTurn(sup.agent, session.agent_session_id);
+    if (turn.userId && turn.userId !== baseline.userId && turn.inputHash === expectedInput) {
+      receipt = turn.userId;
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  } while (Date.now() < receiptDeadline);
+  if (!receipt) {
+    getDb().prepare("UPDATE infinite_runners SET operation_status = 'unconfirmed', last_reason = 'Quota recovery input receipt not observed — no resend made' WHERE id = ? AND run_generation = ? AND operation_id = ? AND operation_status = 'pending'")
+      .run(runner.id, lease.gen, lease.operationId);
+    syncQueuePausedMarker(runner.id, true);
+    throw new MissionError('quota_recovery_unconfirmed', 'Restored conversation has not acknowledged the continuation; no resend made');
+  }
+  getDb().prepare(`UPDATE infinite_runners SET enabled = 1, control_state = 'enabled',
+    operation_status = ?, operation_receipt_user_id = ?, stop_cause = NULL, stop_origin = NULL, stop_at = NULL,
+    last_reason = NULL, scheduler_decision = 'wait_turn_end', scheduler_reason = 'Quota recovery continuation sent'
+    WHERE id = ? AND run_generation = ? AND operation_id = ? AND operation_status = 'pending'`)
+    .run('confirmed', receipt, runner.id, lease.gen, lease.operationId);
+  runnerHistory.record(runner, 'continuation_accepted', { groupId: context.event_id, key: `${context.event_id}:receipt` });
+}
+
+/** Remove runner (disable supervision, release binding, keep session/queue).
+ *  Plan 85: Remove unpins the row and stops supervision IN PLACE. The Mission
+ *  session row and QUEUE.md are separate and untouched — the session stays open
+ *  with its live pane, and simply returns to the ordinary listing. Deleting the
+ *  row drops supervision with it (the watcher selects `enabled = 1`, so a gone
+ *  row is unwatched), and the bumped generation aborts any in-flight send. */
 async function removeRunner(id) {
   const runner = getRunner(id);
   if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
   // Invalidate run generation to abort any in-flight nudge/recovery
   incrementRunGeneration(id);
-  // If enabled, pause first (ends tmux session)
-  if (runner.enabled || runner.control_state === 'enabled') {
-    await pauseRunner(id);
+  // Plan 92 §Phase 3: capture the destroy snapshot BEFORE the row goes away —
+  // the outbox carries the script body, so later edits or the deletion itself
+  // cannot change a recorded event. A misconfigured/absent destroy callback
+  // records nothing (or an error row) and never blocks the removal.
+  let destroyEventId = null;
+  try {
+    const project = getProject(runner.project_id);
+    const recorded = runnerCallbacks.recordCallbackEvent(runner, project, 'destroy', { cwd: project.folder });
+    destroyEventId = recorded && recorded.status === 'pending' ? recorded.id : null;
+  } catch (e) {
+    if (!(e instanceof runnerCallbacks.CallbackError)) throw e;
   }
-  // Clear session binding and disable
-  getDb().prepare('UPDATE infinite_runners SET session_id = NULL, enabled = 0, control_state = \'paused\' WHERE id = ?').run(id);
+  try {
+    getDb().prepare('DELETE FROM infinite_runners WHERE id = ?').run(id);
+  } catch (e) {
+    // The destroy did not happen — withdraw its pending outbox row, if any.
+    if (destroyEventId) getDb().prepare("DELETE FROM runner_callback_outbox WHERE id = ? AND status = 'pending'").run(destroyEventId);
+    throw e;
+  }
+  // "remove the runner configuration/designation. Keep any existing Mission
+  // session/conversation and queue file. The row loses runner controls and
+  // pinning." The Mission session row and QUEUE.md are separate and untouched,
+  // so the session simply returns to the ordinary listing. A soft delete was
+  // wrong: the pinned list renders every row, and a kept row with
+  // session_id = NULL / enabled = 0 / 'paused' is indistinguishable from a
+  // created-but-never-started runner — so "remove" left the pin in place
+  // forever (there is no column that could say "this runner was removed").
+  // (The DELETE itself ran above, before the marker sync, so a recorded
+  // destroy event can be withdrawn if the delete fails.)
+  // Runner removed — ensure no stale pause marker remains.
+  syncQueuePausedMarker(id, false);
+  // Plan 92 §Phase 3: a recorded destroy script launches in the background —
+  // removal never waits for it (it may run up to the script timeout).
+  if (destroyEventId) {
+    runnerCallbacks.pumpCallbackOutbox().catch((e) => console.error(`[callbacks] pump after destroy failed:`, e.message));
+  }
   return { removed: true };
 }
 
-/** Reconcile runners on webui restart: re-enable runners that were enabled, but don't auto-resume. */
-async function reconcileRunners() {
+/** Reconcile runners on webui restart: re-enable runners that were enabled, but don't auto-resume. */async function reconcileRunners() {
   const runners = getDb().prepare('SELECT id FROM infinite_runners WHERE enabled = 1').all();
   for (const r of runners) {
     const runner = getRunner(r.id);
@@ -1936,6 +3448,124 @@ async function reconcileRunners() {
     // We do NOT auto-resume — the human must explicitly Resume.
     // Just ensure the generation is respected (it already is).
     console.log(`[runner reconcile] Runner ${runner.id} (${runner.name}) was enabled at shutdown; control_state=${runner.control_state}, run_generation=${runner.run_generation}. Awaiting explicit Resume.`);
+  }
+}
+
+/** Plan 92 §Phase 3: first-observation baseline for init callbacks. For every
+ *  runner row, an enabled init script with no prior init event records exactly
+ *  once (dedup-guarded). Runs for ALL runners — paused ones included — because
+ *  init is about configuration existing, not supervision running. Never sends
+ *  LLM input, never touches the queue, never blocks on execution (pump is
+ *  fire-and-forget). */
+async function baselineRunnerCallbacks() {
+  const runners = getDb().prepare('SELECT * FROM infinite_runners').all();
+  let recorded = 0;
+  for (const runner of runners) {
+    try {
+      const project = getProject(runner.project_id);
+      const row = runnerCallbacks.recordCallbackEvent(runner, project, 'init', { cwd: project.folder });
+      if (row && row.status === 'pending') recorded++;
+    } catch { /* a bad row must not stop the baseline pass */ }
+  }
+  if (recorded) {
+    runnerCallbacks.pumpCallbackOutbox().catch((e) => console.error('[callbacks] pump failed:', e.message));
+  }
+  return recorded;
+}
+
+/** Thin wrappers so routes and the supervisor tick go through mission. */
+function pumpCallbackOutbox(opts) {
+  return runnerCallbacks.pumpCallbackOutbox(opts);
+}
+function reconcileCallbackOutbox() {
+  return runnerCallbacks.reconcileCallbackOutbox();
+}
+
+/** Plan 92 §Phase 3: run the queue-transition observer for every runner whose
+ *  queue is readable, recording plan_started / plan_completed on OBSERVED
+ *  transitions (stable item id + attempt). Reads each runner's queue with the
+ *  same canonical snapshot the supervisor uses; a projection error is SKIPPED
+ *  because an external file edit is not a queue transition. Runs for
+ *  paused runners too (a human can still edit their queue). One bad runner
+ *  never stops the pass; recording pumps are fire-and-forget. */
+async function observeRunnerQueues() {
+  const runners = getDb().prepare('SELECT * FROM infinite_runners').all();
+  let recorded = 0;
+  for (const runner of runners) {
+    try {
+      const project = getProject(runner.project_id);
+      if (!project) continue;
+      const agent = requireAgent(project.agent_name);
+      const queue = canonicalQueueProjection(runner, project, agent, runnerQueue.snapshot(runner.id));
+      if (queue.condition !== 'ok') continue;
+      recorded += runnerCallbacks.observeQueue(runner, project, queue.parsed.items, { queuePath: queue.path });
+    } catch { /* one bad runner must not stop the observation pass */ }
+  }
+  if (recorded) {
+    runnerCallbacks.pumpCallbackOutbox().catch((e) => console.error('[callbacks] pump failed:', e.message));
+  }
+  return recorded;
+}
+
+/** Plan 92 §Phase 3: run the usage-exhaustion observer for every runner bound
+ *  to a supervisor session. The measured signature (plan 75 row 8) is read from
+ *  the worker conversation's OWN store and disambiguated with the SAME busy
+ *  probe the Mission lists use, so a live turn (which also ends in a user
+ *  message) is never mistaken for exhaustion. An unreadable store — or a busy
+ *  probe that could not answer — WITHHOLDS the event and never clears an armed
+ *  episode, so an operational failure cannot end one. One bad runner never
+ *  stops the pass; recording pumps are fire-and-forget. */
+async function observeRunnerUsage() {
+  const runners = getDb().prepare('SELECT * FROM infinite_runners').all();
+  let recorded = 0;
+  for (const runner of runners) {
+    try {
+      const sup = await getRunnerForSupervision(runner.id);
+      if (!sup || !sup.session || !sup.session.agent_session_id) continue;
+      const { project, agent, session } = sup;
+      const probe = await busyForSessions([{ agent_name: project.agent_name, agent_session_id: session.agent_session_id }]);
+      const busyKnown = probe.knownOf.get(session.agent_session_id) === true;
+      const busy = probe.busyOf.get(session.agent_session_id) === true;
+      const screen = await padTmux.captureScreen(project.agent_name, session.tmux_id, 80);
+      const explicit = require('./provider-limit').screenUsageEvidence(screen);
+      const evidence = explicit || agentStore.readUsageEvidence(agent, session.agent_session_id);
+      recorded += runnerCallbacks.observeUsage(runner, project, evidence, { busy, busyKnown });
+      if (explicit) {
+        const stopped = getDb().prepare(
+          "UPDATE infinite_runners SET enabled = 0, control_state = 'need_input', last_reason = ?, stop_cause = 'usage_exhausted', stop_origin = 'automatic', stop_at = COALESCE(stop_at, ?), scheduler_decision = 'need_input', scheduler_reason = ? WHERE id = ? AND run_generation = ? AND (enabled = 1 OR (control_state = 'need_input' AND stop_cause = 'usage_exhausted'))"
+        ).run(explicit.reason, new Date().toISOString(), explicit.reason, runner.id, runner.run_generation);
+        if (stopped.changes) syncQueuePausedMarker(runner.id, true);
+      }
+      if (explicit || evidence.state === 'ok') reconcileQuotaReceipt(getRunner(runner.id), session, agent, !!explicit);
+    } catch { /* one bad runner must not stop the observation pass */ }
+  }
+  if (recorded) {
+    runnerCallbacks.pumpCallbackOutbox().catch((e) => console.error('[callbacks] pump failed:', e.message));
+  }
+  return recorded;
+}
+async function dispatchNext(runnerId, session, project, agent, queue, kind, gen = getRunner(runnerId)?.run_generation) {
+  const runner = getRunner(runnerId);
+  if (!runner) return;
+
+  // Phase 2: Unified scheduler predicate — gate ALL dispatch paths.
+  const can = await canDispatch(runnerId, { session, project, agent, queue, kind, gen });
+  if (!can.allowed) {
+    if (can.reason) setRunnerReason(runnerId, can.reason);
+    return;
+  }
+
+  try {
+    await ensureRunnerIndex(agent, project);
+    // Plan 91 §Phase 4: the continuation is the rendered `continue` template —
+    // no hardcoded prompt fragments. A misconfigured set or missing context
+    // throws here and lands in the reason below with no send, same as any
+    // other dispatch failure.
+    const msg = renderRunnerPrompt(runner, project, can.queue, 'continue').text;
+    const ownership = acquireDispatchOwnership(runnerId, gen, kind, can.queue.hash, session, msg, can.turn.userId);
+    if (ownership) await deliverRunnerInstruction(runnerId, session, project, agent, can.queue, msg, ownership, can.turn, kind, 'runner');
+  } catch (e) {
+    if (getRunner(runnerId)?.run_generation === gen) setRunnerReason(runnerId, e.message);
   }
 }
 
@@ -1951,11 +3581,29 @@ async function runnerWatchTick() {
   }
 }
 
-/** Single watch tick for one runner. */
+/** Single watch tick for one runner.
+ *  Uses the canonical runner transition service for state changes. */
 async function runnerWatchOnce(runnerId) {
   const runner = getRunner(runnerId);
   if (!runner || !runner.enabled) return;
   const gen = runner.run_generation;
+
+  const stopWith = async (event, reason, cause, details = {}) => {
+    try {
+      const result = await runnerTransition.applyEvent(runnerId, event, { actor: 'watcher', details: { reason, cause, ...details } });
+      if (result?.markerRequired !== undefined) {
+        syncQueuePausedMarker(runnerId, result.markerRequired);
+      }
+    } catch (e) {
+      if (e.code === 'runner_transition_invalid') {
+        console.log(`[runner watch] ${runnerId}: invalid transition ${event} from ${e.message}`);
+      } else {
+        throw e;
+      }
+    }
+    runnerHistory.record(runner, cause === 'finished' ? 'queue_completed' : 'queue_stopped', { key: `stop:${gen}:${cause}`, severity: cause === 'finished' ? 'info' : 'warning', reason });
+  };
+
   const { project, agent, session, queue } = await getRunnerForSupervision(runnerId);
   if (!session) {
     console.log(`[runner watch] ${runnerId}: no worker session bound`);
@@ -1963,24 +3611,39 @@ async function runnerWatchOnce(runnerId) {
   }
   // Verify this run generation still owns the lease
   const fresh = getRunner(runnerId);
-  if (fresh.run_generation !== gen) return; // superseded by new Start/Pause/Remove
+  if (!fresh || !fresh.enabled || fresh.run_generation !== gen) return; // superseded by new Start/Pause/Remove
   // Read and validate queue
-  if (!queue || queue.aggregate.state === 'invalid') {
-    await setRunnerControlState(runnerId, 'finished');
+  if (!queue || queue.condition !== 'ok' || queue.aggregate.state === 'invalid') {
+    await stopWith('projection_mismatch', `Queue is invalid: ${queue?.error || (queue && queue.aggregate ? queue.aggregate.reason : 'unavailable')}`, 'invalid_queue');
     return;
   }
-  if (queue.aggregate.state === 'done' || queue.aggregate.state === 'need input') {
-    await setRunnerControlState(runnerId, queue.aggregate.state === 'done' ? 'finished' : 'need_input');
+  if (queue.aggregate.state === 'done') {
+    observeRunnerTurn(fresh, session, agentStore.readTurn(agent, session.agent_session_id));
+    await stopWith('complete', queue.aggregate.reason || 'Queue is done.', 'finished');
+    return;
+  }
+  if (queue.aggregate.state === 'need input') {
+    await stopWith('need_input', `Queue is blocked on input: ${queue.aggregate.reason || 'see the need-input item'}`, 'need_input');
+    return;
+  }
+  // Plan 91 §Phase 4: corrupt stored templates withhold automatic sends. This
+  // is a configuration failure the user repairs in Configure → Prompts — so
+  // the tick stops with an actionable reason (re-Runnable after repair, like
+  // an invalid queue) rather than dispatching a broken prompt or dying quiet.
+  const promptEff = effectivePromptTemplates(fresh);
+  if (promptEff.error) {
+    await stopWith('projection_mismatch', `Prompt templates misconfigured: ${promptEff.error.message} Repair them in Configure → Prompts, then Run again.`, 'prompts_misconfigured');
     return;
   }
   // Observe pane/turn state
   const paneState = await padTmux.paneState(project.agent_name, session.tmux_id);
-  if (!paneState.live) {
+  if (!paneState.live || paneState.tuiAlive === false) {
+    runnerHistory.record(runner, 'worker_exited', { key: `worker-exited:${gen}:${runner.recovery_count}`, severity: 'warning' });
     console.log(`[runner watch] ${runnerId}: pane dead`);
-    if (runner.recover_exited && runner.retry_count < runner.recovery_budget) {
+    if (runner.recover_exited && runner.recovery_count < runner.recovery_budget) {
       await recoverWorkerSession(runnerId, gen, project, session);
     } else {
-      await setRunnerControlState(runnerId, 'suspected_stuck');
+      await stopWith('hold', `Worker pane is gone and the recovery budget is exhausted (health: suspected_stuck). Reopen the session or press Run.`, 'recovery_exhausted');
     }
     return;
   }
@@ -1990,63 +3653,341 @@ async function runnerWatchOnce(runnerId) {
   const verdict = sendVerdict({ ...session, live: paneState.live, tuiAlive: paneState.tuiAlive, command: paneState.command }, perm);
   if (!verdict.canSend) {
     if (verdict.refusal.startsWith('mission_permission_pending')) {
-      await setRunnerControlState(runnerId, 'need_input');
+      await stopWith('need_input', `Worker is waiting on a permission dialog: ${verdict.refusal}`, 'permission_dialog');
     }
+    recordSchedulerDecision(runnerId, gen, { workerState: 'unknown', schedulerDecision: 'blocked', reason: verdict.refusal });
     return;
   }
-  // Check if a turn is running (tool running, output advancing)
-  const activity = agentStore.readActivity(project.agent_name, session.agent_session_id, { agentRunning: project.status === 'running' });
-  const busy = activity.store?.available && activity.lastToolCall?.status === 'running';
-  if (busy) {
-    // Turn is running — update last_progress
-    getDb().prepare('UPDATE infinite_runners SET last_progress_at = ? WHERE id = ?').run(new Date().toISOString(), runnerId);
-    return;
-  }
-  // Check if output is advancing (compaction grace)
-  // For simplicity: if not busy and not need_input/done, check idle grace
-  const now = Date.now();
-  const lastProgress = runner.last_progress_at ? Date.parse(runner.last_progress_at) : 0;
-  const idleMs = now - (lastProgress || now);
-  if (idleMs >= runner.idle_grace_ms) {
-    // Send nudge if budget allows
-    if (runner.retry_count < runner.no_progress_budget) {
-      const nudgeMsg = '=== RUNNER NUDGE ===\nRe-read QUEUE.md and INDEX.md. Continue the active/next item, or record "need input" if blocked.\n=== END NUDGE ===';
-      await sendText(session.id, nudgeMsg, { actor: 'runner' });
-      getDb().prepare('UPDATE infinite_runners SET last_nudge_at = ?, retry_count = retry_count + 1 WHERE id = ?')
-        .run(new Date().toISOString(), runnerId);
-    } else {
-      await setRunnerControlState(runnerId, 'suspected_stuck');
-    }
+  const turn = agentStore.readTurn(agent, session.agent_session_id);
+  const observed = observeRunnerTurn(runner, session, turn);
+  const decision = computeSchedulerState(observed, queue, turn, Date.now());
+  recordSchedulerDecision(runnerId, gen, decision);
+  if (decision.schedulerDecision === 'dispatch') {
+    const kind = observed.last_dispatch_revision !== queue.hash ? 'rev' : 'retry';
+    await dispatchNext(runnerId, session, project, agent, queue, kind, gen);
+  } else if (decision.schedulerDecision === 'need_input') {
+    await stopWith('need_input', decision.reason, 'scheduler_need_input');
   }
 }
 
-/** Recover a worker session that exited. */
-async function recoverWorkerSession(runnerId, gen, project, deadSession) {
+/**
+ * Phase 3 Plan 90: Compute truthful scheduler state for UI feedback.
+ * Returns { workerState, schedulerDecision, reason, nextCheckMs }.
+ * workerState: 'working' | 'idle' | 'unknown'
+ * schedulerDecision: 'dispatch' | 'wait_idle_grace' | 'wait_nudge_interval' | 'wait_turn_end' | 'paused' | 'observation_unavailable' | 'no_work' | 'finished'
+ *
+ * Plan 91 §Phase 5: a confirmed send the worker never takes must not wait
+ * forever. The retry budget never exhausts while an operation is outstanding,
+ * so `wait_turn_end` once persisted 12+ minutes on a startup whose repaint
+ * confirmation was the TUI boot banner, not the input landing (proven live:
+ * the prompt never reached the conversation's store). Bound it: an
+ * outstanding instruction with a VERIFIED-IDLE worker, no exact receipt, and
+ * a send older than RUNNER_NO_RESPONSE_TIMEOUT_MS escalates to need_input.
+ * Never a resend, never a silent release — the human re-Runs. A working
+ * worker is exempt (long tasks must not trip it), and anything but verified
+ * idle stays suppressed rather than escalating on a guess.
+ */
+const RUNNER_NO_RESPONSE_TIMEOUT_MS = 10 * 60 * 1000;
+function computeSchedulerState(runner, queue, turn, now = Date.now(), { explicit = false } = {}) {
+  const state = turn?.state || 'unknown';
+  const decision = (schedulerDecision, reason, nextCheckMs = null, recoveryRequired = false) => ({ workerState: state, schedulerDecision, reason, nextCheckMs, recoveryRequired });
+  if (!runner.enabled && !explicit) {
+    if (runner.control_state === 'finished') return decision('finished', 'Queue is done');
+    if (runner.control_state === 'need_input') return decision('need_input', runner.last_reason || 'Queue needs input');
+    return decision('paused', 'Queue paused');
+  }
+  if (!queue || queue.aggregate.state === 'invalid') return decision('no_work', 'Queue unavailable or invalid');
+  if (queue.aggregate.state === 'done') return decision('finished', 'Queue is done');
+  if (queue.aggregate.state === 'need input') return decision('need_input', queue.aggregate.reason || 'Queue needs input');
+  if (state === 'working') return decision('wait_turn_end', 'Waiting for current turn');
+  if (state !== 'idle') return decision('observation_unavailable', turn?.reason || 'Turn observation unavailable — automatic sends withheld');
+  // This is intentionally narrower than observation_unavailable: only a
+  // verified completed error turn needs an explicit Run recovery.
+  if (turn?.outcome === 'error' && !explicit) return decision('observation_unavailable', turn.reason, null, true);
+  if (['pending', 'unconfirmed', 'confirmed'].includes(runner.operation_status)) {
+    const sentAt = Date.parse(runner.operation_started_at);
+    const unanswered = state === 'idle' && !runner.operation_receipt_user_id
+      && Number.isFinite(sentAt) && (now - sentAt) > RUNNER_NO_RESPONSE_TIMEOUT_MS;
+    if (unanswered) {
+      return decision('need_input', `No worker response within ${Math.round(RUNNER_NO_RESPONSE_TIMEOUT_MS / 60000)} minutes of the sent instruction — it may never have arrived. No resend was made; check the conversation and Run again.`);
+    }
+    return decision('wait_turn_end', 'Previous instruction outstanding — waiting for its completed turn');
+  }
+  if (explicit) return decision('dispatch', 'Worker idle — ready to start');
+  const idleSince = Date.parse(runner.idle_since);
+  if (!Number.isFinite(idleSince)) return decision('observation_unavailable', 'Idle transition not yet observed');
+  const graceRemaining = runner.idle_grace_ms - (now - idleSince);
+  if (graceRemaining > 0) return decision('wait_idle_grace', `Worker idle — grace ${Math.ceil(graceRemaining / 1000)}s remaining`, graceRemaining);
+  const lastDispatch = Date.parse(runner.last_nudge_at || runner.last_dispatch_at);
+  const intervalRemaining = runner.min_nudge_interval_ms - (now - lastDispatch);
+  if (Number.isFinite(lastDispatch) && intervalRemaining > 0) return decision('wait_nudge_interval', `Waiting for nudge interval (${Math.ceil(intervalRemaining / 1000)}s)`, intervalRemaining);
+  const changed = runner.last_dispatch_revision !== queue.hash;
+  if (!changed && runner.retry_count >= runner.no_progress_budget) return decision('need_input', `No progress after ${runner.no_progress_budget} dispatches — the queue needs a human`);
+  return decision('dispatch', changed ? 'Worker idle — ready for next queued item' : 'Worker idle — ready to continue current item');
+}
+
+function recordSchedulerDecision(id, gen, decision) {
+  getDb().prepare('UPDATE infinite_runners SET worker_state = ?, scheduler_decision = ?, scheduler_reason = ? WHERE id = ? AND run_generation = ?')
+    .run(decision.workerState, decision.schedulerDecision, decision.reason, id, gen);
+}
+
+/** Observe progress, not the polling clock. Keep accepted instructions outstanding
+ * across every step until a stop message for their input has actually completed. */
+function observeRunnerTurn(runner, session, turn) {
+  const progress = Date.parse(turn.progressAt);
+  const prior = Date.parse(runner.last_progress_at);
+  const advanced = Number.isFinite(progress) && (!Number.isFinite(prior) || progress > prior);
+  const sameIdle = runner.worker_state === 'idle' && runner.worker_turn_id === turn.userId;
+  const idleSince = turn.state === 'idle' ? (sameIdle ? runner.idle_since : (turn.completedAt || new Date().toISOString())) : null;
+  getDb().prepare('UPDATE infinite_runners SET worker_state = ?, worker_turn_id = ?, idle_since = ?, last_progress_at = ?, retry_count = ? WHERE id = ? AND run_generation = ? AND operation_generation = ?')
+    .run(turn.state, turn.userId || null, idleSince, advanced ? turn.progressAt : runner.last_progress_at, advanced ? 0 : runner.retry_count, runner.id, runner.run_generation, runner.operation_generation);
+  if (runner.operation_session_id === session.agent_session_id && ['pending', 'unconfirmed', 'confirmed'].includes(runner.operation_status)) {
+    const accepted = turn.userId && turn.userId !== runner.operation_baseline_user_id && turn.inputHash === runner.operation_prompt_hash;
+    const received = runner.operation_receipt_user_id || (accepted ? turn.userId : null);
+    if (received) {
+      // A later human turn also keeps us working; only a measured idle boundary
+      // can release this receipt, never a tool's completion or timeout.
+      const status = turn.state === 'idle' ? 'ended' : 'confirmed';
+      getDb().prepare("UPDATE infinite_runners SET operation_receipt_user_id = ?, operation_status = ?, operation_confirmed_at = COALESCE(operation_confirmed_at, ?), last_reason = CASE WHEN stop_cause = 'usage_exhausted' AND enabled = 0 THEN last_reason ELSE NULL END WHERE id = ? AND run_generation = ? AND operation_id = ? AND operation_status IN ('pending','unconfirmed','confirmed')")
+        .run(received, status, new Date().toISOString(), runner.id, runner.run_generation, runner.operation_id);
+    }
+  }
+  return getRunner(runner.id);
+}
+
+/**
+ * Unified scheduler predicate — Phase 2 Plan 90.
+ * Single gate for ALL dispatch paths (revChanged, retry, nudge, recovery, startRunner).
+ * Returns { allowed: boolean, reason: string, freshRunner: object }.
+ * Uses atomic DB check-and-set for ownership to prevent duplicate dispatches
+ * from overlapping ticks or concurrent requests.
+ */
+async function canDispatch(runnerId, { session, project, agent, queue, kind, gen }) {
+  let fresh = getRunner(runnerId);
+  const explicit = kind === 'start';
+  if (!fresh || (!fresh.enabled && !explicit) || fresh.run_generation !== gen) {
+    return { allowed: false, reason: 'runner disabled or generation stale', freshRunner: fresh };
+  }
+  // Plan 91 §Phase 4: a custom prompt cannot bypass eligibility, and a broken
+  // one cannot send at all. Corrupt stored templates withhold EVERY dispatch
+  // reason here — the same gate the watcher, retry, recovery and start paths
+  // all share — with the repair named in the reason.
+  const promptEff = effectivePromptTemplates(fresh);
+  if (promptEff.error) {
+    return { allowed: false, reason: `prompt templates misconfigured: ${promptEff.error.message} Repair them in Configure → Prompts, then retry.`, freshRunner: fresh };
+  }
+  if (!session?.agent_session_id || fresh.session_id !== session.id || getSession(session.id)?.locked) return { allowed: false, reason: 'Worker identity unavailable or solo locked', freshRunner: fresh };
+  const turn = agentStore.readTurn(agent, session.agent_session_id);
+  fresh = observeRunnerTurn(fresh, session, turn);
+  const currentQueue = canonicalQueueProjection(fresh, project, agent, runnerQueue.snapshot(fresh.id));
+  if (currentQueue.condition !== 'ok') {
+    return { allowed: false, reason: currentQueue.error || 'Queue projection needs repair.', freshRunner: fresh, turn, queue: currentQueue };
+  }
+  const decision = computeSchedulerState(fresh, currentQueue, turn, Date.now(), { explicit });
+  recordSchedulerDecision(runnerId, gen, decision);
+  return { allowed: decision.schedulerDecision === 'dispatch', reason: decision.reason, freshRunner: fresh, turn, queue: currentQueue };
+}
+
+/**
+ * Atomic ownership acquisition for a dispatch.
+ * Uses a unique constraint on (runnerId, operation_id) via operation_generation
+ * to ensure only one tick/request can claim a generation.
+ * Returns the new operationId if acquired, null if another tick won.
+ */
+function acquireDispatchOwnership(runnerId, gen, kind, queueHash, session, message, baselineUserId) {
+  const fresh = getRunner(runnerId);
+  const explicit = kind === 'start';
+  if (!fresh || (!fresh.enabled && !explicit) || fresh.run_generation !== gen) return null;
+  const operationGeneration = (fresh.operation_generation || 0) + 1;
+  const operationId = crypto.randomUUID();
+  const nowIso = new Date().toISOString();
+  const db = getDb();
+  // Atomic check-and-set: only succeeds if operation_generation matches expected
+  // and no concurrent tick already incremented it.
+  const result = db.prepare(
+    `UPDATE infinite_runners SET
+      operation_id = ?, operation_generation = ?, operation_status = 'pending', operation_started_at = ?,
+      operation_session_id = ?, operation_prompt_hash = ?, operation_baseline_user_id = ?, operation_receipt_user_id = NULL,
+      last_dispatch_at = ?, last_nudge_at = ?, last_dispatch_revision = ?, retry_count = ?,
+      run_generation = ?, updated_at = ? WHERE id = ? AND run_generation = ? AND (enabled = 1 OR ?)
+      AND operation_generation = ? AND operation_status NOT IN ('pending', 'unconfirmed', 'confirmed')`
+  ).run(operationId, operationGeneration, nowIso, session.agent_session_id, crypto.createHash('sha256').update(message.trimEnd()).digest('hex'), baselineUserId || null, nowIso, nowIso, queueHash || null, kind === 'retry' ? fresh.retry_count + 1 : fresh.retry_count, explicit ? gen + 1 : gen, nowIso, runnerId, gen, explicit ? 1 : 0, fresh.operation_generation || 0);
+  if (result.changes === 0) return null; // Another tick won the race or gates failed
+  return { operationId, operationGeneration, gen: explicit ? gen + 1 : gen };
+}
+
+async function ensureRunnerIndex(agent, project) {
+  try {
+    await plans.initProjectPlans(agent.name, project);
+  } catch (e) {
+    throw new MissionError('runner_index_unavailable', `Plan rules INDEX.md could not be prepared: ${e.message}. Repair the project's plans folder and press Run.`, 409);
+  }
+}
+
+/** Every runner send owns one durable operation. A late receipt may update ONLY
+ * that operation/generation; it can never undo Pause/Close or enable a newer run. */
+async function deliverRunnerInstruction(id, session, project, agent, queue, message, lease, baselineTurn, kind, actor) {
+  const owns = () => {
+    const r = getRunner(id);
+    return r && r.run_generation === lease.gen && r.operation_id === lease.operationId
+      && r.operation_status === 'pending' && r.session_id === session.id
+      && r.operation_session_id === session.agent_session_id && (kind === 'start' || r.enabled);
+  };
+  const beforeWrite = () => {
+    if (!owns() || getSession(session.id)?.locked) throw new MissionError('runner_dispatch_superseded', 'Dispatch cancelled by Pause/Close, lock or newer operation', 409);
+    const turn = agentStore.readTurn(agent, session.agent_session_id);
+    if (turn.state !== 'idle' || (turn.outcome === 'error' && kind !== 'start') || turn.userId !== baselineTurn.userId) throw new MissionError('runner_worker_not_idle', 'Worker started another turn — instruction withheld', 409);
+    const parsed = plans.parseQueue(fs.readFileSync(plans.queuePath(agent, project, getRunner(id).queue_file), 'utf8'));
+    if (parsed.hash !== queue.hash || fs.existsSync(plans.queuePausedPath(agent, project))) throw new MissionError('runner_dispatch_superseded', 'Queue changed or paused before delivery — instruction withheld', 409);
+  };
+  try {
+    const result = await sendText(session.id, message, { actor, beforeWrite });
+    const observed = agentStore.readTurn(agent, session.agent_session_id);
+    // Transition from dispatching (pending) to running (confirmed) via receipt event
+    try {
+      const receiptResult = await runnerTransition.applyReceipt(id, { actor, details: { operationId: lease.operationId, receiptUserId: observed.userId } });
+      if (receiptResult?.markerRequired !== undefined) {
+        syncQueuePausedMarker(id, receiptResult.markerRequired);
+      }
+    } catch (e) {
+      if (e.code !== 'runner_transition_invalid') throw e;
+    }
+    const changed = getDb().prepare("UPDATE infinite_runners SET operation_status = 'confirmed', operation_confirmed_at = ?, operation_receipt_user_id = ?, worker_state = ?, scheduler_decision = 'wait_turn_end', scheduler_reason = 'Waiting for current turn', last_reason = NULL WHERE id = ? AND run_generation = ? AND operation_id = ? AND operation_status = 'pending'")
+      .run(new Date().toISOString(), observed.userId || null, observed.state, id, lease.gen, lease.operationId);
+    return changed.changes ? result : null;
+  } catch (e) {
+    const status = e.acceptance === 'unknown' || e.attempted || !e.code ? 'unconfirmed' : 'ended';
+    runnerHistory.record(getRunner(id), status === 'unconfirmed' ? 'delivery_unconfirmed' : 'dispatch_failed', { key: `${lease.operationId}:delivery-error`, severity: 'warning', code: e.code || 'delivery_unknown', reason: status === 'unconfirmed' ? 'A write was attempted; automatic resend withheld while waiting for receipt.' : 'Instruction was withheld before acceptance.' });
+    // Transition from dispatching (pending) to awaiting_receipt (unconfirmed) via delivery_unknown event
+    if (status === 'unconfirmed') {
+      try {
+        const duResult = await runnerTransition.applyDeliveryUnknown(id, { actor, details: { operationId: lease.operationId } });
+        if (duResult?.markerRequired !== undefined) {
+          syncQueuePausedMarker(id, duResult.markerRequired);
+        }
+      } catch (te) {
+        if (te.code !== 'runner_transition_invalid') throw te;
+      }
+    }
+    getDb().prepare("UPDATE infinite_runners SET operation_status = ?, last_reason = ? WHERE id = ? AND run_generation = ? AND operation_id = ? AND operation_status = 'pending'")
+      .run(status, status === 'unconfirmed' ? 'Instruction delivery unconfirmed — automatic resend withheld; waiting for the exact input receipt' : e.message, id, lease.gen, lease.operationId);
+    throw e;
+  }
+}
+async function reconcileRunnerOperation(runnerId, { actor = null } = {}) {
   const runner = getRunner(runnerId);
-  if (!runner || runner.run_generation !== gen) return;
-  // End the dead session (already dead)
-  await endSession(deadSession.id, { actor: 'runner' });
-  // Create new session with same conversation
-  const startResult = await startSession(runner.project_id, {
-    label: `Runner: ${runner.name} (recovery ${runner.retry_count + 1}/${runner.recovery_budget})`,
-    origin: 'agent',
-    agentSessionId: deadSession.agent_session_id,
-    createdBy: 'runner',
-  });
-  getDb().prepare('UPDATE infinite_runners SET session_id = ?, retry_count = retry_count + 1, updated_at = ? WHERE id = ?')
-    .run(startResult.session.id, new Date().toISOString(), runnerId);
-  // Send recovery message
-  const queuePath = plans.queuePath(requireAgent(project.agent_name), { ...project, plans_folder: project.plans_folder || 'plans' });
-  const recoveryMsg = [
-    '=== RUNNER RECOVERY ===',
-    `The previous pane exited. This pane resumes the same conversation (${deadSession.agent_session_id}).`,
-    `Re-read QUEUE.md (${queuePath}) and continue.`,
-    '=== END RECOVERY ==='
-  ].join('\n');
-  await sendText(startResult.session.id, recoveryMsg, { actor: 'runner' });
+  if (!runner) throw new MissionError('runner_not_found', `Runner ${runnerId} not found`);
+  if (!['pending', 'unconfirmed', 'confirmed'].includes(runner.operation_status)) {
+    throw new MissionError('runner_no_pending_operation', `No pending operation to reconcile (status: ${runner.operation_status})`);
+  }
+  if (!runner.session_id) throw new MissionError('runner_no_session', 'Runner has no bound session');
+  if (!runner.operation_session_id) throw new MissionError('runner_no_operation_session', 'Operation has no bound conversation');
+
+  const { project, agent, session } = await getRunnerForSupervision(runnerId);
+  if (!session) throw new MissionError('runner_no_session', 'Runner session not found');
+  if (session.agent_session_id !== runner.operation_session_id) {
+    throw new MissionError('runner_identity_changed', 'Worker conversation changed — operation invalidated');
+  }
+
+  // Read the worker's store for the exact operation receipt
+  const turn = agentStore.readTurn(agent, session.agent_session_id);
+  const matched = turn.userId
+    && turn.userId !== runner.operation_baseline_user_id
+    && turn.inputHash === runner.operation_prompt_hash;
+
+  const nowIso = new Date().toISOString();
+
+  if (matched) {
+    // Exact receipt found — confirm the operation and enable supervision via receipt transition
+    try {
+      const receiptResult = await runnerTransition.applyReceipt(runnerId, { actor, details: { operationId: runner.operation_id, receiptUserId: turn.userId } });
+      if (receiptResult?.markerRequired !== undefined) {
+        syncQueuePausedMarker(runnerId, receiptResult.markerRequired);
+      }
+    } catch (e) {
+      if (e.code !== 'runner_transition_invalid') throw e;
+    }
+    const status = turn.state === 'idle' ? 'ended' : 'confirmed';
+    getDb().prepare(
+      `UPDATE infinite_runners SET operation_receipt_user_id = ?, operation_status = ?, operation_confirmed_at = COALESCE(operation_confirmed_at, ?),
+        enabled = 1, control_state = 'enabled', pause_mode = NULL, pause_state = 'none',
+        pause_target_item = NULL, pause_requested_at = NULL,
+        scheduler_decision = 'wait_turn_end', scheduler_reason = 'Reconciled — instruction confirmed',
+        last_reason = NULL, updated_at = ?
+      WHERE id = ? AND run_generation = ? AND operation_id = ? AND operation_status IN ('pending','unconfirmed','confirmed')`
+    ).run(turn.userId, status, nowIso, nowIso, runnerId, runner.run_generation, runner.operation_id);
+    runnerHistory.record(runner, 'reconciled_confirmed', { actor: actor || 'user', key: `${runner.operation_id}:receipt`, receiptUserId: turn.userId });
+    return { reconciled: true, confirmed: true, receiptUserId: turn.userId, workerState: turn.state };
+  }
+
+  // No exact receipt yet — check if we should hold the operation
+  const sentAt = Date.parse(runner.operation_started_at);
+  const noResponseTimeout = 10 * 60 * 1000; // RUNNER_NO_RESPONSE_TIMEOUT_MS
+  const unanswered = turn.state === 'idle'
+    && !runner.operation_receipt_user_id
+    && Number.isFinite(sentAt)
+    && (Date.now() - sentAt) > noResponseTimeout;
+
+  if (unanswered) {
+    // Terminal expiry without a receipt — hold the operation via hold transition
+    try {
+      const holdResult = await runnerTransition.applyHold(runnerId, { actor, details: { operationId: runner.operation_id, reason: 'timeout' } });
+      if (holdResult?.markerRequired !== undefined) {
+        syncQueuePausedMarker(runnerId, holdResult.markerRequired);
+      }
+    } catch (e) {
+      if (e.code !== 'runner_transition_invalid') throw e;
+    }
+    getDb().prepare(
+      `UPDATE infinite_runners SET operation_status = 'held', last_reason = ?, updated_at = ?
+        WHERE id = ? AND run_generation = ? AND operation_id = ? AND operation_status IN ('pending','unconfirmed','confirmed')`
+    ).run(
+      `No worker response within ${Math.round(noResponseTimeout / 60000)} minutes of the sent instruction — it may never have arrived. Operation held; no resend was made. Check the conversation and Run again.`,
+      nowIso, runnerId, runner.run_generation, runner.operation_id
+    );
+    runnerHistory.record(runner, 'reconciled_held', { actor: actor || 'user', key: `${runner.operation_id}:held`, reason: 'timeout' });
+    syncQueuePausedMarker(runnerId, true);
+    return { reconciled: true, confirmed: false, held: true, reason: 'timeout' };
+  }
+
+  // Still awaiting receipt — leave operation as-is, marker absent
+  runnerHistory.record(runner, 'reconciled_awaiting', { actor: actor || 'user', key: `${runner.operation_id}:awaiting`, workerState: turn.state });
+  return { reconciled: false, confirmed: false, awaiting: true, workerState: turn.state };
+}
+async function recoverWorkerSession(runnerId, gen, project, deadSession) {
+  const sup = await getRunnerForSupervision(runnerId);
+  const can = await canDispatch(runnerId, { ...sup, session: deadSession, kind: 'recovery', gen });
+  if (!can.allowed) return;
+  await ensureRunnerIndex(sup.agent, project);
+  // Plan 91 §Phase 4: recovery speaks the rendered `recovery` template. A
+  // template failure withholds the recovery send with a reason — it must never
+  // recreate a worker it cannot instruct.
+  let recoveryMsg;
+  try {
+    recoveryMsg = renderRunnerPrompt(sup.runner, project, can.queue, 'recovery').text;
+  } catch (e) {
+    setRunnerReason(runnerId, `Recovery withheld: ${e.message}`);
+    return;
+  }
+  const lease = acquireDispatchOwnership(runnerId, gen, 'recovery', can.queue.hash, deadSession, recoveryMsg, can.turn.userId);
+  if (!lease) return;
+  const beforeLaunch = () => {
+    const fresh = getRunner(runnerId);
+    if (!fresh?.enabled || fresh.run_generation !== gen || fresh.operation_id !== lease.operationId || fresh.operation_status !== 'pending') throw new MissionError('runner_dispatch_superseded', 'Recovery cancelled by Pause/Close', 409);
+  };
+  try {
+    beforeLaunch();
+    getDb().prepare('UPDATE infinite_runners SET recovery_count = recovery_count + 1 WHERE id = ? AND run_generation = ? AND operation_id = ?').run(runnerId, gen, lease.operationId);
+    await restartSession(deadSession.id, { actor: 'runner', beforeLaunch });
+    runnerHistory.record(getRunner(runnerId), 'worker_restored', { key: `worker-restored:${gen}:${getRunner(runnerId).recovery_count}` });
+    await deliverRunnerInstruction(runnerId, getSession(deadSession.id), project, sup.agent, can.queue, recoveryMsg, lease, can.turn, 'recovery', 'runner');
+  } catch (e) {
+    getDb().prepare("UPDATE infinite_runners SET operation_status = 'ended', last_reason = ? WHERE id = ? AND run_generation = ? AND operation_id = ? AND operation_status = 'pending'").run(e.message, runnerId, gen, lease.operationId);
+  }
 }
 
 module.exports = {
+  resumeQuotaRecovery,
   MissionError,
   supportedTypes,
   assertMissionAgent,
@@ -2086,6 +4027,10 @@ module.exports = {
   state,
   statesFor,
   stampTruth,
+  // Test-only exports
+  canDispatch,
+  computeSchedulerState,
+  observeRunnerTurn,
   withLive,
   withLiveSessions,
   withLiveSessionsByAgent,
@@ -2093,6 +4038,7 @@ module.exports = {
   withAgentBusy,
   withAgentBusyProjects,
   closeSession,
+  disableRunnerForSession,
   endSession,
   // Runner (plan 83)
   newRunnerId,
@@ -2100,17 +4046,50 @@ module.exports = {
   getRunner,
   getActiveRunnerForProject,
   listRunnersForProject,
+  listAllRunners,
   updateRunner,
+  ensureRunnerSession,
   setRunnerControlState,
+  setRunnerEnabled,
+  setRunnerReason,
+  runnerContainerPaths,
   incrementRunGeneration,
+  pauseConfirmation,
   getRunnerForSupervision,
   startRunner,
   pauseRunner,
   resumeRunner,
   removeRunner,
+  resolveRunnerQueue,
+  reconcileRunnerOperation,
   reconcileRunners,
   runnerWatchTick,
   runnerWatchOnce,
+  readRunnerQueue,
+  setupRunnerQueue,
+  updateRunnerQueue,
+  addRunnerQueueItems,
+  reorderRunnerQueue,
+  removeRunnerQueueItem,
+  updateRunnerQueueCustomInstructions,
+  listRunnerPlans,
+  // Runner prompt templates (plan 91)
+  effectivePromptTemplates,
+  withPromptTemplates,
+  runnerPromptConfig,
+  previewRunnerPrompts,
+  previewProjectPrompts,
+  renderRunnerPrompt,
+  promptCatalogue,
+  getRunnerCallbacks,
+  saveRunnerCallbacks,
+  runnerCallbackHistory,
+  callbackCatalogue,
+  baselineRunnerCallbacks,
+  pumpCallbackOutbox,
+  reconcileCallbackOutbox,
+  observeRunnerQueues,
+  observeRunnerUsage,
   RUNNER_CONTROL_STATES,
   RUNNER_HEALTH_STATES,
 };

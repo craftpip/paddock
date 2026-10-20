@@ -1,0 +1,64 @@
+# Plan queue
+
+Read this file and `INDEX.md` before starting or resuming work. `INDEX.md` explains
+how to maintain plans; this file explains how to run this queue.
+
+## Worker rules
+
+1. Read the whole queue before acting. Work one item per turn.
+2. If ANY item is `need input`, stop immediately. Explain its `reason` to the
+   human, keep this session open, and wait. Never skip it to do later items.
+3. Resume the `in progress` item first. Otherwise take the first `new` item and
+   write `in progress` BEFORE doing work. At most one item may be in progress.
+4. Read the referenced plan and follow INDEX.md's plan lifecycle. Keep the plan's
+   progress current. Mark a queue item `done` only when its required work and
+   verification are complete under those rules. Finishing a chat turn is not done.
+5. When blocked or needing clarification, update the plan and set this item to
+   `need input`. Put the exact question or required intervention in `reason`.
+   Then stop. Do not guess, skip the item, or clear your own blocker.
+6. Work exactly ONE item per turn/session instruction, then end your turn —
+   the supervisor sends the next task; do not take a second item yourself.
+7. Before starting an item, check that a file named `QUEUE.paused` does not
+   exist here. If it does, do not start another item — stop and wait.
+8. When every item is done, report completion and wait. Do not invent work.
+9. After the human resolves a blocker, they explicitly resume/requeue the item.
+   Re-read the updated queue on Start; do not assume an old answer still applies.
+
+## Editing rules — keep the parser working
+
+- Preserve the two markers and exactly one JSON block between them.
+- Keep `version` equal to 1 and use the exact lowercase status strings:
+  `new`, `in progress`, `need input`, `done`.
+- Each item has a unique, stable `id`, a `plan` path relative to this directory,
+  a `status`, and a string `reason`. No absolute paths or paths escaping this directory.
+- `reason` is required and nonempty for `need input`; use an empty string otherwise.
+- Add new items at the end with status `new`. Never change existing item IDs.
+- Keep completed entries as `done`; do not delete them to signal completion.
+- Do not add comments or trailing commas inside JSON, extra JSON fields, duplicate
+  keys, or a hand-written overall queue status. Overall status is computed in code.
+- Re-read before writing so newly added tasks are preserved. Use the queue update
+  operation with its revision check when available. Never overwrite a newer revision.
+- Write the complete valid file atomically; never leave half-written JSON behind.
+- Put explanations outside the marked block, or in the item's `reason` when blocked.
+
+<!-- paddock-queue:start -->
+```json
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "p91-a",
+      "plan": "a.md",
+      "status": "done",
+      "reason": ""
+    },
+    {
+      "id": "p91-b",
+      "plan": "b.md",
+      "status": "done",
+      "reason": ""
+    }
+  ]
+}
+```
+<!-- paddock-queue:end -->

@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from 'react'
 import Splitter from '../components/Splitter'
 import OverlayScroll from '../components/OverlayScroll'
-import ProjectDialog from '../components/ProjectDialog'
+import MissionPopups from '../components/MissionPopups'
 import SessionList from '../components/SessionList'
-import Terminal from '../components/Terminal'
+import Tooltip from '../components/Tooltip'
+import { useMissionNavigation } from '../lib/mission-navigation'
+import MissionSessionView from '../components/MissionSessionView'
 import Button from '../components/ui/Button'
 import { useConfirm } from '../lib/confirm'
 import { useMission } from '../stores/mission'
@@ -201,26 +203,30 @@ function ProjectRail({ projects, selectedId, onSelect, onNew, onExpand }) {
           beside a labelled button in a 260px toolbar, stacked under the arrow in
           a 56px rail. Same 32px target either way. */}
       <div className="msn-rail-head flex shrink-0 flex-col items-start gap-1.5 border-b border-line-faint px-3 py-1">
-        <Button
-          variant="ghost"
-          size="bare"
-          icon
-          title="Expand projects column"
-          onClick={onExpand}
-          className="msn-btn-expand h-8 w-8 text-ink-faint"
-        >
-          <Chevron dir="right" />
-        </Button>
-        <Button
-          variant="primary"
-          size="bare"
-          icon
-          title="New project"
-          onClick={onNew}
-          className="msn-btn-new-project-mini h-8 w-8 rounded-pill text-[17px] leading-none"
-        >
-          +
-        </Button>
+        <Tooltip text="Expand projects column" position="right" portal>
+          <Button
+            variant="ghost"
+            size="bare"
+            icon
+            aria-label="Expand projects column"
+            onClick={onExpand}
+            className="msn-btn-expand h-8 w-8 text-ink-faint"
+          >
+            <Chevron dir="right" />
+          </Button>
+        </Tooltip>
+        <Tooltip text="New project" position="right" portal>
+          <Button
+            variant="primary"
+            size="bare"
+            icon
+            aria-label="New project"
+            onClick={onNew}
+            className="msn-btn-new-project-mini h-8 w-8 rounded-pill text-[17px] leading-none"
+          >
+            +
+          </Button>
+        </Tooltip>
       </div>
       {/* `px-3 py-2` mirrors the expanded row's 12px/8px inset, so an avatar
           sits exactly where its row's content did. */}
@@ -228,19 +234,20 @@ function ProjectRail({ projects, selectedId, onSelect, onNew, onExpand }) {
         {projects.map((p) => {
           const on = p.id === selectedId
           return (
-            <Button
-              key={p.id}
-              variant="none"
-              size="bare"
-              icon
-              title={p.name}
-              onClick={() => onSelect(p.id)}
-              className={`msn-avatar msn-rail-btn h-8 w-8 rounded-pill text-[11px] leading-none ${
-                on ? 'msn-avatar-on bg-accent text-accent-ink' : 'bg-raised text-ink-dim hover:bg-raised-hover hover:text-ink'
-              }`}
-            >
-              {initials(p.name)}
-            </Button>
+            <Tooltip key={p.id} text={p.name} position="right" portal>
+              <Button
+                variant="none"
+                size="bare"
+                icon
+                aria-label={p.name}
+                onClick={() => onSelect(p.id)}
+                className={`msn-avatar msn-rail-btn h-8 w-8 rounded-pill text-[11px] leading-none ${
+                  on ? 'msn-avatar-on bg-accent text-accent-ink' : 'bg-raised text-ink-dim hover:bg-raised-hover hover:text-ink'
+                }`}
+              >
+                {initials(p.name)}
+              </Button>
+            </Tooltip>
           )
         })}
       </OverlayScroll>
@@ -315,6 +322,7 @@ function ProjectRow({ project, selected, onSelect, onEdit, onDelete }) {
 }
 
 export default function Mission() {
+  const { location, openPopup, patch, view, hydrated } = useMissionNavigation()
   const [col1, setCol1] = useStoredWidth(COL1_KEY, DEFAULT_COL1)
   const [col2, setCol2] = useStoredWidth(COL2_KEY, DEFAULT_COL2)
   const [col1Collapsed, setCol1Collapsed] = useStoredFlag(COL1_COLLAPSED_KEY)
@@ -362,16 +370,27 @@ export default function Mission() {
   )
   const {
     projects, loading, error, selectedProjectId,
-    openSession, sessionState,
-    reopenFor, reopenError,
+    openSession,
     fetchProjects, select, deleteProject, refreshActive,
-    relaunch, restart,
   } = useMission()
   const fetchAgents = useAgents((s) => s.fetchAgents)
   const agents = useAgents((s) => s.agents)
-  const [dialog, setDialog] = useState(null) // null | { project } — project set = edit
+   const viewLoading = useMission((s) => s.viewLoading)
+   const viewError = useMission((s) => s.viewError)
+   const viewUnavailable = useMission((s) => s.viewUnavailable)
+   const historyView = useMission((s) => s.historyView)
   const [actionError, setActionError] = useState('')
   const confirm = useConfirm()
+  useEffect(() => {
+    if (!loading && !error && view.project && !projects.some((p) => p.id === view.project)) {
+      setActionError('The requested project is unavailable.')
+      patch({ project: null, view: 'all' }, { replace: true })
+    }
+    if (viewUnavailable) {
+      setActionError(viewError)
+      patch({ session: null, conversation: null, terminalProject: null }, { replace: true })
+    }
+  }, [loading, error, projects, view.project, viewUnavailable, viewError, patch])
 
   /* Col 3 renders from the store's `openSession` — a snapshot taken when the
    *  user opened a session, NOT from `sessions.find(…)`. That distinction is
@@ -390,10 +409,11 @@ export default function Mission() {
    *  after that project is deleted from the list (col 3 then correctly shows the
    *  closed state, because its sessions really are). */
   const project = projects.find((p) => p.id === selectedProjectId) || null
-  const session = openSession
+  const session = hydrated && openSession?.id === view.session ? openSession : null
   const sessionProject = session ? projects.find((p) => p.id === session.projectId) || null : null
   const sessionAgent = session?.agentName || sessionProject?.agent_name || null
-  const sessionFolder = session?.folder || sessionProject?.folder || ''
+  const queueExpanded = !!session?.runner && new URLSearchParams(location.search).get('queue') !== 'closed'
+  const setQueueCollapsed = (collapsed) => patch({ queue: collapsed ? 'closed' : 'open' })
   const agentRunning = sessionAgent
     ? agents.find((a) => a.name === sessionAgent)?.status !== 'stopped'
     : false
@@ -483,7 +503,7 @@ export default function Mission() {
               projects={projects}
               selectedId={selectedProjectId}
               onSelect={select}
-              onNew={() => setDialog({})}
+              onNew={() => openPopup('project-new')}
               onExpand={() => {
                 setCol1Collapsed(false)
                 setNarrowOverride(true)
@@ -516,7 +536,7 @@ export default function Mission() {
                   <Button
                     variant="primary"
                     size="bare"
-                    onClick={() => setDialog({})}
+                    onClick={() => openPopup('project-new')}
                     className="msn-btn-new-project py-1 text-[11px]"
                   >
                     + New project
@@ -547,7 +567,7 @@ export default function Mission() {
                     project={p}
                     selected={p.id === selectedProjectId}
                     onSelect={select}
-                    onEdit={(project) => setDialog({ project })}
+                    onEdit={(project) => openPopup('project-edit', project.id)}
                     onDelete={askDeleteProject}
                   />
                 ))
@@ -574,124 +594,41 @@ export default function Mission() {
         <div className="msn-col-shell msn-col-agent flex min-w-0 flex-1 flex-col bg-sunken">
           {session && sessionAgent ? (
             <>
-              <header className="msn-agent-header flex h-9 shrink-0 items-center gap-2 border-b border-line-faint px-3">
-                <span className={`msn-agent-dot h-1.5 w-1.5 shrink-0 rounded-full ${sessionState?.live ? 'bg-success' : 'bg-ink-faint'}`} />
-                {/* The project badge is here for the case plan 58 item 1 makes
-                    possible: col 1 and col 2 follow the project you click, col 3
-                    follows the session you opened, and the two can now be
-                    different projects. Without the name, an 'all projects' row
-                    from another folder looked like it belonged to whatever col 1
-                    had highlighted. It is the same badge the row wears. */}
-                {sessionProject && (
-                  <span
-                    className="msn-agent-project shrink-0 truncate rounded bg-accent/15 px-1 text-[9px] font-medium text-accent"
-                    title={sessionFolder}
-                  >
-                    {sessionProject.name}
-                  </span>
-                )}
-                <span className="msn-agent-label truncate text-[11px] font-medium text-ink-dim">
-                  {session.title || session.label || session.tmux_id}
-                </span>
-                <span className="msn-agent-cwd truncate font-mono text-[10px] text-ink-faint" title={sessionState?.cwd || sessionFolder}>
-                  {sessionState?.cwd || sessionFolder}
-                </span>
-                {session.locked && (
-                  <span className="msn-badge-solo shrink-0 rounded bg-warning/15 px-1.5 py-0.5 text-[10px] text-warning" title="Solo lock — agents may read but not type here">
-                    🔒 solo
-                  </span>
-                )}
-                <span className="msn-agent-actions ml-auto flex shrink-0 items-center gap-1.5">
-                  {/* Relaunch TUI vs Restart is the distinction paneState makes:
-                      a live pane running a shell means the TUI exited (start it
-                      again in the same conversation), while nothing running under
-                      the session at all means the row is a leftover and the TUI
-                      has to be launched from scratch — which is what relaunch does
-                      too. */}
-                  {session.live !== false && !sessionState?.tuiAlive && (
-                    <Button
-                      variant="secondary"
-                      size="bare"
-                      onClick={act(() => relaunch(session.id), 'Could not relaunch the TUI')}
-                      className="msn-btn-relaunch py-0.5 text-[10px] text-ink-dim hover:border-accent"
-                    >
-                      {sessionState ? 'Relaunch TUI' : '…'}
-                    </Button>
-                  )}
-                  <span className="msn-agent-command text-[10px] text-ink-faint">
-                    {sessionState?.tuiAlive
-                      ? sessionState.command
-                      : sessionState
-                        ? 'TUI not running'
-                        : ''}
-                  </span>
-                </span>
-              </header>
-              {actionError && (
-                <div className="msn-error-bar border-b border-danger/30 bg-danger/10 px-3 py-1.5 text-[11px] text-danger">
-                  {actionError}
-                </div>
-              )}
-              {/* Nothing is running here any more — attaching would silently
-                  CREATE an empty shell under the same session name, which looks
-                  like a working session and isn't. Say it in the user's terms
-                  and offer the one action that is actually useful here: reopen
-                  the SAME conversation, not start a new one.
-                  Plan 68: when the pane was found dead at the moment the user
-                  OPENED this session, the store has already restarted it, so
-                  that moment shows a "Reopening…" state instead of a dead end
-                  they have to click out of. A pane that dies later (the poll)
-                  deliberately still lands here — the button stays, because
-                  relaunching an agent process unasked is the human's call. */}
-              {reopenFor === session.id ? (
-                <Empty title="Reopening…">Starting this conversation again.</Empty>
-              ) : sessionState && !sessionState.live ? (
-                <Empty title={reopenError ? 'Could not reopen this conversation' : 'This session is closed'}>
-                  {reopenError || (
-                    <>
-                      Nothing is running here any more — the agent's container may
-                      have been restarted, or the session ended.
-                    </>
-                  )}
-                  <div className="mt-2.5 flex justify-center">
-                    <Button
-                      variant="primary"
-                      size="bare"
-                      onClick={act(() => restart(session.id), 'Could not restart the session')}
-                      className="msn-btn-restart px-2.5 py-1 text-xs"
-                    >
-                      Reopen this conversation
-                    </Button>
-                  </div>
-                </Empty>
-              ) : (
-                <div className="msn-terminal-wrap min-h-0 flex-1 overflow-hidden">
-                  <Terminal
-                    name={sessionAgent}
-                    sessionId={session.tmux_id}
-                    showSessions={false}
-                    running={agentRunning}
-                    height="100%"
-                    minHeight="0"
-                    bordered={false}
-                    className="msn-terminal h-full"
-                  />
-                </div>
-              )}
+            <MissionSessionView
+              session={session}
+              project={sessionProject}
+              agentRunning={agentRunning}
+              queueExpanded={queueExpanded}
+              onQueueCollapsedChange={setQueueCollapsed}
+              onConfigure={() => openPopup('runner-settings', session.runner.id)}
+              error={actionError || viewError}
+            />
             </>
           ) : (
             <Column title="Agent">
-              <Empty title={selectedProjectId ? 'No session selected' : 'No project selected'}>
+               {viewLoading ? <Empty title="Loading session…" /> : viewError ? (
+                 <Empty title={viewUnavailable ? 'View unavailable' : 'Could not load this view'}>
+                   {viewError}
+                   <div className="mt-2"><Button onClick={() => viewUnavailable
+                     ? patch({ session: null, conversation: null, terminalProject: null }, { replace: true })
+                     : useMission.getState().restoreView(view)}> {viewUnavailable ? 'Clear unavailable selection' : 'Retry'}</Button></div>
+                 </Empty>
+               ) : historyView ? (
+                 <Empty title={historyView.metadata?.title || 'Saved conversation'}>
+                   {historyView.conversation} in {historyView.project?.name}. Opening this link does not launch the agent.
+                   <div className="mt-2"><Button onClick={act(() => useMission.getState().startSession(historyView.project.id, { agentSessionId: historyView.conversation }), 'Could not resume')}>Resume this conversation</Button></div>
+                 </Empty>
+               ) : <Empty title={selectedProjectId ? 'No session selected' : 'No project selected'}>
                 {selectedProjectId
                   ? 'Open a session from the middle column and the agent’s own interface appears here — the same terminal, the same TUI, the human and the agent typing into it alike. Switching what the middle column lists leaves this alone.'
                   : 'Pick a project to see its sessions and the conversations the agent already had in that folder.'}
-              </Empty>
+               </Empty>}
             </Column>
           )}
         </div>
       </div>
 
-      {dialog && <ProjectDialog project={dialog.project} onClose={() => setDialog(null)} />}
+      <MissionPopups />
     </div>
   )
 }
