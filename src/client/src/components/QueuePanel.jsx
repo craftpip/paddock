@@ -142,11 +142,13 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
   const summary = landed ? queue.summary : null
   const recoveryRequired = landed && queue.scheduler?.recoveryRequired === true
   const state = landed ? queue.state : null
+  const scheduler = landed ? queue.scheduler : null
   const counts = summary?.counts || null
   const current = summary?.current || null
   const next = summary?.next || null
   const blocked = summary?.blocked || null
-  const running = runner.control_state === 'enabled'
+  // Use canonical queue state and scheduler instead of runner.control_state (old)
+  const running = state === 'in progress' || state === 'need input'
   const busy = !!queueAction
   const doneCount = counts?.done || 0
   // Stable draft key: item id from popup args when open, else from blocked summary.
@@ -225,13 +227,14 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
   // Show detailed status based on stop provenance.
   const headerWord =
     recoveryRequired ? 'Recovery required'
-    : running ? (runner.stop_cause === 'scheduler_need_input' ? 'Running — waiting for current turn' : 'Running')
+    : state === 'in progress' ? (scheduler?.workerState === 'working' ? 'Working' : 'In progress')
+    : state === 'need input' ? 'Needs input'
+    : state === 'done' ? 'Complete'
+    : state === 'projection_error' ? 'Projection error'
     : runner.operation_status === 'unconfirmed' ? 'Delivery unconfirmed'
     : runner.operation_status === 'held' ? 'Operation held'
     : runner.operation_status === 'confirmed' ? 'Instruction confirmed'
-    : state === 'need input' || runner.control_state === 'need_input' ? 'Needs input'
-    : state === 'in progress' ? 'In progress'
-    : summary?.allDone ? 'Complete'
+    : runner.operation_status === 'invalidated' ? 'Paused — instruction invalidated'
     : runner.control_state === 'paused' ? (runner.stop_origin === 'explicit' ? 'Paused' : 'Auto stopped')
     : 'Paused'
 
@@ -333,7 +336,7 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
             </div>
           )}
           {/* Stop reason with provenance (automatic vs explicit pause) */}
-          {runner.control_state === 'paused' && (
+          {state !== 'in progress' && state !== 'need input' && state !== 'done' && (
             <>
               <p className={cx('msn-queue-paused mt-1.5 text-[10px]', (sessions.find((s) => s.id === sessionId)?.busy ? 'text-warning' : 'text-ink-dim'))}>
                 {sessions.find((s) => s.id === sessionId)?.busy
