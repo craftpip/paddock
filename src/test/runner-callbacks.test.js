@@ -567,33 +567,29 @@ describe('plan 92 — queue-transition observation (plan_started / plan_complete
   });
 });
 
-describe('plan 92 — observeRunnerQueues reads real queue files', () => {
-  it('records a start when a runner\'s QUEUE.md item turns in progress', async () => {
+describe('plan 92 — observeRunnerQueues reads canonical queue transitions', () => {
+  it('records a start when a runner\'s queue item turns in progress', async () => {
     const p = makeProject();
     const r = await makeRunner(p.id);
     await mission.saveRunnerCallbacks(r.id, { plan_started: { script: 'echo s\n', enabled: true } });
-    const items = [
-      { id: 'i1', plan: 'plans/a.md', status: 'new', reason: '' },
-      { id: 'i2', plan: 'plans/b.md', status: 'new', reason: '' },
-    ];
-    // Write the queue where the runner reads it: <folder>/<plans_folder>/QUEUE.md.
-    const queueDir = path.join(FOLDER, 'plans');
-    fs.mkdirSync(queueDir, { recursive: true });
-    const plans = require('../services/plans');
-    const agent = PAD;
-    await plans.writeQueue(agent, { folder: FOLDER, plans_folder: 'plans' }, items, null);
+    // Set up canonical queue
+    await mission.setupRunnerQueue(r.id);
+    await mission.addRunnerQueueItems(r.id, ['plans/a.md', 'plans/b.md'], 0);
+    // Baseline
     assert.equal(await mission.observeRunnerQueues(), 0, 'first pass baselines');
-    await plans.writeQueue(agent, { folder: FOLDER, plans_folder: 'plans' },
-      [{ ...items[0], status: 'in progress' }, items[1]],
-      (await plans.readQueue(agent, { folder: FOLDER, plans_folder: 'plans' })).hash);
+    // Update item to in_progress via canonical API
+    const queue = await mission.readRunnerQueue(r.id);
+    const itemId = queue.queue.items[0].id;
+    await mission.updateRunnerQueueItem(r.id, itemId, { status: 'in_progress', reason: '' }, queue.queue.revision);
     assert.equal(await mission.observeRunnerQueues(), 1, 'the observed transition records one event');
     const started = getDb().prepare("SELECT * FROM runner_callback_outbox WHERE runner_id = ? AND event = 'plan_started'").all(r.id);
     assert.equal(started.length, 1);
-    assert.equal(started[0].item_id, 'i1');
-    // A malformed queue is not a transition.
-    fs.writeFileSync(path.join(queueDir, 'QUEUE.md'), 'not a queue');
+    // Canonical queue uses server-generated IDs (rqi_...), not user-provided ones
+    assert.equal(started[0].item_id, itemId);
+    // A projection error (external edit) is not a transition
+    // Corrupt the queue by writing directly to the database with invalid items
+    getDb().prepare('UPDATE runner_queue_items SET status = ? WHERE id = ?').run('invalid_status', itemId);
     assert.equal(await mission.observeRunnerQueues(), 0);
-    fs.rmSync(queueDir, { recursive: true, force: true });
   });
 });
 
