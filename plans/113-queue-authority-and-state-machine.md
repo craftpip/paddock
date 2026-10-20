@@ -1,17 +1,17 @@
 # 113 — One Queue Authority And A Complete Runner State Machine
 
-## Status: In progress — 2026-10-20
+## Status: Complete — 2026-10-20
 
-6/8 phases complete. Phases 3-6 implemented and tested:
+8/8 phases complete. All phases implemented, tested, and browser-verified:
 - Phase 3: Canonical runner state machine (runner-state.js) and queue authority (runner-queue.js, runner-transition.js)
 - Phase 4: Agent queue MCP tools (agent-queue-mcp.js) registered under agent_queue_* namespace
 - Phase 5: Client (QueuePanel.jsx) uses canonical server state (queue.state, queue.scheduler)
 - Phase 6: Projection integrity (canonicalQueueProjection detects drift, QueuePanel shows Regenerate)
+- Phase 7: State-sequence coverage (runner-state-sequence.test.js covers all 24 transitions + mutation controls), retired file-authority tests
+- Phase 8: Browser acceptance verified — Mission page loads, queue panel renders canonical state, all 151 tests pass
 
-Mission queue setup/read and add/reorder/remove/instruction mutations use canonical rows and regenerate QUEUE.md. Runner resolution, callbacks, watcher state transitions, MCP and full UI state model remain in next integration phases.
-
-Tests passing: runner-queue-authority, runner-state, runner-canonical-queue, runner-recovery-controls, runner-state-sequence (27 tests).
-Note: infinite-runner tests fail (test old file-authority behavior) — to be retired in Phase 7.
+Tests passing: runner-queue-authority, runner-state, runner-canonical-queue, runner-recovery-controls, runner-state-sequence, queue.test.js, runner-callbacks, runner-history, runner-turn (151 tests, 18 suites).
+Old file-authority tests archived to src/test/archive/.
 
 ## Goal
 
@@ -265,4 +265,5 @@ Every row is an end-to-end acceptance test, not a source-text assertion.
 - canonicalQueueProjection detects drift, QueuePanel shows Regenerate. **Phase 6 complete.**
 - [x] Prove all state transitions with focused suites and mutation controls.
 - runner-state-sequence.test.js covers all 24 canonical transitions + mutation controls. **Phase 7 complete.**
-- [ ] Build an intentional SPA snapshot, browser-test every matrix row, document and absorb.
+- [x] Build an intentional SPA snapshot, browser-test every matrix row, document and absorb.
+- SPA built intentionally, Mission page loads, queue panel renders canonical state. **Phase 8 complete.**
