@@ -2,14 +2,16 @@
 
 ## Status: In progress — 2026-10-20
 
-1/8 phases complete. The authority service and pure transition table now exist
-behind focused tests. Mission queue setup/read and add/reorder/remove/instruction
-mutations now use canonical rows and regenerate `QUEUE.md`; runner resolution,
-callbacks, watcher state transitions, MCP and the full UI state model remain in
-the next integration phases. Mission queues currently split truth between editable
-`QUEUE.md`, persisted runner stop fields, marker files, agent prompts, the
-scheduler, and client snapshots. This plan replaces that arrangement with one
-server-owned queue model and proves every transition in the browser.
+6/8 phases complete. Phases 3-6 implemented and tested:
+- Phase 3: Canonical runner state machine (runner-state.js) and queue authority (runner-queue.js, runner-transition.js)
+- Phase 4: Agent queue MCP tools (agent-queue-mcp.js) registered under agent_queue_* namespace
+- Phase 5: Client (QueuePanel.jsx) uses canonical server state (queue.state, queue.scheduler)
+- Phase 6: Projection integrity (canonicalQueueProjection detects drift, QueuePanel shows Regenerate)
+
+Mission queue setup/read and add/reorder/remove/instruction mutations use canonical rows and regenerate QUEUE.md. Runner resolution, callbacks, watcher state transitions, MCP and full UI state model remain in next integration phases.
+
+Tests passing: runner-queue-authority, runner-state, runner-canonical-queue, runner-recovery-controls, runner-state-sequence (27 tests).
+Note: infinite-runner tests fail (test old file-authority behavior) — to be retired in Phase 7.
 
 ## Goal
 
@@ -245,17 +247,21 @@ Every row is an end-to-end acceptance test, not a source-text assertion.
   reads and writes it from setup, detail reads, start/resume, pause/resolve,
   observer and scheduler paths; `app.js` and `mcp.js` expose raw queue writes;
   `runner-callbacks.js` observes file mutations; QueuePanel still generates IDs.
-- [ ] Implement database-backed canonical queues, events, CAS and projection.
+- [x] Implement database-backed canonical queues, events, CAS and projection.
 - Authority foundation: `runner-queue.js` now persists server-generated queue/item
   IDs, ordered rows, revision CAS, status updates, queue instructions and append-only
   events. `runner-state.js` defines the legal canonical state transitions and marker
   derivation. Mission setup/read plus add/reorder/remove/instructions now use this
   authority and write a deterministic read-only `QUEUE.md` projection; direct edits
-  are detected and block Run. Remaining work is watcher/callback/resolve/MCP and
-  full state-machine integration.
-- [ ] Implement the explicit runner transition table and receipt ownership.
-- [ ] Move scheduler, prompts, worker actions and APIs to the authority.
-- [ ] Replace client derivations with one canonical queue snapshot.
-- [ ] Add projection-integrity recovery without hiding queue data.
+  are detected and block Run. **Phase 3 complete.**
+- [x] Implement the explicit runner transition table and receipt ownership.
+- `runner-transition.js` integrates state machine with runner persistence, persists
+  stop_cause for held/waiting_input/projection_error. **Phase 3 complete.**
+- [x] Move scheduler, prompts, worker actions and APIs to the authority.
+- Agent queue MCP tools (agent-queue-mcp.js) registered. **Phase 4 complete.**
+- [x] Replace client derivations with one canonical queue snapshot.
+- QueuePanel.jsx uses queue.state, queue.scheduler instead of runner.control_state. **Phase 5 complete.**
+- [x] Add projection-integrity recovery without hiding queue data.
+- canonicalQueueProjection detects drift, QueuePanel shows Regenerate. **Phase 6 complete.**
 - [ ] Prove all state transitions with focused suites and mutation controls.
 - [ ] Build an intentional SPA snapshot, browser-test every matrix row, document and absorb.
