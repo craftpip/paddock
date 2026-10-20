@@ -2782,6 +2782,10 @@ async function updateRunnerQueue(id, _items, _revision, { actor = null } = {}) {
   throw new MissionError('queue_operation_required', 'Use add, reorder, remove, or item update operations; whole-queue writes are no longer supported.');
 }
 
+async function updateRunnerQueueItem(id, itemId, patch, revision, { actor = null } = {}) {
+  return mutateCanonicalQueue(id, revision, actor, () => runnerQueue.updateItem(id, itemId, patch, revision, { actor }));
+}
+
 async function mutateCanonicalQueue(id, revision, actor, mutate) {
   const runner = getRunner(id);
   if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
@@ -4079,6 +4083,7 @@ module.exports = {
   readRunnerQueue,
   setupRunnerQueue,
   updateRunnerQueue,
+  updateRunnerQueueItem,
   addRunnerQueueItems,
   reorderRunnerQueue,
   removeRunnerQueueItem,

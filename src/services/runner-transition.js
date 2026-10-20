@@ -34,7 +34,9 @@ function getRunnerCanonicalState(runner) {
       if (runner.stop_cause === 'invalid_queue') return 'projection_error';
       if (runner.stop_cause === 'permission_dialog') return 'waiting_input';
       if (runner.stop_cause === 'prompts_misconfigured') return 'projection_error';
+      if (runner.stop_cause === 'projection_error') return 'projection_error';
       if (runner.stop_cause === 'need_input') return 'waiting_input';
+      if (runner.stop_cause === 'held') return 'held';
       if (runner.stop_cause === 'recovery_exhausted') return 'held';
       if (runner.stop_cause === 'scheduler_need_input') return 'waiting_input';
       return 'waiting_input';
@@ -56,13 +58,13 @@ function canonicalToControlState(canonical, runner) {
     case 'running':
       return { control_state: 'enabled', enabled: 1, operation_status: 'confirmed' };
     case 'waiting_input':
-      return { control_state: 'need_input', enabled: 0 };
+      return { control_state: 'need_input', enabled: 0, stop_cause: 'need_input' };
     case 'held':
-      return { control_state: 'need_input', enabled: 0 };
+      return { control_state: 'need_input', enabled: 0, stop_cause: 'held' };
     case 'complete':
       return { control_state: 'finished', enabled: 0 };
     case 'projection_error':
-      return { control_state: 'need_input', enabled: 0 };
+      return { control_state: 'need_input', enabled: 0, stop_cause: 'projection_error' };
     default:
       return { control_state: 'paused', enabled: 0 };
   }
@@ -83,6 +85,9 @@ function persistTransition(runnerId, fromState, toState, event, actor, details =
   ];
   if (control.operation_status !== undefined) {
     updates.push(`operation_status = '${control.operation_status}'`);
+  }
+  if (control.stop_cause !== undefined) {
+    updates.push(`stop_cause = '${control.stop_cause}'`);
   }
 
   const params = [id, runnerId, fromState, toState, event, actor || null, JSON.stringify(details), stamp];
