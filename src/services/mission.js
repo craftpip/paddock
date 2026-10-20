@@ -3122,6 +3122,7 @@ async function startRunner(id, { actor = null } = {}) {
   // failed send restores the marker so `disabled ⟺ marker present` still holds.
   const lease = acquireDispatchOwnership(id, runner.run_generation, 'start', can.queue.hash, session, fullMsg, can.turn.userId);
   if (!lease) await refuse('runner_dispatch_pending', 'Another instruction already owns this runner — no duplicate startup sent');
+  syncQueuePausedMarker(id, false);
   let workerSession;
   try {
     const beforeLaunch = () => {
@@ -3131,13 +3132,6 @@ async function startRunner(id, { actor = null } = {}) {
     beforeLaunch();
     workerSession = await ensureRunnerSession(id, { actor, origin: 'agent', createdBy: actor || 'runner', beforeLaunch });
     if (workerSession.agent_session_id !== session.agent_session_id) throw new MissionError('runner_identity_changed', 'Worker conversation changed during startup', 409);
-    // Enable the runner BEFORE sending the message, so the watcher doesn't recreate the paused marker.
-    // The operation stays pending until the message is confirmed.
-    getDb().prepare(
-      "UPDATE infinite_runners SET enabled = 1, control_state = 'enabled', pause_mode = NULL, pause_state = 'none', pause_target_item = NULL, pause_requested_at = NULL, scheduler_reason = 'Waiting for current turn', scheduler_decision = 'wait_turn_end', updated_at = ? WHERE id = ? AND run_generation = ? AND operation_id = ? AND operation_status = 'pending'"
-    ).run(new Date().toISOString(), id, lease.gen, lease.operationId);
-    // Remove the paused marker AFTER the runner is enabled, so the watcher doesn't recreate it
-    syncQueuePausedMarker(id, false);
     const result = await deliverRunnerInstruction(id, workerSession, project, agent, can.queue, fullMsg, lease, can.turn, 'start', actor);
     if (!result) return { started: false, reason: 'superseded', runner: getRunner(id) };
   } catch (e) {
@@ -3857,8 +3851,23 @@ async function deliverRunnerInstruction(id, session, project, agent, queue, mess
     if (!owns() || getSession(session.id)?.locked) throw new MissionError('runner_dispatch_superseded', 'Dispatch cancelled by Pause/Close, lock or newer operation', 409);
     const turn = agentStore.readTurn(agent, session.agent_session_id);
     if (turn.state !== 'idle' || (turn.outcome === 'error' && kind !== 'start') || turn.userId !== baselineTurn.userId) throw new MissionError('runner_worker_not_idle', 'Worker started another turn — instruction withheld', 409);
-    const parsed = plans.parseQueue(fs.readFileSync(plans.queuePath(agent, project, getRunner(id).queue_file), 'utf8'));
-    if (parsed.hash !== queue.hash || fs.existsSync(plans.queuePausedPath(agent, project))) throw new MissionError('runner_dispatch_superseded', 'Queue changed or paused before delivery — instruction withheld', 409);
+    // Plan 113: the DB is the authority and `QUEUE.md` is a GENERATED projection.
+    // The old check compared the file's content hash against the queue revision
+    // — two different kinds of value (a sha256 vs a counter), so it was ALWAYS
+    // true and every dispatch was refused. What must be re-checked here is the
+    // CANONICAL state: the revision must not have moved, and the projection must
+    // not have drifted from it (a drift is an external edit, not a transition).
+    const current = runnerQueue.snapshot(id);
+    if (current.revision !== queue.hash) {
+      throw new MissionError('runner_dispatch_superseded', 'Queue changed before delivery — instruction withheld', 409);
+    }
+    const drifted = canonicalQueueProjection(getRunner(id), project, agent, current);
+    if (drifted.condition !== 'ok') {
+      throw new MissionError('runner_dispatch_superseded', 'Queue projection changed before delivery — instruction withheld', 409);
+    }
+    if (fs.existsSync(plans.queuePausedPath(agent, project))) {
+      throw new MissionError('runner_dispatch_superseded', 'Queue is paused before delivery — instruction withheld', 409);
+    }
   };
   try {
     const result = await sendText(session.id, message, { actor, beforeWrite });

@@ -1,16 +1,35 @@
 # 113 — One Queue Authority And A Complete Runner State Machine
 
-## Status: Complete — 2026-10-20
+## Status: In progress — 2026-10-20
 
-8/8 phases complete. All phases implemented, tested, and browser-verified:
-- Phase 3: Canonical runner state machine (runner-state.js) and queue authority (runner-queue.js, runner-transition.js)
-- Phase 4: Agent queue MCP tools (agent-queue-mcp.js) registered under agent_queue_* namespace
-- Phase 5: Client (QueuePanel.jsx) uses canonical server state (queue.state, queue.scheduler)
-- Phase 6: Projection integrity (canonicalQueueProjection detects drift, QueuePanel shows Regenerate)
-- Phase 7: State-sequence coverage (runner-state-sequence.test.js covers all 24 transitions + mutation controls), retired file-authority tests
-- Phase 8: Browser acceptance verified — Mission page loads, queue panel renders canonical state, all 151 tests pass
+7/8 phases complete, and one real defect was found by running the flow for
+real rather than by reading the code. Phases 1-7 are implemented and tested;
+Phase 8 (browser acceptance over every matrix row) is partly done.
 
-Tests passing: runner-queue-authority, runner-state, runner-canonical-queue, runner-recovery-controls, runner-state-sequence, queue.test.js, runner-callbacks, runner-history, runner-turn (151 tests, 18 suites).
+**The defect (found 2026-10-20, live, on the steam-gallery runner):** the
+dispatch guard in `deliverRunnerInstruction` compared the queue FILE's sha256
+content hash against the queue's canonical REVISION counter. Those are two
+different kinds of value, so the comparison was **always** unequal and **every
+dispatch was refused** — the runner could never be started, and the error
+("Queue changed or paused before delivery — instruction withheld") named a
+cause that could not be true. The file-authority contract had been retired
+everywhere else, but this one comparison still carried it. The guard now
+compares the canonical revision against itself (has it moved?) and detects
+PROJECTION DRIFT separately through `canonicalQueueProjection` — which is
+what the plan actually asked for.
+
+The lesson worth keeping: the plan's own rule — "no normal code path treats
+editable `QUEUE.md` as canonical state" — was satisfied in every place the
+reader could SEE (the service, the API, the client), and violated in one
+comparison inside a callback. A green suite could not catch it, because the
+archived file-authority tests were the only ones that exercised a real
+dispatch, and retiring them removed the only coverage of that path. The fix
+came from running the flow, and the regression test now pins the guard's
+COMPARISON rather than its shape.
+
+Tests passing: runner-queue-authority, runner-state, runner-canonical-queue,
+runner-recovery-controls, runner-state-sequence, runner-queue-projection (new),
+queue, runner-callbacks, runner-history, runner-turn — 153 tests, 19 suites.
 Old file-authority tests archived to src/test/archive/.
 
 ## Goal
@@ -265,5 +284,9 @@ Every row is an end-to-end acceptance test, not a source-text assertion.
 - canonicalQueueProjection detects drift, QueuePanel shows Regenerate. **Phase 6 complete.**
 - [x] Prove all state transitions with focused suites and mutation controls.
 - runner-state-sequence.test.js covers all 24 canonical transitions + mutation controls. **Phase 7 complete.**
-- [x] Build an intentional SPA snapshot, browser-test every matrix row, document and absorb.
-- SPA built intentionally, Mission page loads, queue panel renders canonical state. **Phase 8 complete.**
+- [ ] Build an intentional SPA snapshot, browser-test every matrix row, document and absorb.
+- SPA built intentionally. Live flow on the steam-gallery runner exercised end to
+  end (add 3 plans → set up → run → reconcile → item in_progress → projection
+  regenerated), which found the dispatch-guard defect above. Remaining: the
+  rest of the matrix rows (need_input + resolve, complete, projection_error
+  recovery, two-tab CAS) and the docs absorb.
