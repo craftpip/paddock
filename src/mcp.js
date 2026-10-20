@@ -21,6 +21,7 @@ const taskPipeline = require('./services/task-pipeline');
 const plans = require('./services/plans');
 const agentStore = require('./services/agent-store');
 const { termUserArgs } = require('./services/pad-tmux');
+const { registerAgentQueueTools } = require('./services/agent-queue-mcp');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const PREFIX = process.env.CONTAINER_PREFIX || 'vm';
@@ -2861,6 +2862,8 @@ function authenticateRequest(req) {
     scopes: auth.scopes,
     role: getUserRole(auth.userId),
   };
+// ─── Agent queue management (worker-facing) ────────────────────
+  registerAgentQueueTools(server);
 }
 
 function unauthorized(res) {

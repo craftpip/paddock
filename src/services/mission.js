@@ -2351,6 +2351,16 @@ function getActiveRunnerForProject(projectId) {
   `).get(projectId);
 }
 
+/** Get the enabled runner for an agent (by agent name). */
+function getActiveRunnerForAgent(agentName) {
+  return getDb().prepare(`
+    SELECT r.* FROM infinite_runners r
+    JOIN mission_projects p ON p.id = r.project_id
+    WHERE p.agent_name = ? AND r.enabled = 1
+    ORDER BY r.run_generation DESC LIMIT 1
+  `).get(agentName);
+}
+
 /** List runners for a project. */
 function listRunnersForProject(projectId) {
   return getDb().prepare('SELECT * FROM infinite_runners WHERE project_id = ? ORDER BY created_at DESC').all(projectId)
@@ -4045,6 +4055,7 @@ module.exports = {
   createRunner,
   getRunner,
   getActiveRunnerForProject,
+  getActiveRunnerForAgent,
   listRunnersForProject,
   listAllRunners,
   updateRunner,
