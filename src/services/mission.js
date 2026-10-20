@@ -3122,7 +3122,6 @@ async function startRunner(id, { actor = null } = {}) {
   // failed send restores the marker so `disabled ⟺ marker present` still holds.
   const lease = acquireDispatchOwnership(id, runner.run_generation, 'start', can.queue.hash, session, fullMsg, can.turn.userId);
   if (!lease) await refuse('runner_dispatch_pending', 'Another instruction already owns this runner — no duplicate startup sent');
-  syncQueuePausedMarker(id, false);
   let workerSession;
   try {
     const beforeLaunch = () => {
@@ -3132,6 +3131,13 @@ async function startRunner(id, { actor = null } = {}) {
     beforeLaunch();
     workerSession = await ensureRunnerSession(id, { actor, origin: 'agent', createdBy: actor || 'runner', beforeLaunch });
     if (workerSession.agent_session_id !== session.agent_session_id) throw new MissionError('runner_identity_changed', 'Worker conversation changed during startup', 409);
+    // Enable the runner BEFORE sending the message, so the watcher doesn't recreate the paused marker.
+    // The operation stays pending until the message is confirmed.
+    getDb().prepare(
+      "UPDATE infinite_runners SET enabled = 1, control_state = 'enabled', pause_mode = NULL, pause_state = 'none', pause_target_item = NULL, pause_requested_at = NULL, scheduler_reason = 'Waiting for current turn', scheduler_decision = 'wait_turn_end', updated_at = ? WHERE id = ? AND run_generation = ? AND operation_id = ? AND operation_status = 'pending'"
+    ).run(new Date().toISOString(), id, lease.gen, lease.operationId);
+    // Remove the paused marker AFTER the runner is enabled, so the watcher doesn't recreate it
+    syncQueuePausedMarker(id, false);
     const result = await deliverRunnerInstruction(id, workerSession, project, agent, can.queue, fullMsg, lease, can.turn, 'start', actor);
     if (!result) return { started: false, reason: 'superseded', runner: getRunner(id) };
   } catch (e) {
