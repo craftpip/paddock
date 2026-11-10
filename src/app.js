@@ -54,7 +54,7 @@ const INSTANCES_DIR = path.join(WORKSPACE, 'instances');
 const SCRIPTS_DIR = path.join(WORKSPACE, 'scripts');
 const ENV_FILE = path.join(WORKSPACE, '.env');
 const AUTO_LOGIN = process.env.AUTO_LOGIN === 'true';
-const PREFIX = process.env.CONTAINER_PREFIX || 'vm';
+const PREFIX = process.env.CONTAINER_PREFIX || 'pad';
 const VM_NAME_RE = new RegExp('^' + PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-[a-zA-Z0-9][a-zA-Z0-9_-]*$');
 const PREFIX_DASH = PREFIX + '-';
 
@@ -2058,7 +2058,7 @@ app.get('/api/agents/stats/fleet', async (req, res) => {
     const r = await runCmd('docker', ['stats', '--no-stream', '--format', '{{json .}}']);
     const lines = r.stdout.trim().split('\n').filter(Boolean);
     const all = lines.map(l => JSON.parse(l));
-    const prefix = process.env.CONTAINER_PREFIX || 'vm';
+    const prefix = process.env.CONTAINER_PREFIX || 'pad';
     const stats = all.filter(s => s.Name && s.Name.startsWith(prefix + '-'));
     res.json({ stats });
   } catch { res.json({ stats: [] }); }
@@ -3362,7 +3362,7 @@ app.get('/api/vault/:id/decrypt', requireAdmin, (req, res) => {
 app.post('/api/agents/create', async (req, res) => {
   const { name, agent, assign_to, workspace_host, workspace_dir, allowDocker, network, sshEnabled, port, sshContainerPort, password, extraVolumes, extraPorts, userMode, buildCommands, postCreate, postStart, postAttach, generateDevContainer } = req.body;
   if (!name) return res.status(400).json({ error: 'Name is required' });
-  if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
+  if (!safeVmName(name)) return res.status(400).json({ error: `Invalid pad name — use ${PREFIX}-<name> (letters, digits, _ or -), e.g. ${PREFIX}-dev`, code: 'invalid_pad_name' });
   if (registry.getAgent(name)) return res.status(409).json({ error: 'Agent already exists' });
 
   // Shared pre-flight (plan 30): the same vm.validateAgentCreate that backs the

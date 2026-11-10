@@ -6,7 +6,7 @@ const { workspaceMountInfo, containerViewOf, readWebService, readWebAuth, isMana
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const INSTANCES_DIR = path.join(WORKSPACE, 'instances');
-const PREFIX = process.env.CONTAINER_PREFIX || 'vm';
+const PREFIX = process.env.CONTAINER_PREFIX || 'pad';
 const VM_NAME_RE = new RegExp('^' + PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-[a-zA-Z0-9][a-zA-Z0-9_-]*$');
 
 let _dockerCache = { data: null, ts: 0 };

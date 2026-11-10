@@ -914,7 +914,10 @@ describe('project-rooted plans folder (plan 82)', () => {
     );
   });
 
-  it('reports a folder the webui sees read-only as plan_workspace_read_only', () => {
+  // Host-dependent: needs /www2 mounted read-only into the webui. Skip, with the
+  // reason, rather than fail on a host that simply has no such mount.
+  const roWww2 = require('../services/vm-manager').webuiMountViewOf('/www2');
+  it('reports a folder the webui sees read-only as plan_workspace_read_only', { skip: !(roWww2 && roWww2.readonly) && 'this host has no read-only /www2 mount' }, () => {
     // /www2 itself is mounted `:ro` into the webui and is NOT under the
     // project-root mapping, so a project pointed at it must fail LOUDLY with the
     // read-only code — not silently write a phantom path, and not a generic error.

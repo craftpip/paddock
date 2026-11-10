@@ -1493,6 +1493,19 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
 
 ## Environment Facts
 
+- **Current dev host is `meridian` (10.69.1.131), not lap.** Webui at
+  http://10.69.1.131:6789. Here we are uid 1000 (docker group, no root), the
+  host docker CLI **has** the compose plugin, and `/www1`/`/www2` do not exist —
+  the gitignored `docker-compose.override.yml` replaces the webui volume list
+  (`!override`) to drop them. Two setup traps: `src/node_modules` installed on
+  the host (Node 24, glibc 2.38) crashes the container's Node 20 with
+  `GLIBC_2.38 not found` from better-sqlite3 — rebuild it **inside** the image
+  (`docker compose run --rm --no-deps webui sh -c 'cd /app && npm rebuild
+  better-sqlite3 --build-from-source'`); and the SPA is built on the host
+  (`cd src/client && npm ci && npm run build`). Other containers on this host
+  (`niyu-*`) are not ours. Headless checks: `google-chrome --headless=new` over
+  CDP (no browser MCP here).
+
 - This host: we are **root** (no sudo, no python3). Use the `edit` tool or
   `node -e` for root-owned files — the edit tool works as root.
 - Webui reachability: http://10.69.1.164:6789 (localhost:6789 is refused from

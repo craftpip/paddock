@@ -5,7 +5,7 @@ const fs = require('fs');
 
 describe('Agent Registry - VM Name Validation', () => {
   const registry = require('../services/agent-registry');
-  const P = process.env.CONTAINER_PREFIX || 'vm';
+  const P = process.env.CONTAINER_PREFIX || 'pad';
 
   it('accepts valid VM names', () => {
     assert.ok(registry.VM_NAME_RE.test(`${P}-test`));

@@ -9,7 +9,7 @@ const vm = require('../services/vm-manager');
 const { getDb } = require('../services/db');
 const { csrfCheck } = require('../middleware/auth');
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
-const PREFIX = process.env.CONTAINER_PREFIX || 'vm';
+const PREFIX = process.env.CONTAINER_PREFIX || 'pad';
 
 const router = express.Router();
 

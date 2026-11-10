@@ -24,7 +24,7 @@ const { guard, hostSourceIssue } = require('./workspace-guards');
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const HOST_WORKSPACE = process.env.HOST_WORKSPACE_ROOT || WORKSPACE;
 const INSTANCES_DIR = path.join(WORKSPACE, 'instances');
-const PREFIX = process.env.CONTAINER_PREFIX || 'vm';
+const PREFIX = process.env.CONTAINER_PREFIX || 'pad';
 const PREFIX_RE = new RegExp('^' + PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-');
 const VM_NAME_RE = new RegExp('^' + PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-[a-zA-Z0-9][a-zA-Z0-9_-]*$');
 // The control-plane container itself (docker-compose.yml `container_name`) —
@@ -337,7 +337,7 @@ function webuiMountViewOf(padContainerPath) {
       if (excluded.has(fstype)) continue;
       if (p === mountpoint || p.startsWith(mountpoint + '/')) {
         if (!best || mountpoint.length > best.mountpoint.length) {
-          best = { mountpoint, readonly: options.includes('ro') };
+          best = { mountpoint, readonly: options.split(',').includes('ro') };
         }
       }
     }
@@ -4891,6 +4891,15 @@ async function ensureInstanceBuilds({ onLog = () => {} } = {}) {
       continue;
     }
     const instDir = path.join(INSTANCES_DIR, name);
+    // A dir without `meta.env` is not a pad — discovery ignores it too. Seeding
+    // it would invent an openclaw pad (`AGENT` absent → 'openclaw'), write a
+    // compose + meta.env, and reserve a subnet for a container that never
+    // existed. Seen on a fresh clone whose only `instances/` content was a
+    // stray agent data dir.
+    if (!fs.existsSync(path.join(instDir, 'meta.env'))) {
+      results.skipped.push(`${name} (no meta.env)`);
+      continue;
+    }
     const meta = readMeta(instDir);
     const agent = meta.AGENT || 'openclaw';
     if (!fs.existsSync(buildTemplateDir(agent))) {

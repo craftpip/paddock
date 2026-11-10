@@ -22,7 +22,7 @@ describe('Agent Registry - plan 65: the three activity clocks (1c)', () => {
 
   const { getDb } = require('../services/db');
   const registry = require('../services/agent-registry');
-  const NAME = `${process.env.CONTAINER_PREFIX || 'vm'}-clocked`;
+  const NAME = `${process.env.CONTAINER_PREFIX || 'pad'}-clocked`;
 
   function seedPad(overrides = {}) {
     const vmDir = path.join(dir, 'instances', NAME);
@@ -76,10 +76,10 @@ describe('Agent Registry - plan 65: the three activity clocks (1c)', () => {
     // The control on the test above: if `dbStamps` returned `undefined` values
     // rather than `null`, "omit the unknown" could be passing because nothing
     // was ever there. This pad has a dir but no row.
-    const vmDir = path.join(dir, 'instances', `${process.env.CONTAINER_PREFIX || 'vm'}-ghostpad`);
+    const vmDir = path.join(dir, 'instances', `${process.env.CONTAINER_PREFIX || 'pad'}-ghostpad`);
     fs.mkdirSync(vmDir, { recursive: true });
     fs.writeFileSync(path.join(vmDir, 'meta.env'), 'AGENT_TYPE=opencode\n');
-    const ghost = registry.getAgent(`${process.env.CONTAINER_PREFIX || 'vm'}-ghostpad`);
+    const ghost = registry.getAgent(`${process.env.CONTAINER_PREFIX || 'pad'}-ghostpad`);
     assert.ok(ghost, 'it resolves from the filesystem alone');
     for (const k of ['created_at', 'updated_at', 'last_activity_at']) {
       assert.ok(!(k in ghost), `${k} is absent — no row, no claim`);

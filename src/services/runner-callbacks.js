@@ -296,7 +296,7 @@ function callbackEnv(row) {
     LANG: 'C.UTF-8',
     // The local CLI must resolve the same deployment as the parent webui.
     // Deliberately allowlist non-secret routing/ownership settings only.
-    CONTAINER_PREFIX: process.env.CONTAINER_PREFIX || 'vm',
+    CONTAINER_PREFIX: process.env.CONTAINER_PREFIX || 'pad',
     WORKSPACE_ROOT: process.env.WORKSPACE_ROOT || '/workspace',
     HOST_WORKSPACE_ROOT: process.env.HOST_WORKSPACE_ROOT || process.env.WORKSPACE_ROOT || '/workspace',
     PUID: process.env.PUID || '1000',

@@ -33,3 +33,4 @@ src/vm-builds/*/scripts/
 docs/.vitepress/dist
 docs/.vitepress/cache
 src/public/website
+docker-compose.override.yml

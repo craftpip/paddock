@@ -24,7 +24,7 @@ const { termUserArgs } = require('./services/pad-tmux');
 const { registerAgentQueueTools } = require('./services/agent-queue-mcp');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
-const PREFIX = process.env.CONTAINER_PREFIX || 'vm';
+const PREFIX = process.env.CONTAINER_PREFIX || 'pad';
 const VM_NAME_RE = new RegExp('^' + PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-[a-zA-Z0-9][a-zA-Z0-9_-]*$');
 const MAX_READ_BYTES = 256 * 1024;
 const SERVER_NAME = 'paddock';

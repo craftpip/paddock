@@ -31,6 +31,18 @@ function RequireAuth({ children }) {
   return children
 }
 
+// A signed-in user has no business on /login or /setup: with AUTO_LOGIN on, the
+// login form there is a dead end that reads as "you were signed out".
+function GuestOnly({ children }) {
+  const authenticated = useAuth((s) => s.authenticated)
+  const loading = useAuth((s) => s.loading)
+  const location = useLocation()
+
+  if (loading) return null
+  if (authenticated) return <Navigate to={safeReturnTo(new URLSearchParams(location.search).get("returnTo"))} replace />
+  return children
+}
+
 function AuthGate({ children }) {
   const checkSession = useAuth((s) => s.checkSession)
   const loading = useAuth((s) => s.loading)
@@ -53,8 +65,8 @@ function AuthPage({ children, ...layoutProps }) {
 
 const router = createBrowserRouter(createRoutesFromElements(
   <Route element={<AuthGate><NavigationProvider><Outlet /></NavigationProvider></AuthGate>}>
-    <Route path="/login" element={<Login />} />
-    <Route path="/setup" element={<Setup />} />
+    <Route path="/login" element={<GuestOnly><Login /></GuestOnly>} />
+    <Route path="/setup" element={<GuestOnly><Setup /></GuestOnly>} />
     <Route path="/agents" element={<AuthPage><Dashboard /></AuthPage>} />
     <Route path="/agents/create" element={<AuthPage><CreateAgent /></AuthPage>} />
     <Route path="/agents/create/:name" element={<AuthPage><CreateAgent /></AuthPage>} />

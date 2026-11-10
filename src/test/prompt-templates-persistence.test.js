@@ -163,10 +163,19 @@ describe('plan 91 — create/update plumbing', () => {
   it('saving settings never dispatches: identity, enablement and operation columns are untouched', async () => {
     const p = makeProject();
     const r = await makeRunner(p.id, { promptTemplates: VALID_SET });
-    getDb().prepare('UPDATE infinite_runners SET enabled = 1, control_state = ?, operation_id = ?, operation_status = ? WHERE id = ?')
-      .run('enabled', 'op-1', 'confirmed', r.id);
+    // Plan 113 made `runner_runtime` + `runner_operations` the authority and
+    // `getRunner` PROJECTS enabled/control_state/operation_* from them, so a
+    // "running" fixture has to be seeded there — legacy columns alone read back
+    // as paused, which made this test fail on a correct build.
+    const now = new Date().toISOString();
+    getDb().prepare("INSERT OR REPLACE INTO runner_runtime (runner_id, state, generation, operation_id, updated_at) VALUES (?, 'running', 1, 'op-1', ?)").run(r.id, now);
+    getDb().prepare("INSERT OR REPLACE INTO runner_operations (id, runner_id, generation, status, created_at, updated_at) VALUES ('op-1', ?, 1, 'running', ?, ?)").run(r.id, now, now);
     const before = mission.getRunner(r.id);
+    assert.equal(Number(before.enabled), 1, 'fixture: runner is running before the save');
+    const runtimeBefore = getDb().prepare('SELECT * FROM runner_runtime WHERE runner_id = ?').get(r.id);
     const after = await mission.updateRunner(r.id, { name: 'saved-while-running', promptTemplates: { ...VALID_SET, pause: 'Hold {{runner_name}}.' } });
+    assert.deepEqual(getDb().prepare('SELECT * FROM runner_runtime WHERE runner_id = ?').get(r.id), runtimeBefore, 'canonical runtime untouched');
+    assert.equal(getDb().prepare("SELECT COUNT(*) AS n FROM runner_operations WHERE runner_id = ?").get(r.id).n, 1, 'no new operation minted');
     assert.equal(after.session_id, before.session_id, 'worker binding kept');
     assert.equal(Number(after.enabled), 1, 'still enabled');
     assert.equal(after.control_state, 'enabled', 'no state regression');
