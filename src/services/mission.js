@@ -14,6 +14,7 @@ const runnerCallbacks = require('./runner-callbacks');
 const runnerHistory = require('./runner-history');
 const runnerQueue = require('./runner-queue');
 const runnerTransition = require('./runner-transition');
+const runnerPublication = require('./runner-publication');
 
 /** Look up a PAD by name, throwing if not found (shared with plans.js). */
 function requireAgent(name) {
@@ -383,6 +384,15 @@ function listSessionsForAgent(agentName) {
  *  into it (mission.js's send path is the only writer, and it checks here). */
 function updateSession(id, { label, locked } = {}) {
   const session = getSession(id);
+  if (locked === true) {
+    const bound = getDb().prepare('SELECT id FROM infinite_runners WHERE session_id = ?').get(session.id);
+    const runtime = bound && runnerTransition.getRuntime(bound.id);
+    if (bound && runtime && !['paused', 'waiting_input', 'held', 'complete', 'projection_error'].includes(runtime.state)) {
+      runnerTransition.applyPause(bound.id, { actor: 'session-lock', details: { reason: 'Worker session solo-locked.' } });
+      runnerTransition.setReason(bound.id, 'session_locked', 'Session solo-locked; Run again after unlocking.');
+      syncQueuePausedMarker(bound.id, true);
+    }
+  }
   const sets = [];
   const params = [];
   if (label !== undefined) {
@@ -1041,7 +1051,18 @@ async function sendText(sessionId, text, { actor = null, beforeWrite = null, pas
       throw new MissionError('mission_tui_not_ready', `The pane did not take the text (session gone after write)${where}`, 409, { attempted: true, acceptance: 'unknown' });
     }
   }
-  if (after.text === baseline) {
+  const storeKnown = !!storeBaseline?.known;
+  let storeConfirmed = false;
+  // A quiet pane does not prove non-delivery. The exact conversation's own
+  // store is stronger evidence when it is readable: a TUI may accept and
+  // complete an input without repainting the attached pane (observed on a live
+  // Mission session), so check that receipt before reporting unknown.
+  if (after.text === baseline && storeKnown && session.agent_session_id) {
+    storeConfirmed = await confirmDeliveryViaStore(
+      project.agent_name, session.agent_session_id, storeBaseline.at, Date.now() + STORE_CONFIRM_BUDGET_MS
+    );
+  }
+  if (after.text === baseline && !storeConfirmed) {
     // Plan 88 §Phase 2: a WRITTEN message we could not OBSERVE is UNKNOWN, not a
     // refusal. Absence of a pane change is not proof of non-delivery — a slow or
     // quiet TUI may still have taken it — so this must never read "the TUI did
@@ -1066,10 +1087,11 @@ async function sendText(sessionId, text, { actor = null, beforeWrite = null, pas
   // The store poll gets its own budget: the repaint wait above consumed time
   // meant for repainting, and a leftover deadline would false-negative a
   // message whose store write lagged the repaint by a second.
-  const storeKnown = !!storeBaseline?.known;
-  let storeConfirmed = !storeKnown;
+  if (!storeKnown) storeConfirmed = true;
   if (storeKnown && session.agent_session_id) {
-    storeConfirmed = await confirmDeliveryViaStore(project.agent_name, session.agent_session_id, storeBaseline.at, Date.now() + STORE_CONFIRM_BUDGET_MS);
+    if (!storeConfirmed) {
+      storeConfirmed = await confirmDeliveryViaStore(project.agent_name, session.agent_session_id, storeBaseline.at, Date.now() + STORE_CONFIRM_BUDGET_MS);
+    }
   }
   const acceptance = storeConfirmed ? 'confirmed' : 'unknown';
   if (!storeConfirmed) {
@@ -1091,7 +1113,8 @@ async function sendText(sessionId, text, { actor = null, beforeWrite = null, pas
   audit(project, 'send', { actor, session, details: `${sent.lines} line(s), ${body.length} chars` });
   const fresh = getSession(session.id);
   // Plan 88 §Phase 3: include runner operation status for caller reconciliation.
-  const runner = getDb().prepare('SELECT operation_id, operation_generation, operation_status, operation_started_at, operation_confirmed_at FROM infinite_runners WHERE session_id = ?').get(session.id) || null;
+  const boundRunner = getDb().prepare('SELECT id FROM infinite_runners WHERE session_id = ?').get(session.id) || null;
+  const runner = boundRunner ? getRunner(boundRunner.id) : null;
   return {
     session: { ...fresh, title: await sessionTitle(project, session) },
     project: { id: project.id, name: project.name },
@@ -1227,17 +1250,11 @@ async function screen(sessionId, lines = 40) {
   // metadata (Run/Pause, queue state) from the session ITSELF, never from
   // whichever project col 1 happens to have selected. One cheap indexed read
   // on the detail path both the page and the MCP already take.
-  const boundRunner = getDb().prepare('SELECT * FROM infinite_runners WHERE session_id = ?').get(session.id) || null;
-  // Plan 88 §Phase 3: include operation status for caller reconciliation.
+  const bound = getDb().prepare('SELECT id FROM infinite_runners WHERE session_id = ?').get(session.id) || null;
+  const boundRunner = bound ? getRunner(bound.id) : null;
+  // Plan 114: expose one canonical execution object, not the old flat status fields.
   // Plan 91 §Phase 2: include effective prompt templates for the Configure dialog.
-  const runnerOut = boundRunner ? withPromptTemplates({
-    ...boundRunner,
-    operation_id: boundRunner.operation_id || null,
-    operation_generation: boundRunner.operation_generation || 0,
-    operation_status: boundRunner.operation_status || 'none',
-    operation_started_at: boundRunner.operation_started_at || null,
-    operation_confirmed_at: boundRunner.operation_confirmed_at || null,
-  }) : null;
+  const runnerOut = boundRunner ? publicRunner(withPromptTemplates(boundRunner)) : null;
   const out = {
     session: { ...row, title: await sessionTitle(project, session) },
     state,
@@ -1660,10 +1677,10 @@ async function withAgentBusyProjects(projects) {
 function disableRunnerForSession(sessionId) {
   const bound = getDb().prepare('SELECT id FROM infinite_runners WHERE session_id = ?').get(sessionId);
   if (!bound) return;
-  incrementRunGeneration(bound.id);
-  getDb().prepare("UPDATE infinite_runners SET enabled = 0, control_state = ?, operation_status = 'invalidated', last_reason = ?, updated_at = ? WHERE id = ?")
-    .run('paused', 'Session closed — supervision stopped. Press Run to bind a new session.', new Date().toISOString(), bound.id);
-  // Paused → create the pause marker.
+  const runtime = runnerTransition.getRuntime(bound.id);
+  if (!runtime) throw new MissionError('runner_setup_required', 'Runner must be explicitly initialized before closing its session.');
+  runnerTransition.applyClose(bound.id, { actor: 'mission', details: { reason: 'Session closed; supervision stopped.' } });
+  runnerTransition.setReason(bound.id, 'session_closed', 'Session closed — supervision stopped. Press Run to bind a new session.');
   syncQueuePausedMarker(bound.id, true);
 }
 
@@ -1887,6 +1904,7 @@ function canonicalQueueProjection(runner, project, agent, snapshot) {
   const expected = plans.queueProjection(snapshot.items, snapshot.customInstructions);
   let condition = 'ok';
   let error = null;
+  const publication = runnerPublication.read(runner.id);
   try {
     if (!fs.existsSync(pathOnHost) || fs.readFileSync(pathOnHost, 'utf8') !== expected) {
       condition = 'projection_error';
@@ -1895,6 +1913,25 @@ function canonicalQueueProjection(runner, project, agent, snapshot) {
   } catch (e) {
     condition = 'projection_error';
     error = `Could not verify generated QUEUE.md: ${e.message}`;
+  }
+  const expectedPublicationHash = runnerQueue.publicationHash(snapshot);
+  if (!publication) {
+    condition = 'setup_required';
+    error = 'This existing runner needs explicit canonical runtime and publication setup.';
+  } else if (publication.desired_revision !== snapshot.revision || publication.desired_hash !== expectedPublicationHash ||
+      publication.acknowledged_revision !== snapshot.revision || publication.acknowledged_hash !== expectedPublicationHash ||
+      publication.error) {
+    condition = 'projection_error';
+    error = publication?.error || 'The canonical queue revision has not been acknowledged by its worker projection publisher.';
+  }
+  if (publication && condition === 'ok') {
+    const runtime = runnerTransition.getRuntime(runner.id);
+    const markerRequired = !runtime || runnerTransition.markerRequired(runtime.state);
+    const markerPath = plans.queuePausedPath(agent, { ...project, plans_folder: project.plans_folder || 'plans' });
+    if (publication.desired_marker !== Number(markerRequired) || fs.existsSync(markerPath) !== markerRequired) {
+      condition = 'projection_error';
+      error = 'The queue execution marker does not match the canonical runner state.';
+    }
   }
   const items = snapshot.items.map((item) => ({ ...item, status: item.status.replace('_', ' ') }));
   const parsed = { version: plans.QUEUE_VERSION, items, customInstructions: snapshot.customInstructions };
@@ -1911,13 +1948,11 @@ function canonicalQueueProjection(runner, project, agent, snapshot) {
 }
 
 function writeCanonicalQueueProjection(runner, project, agent, snapshot) {
-  return plans.writeQueueProjection(
-    agent,
-    { ...project, plans_folder: project.plans_folder || 'plans' },
-    snapshot.items,
-    snapshot.customInstructions,
-    runner.queue_file || 'QUEUE.md'
-  );
+  const latest = runnerQueue.snapshot(runner.id);
+  if (latest.revision !== snapshot.revision || runnerQueue.publicationHash(latest) !== runnerQueue.publicationHash(snapshot)) {
+    throw new MissionError('queue_revision_conflict', 'The queue changed before its projection could be published. Reload and retry.');
+  }
+  return runnerPublication.publish(runner, project, agent);
 }
 
 /** Generate a runner id. */
@@ -1959,6 +1994,15 @@ async function createRunner({ projectId, name, sessionId, queueFile = 'QUEUE.md'
   const promptTemplatesJson = promptInput === PROMPT_TEMPLATES_PRESERVE ? null : promptInput;
   const id = newRunnerId();
   const db = getDb();
+  const projectAgent = requireAgent(project.agent_name);
+  try {
+    runnerPublication.assertPathAvailable(id, project, projectAgent, normalizedQueueFile);
+  } catch (error) {
+    if (error instanceof runnerPublication.RunnerPublicationError) {
+      throw new MissionError(error.code, error.message);
+    }
+    throw error;
+  }
   let boundSessionId = null;
   if (sessionId) {
     let session;
@@ -1987,10 +2031,10 @@ async function createRunner({ projectId, name, sessionId, queueFile = 'QUEUE.md'
   try {
     db.prepare(`
       INSERT INTO infinite_runners (id, name, project_id, session_id, queue_file,
-        enabled, control_state, idle_grace_ms, min_nudge_interval_ms, no_progress_budget,
+        idle_grace_ms, min_nudge_interval_ms, no_progress_budget,
         compaction_grace_ms, long_command_threshold_ms, recover_exited, recovery_budget,
-        prompt_templates_json, run_generation, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 0, 'paused', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+        prompt_templates_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id, name, projectId, boundSessionId, normalizedQueueFile,
       idleGraceMs, minNudgeIntervalMs, noProgressBudget,
@@ -2011,13 +2055,17 @@ async function createRunner({ projectId, name, sessionId, queueFile = 'QUEUE.md'
   // Create one canonical queue immediately. The generated worker file is a
   // projection; no runner starts with a file that the worker may author.
   try {
+    runnerTransition.createRuntime(id);
     const createdQueue = runnerQueue.ensure(id, { actor });
-    writeCanonicalQueueProjection(getRunner(id), project, requireAgent(project.agent_name), createdQueue);
+    writeCanonicalQueueProjection(getRunner(id), project, projectAgent, createdQueue);
   } catch (e) {
+    // Keep the durable queue/runtime row on publication failure; the UI must
+    // expose a recoverable Projection error rather than lose the new authority.
     queueMissionError(e);
   }
   // New runner starts paused (enabled=0) — create the pause marker.
   syncQueuePausedMarker(id, true);
+  runnerHistory.record(getRunner(id), 'runner_created', { actor: actor || 'user', key: 'created' });
   return withPromptTemplates(getRunner(id));
 }
 
@@ -2305,7 +2353,23 @@ function renderRunnerPrompt(runner, project, queue, kind, extra = {}) {
   const text = guidance
     ? `${rendered}\n\n=== QUEUE CUSTOM INSTRUCTIONS ===\n${guidance}\n=== END QUEUE CUSTOM INSTRUCTIONS ===`
     : rendered;
-  return { text: promptTemplates.normalizePromptForSend(text), version: eff.version };
+  // This protocol is not an editable template: even older saved prompts must
+  // never send a worker back to editing the generated projection.
+  // `withRunnerRuntime` also exposes the last completed operation for display.
+  // It is not the next dispatch assignment: only a runtime-owned active
+  // operation may supply operation_item_id. New dispatches use the canonical
+  // current/next queue item so a completed item's ID cannot leak into the next
+  // worker prompt.
+  const assignedItem = runner.activeOperationId
+    ? runner.operation_item_id
+    : (queue?.summary?.current?.id || queue?.summary?.next?.id);
+  const assignment = assignedItem
+    ? (runner.activeOperationId
+      ? ` Current owned operation ${runner.activeOperationId} is assigned to item ${assignedItem}.`
+      : ` This dispatch is assigned to item ${assignedItem}.`)
+    : '';
+  const protocol = `Queue authority: runner_id=${runner.id}.${assignment} QUEUE.md is read-only generated output; NEVER edit it. Call paddock_agent_queue_read with this exact runner_id. Its result contains queue.items and queue.revision. Call paddock_agent_queue_update_item with the item's id as item_id, queue.revision as the numeric revision, and an accepted status: new, in_progress, need_input, done. Re-read after every accepted mutation and on a revision conflict. Only update the item assigned to the current operation; do not take a second item. Queue changes must go through these tools, including marking work started, done, or blocked; never choose a runner by PAD name. If the tools are unavailable, stop and report that instead of editing the file.`;
+  return { text: promptTemplates.normalizePromptForSend(`${text}\n\n${protocol}`), version: eff.version };
 }
 
 /** Read-only preview for an existing runner: real container paths and live
@@ -2339,32 +2403,116 @@ async function previewProjectPrompts(projectId, drafts, overrides = {}) {
 
 /** Get a runner by id. */
 function getRunner(id) {
-  return getDb().prepare('SELECT * FROM infinite_runners WHERE id = ?').get(id);
+  const row = getDb().prepare('SELECT * FROM infinite_runners WHERE id = ?').get(id);
+  return withRunnerRuntime(row);
+}
+
+function withRunnerRuntime(row) {
+  if (!row) return row;
+  const runtime = runnerTransition.getRuntime(row.id);
+  if (!runtime) return {
+    ...row,
+    execution: { state: 'setup_required', generation: null, reasonCode: null, reason: null, allowedActions: [], markerRequired: true, operation: null },
+    canonicalState: 'setup_required', allowedActions: [], run_generation: 0,
+    enabled: 0, control_state: 'paused', operation_id: null, operation_generation: 0,
+    operation_status: 'none', operation_started_at: null, operation_confirmed_at: null,
+    operation_session_id: null, operation_prompt_hash: null,
+    operation_baseline_user_id: null, operation_receipt_user_id: null,
+  };
+  const operation = runtime.operation_id
+    ? getDb().prepare('SELECT * FROM runner_operations WHERE id = ? AND runner_id = ?').get(runtime.operation_id, row.id)
+    : getDb().prepare('SELECT * FROM runner_operations WHERE runner_id = ? ORDER BY generation DESC LIMIT 1').get(row.id);
+  const legacyControl = {
+    paused: 'paused', dispatching: 'enabled', awaiting_receipt: 'enabled', running: 'enabled',
+    waiting_input: 'need_input', held: 'need_input', complete: 'finished', projection_error: 'need_input',
+  }[runtime.state];
+  const operationStatus = operation ? ({
+    dispatching: 'pending', awaiting_receipt: 'unconfirmed', running: 'confirmed',
+    held: 'held', invalidated: 'invalidated', completed: 'ended',
+  }[operation.status] || 'none') : 'none';
+  return {
+    ...row,
+    execution: {
+      state: runtime.state,
+      generation: runtime.generation,
+      reasonCode: runtime.reason_code,
+      reason: runtime.reason,
+      allowedActions: runnerTransition.allowedActions(runtime.state),
+      markerRequired: runnerTransition.markerRequired(runtime.state),
+      operation: operation ? {
+        id: operation.id,
+        generation: operation.generation,
+        kind: operation.operation_kind,
+        status: operation.status,
+        conversationId: operation.conversation_id,
+        itemId: operation.item_id,
+        queueRevision: operation.queue_revision,
+        promptHash: operation.prompt_hash,
+        baselineInputId: operation.baseline_input_id,
+        receiptInputId: operation.receipt_input_id,
+        deadlineAt: operation.deadline_at,
+        createdAt: operation.created_at,
+        updatedAt: operation.updated_at,
+      } : null,
+    },
+    canonicalState: runtime.state,
+    runtimeGeneration: runtime.generation,
+    run_generation: runtime.generation,
+    runtimeReasonCode: runtime.reason_code,
+    runtimeReason: runtime.reason,
+    allowedActions: runnerTransition.allowedActions(runtime.state),
+    markerRequired: runnerTransition.markerRequired(runtime.state),
+    control_state: legacyControl,
+    enabled: ['dispatching', 'awaiting_receipt', 'running'].includes(runtime.state) ? 1 : 0,
+    operation_id: runtime.operation_id || operation?.id || null,
+    activeOperationId: runtime.operation_id,
+    operation_status: operationStatus,
+    operation_started_at: operation?.created_at || null,
+    operation_confirmed_at: operation?.status === 'running' ? operation.updated_at : null,
+    operation_deadline_at: operation?.deadline_at || null,
+    operation_kind: operation?.operation_kind || null,
+    operation_item_id: operation?.item_id || null,
+    operation_queue_revision: operation?.queue_revision ?? null,
+    operation_session_id: operation?.conversation_id || null,
+    operation_prompt_hash: operation?.prompt_hash || null,
+    operation_baseline_user_id: operation?.baseline_input_id || null,
+    operation_receipt_user_id: operation?.receipt_input_id || null,
+    last_reason: runtime.reason,
+    stop_cause: runtime.reason_code,
+  };
+}
+
+const TRANSITION_PAYLOAD_FIELDS = [
+  'enabled', 'control_state', 'run_generation', 'operation_id', 'operation_generation',
+  'operation_status', 'operation_started_at', 'operation_confirmed_at', 'operation_deadline_at',
+  'operation_kind', 'operation_item_id', 'operation_queue_revision', 'operation_session_id',
+  'operation_prompt_hash', 'operation_baseline_user_id', 'operation_receipt_user_id',
+  'canonicalState', 'runtimeGeneration', 'runtimeReasonCode', 'runtimeReason',
+  'allowedActions', 'markerRequired', 'activeOperationId', 'stop_cause', 'last_reason',
+];
+
+/** Public Mission runner metadata exposes one canonical execution object, never
+ * the transition-era flat columns that used to look like independent authorities. */
+function publicRunner(runner) {
+  if (!runner) return runner;
+  const out = { ...runner };
+  for (const field of TRANSITION_PAYLOAD_FIELDS) delete out[field];
+  return out;
 }
 
 /** Get the enabled runner for a project (at most one). */
 function getActiveRunnerForProject(projectId) {
   return getDb().prepare(`
-    SELECT * FROM infinite_runners
-    WHERE project_id = ? AND enabled = 1
-    ORDER BY run_generation DESC LIMIT 1
+    SELECT r.* FROM infinite_runners r JOIN runner_runtime rt ON rt.runner_id = r.id
+    WHERE r.project_id = ? AND rt.state IN ('dispatching','awaiting_receipt','running')
+    ORDER BY rt.updated_at DESC LIMIT 1
   `).get(projectId);
-}
-
-/** Get the enabled runner for an agent (by agent name). */
-function getActiveRunnerForAgent(agentName) {
-  return getDb().prepare(`
-    SELECT r.* FROM infinite_runners r
-    JOIN mission_projects p ON p.id = r.project_id
-    WHERE p.agent_name = ? AND r.enabled = 1
-    ORDER BY r.run_generation DESC LIMIT 1
-  `).get(agentName);
 }
 
 /** List runners for a project. */
 function listRunnersForProject(projectId) {
   return getDb().prepare('SELECT * FROM infinite_runners WHERE project_id = ? ORDER BY created_at DESC').all(projectId)
-    .map(withPromptTemplates);
+    .map((row) => withPromptTemplates(withRunnerRuntime(row)));
 }
 
 /** Every runner across every project the caller may see, each tagged with its
@@ -2377,7 +2525,7 @@ function listAllRunners({ allow = null } = {}) {
   const visible = (p) => p && (!allow || allow(p.agent_name));
   return getDb().prepare('SELECT * FROM infinite_runners ORDER BY created_at DESC').all()
     .filter((r) => visible(byId.get(r.project_id)))
-    .map((r) => withPromptTemplates({ ...r, project: projectTag(byId.get(r.project_id)) }));
+    .map((r) => withPromptTemplates({ ...withRunnerRuntime(r), project: projectTag(byId.get(r.project_id)) }));
 }
 
 /** Update runner settings (not state). `promptTemplates` follows the create
@@ -2397,13 +2545,17 @@ async function updateRunner(id, { name, idleGraceMs, minNudgeIntervalMs, noProgr
       throw e;
     }
     if (normalized !== (runner.queue_file || 'QUEUE.md')) {
-      const changed = getDb().prepare(
-        `UPDATE infinite_runners SET queue_file = ?, updated_at = ?
-         WHERE id = ? AND enabled = 0 AND operation_status NOT IN ('pending', 'unconfirmed', 'confirmed')`
-      ).run(normalized, new Date().toISOString(), id);
-      if (!changed.changes) {
+      const runtime = runnerTransition.getRuntime(id);
+      if (!runtime || runtime.state !== 'paused' || runtime.operation_id) {
         throw new MissionError('runner_queue_file_busy', 'Pause supervision and wait for the active instruction to finish before changing the queue file.');
       }
+      const projectAgent = requireAgent(project.agent_name);
+      try { runnerPublication.assertPathAvailable(id, project, projectAgent, normalized); }
+      catch (error) { if (error instanceof runnerPublication.RunnerPublicationError) throw new MissionError(error.code, error.message); throw error; }
+      getDb().prepare('UPDATE infinite_runners SET queue_file = ?, updated_at = ? WHERE id = ?')
+        .run(normalized, new Date().toISOString(), id);
+      const publication = runnerPublication.read(id);
+      if (publication) runnerPublication.invalidateAcknowledgement(id);
     }
   }
   const updates = [];
@@ -2434,6 +2586,7 @@ async function setRunnerControlState(id, controlState) {
   }
   const runner = getRunner(id);
   if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
+  if (controlState === 'enabled') throw new MissionError('runner_operation_required', 'Use startRunner to authorize a specific durable operation.');
 
   const canonical = runnerTransition.getRunnerCanonicalState(runner);
   let result = null;
@@ -2477,12 +2630,8 @@ async function setRunnerEnabled(id, on) {
   const runner = getRunner(id);
   if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
 
-  let result = null;
-  if (on) {
-    result = await runnerTransition.applyRun(id);
-  } else {
-    result = await runnerTransition.applyPause(id);
-  }
+  if (on) throw new MissionError('runner_operation_required', 'Use startRunner to authorize a specific durable operation.');
+  const result = await runnerTransition.applyPause(id);
   if (result?.markerRequired !== undefined) {
     syncQueuePausedMarker(id, result.markerRequired);
   }
@@ -2492,8 +2641,7 @@ async function setRunnerEnabled(id, on) {
 /** Record the actionable reason a runner stopped or is waiting (shown in the
  *  terminal header). A refusal to Run writes this, never the runner's content. */
 function setRunnerReason(id, reason) {
-  getDb().prepare('UPDATE infinite_runners SET last_reason = ?, updated_at = ? WHERE id = ?')
-    .run(reason || null, new Date().toISOString(), id);
+  runnerTransition.setReason(id, reason ? 'runner_notice' : null, reason || null);
 }
 
 /** Container-visible queue/index/paused paths for the worker (plan 85 §Phase 4 gap 7).
@@ -2521,7 +2669,7 @@ function syncQueuePausedMarker(runnerId, paused) {
     const project = getProject(runner.project_id);
     if (!project) return;
     const agent = requireAgent(project.agent_name);
-    plans.setQueuePausedMarker(agent, { ...project, plans_folder: project.plans_folder || 'plans' }, paused);
+    runnerPublication.publishMarker(runner, project, agent);
     // Clear any previous marker sync error on success
     getDb().prepare('UPDATE infinite_runners SET marker_sync_error = NULL WHERE id = ?').run(runnerId);
   } catch (e) {
@@ -2531,19 +2679,9 @@ function syncQueuePausedMarker(runnerId, paused) {
   }
 }
 
-/** Increment run generation (for Start idempotency and restart reconciliation). */
-function incrementRunGeneration(id) {
-  getDb().prepare('UPDATE infinite_runners SET run_generation = run_generation + 1, updated_at = ? WHERE id = ?')
-    .run(new Date().toISOString(), id);
-}
-
 /** Record stop provenance: cause, origin (automatic/explicit), and timestamp. */
 function recordStopProvenance(id, cause, origin, details = null) {
-  const now = new Date().toISOString();
-  const detailsJson = details ? JSON.stringify(details) : null;
-  getDb().prepare(
-    `UPDATE infinite_runners SET stop_cause = ?, stop_origin = ?, stop_at = ?, last_reason = ?, updated_at = ? WHERE id = ?`
-  ).run(cause, origin, now, detailsJson, now, id);
+  runnerTransition.setReason(id, cause, JSON.stringify({ origin, details }));
 }
 
 /** Get runner with project and session details for supervision. */
@@ -2632,28 +2770,13 @@ async function reconcileRunnerPause(runner, project, queue) {
   }
   const next = pauseConfirmation(runner, { targetStatus: target ? target.status : null, workerBusy, workerBusyKnown });
   if (next !== 'confirmed') return runner;
-  getDb().prepare(
-    "UPDATE infinite_runners SET pause_state = 'confirmed', last_reason = ?, updated_at = ? WHERE id = ? AND pause_state = 'requested' AND run_generation = ?"
-  ).run(
-    runner.pause_mode === 'current_task'
-      ? `Paused current task — ${target ? target.plan : 'the plan'} stopped at its checkpoint.`
-      : 'Paused — next task will not start.',
-    new Date().toISOString(), runner.id, runner.run_generation
-  );
-  return getRunner(runner.id);
-}
-
-/** A queue can be repaired outside Paddock while its runner still carries the
- * automatic invalid-queue stop from the earlier read. Clear only that stale
- * diagnosis on a successful parse; remain paused so repairing a file never runs
- * work without the user's next Run action. */
-function reconcileInvalidQueueRepair(runner, queue) {
-  if (!runner || queue.condition !== 'ok' || runner.stop_cause !== 'invalid_queue') return runner;
+  const reason = runner.pause_mode === 'current_task'
+    ? `Paused current task — ${target ? target.plan : 'the plan'} stopped at its checkpoint.`
+    : 'Paused — next task will not start.';
   const changed = getDb().prepare(
-    "UPDATE infinite_runners SET control_state = 'paused', last_reason = ?, stop_cause = NULL, stop_origin = NULL, stop_at = NULL, scheduler_decision = 'paused', scheduler_reason = ?, updated_at = ? WHERE id = ? AND enabled = 0 AND stop_cause = 'invalid_queue'"
-  ).run('Queue repaired — press Run queue to continue.', 'Queue repaired; waiting for explicit Run.', new Date().toISOString(), runner.id);
-  if (!changed.changes) return runner;
-  syncQueuePausedMarker(runner.id, true);
+    "UPDATE infinite_runners SET pause_state = 'confirmed', updated_at = ? WHERE id = ? AND pause_state = 'requested' AND EXISTS (SELECT 1 FROM runner_runtime rt WHERE rt.runner_id = infinite_runners.id AND rt.generation = ?)"
+  ).run(new Date().toISOString(), runner.id, runner.run_generation);
+  if (changed.changes) runnerTransition.setReason(runner.id, 'pause_confirmed', reason);
   return getRunner(runner.id);
 }
 
@@ -2684,10 +2807,21 @@ async function readRunnerQueueFor(runner) {
       };
     } else queueMissionError(e);
   }
+  if (q.condition === 'projection_error') {
+    const runtime = runnerTransition.getRuntime(runner.id);
+    if (runtime && runtime.state !== 'projection_error') {
+      const result = runnerTransition.applyProjectionMismatch(runner.id, {
+        actor: 'projection-integrity', details: { reason: q.error, revision: runtime.generation },
+      });
+      syncQueuePausedMarker(runner.id, result.markerRequired);
+    }
+  }
   // Plan 86 §Phase 4b: a pending pause is confirmed from observation here — the
   // panel polls this read, so "Pausing…" becomes a truthful "Paused" once the
   // worker is seen to have stopped, and never before.
-  const repaired = reconcileInvalidQueueRepair(runner, q);
+  // Invalid projection state is handled by the canonical runtime transition,
+  // never by clearing legacy stop fields during a read.
+  const repaired = runner;
   const current = await reconcileRunnerPause(repaired, project, q);
   const worker = current.session_id ? getSession(current.session_id) : null;
   const turn = agentStore.readTurn(agent, worker?.agent_session_id);
@@ -2696,15 +2830,21 @@ async function readRunnerQueueFor(runner) {
     ? (current.worker_state === 'idle' && current.worker_turn_id === turn.userId ? current.idle_since : turn.completedAt || new Date(now).toISOString())
     : null;
   const scheduler = computeSchedulerState({ ...current, idle_since: idleSince }, q, turn, now);
+  const execution = runnerQueueExecution(current, q, scheduler);
   // Plan 91 §Phase 2: the Configure dialog reads saved prompts from this same
   // detail read, so the subset carries the effective set (never the raw column).
   const eff = effectivePromptTemplates(current);
   return {
-    runner: { id: current.id, name: current.name, control_state: current.control_state, pause_mode: current.pause_mode, pause_state: current.pause_state, queue_file: current.queue_file, session_id: current.session_id, promptTemplates: eff.templates, promptTemplateVersion: eff.version, promptTemplatesCustom: eff.custom, promptTemplatesError: eff.error },
+    runner: {
+      id: current.id, name: current.name, queue_file: current.queue_file,
+      session_id: current.session_id, pause_mode: current.pause_mode, pause_state: current.pause_state,
+      promptTemplates: eff.templates, promptTemplateVersion: eff.version,
+      promptTemplatesCustom: eff.custom, promptTemplatesError: eff.error,
+    },
     project: projectTag(project),
     queue: {
-      state: q.condition === 'projection_error' ? 'projection_error' : q.aggregate.state,
-      reason: q.error || q.aggregate.reason,
+      state: execution.state === 'projection_error' ? 'projection_error' : q.aggregate.state,
+      reason: q.error || (execution.state === 'projection_error' ? execution.reason : q.aggregate.reason),
       condition: q.condition,
       revision: q.hash,
       path: q.path,
@@ -2714,9 +2854,11 @@ async function readRunnerQueueFor(runner) {
       repairDuplicateIds: q.repairDuplicateIds || [],
       customInstructions: q.parsed.customInstructions || '',
       summary: q.summary,
-      error: q.condition === 'ok' ? null : (q.error || q.aggregate.reason),
+      error: q.condition === 'ok' && execution.state !== 'projection_error' ? null : (q.error || execution.reason || q.aggregate.reason),
+      execution,
       scheduler: {
         ...scheduler,
+        ...(q.condition !== 'ok' || execution.state === 'projection_error' ? { schedulerDecision: 'blocked', reason: q.error || execution.reason || q.aggregate.reason, nextCheckMs: null } : {}),
         deadline: scheduler.nextCheckMs === null ? null : new Date(now + scheduler.nextCheckMs).toISOString(),
         observedAt: new Date(now).toISOString(),
       },
@@ -2725,14 +2867,93 @@ async function readRunnerQueueFor(runner) {
   };
 }
 
+/** The one display/action verdict for the queue panel and terminal controls.
+ * Item progress is not runner authorization; projection repair wins over stale
+ * operation and stop fields. The client renders this snapshot without guessing. */
+function runnerQueueExecution(runner, queue, scheduler) {
+  const projectionError = queue.condition === 'projection_error';
+  const state = projectionError ? 'projection_error'
+    : queue.condition === 'setup_required' ? 'setup_required'
+    : queue.condition === 'missing' ? 'setup_required'
+    : runnerTransition.getRunnerCanonicalState(runner);
+  const labels = { setup_required: 'Runner setup required', paused: 'Paused', dispatching: 'Dispatching', awaiting_receipt: 'Awaiting receipt', running: 'Running', waiting_input: 'Needs input', held: 'Operation held', complete: 'Complete', projection_error: 'Projection error' };
+  const active = ['dispatching', 'awaiting_receipt', 'running'].includes(state);
+  const hasWork = queue.parsed.items.some((item) => item.status !== 'done');
+  const blocked = queue.parsed.items.some((item) => item.status === 'need input');
+  const outstanding = !!runnerTransition.getRuntime(runner.id)?.operation_id;
+  const canRun = queue.condition === 'ok' && hasWork && !blocked && (!outstanding || scheduler.recoveryRequired === true)
+    && (['paused', 'held', 'complete'].includes(state) || scheduler.recoveryRequired === true);
+  return {
+    state, label: labels[state], active, setupRequired: state === 'setup_required',
+    operation: runner.activeOperationId ? {
+      id: runner.activeOperationId,
+      kind: runner.operation_kind,
+      status: runner.operation_status,
+      itemId: runner.operation_item_id,
+      queueRevision: runner.operation_queue_revision,
+      deadlineAt: runner.operation_deadline_at,
+    } : null,
+    // An interrupted/error turn still owns a persisted operation, but the
+    // worker is verified idle and needs an explicit Run to replace it. Expose
+    // that recovery action instead of presenting Pause as though work were
+    // still active; callers can still use the server's recoveryRequired flag
+    // to distinguish this Run from an ordinary start.
+    canRun, canPause: active && scheduler.recoveryRequired !== true,
+    canRegenerate: state === 'projection_error',
+    canReviewStatuses: ['paused', 'waiting_input', 'held', 'complete', 'projection_error'].includes(state),
+    canReconcile: !projectionError && ['dispatching', 'awaiting_receipt', 'held'].includes(state),
+    reason: queue.error || (blocked ? queue.summary.blocked?.reason : null) || scheduler.reason,
+    runReason: canRun ? 'Run the queue on this session' : state === 'setup_required' ? 'Set up the canonical queue first' : projectionError ? 'Regenerate the worker projection first'
+      : blocked ? 'Resolve the blocked item first' : !hasWork ? 'Add plans to the queue before running'
+      : outstanding ? 'An instruction is outstanding; reconcile or pause it before running again' : scheduler.reason,
+  };
+}
+
 /** Set a runner's queue up: create QUEUE.md from the template if it does not
  *  exist, then refuse if the file still will not validate. Concurrent creates
  *  are race-safe (`ensureQueue` writes with `wx` and re-reads a loser). */
-async function setupRunnerQueue(id, { actor = null } = {}) {
+async function setupRunnerQueue(id, { actor = null, confirmProjectionReset = false } = {}) {
   const runner = getRunner(id);
   if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
   const project = getProject(runner.project_id);
   const agent = requireAgent(project.agent_name);
+  const plansProject = { ...project, plans_folder: project.plans_folder || 'plans' };
+  let existingSnapshot = null;
+  try { existingSnapshot = runnerQueue.snapshot(id); }
+  catch (error) { if (error.code !== 'queue_not_found') queueMissionError(error); }
+  const currentPath = plans.queuePath(agent, plansProject, runner.queue_file);
+  const fileExists = fs.existsSync(currentPath);
+  let projectionDiffers = fileExists && !existingSnapshot;
+  if (fileExists && existingSnapshot) {
+    try {
+      projectionDiffers = fs.readFileSync(currentPath, 'utf8') !== plans.queueProjection(existingSnapshot.items, existingSnapshot.customInstructions);
+    } catch { projectionDiffers = true; }
+  }
+  if (projectionDiffers && !confirmProjectionReset) {
+    throw new MissionError('runner_projection_confirmation_required',
+      'The server will replace an existing QUEUE.md projection with the canonical database queue. Review the rows, then confirm Regenerate; no queue item status will be imported from the file.');
+  }
+  const existingRuntime = runnerTransition.getRuntime(id);
+  let needsRepair = projectionDiffers || existingRuntime?.state === 'projection_error';
+  try {
+    const condition = canonicalQueueProjection(runner, project, agent, runnerQueue.snapshot(id)).condition;
+    needsRepair ||= condition === 'projection_error';
+  } catch (e) {
+    if (e.code !== 'queue_not_found') throw e;
+    needsRepair ||= fileExists;
+  }
+  if (existingRuntime && ['dispatching', 'awaiting_receipt', 'running'].includes(existingRuntime.state) && !needsRepair) {
+    throw new MissionError('runner_queue_setup_running', 'Pause/stop the runner before explicitly setting up its queue projection.');
+  }
+  if (!runnerTransition.getRuntime(id)) {
+    // Explicit setup is the only initializer for old development runner rows.
+    runnerTransition.createRuntime(id);
+  }
+  let currentRuntime = runnerTransition.getRuntime(id);
+  if (needsRepair && currentRuntime.state !== 'projection_error') {
+    runnerTransition.applyProjectionMismatch(id, { actor, details: { reason: 'Explicit projection regeneration' } });
+    if (runnerPublication.read(id)) syncQueuePausedMarker(id, true);
+  }
   let queue;
   try {
     queue = runnerQueue.ensure(id, { actor });
@@ -2741,9 +2962,18 @@ async function setupRunnerQueue(id, { actor = null } = {}) {
     queueMissionError(e);
   }
   audit(project, 'runner_queue_setup', { actor: actor ? (actor.name || actor) : null });
+  if (needsRepair) {
+    // A repaired projection never resumes work. Consume stale instruction and
+    // stop fields together, so a late receipt cannot undo explicit repair.
+    currentRuntime = runnerTransition.getRuntime(id);
+    if (currentRuntime.state === 'projection_error') {
+      runnerTransition.applyProjectionRegenerated(id, { actor, details: { reason: 'Explicit projection regeneration' } });
+    }
+  }
   // Sync marker to current enabled state (enabled=0 → paused marker exists).
-  syncQueuePausedMarker(id, !runner.enabled);
-  return readRunnerQueueFor(runner);
+  const current = getRunner(id);
+  syncQueuePausedMarker(id, !current.enabled);
+  return readRunnerQueueFor(current);
 }
 
 /** The plans available in a runner's project folder (plan 86 §Phase 3) —
@@ -2782,8 +3012,29 @@ async function updateRunnerQueue(id, _items, _revision, { actor = null } = {}) {
   throw new MissionError('queue_operation_required', 'Use add, reorder, remove, or item update operations; whole-queue writes are no longer supported.');
 }
 
-async function updateRunnerQueueItem(id, itemId, patch, revision, { actor = null } = {}) {
-  return mutateCanonicalQueue(id, revision, actor, () => runnerQueue.updateItem(id, itemId, patch, revision, { actor }));
+async function updateRunnerQueueItem(id, itemId, patch, revision, { actor = null, source = 'review' } = {}) {
+  const detail = await mutateCanonicalQueue(id, revision, actor, () => runnerQueue.updateItem(id, itemId, patch, revision, { actor, source }));
+  if (source !== 'review') return detail;
+  let runtime = runnerTransition.getRuntime(id);
+  if (runtime?.state === 'projection_error') {
+    runnerTransition.applyProjectionRegenerated(id, { actor: actor || 'user', details: { reason: 'Reviewed item status correction' } });
+    runtime = runnerTransition.getRuntime(id);
+  }
+  const current = runnerQueue.snapshot(id);
+  const hasBlocker = current.items.some((item) => item.status === 'need_input');
+  const allDone = current.items.length > 0 && current.items.every((item) => item.status === 'done');
+  if (runtime?.state === 'waiting_input' && !hasBlocker) {
+    runnerTransition.applyResolve(id, { actor: actor || 'user', details: { reason: 'Human-reviewed status correction cleared the blocker.' } });
+  } else if (runtime?.state === 'paused' && hasBlocker) {
+    runnerTransition.applyQueueBlocked(id, { actor: actor || 'user', details: { reason: 'Human-reviewed queue status requires input.' } });
+  } else if (runtime?.state === 'complete' && !allDone) {
+    runnerTransition.applyEvent(id, 'work_added', { actor: actor || 'user', details: { reason: 'Human-reviewed status correction reopened queue work.' } });
+  } else if (runtime?.state === 'paused' && allDone) {
+    runnerTransition.applyReviewComplete(id, { actor: actor || 'user', details: { reason: 'Human reviewed all queue items complete.' } });
+  }
+  const latest = getRunner(id);
+  syncQueuePausedMarker(id, runnerTransition.markerRequired(runnerTransition.getRuntime(id).state));
+  return readRunnerQueueFor(latest);
 }
 
 async function mutateCanonicalQueue(id, revision, actor, mutate) {
@@ -2792,17 +3043,40 @@ async function mutateCanonicalQueue(id, revision, actor, mutate) {
   const project = getProject(runner.project_id);
   const agent = requireAgent(project.agent_name);
   let queue;
+  const before = runnerQueue.snapshot(runner.id);
   try {
     queue = mutate();
     writeCanonicalQueueProjection(runner, project, agent, queue);
   } catch (e) {
     queueMissionError(e);
   }
+  const oldItems = new Map(before.items.map((item) => [item.id, item]));
+  const newItems = new Map(queue.items.map((item) => [item.id, item]));
+  const key = `queue-mutation:${crypto.randomUUID()}`;
+  for (const item of queue.items) if (!oldItems.has(item.id)) {
+    runnerHistory.record(runner, 'plan_added', { actor: actor || 'user', key: `${key}:add:${item.id}`, plan: item.plan, itemId: item.id });
+  }
+  for (const item of before.items) if (!newItems.has(item.id)) {
+    runnerHistory.record(runner, 'plan_removed', { actor: actor || 'user', key: `${key}:remove:${item.id}`, plan: item.plan, itemId: item.id });
+  }
+  if (oldItems.size === newItems.size && before.items.some((item, index) => queue.items[index]?.id !== item.id)) {
+    runnerHistory.record(runner, 'queue_reordered', { actor: actor || 'user', key: `${key}:reordered`, reason: `${queue.items.length} queued item positions updated` });
+  }
   audit(project, 'runner_queue_update', { actor: actor ? (actor.name || actor) : null });
   return readRunnerQueueFor(runner);
 }
 
 async function addRunnerQueueItems(id, plansToAdd, revision, { actor = null } = {}) {
+  const runner = getRunner(id);
+  if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
+  const project = getProject(runner.project_id);
+  const agent = requireAgent(project.agent_name);
+  try {
+    for (const plan of plansToAdd || []) plans.planPath(agent, plan, { project });
+  } catch (error) {
+    if (error instanceof plans.PlansError) throw new MissionError(error.code, error.message);
+    throw error;
+  }
   return mutateCanonicalQueue(id, revision, actor, () => runnerQueue.addPlans(id, plansToAdd, revision, { actor }));
 }
 
@@ -2829,10 +3103,14 @@ async function updateRunnerQueueCustomInstructions(id, customInstructions, revis
 async function resolveRunnerQueue(id, itemId, answer, revision, idempotencyKey, { actor = null } = {}) {
   const runner = getRunner(id);
   if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
-  if (runner.control_state !== 'need_input' && runner.control_state !== 'paused') {
-    throw new MissionError('runner_invalid_state', `Runner must be paused or need_input to resolve (current: ${runner.control_state})`);
+  const runtime = runnerTransition.getRuntime(id);
+  if (!runtime || runtime.state !== 'waiting_input') {
+    throw new MissionError('runner_invalid_state', `Runner must be waiting_input to resolve (current: ${runtime?.state || 'setup_required'})`);
   }
   const { project, agent, session, queue } = await getRunnerForSupervision(id);
+  if (queue.condition !== 'ok') {
+    throw new MissionError('runner_invalid_queue', queue.error || 'Regenerate the queue projection before resolving input.');
+  }
   if (!session) throw new MissionError('runner_no_session', 'Runner has no bound session');
   if (queue.aggregate.state !== 'need input') {
     throw new MissionError('runner_no_need_input', 'Queue is not blocked on input');
@@ -2849,7 +3127,14 @@ async function resolveRunnerQueue(id, itemId, answer, revision, idempotencyKey, 
   // Idempotency check: if this exact key was used before, return the existing result
   if (idempotencyKey) {
     const existing = getDb().prepare('SELECT * FROM runner_resolutions WHERE runner_id = ? AND idempotency_key = ?').get(id, idempotencyKey);
-    if (existing) return { delivered: existing.delivered_at, requeued: existing.requeued_at, resumed: existing.resumed_at };
+    if (existing) return {
+      delivered: existing.delivered_at,
+      requeued: existing.requeued_at,
+      resumed: existing.resumed_at,
+      awaitingReceipt: ['pending', 'awaiting_receipt'].includes(existing.status),
+      status: existing.status,
+      resolutionId: existing.id,
+    };
   }
 
   const agentObj = requireAgent(project.agent_name);
@@ -2870,51 +3155,73 @@ async function resolveRunnerQueue(id, itemId, answer, revision, idempotencyKey, 
   }
 
   try {
-    // 1. Deliver the answer to the worker's bound conversation
-    runnerHistory.record(runner, 'answer_submitted', { actor: actor || 'user', groupId: `answer:${resolutionId}`, key: `${resolutionId}:submitted`, itemId, plan: item.plan, characters: String(answer).length });
+    // Reserve the answer as its own durable operation before typing. It may
+    // resume only after the exact answer receipt is observed.
+    const baseline = agentStore.readTurn(agent, session.agent_session_id);
     const answerText = `Resolution for "${item.plan}": ${answer}`;
-    let reconciled = false;
-    try {
-      await sendText(session.id, answerText, { actor: actor || 'runner' });
-    } catch (e) {
-      if (!e?.attempted || e?.acceptance !== 'unknown') throw e;
-
-      // The pane can fail to repaint after accepting input. Never resend that
-      // answer: the same item's queue transition is the only safe evidence that
-      // this write reached the worker and it moved on.
-        const observed = canonicalQueueProjection(runner, project, agentObj, runnerQueue.snapshot(runner.id));
-      const observedItem = (observed.parsed.items || []).find((it) => it.id === itemId);
-      if (!observedItem || observedItem.status === 'need input') throw e;
-      reconciled = true;
-    }
-
-    // 2. Requeue the item with empty reason (clears the blocker), unless the
-    // worker already advanced that same item while confirming the write failed.
-    if (!reconciled) {
-      const updatedQueue = runnerQueue.updateItem(id, itemId, { status: 'new', reason: '' }, queue.hash, { actor });
-      writeCanonicalQueueProjection(runner, project, agentObj, updatedQueue);
-    }
-
-    // 3. Lift the QUEUE.paused marker BEFORE enabling supervision
+    const operationId = `rop_${crypto.randomUUID()}`;
+    const resolveOperation = runnerTransition.applyResolveBegin(id, { actor: actor || 'user', details: {
+      operationId, kind: 'resolution', conversationId: session.agent_session_id,
+      itemId, queueRevision: revision,
+      promptHash: crypto.createHash('sha256').update(answerText.trimEnd()).digest('hex'),
+      baselineInputId: baseline.userId || null,
+      deadlineAt: new Date(Date.now() + RUNNER_NO_RESPONSE_TIMEOUT_MS).toISOString(),
+    } });
     syncQueuePausedMarker(id, false);
-
-    // 4. Enable supervision WITHOUT sending a startup message
-    // The worker already received the answer and will continue from its checkpoint
-    getDb().prepare(
-      `UPDATE infinite_runners SET enabled = 1, control_state = 'enabled', pause_mode = NULL, pause_state = 'none',
-       pause_target_item = NULL, pause_requested_at = NULL, scheduler_reason = 'Resumed after resolution',
-       scheduler_decision = 'wait_turn_end', updated_at = ? WHERE id = ? AND run_generation = ?`
-    ).run(nowIso, id, runner.run_generation);
+    runnerHistory.record(runner, 'answer_submitted', { actor: actor || 'user', groupId: `answer:${resolutionId}`, key: `${resolutionId}:submitted`, itemId, plan: item.plan, characters: String(answer).length });
+    const beforeWrite = () => {
+      const current = runnerTransition.getRuntime(id);
+      const currentSession = getSession(session.id);
+      if (!current || current.state !== 'dispatching' || current.operation_id !== operationId ||
+          current.generation !== resolveOperation.runtime.generation || currentSession.locked ||
+          currentSession.agent_session_id !== session.agent_session_id) {
+        throw new MissionError('runner_resolution_superseded', 'Answer delivery was cancelled by Pause, Close, lock or conversation change.', 409);
+      }
+      const freshQueue = runnerQueue.snapshot(id);
+      if (freshQueue.revision !== revision || freshQueue.items.find((entry) => entry.id === itemId)?.status !== 'need_input') {
+        throw new MissionError('queue_revision_conflict', 'The blocked item changed before the answer was sent. Reload and review it.', 409);
+      }
+    };
+    try {
+      await sendText(session.id, answerText, { actor: actor || 'runner', beforeWrite });
+    } catch (error) {
+      if (error?.attempted && error?.acceptance === 'unknown') {
+        runnerTransition.applyDeliveryUnknown(id, { actor: actor || 'user', details: { operationId, reason: 'resolution receipt not observed' } });
+        getDb().prepare('UPDATE runner_resolutions SET status = ?, error = ? WHERE id = ?')
+          .run('awaiting_receipt', 'Answer delivery is unconfirmed; no resend made.', resolutionId);
+        syncQueuePausedMarker(id, false);
+        return { delivered: null, requeued: null, resumed: null, awaitingReceipt: true, operationId };
+      }
+      throw error;
+    }
+    const receipt = agentStore.readTurn(agent, session.agent_session_id);
+    const expectedHash = crypto.createHash('sha256').update(answerText.trimEnd()).digest('hex');
+    if (!receipt.userId || receipt.userId === baseline.userId || receipt.inputHash !== expectedHash) {
+      runnerTransition.applyDeliveryUnknown(id, { actor: actor || 'user', details: { operationId, reason: 'resolution exact receipt not observed' } });
+      getDb().prepare('UPDATE runner_resolutions SET status = ?, error = ? WHERE id = ?')
+        .run('awaiting_receipt', 'Answer delivery is unconfirmed; no resend made.', resolutionId);
+      syncQueuePausedMarker(id, false);
+      return { delivered: null, requeued: null, resumed: null, awaitingReceipt: true, operationId };
+    }
+    runnerTransition.applyReceipt(id, { actor: actor || 'user', details: { operationId, receiptInputId: receipt.userId } });
+    const currentQueue = runnerQueue.snapshot(id);
+    const updatedQueue = runnerQueue.updateItem(id, itemId, { status: 'new', reason: '' }, currentQueue.revision, { actor, source: 'resolution' });
+    writeCanonicalQueueProjection(getRunner(id), project, agentObj, updatedQueue);
+    syncQueuePausedMarker(id, false);
 
     // Mark resolution as complete
     getDb().prepare('UPDATE runner_resolutions SET status = ?, delivered_at = ?, requeued_at = ?, resumed_at = ? WHERE id = ?')
       .run('completed', nowIso, nowIso, nowIso, resolutionId);
     runnerHistory.record(runner, 'answer_accepted', { actor: actor || 'user', groupId: `answer:${resolutionId}`, key: `${resolutionId}:accepted`, itemId, plan: item.plan });
 
-    return { delivered: nowIso, requeued: nowIso, resumed: nowIso, reconciled };
+    return { delivered: nowIso, requeued: nowIso, resumed: nowIso, operationId, receiptInputId: receipt.userId };
   } catch (e) {
-    // On failure, restore the marker if the runner wasn't already enabled
-    if (runner.enabled === 0) syncQueuePausedMarker(id, true);
+    const currentRuntime = runnerTransition.getRuntime(id);
+    if (currentRuntime?.state === 'dispatching') {
+      runnerTransition.applyPause(id, { actor: actor || 'user', details: { reason: 'Resolution did not reach a confirmed receipt.' } });
+      runnerTransition.setReason(id, 'resolution_failed', e.message);
+      syncQueuePausedMarker(id, true);
+    }
     getDb().prepare('UPDATE runner_resolutions SET status = ?, error = ? WHERE id = ?')
       .run('failed', e.message, resolutionId);
     runnerHistory.record(runner, 'answer_failed', { actor: actor || 'user', groupId: `answer:${resolutionId}`, key: `${resolutionId}:failed`, itemId, plan: item.plan, severity: 'warning', code: e.code || 'resolution_failed' });
@@ -2987,11 +3294,11 @@ async function ensureRunnerSession(id, { actor = null, origin = 'human', created
 async function startRunner(id, { actor = null } = {}) {
   const runner = getRunner(id);
   if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
+  const runtime = runnerTransition.getRuntime(id);
+  if (!runtime) throw new MissionError('runner_setup_required', 'This runner has no canonical runtime. Explicitly set it up before running.');
   runnerHistory.record(runner, 'run_requested', { actor: actor || 'user' });
   try {
-  if (!RUNNER_CONTROL_STATES.includes(runner.control_state)) {
-    throw new MissionError('runner_invalid_state', `Runner in invalid control state: ${runner.control_state}`);
-  }
+  if (!runnerTransition.STATES.includes(runtime.state)) throw new MissionError('runner_invalid_state', `Runner in invalid canonical state: ${runtime.state}`);
   let { project, agent, session, queue } = await getRunnerForSupervision(id);
   const refuse = async (code, reason) => {
     setRunnerReason(id, reason);
@@ -3014,7 +3321,13 @@ async function startRunner(id, { actor = null } = {}) {
     setRunnerReason(id, queue.aggregate.reason || 'Queue is done.');
     return { started: false, reason: 'empty_queue', runner: getRunner(id) };
   }
-  if (!runner.enabled && runner.stop_cause === 'usage_exhausted') {
+  if (runtime.state === 'projection_error') {
+    await refuse('runner_invalid_queue', 'Regenerate the queue projection before Run.');
+  }
+  if (['dispatching', 'awaiting_receipt'].includes(runtime.state)) {
+    return { started: false, reason: runtime.state, runner: getRunner(id), operationId: runtime.operation_id };
+  }
+  if (runtime.state === 'waiting_input' && runner.stop_cause === 'usage_exhausted') {
     const callback = runnerCallbacks.getCallback(id, 'usage_exhausted');
     if (!callback.enabled || !callback.recreateResume) {
       throw new MissionError('quota_recovery_not_configured', 'Quota is exhausted. Enable the usage_exhausted callback and resume-after-success option before retrying recovery.');
@@ -3024,10 +3337,11 @@ async function startRunner(id, { actor = null } = {}) {
         UNION SELECT event_id AS id FROM runner_quota_recoveries WHERE runner_id = ? AND status IN ('script_running', 'restoring') LIMIT 1`).get(id, id);
       if (active) return { id: active.id, existing: true };
       const fresh = getRunner(id);
-      if (!fresh || fresh.enabled || fresh.run_generation !== runner.run_generation || fresh.stop_cause !== 'usage_exhausted') {
+      const currentRuntime = runnerTransition.getRuntime(id);
+      if (!fresh || currentRuntime?.state !== 'waiting_input' || currentRuntime.reason_code !== 'usage_exhausted' ||
+          currentRuntime.generation !== runtime.generation) {
         throw new MissionError('quota_recovery_superseded', 'Runner state changed before recovery could be queued');
       }
-      incrementRunGeneration(id);
       const updated = getRunner(id);
       const episode = getDb().prepare('SELECT episode_seq FROM runner_usage_state WHERE runner_id = ?').get(id);
       const recorded = runnerCallbacks.recordCallbackEvent(updated, project, 'usage_exhausted', {
@@ -3046,13 +3360,11 @@ async function startRunner(id, { actor = null } = {}) {
   // A resolution can write successfully but lack a pane/store confirmation. If
   // its worker already moved the same queue forward, an explicit Run adopts that
   // verified active turn instead of sending a duplicate startup instruction.
-  if (!runner.enabled && queue.aggregate.state === 'in progress' && session?.agent_session_id) {
+  if (runtime.state === 'paused' && queue.aggregate.state === 'in progress' && session?.agent_session_id) {
     const activeTurn = agentStore.readTurn(agent, session.agent_session_id);
     if (activeTurn.state === 'working') {
+      runnerTransition.applyAdoptActiveTurn(id, { actor: actor || 'user', details: { conversationId: session.agent_session_id, reason: 'adopting verified active turn' } });
       syncQueuePausedMarker(id, false);
-      getDb().prepare(
-        "UPDATE infinite_runners SET enabled = 1, control_state = 'enabled', scheduler_reason = 'Resumed active worker after resolution', scheduler_decision = 'wait_turn_end', updated_at = ? WHERE id = ? AND run_generation = ? AND enabled = 0"
-      ).run(new Date().toISOString(), id, runner.run_generation);
       runnerHistory.record(runner, 'runner_started', { actor: actor || 'user', key: `started:${runner.run_generation}`, reason: 'Supervision resumed around the active worker' });
       return { started: true, reason: 'adopted_active_turn', runner: getRunner(id), session, queue: queue.aggregate };
     }
@@ -3061,11 +3373,11 @@ async function startRunner(id, { actor = null } = {}) {
   // race its observation, but automatic dispatch is deliberately withheld.
   // Run is the one explicit recovery path: it must re-observe below before it
   // can acquire a new delivery lease.
-  const startTurn = runner.enabled && session?.agent_session_id
+  const startTurn = runtime.state === 'running' && session?.agent_session_id
     ? agentStore.readTurn(agent, session.agent_session_id)
     : null;
   const interruptedTurn = startTurn?.state === 'idle' && startTurn.outcome === 'error';
-  if (runner.enabled && !interruptedTurn) return { started: false, reason: 'already_running', runner: getRunner(id) };
+  if (runtime.state === 'running' && !interruptedTurn) return { started: false, reason: 'already_running', runner: getRunner(id) };
   await ensureRunnerIndex(agent, project);
   // Plan 91 §Phase 4: check template health explicitly BEFORE the eligibility
   // gate, so a corrupt set refuses with its own code — the worker may be
@@ -3080,8 +3392,10 @@ async function startRunner(id, { actor = null } = {}) {
     // This exact, completed error turn conclusively ends the old instruction.
     // Bind the update to its observed operation id so a second recovery click
     // cannot release the new operation another caller has already acquired.
-    getDb().prepare("UPDATE infinite_runners SET operation_status = 'ended' WHERE id = ? AND operation_id = ? AND operation_status IN ('pending', 'unconfirmed', 'confirmed')")
-      .run(id, runner.operation_id);
+    const interruptedRuntime = runnerTransition.getRuntime(id);
+    if (interruptedRuntime?.state === 'running' && interruptedRuntime.operation_id === runner.operation_id) {
+      runnerTransition.applyTurnCompleted(id, { actor: actor || 'user', details: { operationId: runner.operation_id, reason: 'interrupted turn explicitly recovered' } });
+    }
   }
   const can = await canDispatch(id, { session, project, agent, queue, kind: 'start', gen: runner.run_generation });
   if (!can.allowed) await refuse('runner_worker_not_idle', can.reason);
@@ -3135,21 +3449,11 @@ async function startRunner(id, { actor = null } = {}) {
     const result = await deliverRunnerInstruction(id, workerSession, project, agent, can.queue, fullMsg, lease, can.turn, 'start', actor);
     if (!result) return { started: false, reason: 'superseded', runner: getRunner(id) };
   } catch (e) {
-    if (getRunner(id)?.run_generation === lease.gen) {
-      const isUnconfirmed = e.code === 'mission_send_unconfirmed' || e.acceptance === 'unknown';
-      const status = isUnconfirmed ? 'unconfirmed' : 'ended';
-      const reason = isUnconfirmed
-        ? 'Instruction delivery unconfirmed — automatic resend withheld; waiting for the exact input receipt'
-        : e.message;
-      getDb().prepare("UPDATE infinite_runners SET operation_status = ?, last_reason = ? WHERE id = ? AND run_generation = ? AND operation_id = ? AND operation_status = 'pending'")
-        .run(status, reason, id, lease.gen, lease.operationId);
-      // Only restore the pause marker for true failures, NOT for unconfirmed deliveries.
-      // An unconfirmed write may have landed; restoring the marker would make a
-      // successfully reached worker stop. Keep the marker absent while the exact
-      // receipt is still eligible (Plan 112).
-      if (!isUnconfirmed) {
-        syncQueuePausedMarker(id, true);
-      }
+    const currentRuntime = runnerTransition.getRuntime(id);
+    if (currentRuntime?.operation_id === lease.operationId && currentRuntime.state === 'dispatching') {
+      runnerTransition.applyPause(id, { actor: actor || 'user', details: { reason: e.message } });
+      runnerTransition.setReason(id, e.code || 'dispatch_failed', e.message);
+      syncQueuePausedMarker(id, true);
     }
     throw e;
   }
@@ -3160,8 +3464,8 @@ async function startRunner(id, { actor = null } = {}) {
   // The `current_task` branch still needs its continuation sentence above; the
   // record itself is cleared in both cases here.
   getDb().prepare(
-    "UPDATE infinite_runners SET enabled = 1, control_state = 'enabled', pause_mode = NULL, pause_state = 'none', pause_target_item = NULL, pause_requested_at = NULL, scheduler_reason = 'Waiting for current turn', scheduler_decision = 'wait_turn_end', updated_at = ? WHERE id = ? AND run_generation = ? AND operation_id = ? AND operation_status = 'confirmed'"
-  ).run(new Date().toISOString(), id, lease.gen, lease.operationId);
+    "UPDATE infinite_runners SET pause_mode = NULL, pause_state = 'none', pause_target_item = NULL, pause_requested_at = NULL, scheduler_reason = 'Waiting for current turn', scheduler_decision = 'wait_turn_end', updated_at = ? WHERE id = ? AND run_generation = ?"
+  ).run(new Date().toISOString(), id, lease.gen);
   const updated = getRunner(id);
   runnerHistory.record(updated, 'runner_started', { actor: actor || 'user', key: `started:${updated.run_generation}` });
   return { started: true, runner: updated, session: workerSession, queue: queue.aggregate };
@@ -3201,7 +3505,6 @@ async function pauseRunner(id, { mode = 'before_next_task', actor = null } = {})
   runnerHistory.record(runner, 'pause_requested', { actor: actor || 'user', mode });
   // Stop dispatch first, for BOTH modes: no nudge/recovery may fire from here on,
   // and the QUEUE.paused marker stops the worker from taking the next plan.
-  incrementRunGeneration(id);
   await setRunnerEnabled(id, false);
   runnerHistory.record(runner, 'pause_applied', { actor: actor || 'user', mode, reason: 'Future dispatch stopped; an active task may still be finishing' });
 
@@ -3219,11 +3522,8 @@ async function pauseRunner(id, { mode = 'before_next_task', actor = null } = {})
   } catch { /* queue/session unavailable — treat as no target */ }
 
   const nowIso = new Date().toISOString();
-  // Plan 88 §Phase 3: Pause/Close invalidates any pending/unconfirmed operation.
-  // Late receipt/acknowledgment cannot override the user's explicit stop.
-  getDb().prepare(
-    `UPDATE infinite_runners SET operation_status = 'invalidated', updated_at = ? WHERE id = ?`
-  ).run(nowIso, id);
+  // The canonical transition already invalidated the owned operation. Only
+  // cooperative pause-request metadata is stored below.
 
   const writePause = (pauseMode, pauseState, targetId) => {
     getDb().prepare(
@@ -3277,11 +3577,9 @@ async function pauseRunner(id, { mode = 'before_next_task', actor = null } = {})
 async function resumeRunner(id, { actor = null } = {}) {
   const runner = getRunner(id);
   if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
-  if (runner.control_state !== 'paused') {
+  if (runnerTransition.getRuntime(id)?.state !== 'paused') {
     throw new MissionError('runner_not_paused', 'Runner is not paused');
   }
-  // Clear stop provenance on successful resume
-  getDb().prepare('UPDATE infinite_runners SET stop_cause = NULL, stop_origin = NULL, stop_at = NULL WHERE id = ?').run(id);
   return startRunner(id, { actor });
 }
 
@@ -3294,15 +3592,18 @@ function reconcileQuotaReceipt(runner, session, agent, stillExhausted) {
       runner.operation_status !== 'unconfirmed') return;
   const turn = agentStore.readTurn(agent, session.agent_session_id);
   if (!turn.userId || turn.userId === runner.operation_baseline_user_id || turn.inputHash !== runner.operation_prompt_hash) return;
-  const changed = getDb().prepare("UPDATE infinite_runners SET operation_status = 'confirmed', operation_receipt_user_id = ?, enabled = ?, control_state = ?, last_reason = ?, stop_cause = ? WHERE id = ? AND run_generation = ? AND operation_id = ? AND operation_status = 'unconfirmed'")
-    .run(turn.userId, stillExhausted ? 0 : 1, stillExhausted ? 'need_input' : 'enabled', stillExhausted ? 'Recovery continuation accepted, but provider quota is still exhausted' : null, stillExhausted ? 'usage_exhausted' : null, runner.id, runner.run_generation, runner.operation_id);
-  if (changed.changes) {
-    getDb().prepare('UPDATE runner_quota_recoveries SET status = ?, error = NULL, updated_at = ? WHERE event_id = ?')
-      .run(stillExhausted ? 'exhausted_again' : 'resumed', new Date().toISOString(), recovery.event_id);
-    runnerHistory.record(runner, 'continuation_accepted', { groupId: recovery.event_id, key: `${recovery.event_id}:receipt` });
-    runnerHistory.record(runner, stillExhausted ? 'quota_remains' : 'recovery_resumed', { groupId: recovery.event_id, key: `${recovery.event_id}:late-result`, severity: stillExhausted ? 'warning' : 'info' });
-    if (!stillExhausted) syncQueuePausedMarker(runner.id, false);
+  const runtime = runnerTransition.getRuntime(runner.id);
+  if (!runtime || runtime.operation_id !== runner.operation_id || runtime.state !== 'awaiting_receipt') return;
+  if (stillExhausted) {
+    runnerTransition.applyNeedInput(runner.id, { actor: 'quota-observer', details: { operationId: runner.operation_id, cause: 'usage_exhausted', reason: 'Recovery continuation accepted, but provider quota remains exhausted.' } });
+  } else {
+    runnerTransition.applyReceipt(runner.id, { actor: 'quota-observer', details: { operationId: runner.operation_id, receiptInputId: turn.userId } });
   }
+  getDb().prepare('UPDATE runner_quota_recoveries SET status = ?, error = NULL, updated_at = ? WHERE event_id = ?')
+    .run(stillExhausted ? 'exhausted_again' : 'resumed', new Date().toISOString(), recovery.event_id);
+  runnerHistory.record(runner, 'continuation_accepted', { groupId: recovery.event_id, key: `${recovery.event_id}:receipt` });
+  runnerHistory.record(runner, stillExhausted ? 'quota_remains' : 'recovery_resumed', { groupId: recovery.event_id, key: `${recovery.event_id}:late-result`, severity: stillExhausted ? 'warning' : 'info' });
+  syncQueuePausedMarker(runner.id, runnerTransition.markerRequired(runnerTransition.getRuntime(runner.id).state));
 }
 
 /** Explicit quota-recovery scripts may recreate a PAD and authorize one new
@@ -3312,7 +3613,8 @@ async function resumeQuotaRecovery(context) {
   const owns = () => {
     const r = getRunner(context.runner_id);
     const s = r && getSession(r.session_id);
-    if (!r || r.enabled || r.run_generation !== context.generation || r.stop_cause !== 'usage_exhausted' ||
+    const runtime = r && runnerTransition.getRuntime(context.runner_id);
+    if (!r || !runtime || runtime.state !== 'waiting_input' || r.run_generation !== context.generation || runtime.reason_code !== 'usage_exhausted' ||
         r.session_id !== context.session_id || s?.agent_session_id !== context.conversation_id || s.locked) {
       throw new MissionError('quota_recovery_superseded', 'Recovery cancelled by Pause, Close, lock, or changed conversation');
     }
@@ -3354,13 +3656,13 @@ async function resumeQuotaRecovery(context) {
   runnerHistory.record(runner, 'session_restored', { groupId: context.event_id, key: `${context.event_id}:restored` });
   const message = renderRunnerPrompt(runner, sup.project, sup.queue, 'recovery').text;
   const baseline = agentStore.readTurn(sup.agent, session.agent_session_id);
-  getDb().prepare("UPDATE infinite_runners SET operation_status = 'ended' WHERE id = ? AND run_generation = ? AND enabled = 0")
-    .run(runner.id, context.generation);
-  const lease = acquireDispatchOwnership(runner.id, context.generation, 'start', sup.queue.hash, session, message, baseline.userId);
+  const lease = acquireDispatchOwnership(runner.id, context.generation, 'quota-recovery', sup.queue.hash, session, message, baseline.userId);
   if (!lease) throw new MissionError('quota_recovery_owned', 'Another operation already owns recovery');
   const beforeWrite = () => {
     const current = getRunner(runner.id);
-    if (!current || current.run_generation !== lease.gen || current.operation_id !== lease.operationId || current.operation_status !== 'pending' || getSession(session.id).locked) {
+      const currentRuntime = runnerTransition.getRuntime(runner.id);
+    if (!current || !currentRuntime || currentRuntime.state !== 'dispatching' || currentRuntime.operation_id !== lease.operationId ||
+        currentRuntime.generation !== lease.runtimeGeneration || current.run_generation !== lease.gen || getSession(session.id).locked) {
       throw new MissionError('quota_recovery_superseded', 'Recovery continuation cancelled by newer control action');
     }
     const turn = agentStore.readTurn(sup.agent, session.agent_session_id);
@@ -3371,7 +3673,11 @@ async function resumeQuotaRecovery(context) {
     await sendText(session.id, message, { actor: 'quota-recovery', beforeWrite, paste: true });
   } catch (e) {
     if (!e.attempted || e.acceptance !== 'unknown') {
-      getDb().prepare("UPDATE infinite_runners SET operation_status = 'ended', last_reason = ? WHERE id = ? AND operation_id = ?").run(e.message, runner.id, lease.operationId);
+      const currentRuntime = runnerTransition.getRuntime(runner.id);
+      if (currentRuntime?.state === 'dispatching' && currentRuntime.operation_id === lease.operationId) {
+        runnerTransition.applyPause(runner.id, { actor: 'quota-recovery', details: { reason: e.message } });
+        runnerTransition.setReason(runner.id, 'quota_recovery_failed', e.message);
+      }
       syncQueuePausedMarker(runner.id, true);
       throw e;
     }
@@ -3390,16 +3696,13 @@ async function resumeQuotaRecovery(context) {
     await new Promise((resolve) => setTimeout(resolve, 300));
   } while (Date.now() < receiptDeadline);
   if (!receipt) {
-    getDb().prepare("UPDATE infinite_runners SET operation_status = 'unconfirmed', last_reason = 'Quota recovery input receipt not observed — no resend made' WHERE id = ? AND run_generation = ? AND operation_id = ? AND operation_status = 'pending'")
-      .run(runner.id, lease.gen, lease.operationId);
-    syncQueuePausedMarker(runner.id, true);
+    runnerTransition.applyDeliveryUnknown(runner.id, { actor: 'quota-recovery', details: { operationId: lease.operationId, reason: 'quota receipt not observed' } });
+    syncQueuePausedMarker(runner.id, false);
     throw new MissionError('quota_recovery_unconfirmed', 'Restored conversation has not acknowledged the continuation; no resend made');
   }
-  getDb().prepare(`UPDATE infinite_runners SET enabled = 1, control_state = 'enabled',
-    operation_status = ?, operation_receipt_user_id = ?, stop_cause = NULL, stop_origin = NULL, stop_at = NULL,
-    last_reason = NULL, scheduler_decision = 'wait_turn_end', scheduler_reason = 'Quota recovery continuation sent'
-    WHERE id = ? AND run_generation = ? AND operation_id = ? AND operation_status = 'pending'`)
-    .run('confirmed', receipt, runner.id, lease.gen, lease.operationId);
+  runnerTransition.applyReceipt(runner.id, { actor: 'quota-recovery', details: { operationId: lease.operationId, receiptInputId: receipt } });
+  getDb().prepare("UPDATE infinite_runners SET scheduler_decision = 'wait_turn_end', scheduler_reason = 'Quota recovery continuation sent' WHERE id = ?")
+    .run(runner.id);
   runnerHistory.record(runner, 'continuation_accepted', { groupId: context.event_id, key: `${context.event_id}:receipt` });
 }
 
@@ -3409,11 +3712,12 @@ async function resumeQuotaRecovery(context) {
  *  with its live pane, and simply returns to the ordinary listing. Deleting the
  *  row drops supervision with it (the watcher selects `enabled = 1`, so a gone
  *  row is unwatched), and the bumped generation aborts any in-flight send. */
-async function removeRunner(id) {
+async function removeRunner(id, { actor = null } = {}) {
   const runner = getRunner(id);
   if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
-  // Invalidate run generation to abort any in-flight nudge/recovery
-  incrementRunGeneration(id);
+  runnerTransition.applyClose(id, { actor: actor || 'user', details: { reason: 'Runner removed; execution revoked.' } });
+  syncQueuePausedMarker(id, true);
+  const detachedQueue = runnerQueue.detach(id, { actor: actor || 'user' });
   // Plan 92 §Phase 3: capture the destroy snapshot BEFORE the row goes away —
   // the outbox carries the script body, so later edits or the deletion itself
   // cannot change a recorded event. A misconfigured/absent destroy callback
@@ -3433,6 +3737,7 @@ async function removeRunner(id) {
     if (destroyEventId) getDb().prepare("DELETE FROM runner_callback_outbox WHERE id = ? AND status = 'pending'").run(destroyEventId);
     throw e;
   }
+  runnerHistory.record(runner, 'runner_removed', { actor: actor || 'user', key: `removed:${runner.run_generation}` });
   // "remove the runner configuration/designation. Keep any existing Mission
   // session/conversation and queue file. The row loses runner controls and
   // pinning." The Mission session row and QUEUE.md are separate and untouched,
@@ -3443,18 +3748,65 @@ async function removeRunner(id) {
   // forever (there is no column that could say "this runner was removed").
   // (The DELETE itself ran above, before the marker sync, so a recorded
   // destroy event can be withdrawn if the delete fails.)
-  // Runner removed — ensure no stale pause marker remains.
-  syncQueuePausedMarker(id, false);
+  // The worker file remains a read-only projection, but the marker is left
+  // present so a detached worker cannot silently take another item.
   // Plan 92 §Phase 3: a recorded destroy script launches in the background —
   // removal never waits for it (it may run up to the script timeout).
   if (destroyEventId) {
     runnerCallbacks.pumpCallbackOutbox().catch((e) => console.error(`[callbacks] pump after destroy failed:`, e.message));
   }
-  return { removed: true };
+  return { removed: true, queuePreserved: !!detachedQueue, queueRevision: detachedQueue?.revision ?? null };
 }
 
-/** Reconcile runners on webui restart: re-enable runners that were enabled, but don't auto-resume. */async function reconcileRunners() {
-  const runners = getDb().prepare('SELECT id FROM infinite_runners WHERE enabled = 1').all();
+/** Reconcile durable desired publications before the watcher starts. A crash
+ * after DB commit but before filesystem acknowledgement is retried. A file that
+ * differs from an already-acknowledged revision is treated as an external edit
+ * and is never overwritten on boot. */
+function reconcileQueuePublications() {
+  const runners = getDb().prepare('SELECT * FROM infinite_runners').all();
+  let published = 0;
+  let blocked = 0;
+  for (const row of runners) {
+    try {
+      const runner = getRunner(row.id);
+      const publication = runnerPublication.read(row.id);
+      if (!publication) continue; // explicit setup is the only initializer
+      const project = getProject(row.project_id);
+      if (!project) continue;
+      const agent = requireAgent(project.agent_name);
+      const snapshot = runnerQueue.snapshot(row.id);
+      const projectionPath = plans.queuePath(agent, { ...project, plans_folder: project.plans_folder || 'plans' }, runner.queue_file);
+      const expected = plans.queueProjection(snapshot.items, snapshot.customInstructions);
+      const exists = fs.existsSync(projectionPath);
+      const actual = exists ? fs.readFileSync(projectionPath, 'utf8') : null;
+      if (actual !== expected && publication.acknowledged_revision === snapshot.revision &&
+          publication.acknowledged_hash === runnerQueue.publicationHash(snapshot)) {
+        const runtime = runnerTransition.getRuntime(row.id);
+        if (runtime && runtime.state !== 'projection_error') {
+          runnerTransition.applyProjectionMismatch(row.id, {
+            actor: 'boot-integrity', details: { reason: 'Acknowledged worker projection changed outside Paddock.' },
+          });
+        }
+        syncQueuePausedMarker(row.id, true);
+        blocked++;
+        continue;
+      }
+      if (publication.desired_revision !== snapshot.revision || publication.desired_hash !== runnerQueue.publicationHash(snapshot) ||
+          publication.acknowledged_revision !== snapshot.revision || publication.acknowledged_hash !== runnerQueue.publicationHash(snapshot) || publication.error) {
+        runnerPublication.publish(runner, project, agent);
+        published++;
+      }
+      const currentRuntime = runnerTransition.getRuntime(row.id);
+      syncQueuePausedMarker(row.id, !currentRuntime || runnerTransition.markerRequired(currentRuntime.state));
+    } catch (error) {
+      console.error(`[runner publication reconcile] ${row.id}:`, error.message);
+    }
+  }
+  return { published, blocked };
+}
+
+/** Report active canonical runtimes after restart; never auto-resume uncertain work. */async function reconcileRunners() {
+  const runners = getDb().prepare("SELECT runner_id AS id FROM runner_runtime WHERE state IN ('dispatching','awaiting_receipt','running')").all();
   for (const r of runners) {
     const runner = getRunner(r.id);
     // The run generation was incremented on pause/remove, so a restarted webui
@@ -3495,13 +3847,8 @@ function reconcileCallbackOutbox() {
   return runnerCallbacks.reconcileCallbackOutbox();
 }
 
-/** Plan 92 §Phase 3: run the queue-transition observer for every runner whose
- *  queue is readable, recording plan_started / plan_completed on OBSERVED
- *  transitions (stable item id + attempt). Reads each runner's queue with the
- *  same canonical snapshot the supervisor uses; a projection error is SKIPPED
- *  because an external file edit is not a queue transition. Runs for
- *  paused runners too (a human can still edit their queue). One bad runner
- *  never stops the pass; recording pumps are fire-and-forget. */
+/** Replay canonical queue events in order, including transitions that begin and
+ * finish between observer polls. */
 async function observeRunnerQueues() {
   const runners = getDb().prepare('SELECT * FROM infinite_runners').all();
   let recorded = 0;
@@ -3510,9 +3857,9 @@ async function observeRunnerQueues() {
       const project = getProject(runner.project_id);
       if (!project) continue;
       const agent = requireAgent(project.agent_name);
-      const queue = canonicalQueueProjection(runner, project, agent, runnerQueue.snapshot(runner.id));
-      if (queue.condition !== 'ok') continue;
-      recorded += runnerCallbacks.observeQueue(runner, project, queue.parsed.items, { queuePath: queue.path });
+      runnerQueue.snapshot(runner.id); // fail closed on runners without canonical setup
+      const queuePath = plans.queuePath(agent, { ...project, plans_folder: project.plans_folder || 'plans' }, runner.queue_file);
+      recorded += runnerCallbacks.observeCanonicalEvents(runner, project, { queuePath });
     } catch { /* one bad runner must not stop the observation pass */ }
   }
   if (recorded) {
@@ -3530,7 +3877,8 @@ async function observeRunnerQueues() {
  *  episode, so an operational failure cannot end one. One bad runner never
  *  stops the pass; recording pumps are fire-and-forget. */
 async function observeRunnerUsage() {
-  const runners = getDb().prepare('SELECT * FROM infinite_runners').all();
+  const runners = getDb().prepare(`SELECT r.* FROM infinite_runners r JOIN runner_runtime rt ON rt.runner_id = r.id
+    WHERE rt.state IN ('dispatching','awaiting_receipt','running')`).all();
   let recorded = 0;
   for (const runner of runners) {
     try {
@@ -3543,13 +3891,14 @@ async function observeRunnerUsage() {
       const screen = await padTmux.captureScreen(project.agent_name, session.tmux_id, 80);
       const explicit = require('./provider-limit').screenUsageEvidence(screen);
       const evidence = explicit || agentStore.readUsageEvidence(agent, session.agent_session_id);
-      recorded += runnerCallbacks.observeUsage(runner, project, evidence, { busy, busyKnown });
       if (explicit) {
-        const stopped = getDb().prepare(
-          "UPDATE infinite_runners SET enabled = 0, control_state = 'need_input', last_reason = ?, stop_cause = 'usage_exhausted', stop_origin = 'automatic', stop_at = COALESCE(stop_at, ?), scheduler_decision = 'need_input', scheduler_reason = ? WHERE id = ? AND run_generation = ? AND (enabled = 1 OR (control_state = 'need_input' AND stop_cause = 'usage_exhausted'))"
-        ).run(explicit.reason, new Date().toISOString(), explicit.reason, runner.id, runner.run_generation);
-        if (stopped.changes) syncQueuePausedMarker(runner.id, true);
+        const runtime = runnerTransition.getRuntime(runner.id);
+        if (runtime && ['dispatching', 'awaiting_receipt', 'running'].includes(runtime.state)) {
+          const stopped = runnerTransition.applyNeedInput(runner.id, { actor: 'usage-observer', details: { cause: 'usage_exhausted', reason: explicit.reason } });
+          syncQueuePausedMarker(runner.id, stopped.markerRequired);
+        }
       }
+      recorded += runnerCallbacks.observeUsage(runner, project, evidence, { busy, busyKnown });
       if (explicit || evidence.state === 'ok') reconcileQuotaReceipt(getRunner(runner.id), session, agent, !!explicit);
     } catch { /* one bad runner must not stop the observation pass */ }
   }
@@ -3585,7 +3934,7 @@ async function dispatchNext(runnerId, session, project, agent, queue, kind, gen 
 
 /** The supervisor watch loop — called periodically for enabled runners. */
 async function runnerWatchTick() {
-  const runners = getDb().prepare('SELECT id FROM infinite_runners WHERE enabled = 1').all();
+  const runners = getDb().prepare("SELECT runner_id AS id FROM runner_runtime WHERE state = 'running'").all();
   for (const r of runners) {
     try {
       await runnerWatchOnce(r.id);
@@ -3599,7 +3948,8 @@ async function runnerWatchTick() {
  *  Uses the canonical runner transition service for state changes. */
 async function runnerWatchOnce(runnerId) {
   const runner = getRunner(runnerId);
-  if (!runner || !runner.enabled) return;
+  const runtime = runnerTransition.getRuntime(runnerId);
+  if (!runner || !runtime || runtime.state !== 'running') return;
   const gen = runner.run_generation;
 
   const stopWith = async (event, reason, cause, details = {}) => {
@@ -3625,14 +3975,19 @@ async function runnerWatchOnce(runnerId) {
   }
   // Verify this run generation still owns the lease
   const fresh = getRunner(runnerId);
-  if (!fresh || !fresh.enabled || fresh.run_generation !== gen) return; // superseded by new Start/Pause/Remove
+  if (!fresh || fresh.run_generation !== gen || runnerTransition.getRuntime(runnerId)?.state !== 'running') return; // superseded by new Start/Pause/Remove
   // Read and validate queue
   if (!queue || queue.condition !== 'ok' || queue.aggregate.state === 'invalid') {
     await stopWith('projection_mismatch', `Queue is invalid: ${queue?.error || (queue && queue.aggregate ? queue.aggregate.reason : 'unavailable')}`, 'invalid_queue');
     return;
   }
   if (queue.aggregate.state === 'done') {
-    observeRunnerTurn(fresh, session, agentStore.readTurn(agent, session.agent_session_id));
+    const completedTurn = agentStore.readTurn(agent, session.agent_session_id);
+    observeRunnerTurn(fresh, session, completedTurn);
+    if (completedTurn.state !== 'idle') {
+      recordSchedulerDecision(runnerId, gen, { workerState: completedTurn.state || 'unknown', schedulerDecision: 'wait_turn_end', reason: 'All items are marked done; waiting for the owned worker turn to finish.', nextCheckMs: 1000, recoveryRequired: false });
+      return;
+    }
     await stopWith('complete', queue.aggregate.reason || 'Queue is done.', 'finished');
     return;
   }
@@ -3705,9 +4060,13 @@ const RUNNER_NO_RESPONSE_TIMEOUT_MS = 10 * 60 * 1000;
 function computeSchedulerState(runner, queue, turn, now = Date.now(), { explicit = false } = {}) {
   const state = turn?.state || 'unknown';
   const decision = (schedulerDecision, reason, nextCheckMs = null, recoveryRequired = false) => ({ workerState: state, schedulerDecision, reason, nextCheckMs, recoveryRequired });
-  if (!runner.enabled && !explicit) {
-    if (runner.control_state === 'finished') return decision('finished', 'Queue is done');
-    if (runner.control_state === 'need_input') return decision('need_input', runner.last_reason || 'Queue needs input');
+  const executionState = runner.canonicalState || 'setup_required';
+  if (!explicit && executionState !== 'running') {
+    if (executionState === 'complete') return decision('finished', 'Queue is done');
+    if (executionState === 'waiting_input') return decision('need_input', runner.runtimeReason || 'Queue needs input');
+    if (executionState === 'held') return decision('need_input', runner.runtimeReason || 'Operation is held');
+    if (executionState === 'projection_error') return decision('blocked', runner.runtimeReason || 'Queue projection needs repair');
+    if (executionState === 'setup_required') return decision('no_work', 'Set up the canonical runner runtime');
     return decision('paused', 'Queue paused');
   }
   if (!queue || queue.aggregate.state === 'invalid') return decision('no_work', 'Queue unavailable or invalid');
@@ -3719,9 +4078,9 @@ function computeSchedulerState(runner, queue, turn, now = Date.now(), { explicit
   // verified completed error turn needs an explicit Run recovery.
   if (turn?.outcome === 'error' && !explicit) return decision('observation_unavailable', turn.reason, null, true);
   if (['pending', 'unconfirmed', 'confirmed'].includes(runner.operation_status)) {
-    const sentAt = Date.parse(runner.operation_started_at);
+    const deadline = Date.parse(runner.operation_deadline_at);
     const unanswered = state === 'idle' && !runner.operation_receipt_user_id
-      && Number.isFinite(sentAt) && (now - sentAt) > RUNNER_NO_RESPONSE_TIMEOUT_MS;
+      && Number.isFinite(deadline) && now >= deadline;
     if (unanswered) {
       return decision('need_input', `No worker response within ${Math.round(RUNNER_NO_RESPONSE_TIMEOUT_MS / 60000)} minutes of the sent instruction — it may never have arrived. No resend was made; check the conversation and Run again.`);
     }
@@ -3755,15 +4114,29 @@ function observeRunnerTurn(runner, session, turn) {
   const idleSince = turn.state === 'idle' ? (sameIdle ? runner.idle_since : (turn.completedAt || new Date().toISOString())) : null;
   getDb().prepare('UPDATE infinite_runners SET worker_state = ?, worker_turn_id = ?, idle_since = ?, last_progress_at = ?, retry_count = ? WHERE id = ? AND run_generation = ? AND operation_generation = ?')
     .run(turn.state, turn.userId || null, idleSince, advanced ? turn.progressAt : runner.last_progress_at, advanced ? 0 : runner.retry_count, runner.id, runner.run_generation, runner.operation_generation);
-  if (runner.operation_session_id === session.agent_session_id && ['pending', 'unconfirmed', 'confirmed'].includes(runner.operation_status)) {
+  if (runner.operation_session_id === session.agent_session_id && runner.operation_id) {
     const accepted = turn.userId && turn.userId !== runner.operation_baseline_user_id && turn.inputHash === runner.operation_prompt_hash;
     const received = runner.operation_receipt_user_id || (accepted ? turn.userId : null);
     if (received) {
-      // A later human turn also keeps us working; only a measured idle boundary
-      // can release this receipt, never a tool's completion or timeout.
-      const status = turn.state === 'idle' ? 'ended' : 'confirmed';
-      getDb().prepare("UPDATE infinite_runners SET operation_receipt_user_id = ?, operation_status = ?, operation_confirmed_at = COALESCE(operation_confirmed_at, ?), last_reason = CASE WHEN stop_cause = 'usage_exhausted' AND enabled = 0 THEN last_reason ELSE NULL END WHERE id = ? AND run_generation = ? AND operation_id = ? AND operation_status IN ('pending','unconfirmed','confirmed')")
-        .run(received, status, new Date().toISOString(), runner.id, runner.run_generation, runner.operation_id);
+      const runtime = runnerTransition.getRuntime(runner.id);
+      const op = runtime?.operation_id && getDb().prepare('SELECT status FROM runner_operations WHERE id = ? AND runner_id = ?').get(runtime.operation_id, runner.id);
+      if (runtime?.operation_id === runner.operation_id && ['dispatching', 'awaiting_receipt'].includes(runtime.state) &&
+          ['dispatching', 'awaiting_receipt'].includes(op?.status)) {
+        try {
+          runnerTransition.applyReceipt(runner.id, { actor: 'worker-observer', details: { operationId: runtime.operation_id, receiptInputId: received } });
+        } catch (error) {
+          if (error.code !== 'runner_transition_invalid' && error.code !== 'runner_operation_superseded') throw error;
+        }
+      }
+      const afterReceipt = runnerTransition.getRuntime(runner.id);
+      const activeOp = afterReceipt?.operation_id && getDb().prepare('SELECT status FROM runner_operations WHERE id = ? AND runner_id = ?').get(afterReceipt.operation_id, runner.id);
+      if (turn.state === 'idle' && afterReceipt?.state === 'running' && afterReceipt.operation_id === runner.operation_id && activeOp?.status === 'running') {
+        try {
+          runnerTransition.applyTurnCompleted(runner.id, { actor: 'worker-observer', details: { operationId: afterReceipt.operation_id, receiptInputId: received } });
+        } catch (error) {
+          if (error.code !== 'runner_transition_invalid' && error.code !== 'runner_operation_superseded') throw error;
+        }
+      }
     }
   }
   return getRunner(runner.id);
@@ -3779,7 +4152,12 @@ function observeRunnerTurn(runner, session, turn) {
 async function canDispatch(runnerId, { session, project, agent, queue, kind, gen }) {
   let fresh = getRunner(runnerId);
   const explicit = kind === 'start';
-  if (!fresh || (!fresh.enabled && !explicit) || fresh.run_generation !== gen) {
+  const quotaRecovery = kind === 'quota-recovery';
+  const runtime = runnerTransition.getRuntime(runnerId);
+  const runtimeEligible = runtime && (runtime.state === 'running' ||
+    (explicit && ['paused', 'held', 'complete'].includes(runtime.state)) ||
+    (quotaRecovery && runtime.state === 'waiting_input'));
+  if (!fresh || !runtimeEligible || fresh.run_generation !== gen) {
     return { allowed: false, reason: 'runner disabled or generation stale', freshRunner: fresh };
   }
   // Plan 91 §Phase 4: a custom prompt cannot bypass eligibility, and a broken
@@ -3804,30 +4182,46 @@ async function canDispatch(runnerId, { session, project, agent, queue, kind, gen
 
 /**
  * Atomic ownership acquisition for a dispatch.
- * Uses a unique constraint on (runnerId, operation_id) via operation_generation
- * to ensure only one tick/request can claim a generation.
+ * The canonical runtime CAS is the only operation-owner constraint. Legacy
+ * operation columns are not written; runner_operations owns attempt facts.
  * Returns the new operationId if acquired, null if another tick won.
  */
 function acquireDispatchOwnership(runnerId, gen, kind, queueHash, session, message, baselineUserId) {
   const fresh = getRunner(runnerId);
   const explicit = kind === 'start';
-  if (!fresh || (!fresh.enabled && !explicit) || fresh.run_generation !== gen) return null;
-  const operationGeneration = (fresh.operation_generation || 0) + 1;
-  const operationId = crypto.randomUUID();
+  const quotaRecovery = kind === 'quota-recovery';
+  if (!fresh || fresh.run_generation !== gen) return null;
+  const runtime = runnerTransition.getRuntime(runnerId);
+  const transitionEvent = quotaRecovery ? 'quota_recovery' : runtime?.state === 'running' ? 'dispatch_next' : 'run';
+  if (!runtime || (explicit ? !['paused', 'held', 'complete', 'running'].includes(runtime.state)
+      : quotaRecovery ? runtime.state !== 'waiting_input' : runtime.state !== 'running')) return null;
+  const operationId = `rop_${crypto.randomUUID()}`;
+  let transitionResult;
   const nowIso = new Date().toISOString();
   const db = getDb();
-  // Atomic check-and-set: only succeeds if operation_generation matches expected
-  // and no concurrent tick already incremented it.
-  const result = db.prepare(
-    `UPDATE infinite_runners SET
-      operation_id = ?, operation_generation = ?, operation_status = 'pending', operation_started_at = ?,
-      operation_session_id = ?, operation_prompt_hash = ?, operation_baseline_user_id = ?, operation_receipt_user_id = NULL,
-      last_dispatch_at = ?, last_nudge_at = ?, last_dispatch_revision = ?, retry_count = ?,
-      run_generation = ?, updated_at = ? WHERE id = ? AND run_generation = ? AND (enabled = 1 OR ?)
-      AND operation_generation = ? AND operation_status NOT IN ('pending', 'unconfirmed', 'confirmed')`
-  ).run(operationId, operationGeneration, nowIso, session.agent_session_id, crypto.createHash('sha256').update(message.trimEnd()).digest('hex'), baselineUserId || null, nowIso, nowIso, queueHash || null, kind === 'retry' ? fresh.retry_count + 1 : fresh.retry_count, explicit ? gen + 1 : gen, nowIso, runnerId, gen, explicit ? 1 : 0, fresh.operation_generation || 0);
-  if (result.changes === 0) return null; // Another tick won the race or gates failed
-  return { operationId, operationGeneration, gen: explicit ? gen + 1 : gen };
+  const operationGeneration = runtime.generation + 1;
+  const tx = db.transaction(() => {
+    transitionResult = runnerTransition.applyEvent(runnerId, transitionEvent, {
+      actor: 'mission', details: {
+        operationId, conversationId: session.agent_session_id,
+        itemId: queueHash && runnerQueue.snapshot(runnerId).summary.current?.id || runnerQueue.snapshot(runnerId).summary.next?.id,
+        promptHash: crypto.createHash('sha256').update(message.trimEnd()).digest('hex'),
+        baselineInputId: baselineUserId || null,
+        deadlineAt: new Date(Date.now() + RUNNER_NO_RESPONSE_TIMEOUT_MS).toISOString(),
+      },
+    });
+    const result = db.prepare(`UPDATE infinite_runners SET last_dispatch_at = ?, last_nudge_at = ?,
+      last_dispatch_revision = ?, retry_count = ?, updated_at = ? WHERE id = ?`)
+      .run(nowIso, nowIso, queueHash || null, kind === 'retry' ? fresh.retry_count + 1 : fresh.retry_count,
+        nowIso, runnerId);
+    if (!result.changes) throw new MissionError('runner_dispatch_owned', 'Another instruction owns this runner.', 409);
+    return { operationId, operationGeneration, gen: transitionResult.runtime.generation, runtimeGeneration: transitionResult.runtime.generation };
+  });
+  try { return tx.immediate(); }
+  catch (e) {
+    if (e.code === 'runner_dispatch_owned') return null;
+    throw e;
+  }
 }
 
 async function ensureRunnerIndex(agent, project) {
@@ -3843,9 +4237,11 @@ async function ensureRunnerIndex(agent, project) {
 async function deliverRunnerInstruction(id, session, project, agent, queue, message, lease, baselineTurn, kind, actor) {
   const owns = () => {
     const r = getRunner(id);
-    return r && r.run_generation === lease.gen && r.operation_id === lease.operationId
-      && r.operation_status === 'pending' && r.session_id === session.id
-      && r.operation_session_id === session.agent_session_id && (kind === 'start' || r.enabled);
+    const runtime = runnerTransition.getRuntime(id);
+    return r && runtime && runtime.state === 'dispatching' && runtime.operation_id === lease.operationId
+      && runtime.generation === lease.runtimeGeneration
+      && r.run_generation === lease.gen && r.session_id === session.id
+      && r.operation_session_id === session.agent_session_id;
   };
   const beforeWrite = () => {
     if (!owns() || getSession(session.id)?.locked) throw new MissionError('runner_dispatch_superseded', 'Dispatch cancelled by Pause/Close, lock or newer operation', 409);
@@ -3871,48 +4267,65 @@ async function deliverRunnerInstruction(id, session, project, agent, queue, mess
   };
   try {
     const result = await sendText(session.id, message, { actor, beforeWrite });
+    if (!owns()) return null;
     const observed = agentStore.readTurn(agent, session.agent_session_id);
-    // Transition from dispatching (pending) to running (confirmed) via receipt event
-    try {
-      const receiptResult = await runnerTransition.applyReceipt(id, { actor, details: { operationId: lease.operationId, receiptUserId: observed.userId } });
-      if (receiptResult?.markerRequired !== undefined) {
-        syncQueuePausedMarker(id, receiptResult.markerRequired);
-      }
-    } catch (e) {
-      if (e.code !== 'runner_transition_invalid') throw e;
+    const expectedHash = crypto.createHash('sha256').update(message.trimEnd()).digest('hex');
+    if (!observed.userId || observed.userId === baselineTurn.userId || observed.inputHash !== expectedHash) {
+      throw new MissionError('mission_send_unconfirmed', 'Instruction written, but its exact input receipt has not been observed; no resend made.', 409, { attempted: true, acceptance: 'unknown' });
     }
-    const changed = getDb().prepare("UPDATE infinite_runners SET operation_status = 'confirmed', operation_confirmed_at = ?, operation_receipt_user_id = ?, worker_state = ?, scheduler_decision = 'wait_turn_end', scheduler_reason = 'Waiting for current turn', last_reason = NULL WHERE id = ? AND run_generation = ? AND operation_id = ? AND operation_status = 'pending'")
-      .run(new Date().toISOString(), observed.userId || null, observed.state, id, lease.gen, lease.operationId);
-    return changed.changes ? result : null;
+    // Confirm the exact owned row once. A state helper that sets confirmed
+    // before this pending-only CAS makes a successful delivery look superseded.
+    const commitReceipt = getDb().transaction(() => {
+      runnerTransition.applyReceipt(id, { actor, details: { operationId: lease.operationId, receiptInputId: observed.userId } });
+      const changed = getDb().prepare("UPDATE infinite_runners SET worker_state = ?, scheduler_decision = 'wait_turn_end', scheduler_reason = 'Waiting for current turn', updated_at = ? WHERE id = ? AND run_generation = ?")
+        .run(observed.state, new Date().toISOString(), id, lease.gen);
+      if (!changed.changes) throw new MissionError('runner_dispatch_superseded', 'Receipt lost operation ownership.', 409);
+    });
+    commitReceipt.immediate();
+    return result;
   } catch (e) {
+    if (!owns()) return null;
     const status = e.acceptance === 'unknown' || e.attempted || !e.code ? 'unconfirmed' : 'ended';
     runnerHistory.record(getRunner(id), status === 'unconfirmed' ? 'delivery_unconfirmed' : 'dispatch_failed', { key: `${lease.operationId}:delivery-error`, severity: 'warning', code: e.code || 'delivery_unknown', reason: status === 'unconfirmed' ? 'A write was attempted; automatic resend withheld while waiting for receipt.' : 'Instruction was withheld before acceptance.' });
     // Transition from dispatching (pending) to awaiting_receipt (unconfirmed) via delivery_unknown event
     if (status === 'unconfirmed') {
-      try {
-        const duResult = await runnerTransition.applyDeliveryUnknown(id, { actor, details: { operationId: lease.operationId } });
-        if (duResult?.markerRequired !== undefined) {
-          syncQueuePausedMarker(id, duResult.markerRequired);
-        }
-      } catch (te) {
-        if (te.code !== 'runner_transition_invalid') throw te;
+      // Keep supervision observing the outstanding attempt, including startup.
+      // This authorizes receipt reconciliation, never another send.
+      runnerTransition.applyDeliveryUnknown(id, { actor, details: { operationId: lease.operationId, reason: 'exact receipt not observed' } });
+    } else {
+      const currentRuntime = runnerTransition.getRuntime(id);
+      if (currentRuntime?.state === 'dispatching' && currentRuntime.operation_id === lease.operationId) {
+        runnerTransition.applyPause(id, { actor, details: { reason: e.message } });
+        runnerTransition.setReason(id, e.code || 'dispatch_failed', e.message);
       }
     }
-    getDb().prepare("UPDATE infinite_runners SET operation_status = ?, last_reason = ? WHERE id = ? AND run_generation = ? AND operation_id = ? AND operation_status = 'pending'")
-      .run(status, status === 'unconfirmed' ? 'Instruction delivery unconfirmed — automatic resend withheld; waiting for the exact input receipt' : e.message, id, lease.gen, lease.operationId);
+    syncQueuePausedMarker(id, runnerTransition.markerRequired(runnerTransition.getRuntime(id).state));
     throw e;
   }
 }
 async function reconcileRunnerOperation(runnerId, { actor = null } = {}) {
   const runner = getRunner(runnerId);
   if (!runner) throw new MissionError('runner_not_found', `Runner ${runnerId} not found`);
+  const { project, agent, session, queue } = await getRunnerForSupervision(runnerId);
+  if (queue.condition !== 'ok') {
+    throw new MissionError('runner_invalid_queue', queue.error || 'Regenerate the queue projection before reconciling.');
+  }
+  const runtime = runnerTransition.getRuntime(runnerId);
+  if (runtime?.state === 'held') {
+    const heldOperation = runner.operation_id && getDb().prepare('SELECT * FROM runner_operations WHERE id = ? AND runner_id = ? AND status = \'held\'').get(runner.operation_id, runnerId);
+    if (!heldOperation || !session || session.agent_session_id !== heldOperation.conversation_id) {
+      throw new MissionError('runner_held_operation_missing', 'Held operation evidence is unavailable; Run will create a fresh operation.');
+    }
+    const heldTurn = agentStore.readTurn(agent, session.agent_session_id);
+    const receiptObserved = !!(heldTurn.userId && heldTurn.userId !== heldOperation.baseline_input_id && heldTurn.inputHash === heldOperation.prompt_hash);
+    runnerHistory.record(runner, 'reconciled_held', { actor: actor || 'user', key: `${heldOperation.id}:held-inspected`, reason: receiptObserved ? 'Late exact receipt observed after Hold; authorization remains revoked.' : 'No exact receipt found; operation remains held.' });
+    return { reconciled: true, held: true, receiptObserved, resumed: false, reason: 'Hold remains in force. Use Run fresh to authorize a new operation.' };
+  }
   if (!['pending', 'unconfirmed', 'confirmed'].includes(runner.operation_status)) {
     throw new MissionError('runner_no_pending_operation', `No pending operation to reconcile (status: ${runner.operation_status})`);
   }
   if (!runner.session_id) throw new MissionError('runner_no_session', 'Runner has no bound session');
   if (!runner.operation_session_id) throw new MissionError('runner_no_operation_session', 'Operation has no bound conversation');
-
-  const { project, agent, session } = await getRunnerForSupervision(runnerId);
   if (!session) throw new MissionError('runner_no_session', 'Runner session not found');
   if (session.agent_session_id !== runner.operation_session_id) {
     throw new MissionError('runner_identity_changed', 'Worker conversation changed — operation invalidated');
@@ -3927,35 +4340,42 @@ async function reconcileRunnerOperation(runnerId, { actor = null } = {}) {
   const nowIso = new Date().toISOString();
 
   if (matched) {
-    // Exact receipt found — confirm the operation and enable supervision via receipt transition
-    try {
-      const receiptResult = await runnerTransition.applyReceipt(runnerId, { actor, details: { operationId: runner.operation_id, receiptUserId: turn.userId } });
-      if (receiptResult?.markerRequired !== undefined) {
-        syncQueuePausedMarker(runnerId, receiptResult.markerRequired);
+    const operation = getDb().prepare('SELECT * FROM runner_operations WHERE id = ? AND runner_id = ?').get(runner.operation_id, runnerId);
+    if (operation?.operation_kind === 'resolution') {
+      const queueSnapshot = runnerQueue.snapshot(runnerId);
+      const target = queueSnapshot.items.find((item) => item.id === operation.item_id);
+      if (target?.status === 'need_input') {
+        if (queueSnapshot.revision !== operation.queue_revision) {
+          throw new MissionError('queue_revision_conflict', 'The queue changed after the answer was delivered; review the blocked item before continuing.');
+        }
+        await updateRunnerQueueItem(runnerId, target.id, { status: 'new', reason: '' }, queueSnapshot.revision, { actor, source: 'resolution' });
       }
-    } catch (e) {
-      if (e.code !== 'runner_transition_invalid') throw e;
     }
-    const status = turn.state === 'idle' ? 'ended' : 'confirmed';
-    getDb().prepare(
-      `UPDATE infinite_runners SET operation_receipt_user_id = ?, operation_status = ?, operation_confirmed_at = COALESCE(operation_confirmed_at, ?),
-        enabled = 1, control_state = 'enabled', pause_mode = NULL, pause_state = 'none',
-        pause_target_item = NULL, pause_requested_at = NULL,
-        scheduler_decision = 'wait_turn_end', scheduler_reason = 'Reconciled — instruction confirmed',
-        last_reason = NULL, updated_at = ?
-      WHERE id = ? AND run_generation = ? AND operation_id = ? AND operation_status IN ('pending','unconfirmed','confirmed')`
-    ).run(turn.userId, status, nowIso, nowIso, runnerId, runner.run_generation, runner.operation_id);
+    const receiptResult = runnerTransition.applyReceipt(runnerId, { actor, details: { operationId: runner.operation_id, receiptInputId: turn.userId } });
+    if (turn.state === 'idle') {
+      runnerTransition.applyTurnCompleted(runnerId, { actor, details: { operationId: runner.operation_id, receiptInputId: turn.userId } });
+    }
+    syncQueuePausedMarker(runnerId, receiptResult.markerRequired);
+    getDb().prepare(`UPDATE infinite_runners SET pause_mode = NULL, pause_state = 'none',
+      pause_target_item = NULL, pause_requested_at = NULL, scheduler_decision = 'wait_turn_end',
+      scheduler_reason = 'Reconciled — instruction confirmed', updated_at = ? WHERE id = ?`)
+      .run(nowIso, runnerId);
     runnerHistory.record(runner, 'reconciled_confirmed', { actor: actor || 'user', key: `${runner.operation_id}:receipt`, receiptUserId: turn.userId });
+    if (operation?.operation_kind === 'resolution') {
+      getDb().prepare(`UPDATE runner_resolutions SET status = 'completed', delivered_at = COALESCE(delivered_at, ?),
+        requeued_at = COALESCE(requeued_at, ?), resumed_at = ? WHERE runner_id = ? AND item_id = ? AND status IN ('pending','awaiting_receipt')`)
+        .run(nowIso, nowIso, nowIso, runnerId, operation.item_id);
+    }
     return { reconciled: true, confirmed: true, receiptUserId: turn.userId, workerState: turn.state };
   }
 
   // No exact receipt yet — check if we should hold the operation
-  const sentAt = Date.parse(runner.operation_started_at);
+  const deadline = Date.parse(runner.operation_deadline_at);
   const noResponseTimeout = 10 * 60 * 1000; // RUNNER_NO_RESPONSE_TIMEOUT_MS
   const unanswered = turn.state === 'idle'
     && !runner.operation_receipt_user_id
-    && Number.isFinite(sentAt)
-    && (Date.now() - sentAt) > noResponseTimeout;
+    && Number.isFinite(deadline)
+    && Date.now() >= deadline;
 
   if (unanswered) {
     // Terminal expiry without a receipt — hold the operation via hold transition
@@ -3967,13 +4387,8 @@ async function reconcileRunnerOperation(runnerId, { actor = null } = {}) {
     } catch (e) {
       if (e.code !== 'runner_transition_invalid') throw e;
     }
-    getDb().prepare(
-      `UPDATE infinite_runners SET operation_status = 'held', last_reason = ?, updated_at = ?
-        WHERE id = ? AND run_generation = ? AND operation_id = ? AND operation_status IN ('pending','unconfirmed','confirmed')`
-    ).run(
-      `No worker response within ${Math.round(noResponseTimeout / 60000)} minutes of the sent instruction — it may never have arrived. Operation held; no resend was made. Check the conversation and Run again.`,
-      nowIso, runnerId, runner.run_generation, runner.operation_id
-    );
+    runnerTransition.setReason(runnerId, 'operation_timeout',
+      `No worker response within ${Math.round(noResponseTimeout / 60000)} minutes of the sent instruction — no resend was made.`);
     runnerHistory.record(runner, 'reconciled_held', { actor: actor || 'user', key: `${runner.operation_id}:held`, reason: 'timeout' });
     syncQueuePausedMarker(runnerId, true);
     return { reconciled: true, confirmed: false, held: true, reason: 'timeout' };
@@ -4002,16 +4417,25 @@ async function recoverWorkerSession(runnerId, gen, project, deadSession) {
   if (!lease) return;
   const beforeLaunch = () => {
     const fresh = getRunner(runnerId);
-    if (!fresh?.enabled || fresh.run_generation !== gen || fresh.operation_id !== lease.operationId || fresh.operation_status !== 'pending') throw new MissionError('runner_dispatch_superseded', 'Recovery cancelled by Pause/Close', 409);
+    const currentRuntime = runnerTransition.getRuntime(runnerId);
+    if (!fresh || !currentRuntime || currentRuntime.state !== 'dispatching' || currentRuntime.operation_id !== lease.operationId ||
+        fresh.run_generation !== lease.gen || currentRuntime.generation !== lease.runtimeGeneration) {
+      throw new MissionError('runner_dispatch_superseded', 'Recovery cancelled by Pause/Close', 409);
+    }
   };
   try {
     beforeLaunch();
-    getDb().prepare('UPDATE infinite_runners SET recovery_count = recovery_count + 1 WHERE id = ? AND run_generation = ? AND operation_id = ?').run(runnerId, gen, lease.operationId);
+    getDb().prepare('UPDATE infinite_runners SET recovery_count = recovery_count + 1 WHERE id = ? AND run_generation = ?').run(runnerId, lease.gen);
     await restartSession(deadSession.id, { actor: 'runner', beforeLaunch });
-    runnerHistory.record(getRunner(runnerId), 'worker_restored', { key: `worker-restored:${gen}:${getRunner(runnerId).recovery_count}` });
+    runnerHistory.record(getRunner(runnerId), 'worker_restored', { key: `worker-restored:${lease.gen}:${getRunner(runnerId).recovery_count}` });
     await deliverRunnerInstruction(runnerId, getSession(deadSession.id), project, sup.agent, can.queue, recoveryMsg, lease, can.turn, 'recovery', 'runner');
   } catch (e) {
-    getDb().prepare("UPDATE infinite_runners SET operation_status = 'ended', last_reason = ? WHERE id = ? AND run_generation = ? AND operation_id = ? AND operation_status = 'pending'").run(e.message, runnerId, gen, lease.operationId);
+    const runtime = runnerTransition.getRuntime(runnerId);
+    if (runtime?.state === 'dispatching' && runtime.operation_id === lease.operationId) {
+      runnerTransition.applyPause(runnerId, { actor: 'worker-recovery', details: { reason: e.message } });
+      runnerTransition.setReason(runnerId, 'worker_recovery_failed', e.message);
+      syncQueuePausedMarker(runnerId, true);
+    }
   }
 }
 
@@ -4073,8 +4497,8 @@ module.exports = {
   newRunnerId,
   createRunner,
   getRunner,
+  publicRunner,
   getActiveRunnerForProject,
-  getActiveRunnerForAgent,
   listRunnersForProject,
   listAllRunners,
   updateRunner,
@@ -4083,7 +4507,6 @@ module.exports = {
   setRunnerEnabled,
   setRunnerReason,
   runnerContainerPaths,
-  incrementRunGeneration,
   pauseConfirmation,
   getRunnerForSupervision,
   startRunner,
@@ -4093,6 +4516,7 @@ module.exports = {
   resolveRunnerQueue,
   reconcileRunnerOperation,
   reconcileRunners,
+  reconcileQueuePublications,
   runnerWatchTick,
   runnerWatchOnce,
   readRunnerQueue,

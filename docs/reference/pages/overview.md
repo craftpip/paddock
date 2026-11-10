@@ -454,6 +454,15 @@ function) for a human sentence and carries the raw reason in the row's `title`
 — the raw string stays reachable on hover. The same translation can be reused
 anywhere a backend error string needs to become UI prose.
 
+**Infinite runner Queue and History share the terminal column.** The runner panel
+keeps status/current-plan context above Queue and History tabs. The URL's
+`runnerTab=history` selects a durable newest-first event journal without changing
+the open Mission session or remounting its terminal. Recovery/callback steps group
+by attempt id; filters and cursor paging do not rebuild older activity from current
+state. At narrow widths the History view overlays the Mission columns while keeping
+the underlying terminal mounted. See [Runner History](../components/runner-history.md)
+for the journal/API contract.
+
 ## Frontend Conventions and Gotchas
 
 - **Tooltips are the shared `Tooltip` primitive, never a native `title`**

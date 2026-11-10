@@ -65,6 +65,9 @@ describe('MCP Server - Handshake', () => {
     assert.ok(names.includes('help'), 'has help (the LLM usage guide)');
     assert.ok(names.includes('agent_commands'), 'has agent_commands (Set B catalog)');
     assert.ok(!names.includes('web_get'), 'no standalone web_get tool');
+    for (const queueTool of ['agent_queue_read', 'agent_queue_update_item', 'agent_queue_reorder', 'agent_queue_resolve_need_input']) {
+      assert.ok(names.includes(queueTool), `${queueTool} is registered on the SDK tool list`);
+    }
   });
 
   it('recreate carries the consolidated settings schema', async () => {

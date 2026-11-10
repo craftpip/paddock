@@ -201,7 +201,16 @@ describe('plan 91 — shipped defaults', () => {
     assert.match(renderTemplate(DEFAULT_TEMPLATES.continue, SAMPLE), /QUEUE\.paused.*does not exist/);
     assert.match(renderTemplate(DEFAULT_TEMPLATES.recovery, SAMPLE), /resumes the same conversation/);
     assert.match(renderTemplate(DEFAULT_TEMPLATES.pause, SAMPLE), /12-thing\.md/);
-    assert.match(renderTemplate(DEFAULT_TEMPLATES.pause, SAMPLE), /keep its queue item "in progress"/);
+    // Preserve the checkpoint, now using the server API's canonical enum.
+    assert.match(renderTemplate(DEFAULT_TEMPLATES.pause, SAMPLE), /keep its server queue item in_progress/);
+    assert.match(renderTemplate(DEFAULT_TEMPLATES.pause, SAMPLE), /Never edit .*QUEUE\.md/);
+  });
+
+  it('names queue tools with the Paddock MCP namespace exposed to OpenCode', () => {
+    for (const key of ['start', 'resume', 'continue', 'recovery']) {
+      assert.match(DEFAULT_TEMPLATES[key], /paddock_agent_queue_read/);
+      assert.match(DEFAULT_TEMPLATES[key], /paddock_agent_queue_update_item/);
+    }
   });
 
   it('the catalogue documents every variable the defaults use', () => {

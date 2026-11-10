@@ -2,6 +2,7 @@ const { promisify } = require('node:util');
 const { execFile } = require('node:child_process');
 const { getDb } = require('./db');
 const history = require('./runner-history');
+const runnerTransition = require('./runner-transition');
 const exec = promisify(execFile);
 
 function isRecovery(row) {
@@ -19,8 +20,9 @@ async function begin(row, { inspect = containerId } = {}) {
   if (!isRecovery(row)) return null;
   const db = getDb();
   const runner = db.prepare('SELECT * FROM infinite_runners WHERE id = ?').get(row.runner_id);
+  const runtime = runner && runnerTransition.getRuntime(row.runner_id);
   const session = runner && db.prepare('SELECT * FROM mission_sessions WHERE id = ?').get(runner.session_id);
-  if (!runner || !session?.agent_session_id || runner.enabled || runner.stop_cause !== 'usage_exhausted') {
+  if (!runner || !runtime || runtime.state !== 'waiting_input' || runtime.reason_code !== 'usage_exhausted' || !session?.agent_session_id) {
     throw new Error('Quota recovery requires the stopped runner and its original conversation');
   }
   const previous = db.prepare('SELECT * FROM runner_quota_recoveries WHERE event_id = ?').get(row.id);
@@ -30,7 +32,7 @@ async function begin(row, { inspect = containerId } = {}) {
   db.prepare(`INSERT INTO runner_quota_recoveries
     (event_id, runner_id, session_id, conversation_id, generation, container_id, status, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, 'script_running', ?)`)
-    .run(row.id, row.runner_id, session.id, session.agent_session_id, runner.run_generation, id, new Date().toISOString());
+    .run(row.id, row.runner_id, session.id, session.agent_session_id, runtime.generation, id, new Date().toISOString());
   return db.prepare('SELECT * FROM runner_quota_recoveries WHERE event_id = ?').get(row.id);
 }
 
@@ -48,7 +50,8 @@ async function complete(row, context, outcome, { inspect = containerId, resume }
   if (!claim.changes) return;
   try {
     const runner = db.prepare('SELECT * FROM infinite_runners WHERE id = ?').get(context.runner_id);
-    if (!runner || runner.run_generation !== context.generation || runner.enabled || runner.stop_cause !== 'usage_exhausted') {
+    const runtime = runner && runnerTransition.getRuntime(context.runner_id);
+    if (!runner || !runtime || runtime.generation !== context.generation || runtime.state !== 'waiting_input' || runtime.reason_code !== 'usage_exhausted') {
       throw new Error('Recovery cancelled by a newer runner control action');
     }
     const after = await inspect(row.agent_name);
@@ -61,8 +64,10 @@ async function complete(row, context, outcome, { inspect = containerId, resume }
   } catch (e) {
     settle('failed', e.message);
     history.record({ id: row.runner_id, session_id: context.session_id }, 'recovery_failed', { groupId: row.id, key: `${row.id}:recovery-result`, severity: 'warning', code: e.code || 'recovery_failed', reason: 'Recovery stopped; the session was not blindly resent' });
-    db.prepare('UPDATE infinite_runners SET last_reason = ? WHERE id = ? AND enabled = 0 AND run_generation = ?')
-      .run(`Quota recovery stopped: ${e.message}`, context.runner_id, context.generation);
+    const runtime = runnerTransition.getRuntime(context.runner_id);
+    if (runtime?.state === 'waiting_input' && runtime.generation === context.generation) {
+      runnerTransition.setReason(context.runner_id, 'quota_recovery_failed', `Quota recovery stopped: ${e.message}`);
+    }
   }
 }
 

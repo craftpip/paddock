@@ -1278,6 +1278,30 @@ describe('Mission - send refuses what it cannot type into (plan 62 1b/1c/1h)', (
     );
   });
 
+  it('confirms from the exact conversation store when a live TUI accepts input without repainting', async () => {
+    const agentStore = require('../services/agent-store');
+    const originalReadActivity = agentStore.readActivity;
+    let reads = 0;
+    const p = mission.createProject({ name: 'quiet-store-receipt', agent: 'pad-msn-oc', folder: '/www1/a' });
+    const s = mission.createSession(p.id, { tmuxId: 'msn-7777ffff', agentSessionId: 'ses_quiet_store' });
+    screenText = 'stable TUI screen';
+    padTmux.sendText = async () => { typed++; return { lines: 1 }; };
+    agentStore.readActivity = async () => ({
+      store: { path: '/fixture/opencode.db', available: true },
+      lastActivityAt: reads++ === 0 ? '2026-10-23T07:00:00.000Z' : '2026-10-23T07:00:01.000Z',
+    });
+    try {
+      const result = await mission.sendText(s.id, 'read the queue');
+      assert.equal(typed, 1);
+      assert.equal(result.confirmed, true);
+      assert.equal(result.acceptance, 'confirmed');
+      assert.equal(result.screen, screenText, 'the pane did not repaint, but the conversation store proved acceptance');
+      assert.ok(reads >= 2, 'the store baseline and post-write activity were both read');
+    } finally {
+      agentStore.readActivity = originalReadActivity;
+    }
+  });
+
   // 1f: two clocks. `last_seen_at` moves because someone LOOKED; `last_output_at`
   // moves because the agent PRODUCED something. A caller asking "is it still
   // working?" needs the second one, and a field that moved on every read would

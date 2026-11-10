@@ -2,6 +2,11 @@ const { getDb } = require('./db');
 
 const TYPES = {
   history_started: ['control', 'History recording started'],
+  runner_created: ['control', 'Runner created'],
+  runner_removed: ['control', 'Runner removed'],
+  plan_added: ['plans', 'Plan added to queue'],
+  plan_removed: ['plans', 'Plan removed from queue'],
+  queue_reordered: ['plans', 'Queue order changed'],
   run_requested: ['control', 'Run requested'],
   runner_started: ['control', 'Queue supervision started'],
   run_failed: ['control', 'Run could not start'],

@@ -97,8 +97,7 @@ describe('Plan 97: computeSchedulerState - core dispatch decision logic', () => 
   it('returns wait_turn_end when worker turn is running (resolution race)', () => {
     const runner = {
       id: 'runner-test',
-      enabled: 1,
-      control_state: 'enabled',
+      canonicalState: 'running',
       run_generation: 1,
       idle_grace_ms: 120000,
       min_nudge_interval_ms: 120000,
@@ -142,8 +141,7 @@ describe('Plan 97: computeSchedulerState - core dispatch decision logic', () => 
   it('returns dispatch when worker turn is idle and queue has work', () => {
     const runner = {
       id: 'runner-test',
-      enabled: 1,
-      control_state: 'enabled',
+      canonicalState: 'running',
       run_generation: 1,
       idle_grace_ms: 120000,
       min_nudge_interval_ms: 120000,
@@ -187,8 +185,7 @@ describe('Plan 97: computeSchedulerState - core dispatch decision logic', () => 
 it('returns wait_idle_grace when worker just finished and idle grace has not elapsed', () => {
     const runner = {
       id: 'runner-test',
-      enabled: 1,
-      control_state: 'enabled',
+      canonicalState: 'running',
       run_generation: 1,
       idle_grace_ms: 120000,
       min_nudge_interval_ms: 120000,

@@ -28,6 +28,13 @@ it('journal survives reopening, preserves actors and dates, and excludes other r
   assert.equal(page.groups[0].events[0].title, 'Run requested');
 });
 
+it('an empty runner has a truthful first-use state without invented earlier events', () => {
+  const page = history.read('runner-never-observed');
+  assert.deepEqual(page.groups, []);
+  assert.equal(page.since, null);
+  assert.equal(page.nextCursor, null);
+});
+
 it('recovery steps stay together, event keys deduplicate, and cursor pages do not overlap', () => {
   history.record(a, 'recovery_requested', { groupId: 'cb-one', key: 'request-one' });
   history.record(a, 'script_started', { groupId: 'cb-one', key: 'start-one' });
@@ -96,6 +103,6 @@ it('a real pause action emits ordered request and dispatch-stop facts', async ()
   const runner = await mission.createRunner({ projectId: p.id, sessionId: 'msn-history', name: 'History runner' });
   await mission.pauseRunner(runner.id, { actor: 'user:alice' });
   const events = history.read(runner.id).groups.flatMap((g) => g.events).reverse();
-  assert.deepEqual(events.map((e) => e.type), ['pause_requested', 'pause_applied']);
-  assert.ok(events.every((e) => e.actor === 'user:alice'));
+  assert.deepEqual(events.map((e) => e.type), ['runner_created', 'pause_requested', 'pause_applied']);
+  assert.ok(events.filter((e) => e.type !== 'runner_created').every((e) => e.actor === 'user:alice'));
 });

@@ -34,7 +34,7 @@ docs/
 └── reference/                        ← technical reference
     ├── STYLE-GUIDE.md                ← how to write docs
     ├── overview/                     ← architecture, business logic, react migration
-    ├── backend/                      ← services, drivers, middleware, user management
+    ├── backend/                      ← services, Mission queue, drivers, middleware
     ├── pages/                        ← top-level page docs
     ├── tabs/                         ← one file per Agent Detail tab
     ├── components/                   ← stats, theme, ux
@@ -45,6 +45,12 @@ docs/
 
 URL views, popup history and read-only Mission restoration are documented in
 [URL navigation](reference/components/navigation.md).
+
+Infinite runner timeline behavior is documented in
+[Runner History](reference/components/runner-history.md).
+
+Canonical queue, execution and publication behavior is documented in
+[Mission Queue and Runner](reference/backend/mission-queue.md).
 
 Shell commands for PAD lifecycle and recovery scripts are in
 [Paddock command](reference/operations/paddock-cli.md).

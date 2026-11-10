@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 
-export default function RunnerSchedulerStatus({ runner, scheduler }) {
+export default function RunnerSchedulerStatus({ execution, scheduler }) {
   const [seconds, setSeconds] = useState(null)
   const timed = ['wait_idle_grace', 'wait_nudge_interval'].includes(scheduler?.schedulerDecision)
   const deadline = scheduler?.deadline
@@ -25,9 +25,9 @@ export default function RunnerSchedulerStatus({ runner, scheduler }) {
     return () => clearInterval(timer)
   }, [timed, deadline, observedAt])
 
-  const word = scheduler?.workerState || runner.worker_state || 'unknown'
-  let reason = scheduler?.reason || runner.scheduler_reason || 'Waiting for worker observation'
-  if (runner.control_state === 'finished') reason = 'Queue is done'
+  const word = scheduler?.workerState || 'unknown'
+  let reason = execution?.reason || scheduler?.reason || 'Waiting for worker observation'
+  if (execution?.state === 'complete') reason = 'Queue is done'
   if (timed && seconds !== null) {
     const label = scheduler.schedulerDecision === 'wait_idle_grace' ? 'Idle grace' : 'Nudge interval'
     const clock = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`

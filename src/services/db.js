@@ -403,6 +403,21 @@ function migrate(db) {
       created_at TEXT NOT NULL,
       FOREIGN KEY (queue_id) REFERENCES runner_queues(id) ON DELETE CASCADE
     );
+    CREATE TABLE IF NOT EXISTS runner_queue_event_cursors (
+      runner_id TEXT PRIMARY KEY,
+      last_event_rowid INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (runner_id) REFERENCES infinite_runners(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS detached_runner_queues (
+      project_id TEXT NOT NULL,
+      queue_file TEXT NOT NULL,
+      snapshot_json TEXT NOT NULL,
+      events_json TEXT NOT NULL,
+      detached_at TEXT NOT NULL,
+      PRIMARY KEY (project_id, queue_file),
+      FOREIGN KEY (project_id) REFERENCES mission_projects(id) ON DELETE CASCADE
+    );
     CREATE TABLE IF NOT EXISTS runner_transitions (
       id TEXT PRIMARY KEY,
       runner_id TEXT NOT NULL,
@@ -411,6 +426,61 @@ function migrate(db) {
       event TEXT NOT NULL,
       actor TEXT,
       details TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (runner_id) REFERENCES infinite_runners(id) ON DELETE CASCADE
+    );
+    -- Canonical execution authorization. Unlike historical runner configuration
+    -- and telemetry columns, this row alone decides whether work may dispatch.
+    CREATE TABLE IF NOT EXISTS runner_runtime (
+      runner_id TEXT PRIMARY KEY,
+      state TEXT NOT NULL CHECK (state IN ('paused','dispatching','awaiting_receipt','running','waiting_input','held','complete','projection_error')),
+      generation INTEGER NOT NULL DEFAULT 0,
+      operation_id TEXT,
+      reason_code TEXT,
+      reason TEXT,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (runner_id) REFERENCES infinite_runners(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS runner_operations (
+      id TEXT PRIMARY KEY,
+      runner_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      operation_kind TEXT,
+      conversation_id TEXT,
+      item_id TEXT,
+      queue_revision INTEGER,
+      prompt_hash TEXT,
+      baseline_input_id TEXT,
+      receipt_input_id TEXT,
+      status TEXT NOT NULL CHECK (status IN ('dispatching','awaiting_receipt','running','held','invalidated','completed')),
+      deadline_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (runner_id, generation),
+      FOREIGN KEY (runner_id) REFERENCES infinite_runners(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS runner_publications (
+      runner_id TEXT PRIMARY KEY,
+      desired_revision INTEGER NOT NULL DEFAULT 0,
+      desired_hash TEXT NOT NULL DEFAULT '',
+      acknowledged_revision INTEGER,
+      acknowledged_hash TEXT,
+      desired_marker INTEGER NOT NULL DEFAULT 1,
+      error TEXT,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (runner_id) REFERENCES infinite_runners(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS runner_publication_leases (
+      runner_id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      acquired_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      FOREIGN KEY (runner_id) REFERENCES infinite_runners(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS runner_projection_owners (
+      path TEXT PRIMARY KEY,
+      runner_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('projection','marker')),
       created_at TEXT NOT NULL,
       FOREIGN KEY (runner_id) REFERENCES infinite_runners(id) ON DELETE CASCADE
     );
@@ -610,6 +680,17 @@ function migrate(db) {
     ['marker_sync_error', 'TEXT'],
   ]) {
     if (!runnerCols.includes(col)) db.exec(`ALTER TABLE infinite_runners ADD COLUMN ${col} ${decl}`);
+  }
+  // Plan 114's operation attempts add two facts that did not exist in the
+  // earlier development table. Add columns only: historical rows are left NULL
+  // (unknown kind/revision), never reclassified from legacy flags or inferred
+  // metadata. New writes always supply these values through runner-transition.
+  const operationCols = db.prepare('PRAGMA table_info(runner_operations)').all().map((c) => c.name);
+  for (const [col, decl] of [
+    ['operation_kind', 'TEXT'],
+    ['queue_revision', 'INTEGER'],
+  ]) {
+    if (!operationCols.includes(col)) db.exec(`ALTER TABLE runner_operations ADD COLUMN ${col} ${decl}`);
   }
   // Plan 92 §Phase 3: past-run cwd display on history rows predating the column.
   const histCols = db.prepare('PRAGMA table_info(runner_callback_history)').all().map((c) => c.name);

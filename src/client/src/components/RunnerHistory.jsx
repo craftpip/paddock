@@ -39,7 +39,7 @@ function Event({ event }) {
   </div>
 }
 
-export default function RunnerHistory({ runnerId, active }) {
+export default function RunnerHistory({ runnerId, active, expanded }) {
   const [filter, setFilter] = useState('all')
   const [snapshot, setSnapshot] = useState(null)
   const [error, setError] = useState('')
@@ -97,7 +97,7 @@ export default function RunnerHistory({ runnerId, active }) {
   }
 
   let lastDay = ''
-  return <div className={`msn-history-panel min-h-0 flex-1 flex-col ${active ? 'flex' : 'hidden'}`} id="msn-runner-history" role="tabpanel" aria-labelledby="msn-history-tab">
+  return <div className={`msn-history-panel min-h-0 flex flex-col ${expanded ? 'flex-1' : 'max-h-[38vh] shrink-0'} ${active ? '' : 'hidden'}`} id="msn-runner-history" role="tabpanel" aria-labelledby="msn-history-tab">
     <div className="flex shrink-0 flex-wrap items-center gap-1 border-t border-line-faint px-3 py-2" aria-label="History filters">
       {FILTERS.map(([key, label]) => <Button key={key} size="bare" variant={filter === key ? 'primary' : 'ghost'} aria-pressed={filter === key} onClick={() => setFilter(key)} className="msn-history-filter px-2 py-1 text-[11px]">{label}</Button>)}
       <Button size="bare" variant="ghost" onClick={() => refresh(true)} className="msn-history-refresh ml-auto px-2 py-1 text-[11px]" disabled={loading}>Refresh</Button>

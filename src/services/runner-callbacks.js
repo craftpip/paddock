@@ -528,7 +528,7 @@ function observeQueue(runner, project, items, { queuePath = null } = {}) {
         const row = recordTransition(runner, project, 'plan_completed', item, effAttempt, queuePath);
         if (row && row.status === 'pending') recorded += 1;
       } else if (item.status === 'need input') {
-        history.record(runner, 'input_needed', { key: `input:${item.id}:${prev.last_seen_at}`, itemId: item.id, plan: item.plan, severity: 'warning', reason: item.reason });
+        history.record(runner, 'input_needed', { key: `input:${item.id}:${prev.last_seen_at}`, itemId: item.id, plan: item.plan, severity: 'warning' });
       } else if (item.status === 'new') {
         history.record(runner, 'plan_requeued', { key: `requeued:${item.id}:${prev.last_seen_at}`, itemId: item.id, plan: item.plan });
       }
@@ -536,6 +536,46 @@ function observeQueue(runner, project, items, { queuePath = null } = {}) {
       // the next in-progress observation emits the new start.
     }
     updObs.run(item.plan || null, item.status, attempt, now, startedAt, runner.id, item.id);
+  }
+  return recorded;
+}
+
+/** Replay canonical queue mutations in order, not just the latest file/queue
+ * snapshot. This preserves a fast in_progress -> done turn between polls. The
+ * callback outbox dedup keys make replay after a process crash safe. */
+function observeCanonicalEvents(runner, project, { queuePath = null } = {}) {
+  const db = getDb();
+  const queue = db.prepare('SELECT id FROM runner_queues WHERE runner_id = ?').get(runner.id);
+  if (!queue) return 0;
+  const savedCursor = db.prepare('SELECT last_event_rowid FROM runner_queue_event_cursors WHERE runner_id = ?').get(runner.id);
+  if (!savedCursor) {
+    // Existing canonical queues with no event cursor get a current-state
+    // baseline. Their historic events are not replayed as callbacks.
+    const baseline = db.prepare('SELECT id, position, plan, status, reason FROM runner_queue_items WHERE queue_id = ? ORDER BY position').all(queue.id)
+      .map((item) => ({ ...item, status: item.status.replaceAll('_', ' ') }));
+    observeQueue(runner, project, baseline, { queuePath });
+    const max = db.prepare('SELECT COALESCE(MAX(rowid), 0) AS rowid FROM runner_queue_events WHERE queue_id = ?').get(queue.id).rowid;
+    db.prepare('INSERT OR IGNORE INTO runner_queue_event_cursors (runner_id, last_event_rowid, updated_at) VALUES (?, ?, ?)')
+      .run(runner.id, max, new Date().toISOString());
+    return 0;
+  }
+  const cursor = savedCursor.last_event_rowid;
+  const rows = db.prepare('SELECT rowid AS event_rowid, * FROM runner_queue_events WHERE queue_id = ? AND rowid > ? ORDER BY rowid').all(queue.id, cursor);
+  let recorded = 0;
+  for (const row of rows) {
+    let snapshot = null;
+    try {
+      snapshot = row.after_json ? JSON.parse(row.after_json) : null;
+      if (!snapshot || !Array.isArray(snapshot.items)) throw new Error('Queue event has no valid after snapshot');
+    } catch (error) {
+      // Do not advance past an event whose durable facts cannot be decoded.
+      throw new CallbackError('queue_event_corrupt', `Queue event ${row.id} cannot be replayed: ${error.message}`);
+    }
+    const items = snapshot.items.map((item) => ({ ...item, status: item.status.replaceAll('_', ' ') }));
+    recorded += observeQueue(runner, project, items, { queuePath });
+    db.prepare(`INSERT INTO runner_queue_event_cursors (runner_id, last_event_rowid, updated_at)
+      VALUES (?, ?, ?) ON CONFLICT(runner_id) DO UPDATE SET last_event_rowid = excluded.last_event_rowid, updated_at = excluded.updated_at`)
+      .run(runner.id, row.event_rowid, new Date().toISOString());
   }
   return recorded;
 }
@@ -584,11 +624,14 @@ function observeUsage(runner, project, evidence, { busy = null, busyKnown = fals
     if (state !== 'exhausted') {
       seq += 1;
       state = 'exhausted';
-      history.record(runner, 'usage_exhausted', { key: `usage:${seq}`, severity: 'warning', reason: evidence.reason });
       const row = recordCallbackEvent(runner, project, 'usage_exhausted', {
         episodeKey: seq,
         usageReason: evidence.reason || 'Provider usage exhaustion',
         cwd: project.folder,
+      });
+      history.record(runner, 'usage_exhausted', {
+        key: `usage:${seq}`, groupId: row?.id || `${runner.id}:usage:${seq}`,
+        severity: 'warning', reason: evidence.reason,
       });
       if (row && row.status === 'pending') recorded = 1;
     }
@@ -629,5 +672,6 @@ module.exports = {
   launchCallback,
   reconcileCallbackOutbox,
   observeQueue,
+  observeCanonicalEvents,
   observeUsage,
 };

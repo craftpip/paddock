@@ -10,6 +10,7 @@ import { translateHistoryError } from '../lib/error-text'
 import { cx } from '../lib/cx'
 import { useAuth } from '../stores/auth'
 import { openMissionPopout } from '../lib/mission-popout'
+import { useToast } from '../lib/toast'
 
 // Col 2 — every conversation in this project, in ONE list.
 //
@@ -439,7 +440,7 @@ export default function SessionList() {
     fetchRunners, removeRunner, openRunnerSession,
   } = useMission()
 
-  const [actionError, setActionError] = useState('')
+  const toast = useToast()
   const project = useMission((s) => s.projects.find((p) => p.id === s.selectedProjectId))
   const confirm = useConfirm()
   const userId = useAuth((s) => s.userId)
@@ -460,11 +461,10 @@ export default function SessionList() {
   if (!project && !projects.length) return <Empty className="msn-no-project">Pick a project to see its sessions.</Empty>
 
   const run = async (fn, msg) => {
-    setActionError('')
     try {
       await fn()
     } catch (e) {
-      setActionError(e?.error || e?.message || msg)
+      toast.error(e?.error || e?.message || msg, { duration: 10000 })
     }
   }
 
@@ -501,22 +501,22 @@ export default function SessionList() {
   // Per-scope "has this list ever loaded" flag — the placeholder must not show
   // on a 15s refresh, and must still show on a first load.
   const listLoaded = isAll ? allLoaded : loadedFor === project?.id
-  // startSession already parks its failure in `sessionsError` (rendered below),
-  // so the click handler only has to swallow the rejection to keep it out of
-  // the console — re-reporting it here would print the same message twice.
+  // Starting a session is a user action: show a transient toast rather than
+  // turning its failure into a persistent list-level loading error.
   //
   // A history row is resumed in ITS OWN project, not in the one col 1 happens to
   // have selected — in the 'all' scope those differ, and resuming a conversation
   // in the wrong folder is the one mistake this view cannot make.
   const start = (opts, projectId) =>
-    startSession(projectId || project?.id || '', opts).catch(() => {})
+    startSession(projectId || project?.id || '', opts).catch((e) => {
+      toast.error(e?.error || e?.message || 'Could not start the session', { duration: 10000 })
+    })
   const popout = async (id) => {
-    setActionError('')
     try {
       await openMissionPopout(id, userId)
       useMission.getState().detachSession(id)
     } catch (e) {
-      setActionError(e?.message || 'Could not open the session popup')
+      toast.error(e?.message || 'Could not open the session popup', { duration: 10000 })
     }
   }
   // The key a start is filed under, so the column can tell WHOSE click is still
@@ -651,9 +651,6 @@ export default function SessionList() {
           independent switch inside the column was where the two scopes could
           disagree with each other. */}
 
-      {actionError && (
-        <div className="msn-error-bar border-b border-danger/30 bg-danger/10 px-3 py-1.5 text-[11px] text-danger">{actionError}</div>
-      )}
       {sessionsError && (
         <div className="msn-error-bar border-b border-danger/30 bg-danger/10 px-3 py-1.5 text-[11px] text-danger">{sessionsError}</div>
       )}

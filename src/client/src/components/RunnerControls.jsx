@@ -8,12 +8,11 @@ import { useMission } from '../stores/mission'
 // conversation and running its queue are separate actions: this never opens
 // anything, and reopening a paused conversation leaves its queue paused.
 //
-// Plan 86 §Phase 4b: Pause is a dropdown with exactly two explicit actions —
+// Pause is a dropdown with exactly two explicit actions —
 // "Pause before next task" (finish the current plan, then wait) and
 // "Pause current task" (ask the worker to stop at the earliest safe
-// checkpoint). The state word is derived from control_state AND the pending
-// pause request, so a pause that only reached the worker as a REQUEST never
-// reads as a confirmed "Paused" while the worker may still be developing.
+// checkpoint). Execution labels and action permission come from the server's
+// canonical queue snapshot; no client flag reconstruction is allowed.
 //
 // The Run queue control is disabled until the queue is actually runnable
 // (plan 86: a missing/empty/malformed queue can't run, and the panel explains
@@ -29,22 +28,13 @@ import { useMission } from '../stores/mission'
 //
 // Per plan 98: error display is centralized in the QueuePanel via
 // `operationFeedback`. This component is action controls only.
-const STATE_WORD = {
-  enabled: 'Running',
-  paused: 'Paused',
-  waiting: 'Waiting',
-  need_input: 'Need input',
-  finished: 'Complete',
-}
-
 export function requiresExplicitRecovery(runner, queue, queueForRunner) {
-  return runner?.control_state === 'enabled'
-    && queueForRunner === runner.id
+  return queueForRunner === runner?.id && queue?.execution?.state === 'running'
     && queue?.scheduler?.recoveryRequired === true
 }
 
 export function runnerIsRunning(runner, queue, queueForRunner) {
-  return runner?.control_state === 'enabled' && !requiresExplicitRecovery(runner, queue, queueForRunner)
+  return queueForRunner === runner?.id && queue?.execution?.canPause === true
 }
 
 export default function RunnerControls({ runner, onConfigure }) {
@@ -82,27 +72,22 @@ export default function RunnerControls({ runner, onConfigure }) {
 
   if (!runner) return null
   const landed = queue && queueForRunner === runner.id
-  const running = runnerIsRunning(runner, queue, queueForRunner)
-  // A pause that only reached the worker as a REQUEST is not a confirmed pause.
-  const pausePending = runner.control_state === 'paused' && runner.pause_state === 'requested'
-  const stateWord = recoveryRequired
-    ? 'Recovery required'
-    : pausePending
-    ? (runner.pause_mode === 'current_task' ? 'Pausing task' : 'Pausing')
-    : (STATE_WORD[runner.control_state] || runner.control_state)
+  const execution = landed ? queue.execution : null
+  const running = execution ? execution.canPause : runnerIsRunning(runner, queue, queueForRunner)
+  const stateWord = execution?.label || 'Loading runner state'
   // Run needs a queue that parses AND has work: `ok` with zero items is an
   // empty queue (Run does nothing), `missing` needs setup, `unreadable` /
   // `malformed` need repair. Only judge the queue actually landed for this
   // runner; before it lands, keep Run clickable and let the server validate.
   const runDisabled =
-    busy || (landed && (queue.condition !== 'ok' || !(queue.items || []).length))
-  const runTitle = landed && !runDisabled
+    busy || (execution ? !execution.canRun : (landed && (queue.condition !== 'ok' || !(queue.items || []).length)))
+  const runTitle = execution?.runReason || (landed && !runDisabled
     ? 'Run the queue on this session'
     : landed && queue.condition !== 'ok'
       ? `The queue ${queue.condition} — see the queue panel`
       : landed
         ? 'Add plans to the queue before running'
-        : 'Run the queue on this session'
+        : 'Run the queue on this session')
 
   const act = async (fn) => {
     if (busy) return
@@ -123,7 +108,7 @@ export default function RunnerControls({ runner, onConfigure }) {
     <span className="msn-runner-controls flex shrink-0 items-center gap-1.5">
       <span
         className="msn-runner-state shrink-0 rounded bg-accent/15 px-1 text-[9px] font-medium text-accent"
-        title={recoveryRequired ? queue.scheduler.reason : (runner.last_reason || `Queue ${stateWord}`)}
+        title={execution?.reason || `Queue ${stateWord}`}
       >
         ∞ {stateWord}
       </span>
@@ -187,7 +172,7 @@ export default function RunnerControls({ runner, onConfigure }) {
           className="msn-btn-runner-toggle py-0.5 text-[10px]"
           title={runTitle}
         >
-          {busy ? '…' : 'Run queue'}
+          {busy ? '…' : execution?.setupRequired ? 'Set up first' : 'Run queue'}
         </Button>
       )}
       <Button

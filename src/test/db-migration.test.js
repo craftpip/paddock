@@ -41,7 +41,7 @@ function dropColumn(path_, table, column) {
   db.close();
 }
 
-describe('Database - migrations onto a populated pre-67 database', () => {
+describe('Database - migrations onto populated earlier schemas', () => {
   let db;
 
   before(() => {
@@ -58,6 +58,10 @@ describe('Database - migrations onto a populated pre-67 database', () => {
     addSession.run('msn_1', 'msn-abc', 'human', null);
     addSession.run('msn_2', 'msn-def', 'agent', 'key:key_old');
     db.prepare("INSERT INTO tasks (id, prompt, status) VALUES ('task_1','do the thing','pending')").run();
+    db.prepare("INSERT INTO infinite_runners (id, name, project_id, session_id) VALUES ('run_1','runner','prj_1','msn_1')").run();
+    db.prepare(`INSERT INTO runner_operations
+      (id, runner_id, generation, operation_kind, conversation_id, item_id, queue_revision, status, created_at, updated_at)
+      VALUES ('op_1','run_1',1,'quota_recovery','ses_old','item_old',17,'awaiting_receipt','t0','t0')`).run();
     db.close();
 
     // 2. rewind it to before the ALTERs
@@ -81,6 +85,12 @@ describe('Database - migrations onto a populated pre-67 database', () => {
     for (const c of ['enqueue', 'timeout_ms', 'timed_out', 'attempt', 'superseded_by']) {
       dropColumn(oldPath, 'tasks', c);
     }
+    // The live development runner_operations table predates these two facts.
+    // Drop them with SQLite's column operation so the fixture keeps the real
+    // table constraints and existing operation row intact.
+    const older = new Database(oldPath);
+    older.exec('ALTER TABLE runner_operations DROP COLUMN operation_kind; ALTER TABLE runner_operations DROP COLUMN queue_revision;');
+    older.close();
 
     // 3. boot for real
     process.env.PAD_DB_PATH = oldPath;
@@ -140,6 +150,17 @@ describe('Database - migrations onto a populated pre-67 database', () => {
     }
   });
 
+  it('adds the runner operation facts without inventing values for an earlier operation', () => {
+    assert.ok(cols('runner_operations').includes('operation_kind'));
+    assert.ok(cols('runner_operations').includes('queue_revision'));
+    const old = db.prepare('SELECT operation_kind, queue_revision, status FROM runner_operations WHERE id = ?').get('op_1');
+    assert.deepStrictEqual(old, { operation_kind: null, queue_revision: null, status: 'awaiting_receipt' });
+    const added = db.prepare(`INSERT INTO runner_operations
+      (id, runner_id, generation, operation_kind, queue_revision, status, created_at, updated_at)
+      VALUES ('op_2','run_1',2,'queue',18,'dispatching','t1','t1')`).run();
+    assert.equal(added.changes, 1, 'new attempts can write both canonical fields');
+  });
+
   it('gives a pre-63 task the defaults that are TRUE of it', () => {
     // Not arbitrary zeroes. `enqueue = 0` says "pushed", which is right for a
     // task that was never claimable; `attempt = 1` is right because the row is
@@ -169,6 +190,8 @@ describe('Database - migrations onto a populated pre-67 database', () => {
     assert.strictEqual(db.prepare('SELECT COUNT(*) c FROM mission_sessions').get().c, 2);
     assert.strictEqual(db.prepare('SELECT COUNT(*) c FROM mission_projects').get().c, 1);
     assert.strictEqual(db.prepare('SELECT COUNT(*) c FROM tasks').get().c, 1);
+    assert.strictEqual(db.prepare('SELECT COUNT(*) c FROM infinite_runners').get().c, 1);
+    assert.strictEqual(db.prepare('SELECT COUNT(*) c FROM runner_operations').get().c, 2);
   });
 
   it('leaves a pre-existing session NULL rather than inventing a provenance', () => {
@@ -215,11 +238,11 @@ describe('Database - migrations onto a populated pre-67 database', () => {
 // is not the claim; "the ALTER added it to a table that lacked it" is, and only
 // a run with the migration removed can tell those two apart.
 //
-// So: the same stripped fixture, booted with the task ALTERs suppressed, and the
-// assertion is that the columns are ABSENT. If the loop in db.js is deleted or
-// narrowed, this test still passes (it is asserting absence) and the five tests
-// above go red — which is the point. It is a control, not a duplicate.
-describe('Database - control: the task migrations are what add the columns', () => {
+// So: the same stripped fixture, booted with the task and runner-operation ALTERs
+// suppressed, and the assertion is that the columns are ABSENT. If a migration is
+// deleted or narrowed, this control stays green and its matching positive test goes
+// red — which is the point. It is a control, not a duplicate.
+describe('Database - control: the ALTER migrations add their columns', () => {
   const cdir = fs.mkdtempSync(path.join(os.tmpdir(), 'pad-mig-ctl-'));
   const cpath = path.join(cdir, 'old.db');
   const cseed = path.join(cdir, 'seed.db');
@@ -235,15 +258,22 @@ describe('Database - control: the task migrations are what add the columns', () 
     seed.prepare("INSERT INTO tasks (id, prompt, status) VALUES ('task_1','do the thing','pending')").run();
     seed.prepare("INSERT INTO agents (id, name, runtime_ref) VALUES ('ag_1','pad-oc','container:pad-oc')").run();
     seed.prepare("INSERT INTO mission_projects (id, name, agent_name, agent_type, folder) VALUES ('prj_1','paddock','pad-oc','opencode','/www2/paddock')").run();
+    seed.prepare("INSERT INTO infinite_runners (id, name, project_id) VALUES ('run_1','runner','prj_1')").run();
+    seed.prepare(`INSERT INTO runner_operations
+      (id, runner_id, generation, operation_kind, queue_revision, status, created_at, updated_at)
+      VALUES ('op_1','run_1',1,'queue',1,'dispatching','t0','t0')`).run();
     seed.close();
     fs.copyFileSync(cseed, cpath);
     for (const c of ['enqueue', 'timeout_ms', 'timed_out', 'attempt', 'superseded_by']) {
       dropColumn(cpath, 'tasks', c);
     }
     dropColumn(cpath, 'mission_projects', 'plans_folder');
+    const older = new Database(cpath);
+    older.exec('ALTER TABLE runner_operations DROP COLUMN operation_kind; ALTER TABLE runner_operations DROP COLUMN queue_revision;');
+    older.close();
     const realExec = Database.prototype.exec;
     Database.prototype.exec = function patched(sql) {
-      if (/ALTER TABLE (tasks|mission_projects) ADD COLUMN/i.test(sql)) return this;
+      if (/ALTER TABLE (tasks|mission_projects|runner_operations) ADD COLUMN/i.test(sql)) return this;
       return realExec.call(this, sql);
     };
     try {
@@ -271,9 +301,14 @@ describe('Database - control: the task migrations are what add the columns', () 
       !db.prepare('PRAGMA table_info(mission_projects)').all().map((c) => c.name).includes('plans_folder'),
       'plans_folder is absent too — so its presence in the fixture suite is the ALTER and not the CREATE'
     );
+    const operationCols = db.prepare('PRAGMA table_info(runner_operations)').all().map((c) => c.name);
+    assert.ok(!operationCols.includes('operation_kind'));
+    assert.ok(!operationCols.includes('queue_revision'));
     assert.strictEqual(
       db.prepare('SELECT COUNT(*) c FROM tasks').get().c, 1,
       'and the rest of the table is intact, so the absence is the ALTERs and not a broken fixture'
     );
+    assert.strictEqual(db.prepare('SELECT COUNT(*) c FROM runner_operations').get().c, 1,
+      'the runner operation row remains while the columns are suppressed');
   });
 });

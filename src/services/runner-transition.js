@@ -1,6 +1,6 @@
 const crypto = require('crypto');
 const { getDb } = require('./db');
-const { transition, STATES, EVENTS, markerRequired, allowedActions, RunnerStateError } = require('./runner-state');
+const { transition, STATES, EVENTS, markerRequired, allowedActions } = require('./runner-state');
 
 class RunnerTransitionError extends Error {
   constructor(code, message) {
@@ -10,234 +10,186 @@ class RunnerTransitionError extends Error {
   }
 }
 
-function transitionId() {
-  return `rqt_${crypto.randomUUID()}`;
-}
-
-function now() {
-  return new Date().toISOString();
-}
-
-function getRunnerCanonicalState(runner) {
-  const cs = runner?.control_state;
-  if (!cs) return 'paused';
-  switch (cs) {
-    case 'enabled':
-      return runner.operation_status === 'pending' ? 'dispatching'
-        : runner.operation_status === 'unconfirmed' ? 'awaiting_receipt'
-        : runner.operation_status === 'confirmed' ? 'running'
-        : runner.operation_status === 'held' ? 'held'
-        : 'paused';
-    case 'waiting':
-      return 'paused';
-    case 'need_input':
-      if (runner.stop_cause === 'invalid_queue') return 'projection_error';
-      if (runner.stop_cause === 'permission_dialog') return 'waiting_input';
-      if (runner.stop_cause === 'prompts_misconfigured') return 'projection_error';
-      if (runner.stop_cause === 'projection_error') return 'projection_error';
-      if (runner.stop_cause === 'need_input') return 'waiting_input';
-      if (runner.stop_cause === 'held') return 'held';
-      if (runner.stop_cause === 'recovery_exhausted') return 'held';
-      if (runner.stop_cause === 'scheduler_need_input') return 'waiting_input';
-      return 'waiting_input';
-    case 'finished':
-      return 'complete';
-    default:
-      return 'paused';
-  }
-}
-
-function canonicalToControlState(canonical, runner) {
-  switch (canonical) {
-    case 'paused':
-      return { control_state: 'paused', enabled: 0 };
-    case 'dispatching':
-      return { control_state: 'enabled', enabled: 1, operation_status: 'pending' };
-    case 'awaiting_receipt':
-      return { control_state: 'enabled', enabled: 1, operation_status: 'unconfirmed' };
-    case 'running':
-      return { control_state: 'enabled', enabled: 1, operation_status: 'confirmed' };
-    case 'waiting_input':
-      return { control_state: 'need_input', enabled: 0, stop_cause: 'need_input' };
-    case 'held':
-      return { control_state: 'need_input', enabled: 0, stop_cause: 'held' };
-    case 'complete':
-      return { control_state: 'finished', enabled: 0 };
-    case 'projection_error':
-      return { control_state: 'need_input', enabled: 0, stop_cause: 'projection_error' };
-    default:
-      return { control_state: 'paused', enabled: 0 };
-  }
-}
-
-function persistTransition(runnerId, fromState, toState, event, actor, details = {}) {
-  const db = getDb();
-  const stamp = now();
-  const id = transitionId();
-  const runner = getRunner(runnerId);
-  const control = canonicalToControlState(toState, runner);
-  const runGen = runner.run_generation;
-
-  const updates = [
-    `control_state = '${control.control_state}'`,
-    `enabled = ${control.enabled}`,
-    `updated_at = '${stamp}'`,
-  ];
-  if (control.operation_status !== undefined) {
-    updates.push(`operation_status = '${control.operation_status}'`);
-  }
-  if (control.stop_cause !== undefined) {
-    updates.push(`stop_cause = '${control.stop_cause}'`);
-  }
-
-  const params = [id, runnerId, fromState, toState, event, actor || null, JSON.stringify(details), stamp];
-  db.prepare(`INSERT INTO runner_transitions (id, runner_id, from_state, to_state, event, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(...params);
-
-  db.prepare(`UPDATE infinite_runners SET ${updates.join(', ')} WHERE id = ? AND run_generation = ?`).run(runnerId, runGen);
-
-  return { id, fromState, toState, event, actor: actor || null, details, createdAt: stamp, markerRequired: markerRequired(toState) };
-}
-
-function ensureTransitionTable() {
-  const db = getDb();
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS runner_transitions (
-      id TEXT PRIMARY KEY,
-      runner_id TEXT NOT NULL,
-      from_state TEXT NOT NULL,
-      to_state TEXT NOT NULL,
-      event TEXT NOT NULL,
-      actor TEXT,
-      details TEXT,
-      created_at TEXT NOT NULL,
-      FOREIGN KEY (runner_id) REFERENCES infinite_runners(id) ON DELETE CASCADE
-    );
-    CREATE INDEX IF NOT EXISTS idx_runner_transitions_runner_created
-      ON runner_transitions(runner_id, created_at);
-  `);
-}
+const transitionId = () => `rqt_${crypto.randomUUID()}`;
+const now = () => new Date().toISOString();
 
 function getRunner(runnerId) {
   return getDb().prepare('SELECT * FROM infinite_runners WHERE id = ?').get(runnerId);
 }
 
-function applyEvent(runnerId, event, { actor = null, details = {} } = {}) {
-  ensureTransitionTable();
+function getRuntime(runnerId) {
+  return getDb().prepare('SELECT * FROM runner_runtime WHERE runner_id = ?').get(runnerId) || null;
+}
+
+function createRuntime(runnerId) {
+  const db = getDb();
+  const createdAt = now();
+  const insert = db.prepare(`INSERT OR IGNORE INTO runner_runtime
+    (runner_id, state, generation, operation_id, reason_code, reason, updated_at)
+    SELECT id, 'paused', 0, NULL, NULL, NULL, ? FROM infinite_runners WHERE id = ?`);
+  insert.run(createdAt, runnerId);
+  const runtime = getRuntime(runnerId);
+  if (!runtime) throw new RunnerTransitionError('runner_not_found', `Runner ${runnerId} not found`);
+  return runtime;
+}
+
+/** The runtime row is the only authority. Missing rows mean setup is required;
+ * never reconstruct authorization from legacy control/operation columns. */
+function getRunnerCanonicalState(runner) {
+  if (!runner) return null;
+  const runtime = getRuntime(runner.id);
+  return runtime ? runtime.state : 'setup_required';
+}
+
+function runtimeView(runnerId) {
   const runner = getRunner(runnerId);
-  if (!runner) throw new RunnerTransitionError('runner_not_found', `Runner ${runnerId} not found`);
-
-  const fromState = getRunnerCanonicalState(runner);
-  if (!STATES.includes(fromState)) {
-    throw new RunnerTransitionError('runner_state_invalid', `Runner ${runnerId} has invalid canonical state: ${fromState}`);
-  }
-
-  if (!Object.hasOwn(EVENTS, event)) {
-    throw new RunnerTransitionError('runner_event_invalid', `Unknown runner event: ${event}`);
-  }
-
-  if (!EVENTS[event].includes(fromState)) {
-    throw new RunnerTransitionError(
-      'runner_transition_invalid',
-      `Cannot ${event} while ${fromState}. Allowed actions: ${allowedActions(fromState).join(', ') || 'none'}.`
-    );
-  }
-
-  const result = transition(fromState, event);
-  const toState = result.state;
-
-  const transitionRecord = persistTransition(runnerId, fromState, toState, event, actor, details);
-  const updatedRunner = getRunner(runnerId);
-
+  if (!runner) return null;
+  const runtime = getRuntime(runnerId);
+  if (!runtime) return { runner, canonicalState: 'setup_required', markerRequired: true, allowedActions: [], runtime: null };
   return {
-    runner: updatedRunner,
-    canonicalState: toState,
-    markerRequired: result.markerRequired,
-    allowedActions: result.allowedActions,
-    transition: transitionRecord,
+    runner,
+    runtime,
+    canonicalState: runtime.state,
+    markerRequired: markerRequired(runtime.state),
+    allowedActions: allowedActions(runtime.state),
   };
 }
 
-function applyRun(runnerId, { actor = null, details = {} } = {}) {
-  return applyEvent(runnerId, 'run', { actor, details });
+function setReason(runnerId, reasonCode, reason) {
+  const result = getDb().prepare(`UPDATE runner_runtime SET reason_code = ?, reason = ?, updated_at = ?
+    WHERE runner_id = ?`).run(reasonCode || null, reason || null, now(), runnerId);
+  if (!result.changes) throw new RunnerTransitionError('runner_setup_required', `Runner ${runnerId} has no canonical runtime.`);
+  return getRuntime(runnerId);
 }
 
-function applyDeliveryUnknown(runnerId, { actor = null, details = {} } = {}) {
-  return applyEvent(runnerId, 'delivery_unknown', { actor, details });
+function persistTransition(runnerId, fromRuntime, toState, event, actor, details = {}) {
+  const db = getDb();
+  const stamp = now();
+  const id = transitionId();
+  const runGeneration = fromRuntime.generation + (['run', 'adopt_active_turn', 'dispatch_next', 'resolve_begin', 'quota_recovery', 'pause', 'close', 'projection_mismatch', 'hold', 'queue_blocked', 'review_complete'].includes(event) ? 1 : 0);
+  const nextOperationId = ['pause', 'close', 'hold', 'projection_mismatch', 'complete', 'need_input', 'resolve', 'turn_completed'].includes(event)
+    ? null
+    : (details.operationId === undefined ? fromRuntime.operation_id : details.operationId);
+  const reasonCode = details.reasonCode || (toState === 'paused' ? null : (details.cause || event));
+  const reason = details.reason || (toState === 'paused' ? null : null);
+  const changed = db.prepare(`UPDATE runner_runtime
+      SET state = ?, generation = ?, operation_id = ?, reason_code = ?, reason = ?, updated_at = ?
+      WHERE runner_id = ? AND state = ? AND generation = ? AND operation_id IS ?`)
+      .run(toState, runGeneration, nextOperationId, reasonCode, reason, stamp,
+        runnerId, fromRuntime.state, fromRuntime.generation, fromRuntime.operation_id);
+  if (!changed.changes) {
+    throw new RunnerTransitionError('runner_transition_conflict', 'Runner state changed concurrently; reload and retry.');
+  }
+  // Kept only as a compatibility/telemetry projection for existing non-state
+  // queries during this replacement. Authorization and ownership always read
+  // runner_runtime.generation; no caller writes or branches on this copy.
+  db.prepare('UPDATE infinite_runners SET run_generation = ?, updated_at = ? WHERE id = ?')
+    .run(runGeneration, stamp, runnerId);
+  db.prepare(`INSERT INTO runner_transitions
+      (id, runner_id, from_state, to_state, event, actor, details, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, runnerId, fromRuntime.state, toState, event, actor || null, JSON.stringify(details), stamp);
+  return { id, runnerId, fromState: fromRuntime.state, toState, event,
+    actor: actor || null, details, createdAt: stamp, generation: runGeneration };
 }
 
-function applyReceipt(runnerId, { actor = null, details = {} } = {}) {
-  return applyEvent(runnerId, 'receipt', { actor, details });
+function applyEvent(runnerId, event, { actor = null, details = {} } = {}) {
+  const db = getDb();
+  const tx = db.transaction(() => {
+    const runner = getRunner(runnerId);
+    if (!runner) throw new RunnerTransitionError('runner_not_found', `Runner ${runnerId} not found`);
+    const runtime = getRuntime(runnerId);
+    if (!runtime) throw new RunnerTransitionError('runner_setup_required', `Runner ${runnerId} has no canonical runtime; initialize it explicitly before running.`);
+    if (!STATES.includes(runtime.state)) {
+      throw new RunnerTransitionError('runner_state_invalid', `Runner ${runnerId} has invalid canonical state: ${runtime.state}`);
+    }
+    if (!Object.hasOwn(EVENTS, event)) throw new RunnerTransitionError('runner_event_invalid', `Unknown runner event: ${event}`);
+    if (!EVENTS[event].includes(runtime.state)) {
+      throw new RunnerTransitionError('runner_transition_invalid', `Cannot ${event} while ${runtime.state}. Allowed actions: ${allowedActions(runtime.state).join(', ') || 'none'}.`);
+    }
+    if (['run', 'dispatch_next', 'resolve_begin', 'quota_recovery'].includes(event) && !details.operationId) details = { ...details, operationId: `rop_${crypto.randomUUID()}` };
+    if (['receipt', 'delivery_unknown'].includes(event) &&
+        (!details.operationId || !runtime.operation_id || details.operationId !== runtime.operation_id)) {
+      throw new RunnerTransitionError('runner_operation_superseded', 'The operation no longer owns this runner.');
+    }
+    if (event === 'turn_completed' &&
+        (!runtime.operation_id || (details.operationId && details.operationId !== runtime.operation_id))) {
+      throw new RunnerTransitionError('runner_operation_superseded', 'No running operation owns this completed turn.');
+    }
+    const result = transition(runtime.state, event);
+    const transitionRecord = persistTransition(runnerId, runtime, result.state, event, actor, details);
+    const stamp = now();
+    db.prepare(`UPDATE runner_publications SET desired_marker = ?, error = NULL, updated_at = ? WHERE runner_id = ?`)
+      .run(markerRequired(result.state) ? 1 : 0, stamp, runnerId);
+    if (event === 'dispatch_next' && runtime.operation_id) {
+      db.prepare(`UPDATE runner_operations SET status = 'completed', updated_at = ?
+        WHERE id = ? AND runner_id = ? AND generation = ? AND status = 'running'`)
+        .run(stamp, runtime.operation_id, runnerId, runtime.generation);
+    }
+    if (['run', 'dispatch_next', 'resolve_begin', 'quota_recovery'].includes(event)) {
+      db.prepare(`INSERT INTO runner_operations
+        (id, runner_id, generation, operation_kind, conversation_id, item_id, queue_revision, prompt_hash, baseline_input_id,
+         receipt_input_id, status, deadline_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'dispatching', ?, ?, ?)`)
+        .run(details.operationId, runnerId, transitionRecord.generation, details.kind || (event === 'resolve_begin' ? 'resolve' : event === 'quota_recovery' ? 'quota_recovery' : 'queue'),
+          details.conversationId || runner.session_id, details.itemId || null, details.queueRevision ?? null,
+          details.promptHash || null, details.baselineInputId || null,
+          details.deadlineAt || null, stamp, stamp);
+    } else if (['receipt', 'delivery_unknown', 'hold', 'complete', 'pause', 'close', 'projection_mismatch', 'need_input', 'resolve', 'turn_completed'].includes(event)) {
+      const operationStatus = event === 'receipt' ? 'running'
+        : event === 'delivery_unknown' ? 'awaiting_receipt'
+        : event === 'hold' ? 'held'
+        : ['complete', 'need_input', 'resolve', 'turn_completed'].includes(event) ? 'completed' : 'invalidated';
+      const updated = db.prepare(`UPDATE runner_operations SET status = ?, receipt_input_id = COALESCE(?, receipt_input_id), updated_at = ?
+        WHERE id = ? AND runner_id = ? AND generation = ? AND status IN ('dispatching','awaiting_receipt','running')`)
+        .run(operationStatus, details.receiptInputId || null, stamp,
+          details.operationId || runtime.operation_id, runnerId, runtime.generation);
+      if (details.operationId && !updated.changes) {
+        throw new RunnerTransitionError('runner_operation_superseded', 'The operation no longer owns this runner.');
+      }
+    }
+    const updated = getRuntime(runnerId);
+    return {
+      runner: getRunner(runnerId), runtime: updated, canonicalState: updated.state,
+      markerRequired: result.markerRequired, allowedActions: result.allowedActions,
+      transition: transitionRecord,
+    };
+  });
+  return tx.immediate();
 }
 
-function applyHold(runnerId, { actor = null, details = {} } = {}) {
-  return applyEvent(runnerId, 'hold', { actor, details });
-}
-
-function applyPause(runnerId, { actor = null, details = {} } = {}) {
-  return applyEvent(runnerId, 'pause', { actor, details });
-}
-
-function applyClose(runnerId, { actor = null, details = {} } = {}) {
-  return applyEvent(runnerId, 'close', { actor, details });
-}
-
-function applyNeedInput(runnerId, { actor = null, details = {} } = {}) {
-  return applyEvent(runnerId, 'need_input', { actor, details });
-}
-
-function applyResolve(runnerId, { actor = null, details = {} } = {}) {
-  return applyEvent(runnerId, 'resolve', { actor, details });
-}
-
-function applyComplete(runnerId, { actor = null, details = {} } = {}) {
-  return applyEvent(runnerId, 'complete', { actor, details });
-}
-
-function applyProjectionMismatch(runnerId, { actor = null, details = {} } = {}) {
-  return applyEvent(runnerId, 'projection_mismatch', { actor, details });
-}
-
-function applyProjectionRegenerated(runnerId, { actor = null, details = {} } = {}) {
-  return applyEvent(runnerId, 'projection_regenerated', { actor, details });
-}
+const applyRun = (id, options = {}) => applyEvent(id, 'run', options);
+const applyAdoptActiveTurn = (id, options = {}) => applyEvent(id, 'adopt_active_turn', options);
+const applyDispatchNext = (id, options = {}) => applyEvent(id, 'dispatch_next', options);
+const applyDeliveryUnknown = (id, options = {}) => applyEvent(id, 'delivery_unknown', options);
+const applyReceipt = (id, options = {}) => applyEvent(id, 'receipt', options);
+const applyTurnCompleted = (id, options = {}) => applyEvent(id, 'turn_completed', options);
+const applyHold = (id, options = {}) => applyEvent(id, 'hold', options);
+const applyPause = (id, options = {}) => applyEvent(id, 'pause', options);
+const applyClose = (id, options = {}) => applyEvent(id, 'close', options);
+const applyNeedInput = (id, options = {}) => applyEvent(id, 'need_input', options);
+const applyResolveBegin = (id, options = {}) => applyEvent(id, 'resolve_begin', options);
+const applyQuotaRecovery = (id, options = {}) => applyEvent(id, 'quota_recovery', options);
+const applyResolve = (id, options = {}) => applyEvent(id, 'resolve', options);
+const applyComplete = (id, options = {}) => applyEvent(id, 'complete', options);
+const applyQueueBlocked = (id, options = {}) => applyEvent(id, 'queue_blocked', options);
+const applyReviewComplete = (id, options = {}) => applyEvent(id, 'review_complete', options);
+const applyProjectionMismatch = (id, options = {}) => applyEvent(id, 'projection_mismatch', options);
+const applyProjectionRegenerated = (id, options = {}) => applyEvent(id, 'projection_regenerated', options);
 
 function getTransitions(runnerId) {
-  ensureTransitionTable();
-  return getDb().prepare('SELECT * FROM runner_transitions WHERE runner_id = ? ORDER BY created_at').all(runnerId);
+  return getDb().prepare('SELECT * FROM runner_transitions WHERE runner_id = ? ORDER BY created_at, rowid').all(runnerId);
 }
 
 function getRunnerWithCanonical(runnerId) {
-  const runner = getRunner(runnerId);
-  if (!runner) return null;
-  return {
-    ...runner,
-    canonicalState: getRunnerCanonicalState(runner),
-    markerRequired: markerRequired(getRunnerCanonicalState(runner)),
-    allowedActions: allowedActions(getRunnerCanonicalState(runner)),
-  };
+  return runtimeView(runnerId);
 }
 
 module.exports = {
-  RunnerTransitionError,
-  STATES,
-  EVENTS,
-  markerRequired,
-  allowedActions,
-  transition,
-  getRunnerCanonicalState,
-  canonicalToControlState,
-  applyEvent,
-  applyRun,
-  applyDeliveryUnknown,
-  applyReceipt,
-  applyHold,
-  applyPause,
-  applyClose,
-  applyNeedInput,
-  applyResolve,
-  applyComplete,
-  applyProjectionMismatch,
-  applyProjectionRegenerated,
-  getTransitions,
-  getRunnerWithCanonical,
+  RunnerTransitionError, STATES, EVENTS, markerRequired, allowedActions, transition,
+  getRunnerCanonicalState, getRuntime, createRuntime, runtimeView, applyEvent,
+  setReason,
+  applyRun, applyAdoptActiveTurn, applyDispatchNext, applyDeliveryUnknown, applyReceipt, applyTurnCompleted, applyHold, applyPause, applyClose,
+  applyNeedInput, applyResolveBegin, applyQuotaRecovery, applyResolve, applyComplete, applyQueueBlocked, applyReviewComplete, applyProjectionMismatch,
+  applyProjectionRegenerated, getTransitions, getRunnerWithCanonical,
 };

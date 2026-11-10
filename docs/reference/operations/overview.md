@@ -117,6 +117,15 @@ docker restart paddock
 
 The compose service is `webui`, container name `paddock`.
 
+### Mission Project Mounts
+
+Mission writes project plans and queue files through the webui's filesystem.
+Both `/www2` and `/www1` are mounted read-write at the same paths in the webui,
+so projects under either directory can manage their plans and queue files.
+
+After changing bind mounts in the `webui` service, recreate the service.
+A restart alone does not apply mount changes.
+
 ### Runtime File Ownership
 
 The webui container runs as **root** (no `user:` in `docker-compose.yml`) so it

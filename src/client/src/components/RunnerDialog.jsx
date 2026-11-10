@@ -12,6 +12,7 @@ import { TONES } from './ui/tone'
 import SettingsDialog from './SettingsDialog'
 import PromptTemplateEditor from './PromptTemplateEditor'
 import CallbackScriptEditor, { CallbackKindTabs } from './CallbackScriptEditor'
+import { useToast } from '../lib/toast'
 
 function useCodingAgents() {
   const agents = useAgents((s) => s.agents)
@@ -100,7 +101,7 @@ export default function RunnerDialog({ runner, project, session, onClose }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [actionBusy, setActionBusy] = useState(null)
-  const [actionError, setActionError] = useState('')
+  const toast = useToast()
 
   useEffect(() => {
     if (!editing || !current?.id || loadedQueueFile === queueFile || memory.has(draftPrefix + 'customInstructions')) return
@@ -403,14 +404,13 @@ export default function RunnerDialog({ runner, project, session, onClose }) {
   // captured row.
   const handleRemove = async () => {
     setActionBusy(current.id)
-    setActionError('')
     try {
       await removeRunner(current.id)
       saved.current = true
       clearDrafts()
       onClose({ saved: true })
     } catch (err) {
-      setActionError(err?.error || err?.message || 'Could not remove runner')
+      toast.error(err?.error || err?.message || 'Could not remove runner', { duration: 10000 })
     } finally {
       setActionBusy(null)
     }
@@ -622,9 +622,6 @@ export default function RunnerDialog({ runner, project, session, onClose }) {
                     Remove as runner
                   </Button>
                 </div>
-                {actionError && (
-                  <p className={cx('msn-error-bar rounded-control border px-3 py-2 text-xs', TONES.danger.panel)}>{actionError}</p>
-                )}
               </div>
             )}
           </>

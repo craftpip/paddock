@@ -10,6 +10,7 @@ import Button from '../components/ui/Button'
 import { useConfirm } from '../lib/confirm'
 import { useMission } from '../stores/mission'
 import { useAgents } from '../stores/agents'
+import { useToast } from '../lib/toast'
 
 /**
  * ─────────────────────────────────────────────────────────────────────────────
@@ -379,18 +380,17 @@ export default function Mission() {
    const viewError = useMission((s) => s.viewError)
    const viewUnavailable = useMission((s) => s.viewUnavailable)
    const historyView = useMission((s) => s.historyView)
-  const [actionError, setActionError] = useState('')
+  const toast = useToast()
   const confirm = useConfirm()
   useEffect(() => {
     if (!loading && !error && view.project && !projects.some((p) => p.id === view.project)) {
-      setActionError('The requested project is unavailable.')
+      toast.error('The requested project is unavailable.', { duration: 10000 })
       patch({ project: null, view: 'all' }, { replace: true })
     }
     if (viewUnavailable) {
-      setActionError(viewError)
       patch({ session: null, conversation: null, terminalProject: null }, { replace: true })
     }
-  }, [loading, error, projects, view.project, viewUnavailable, viewError, patch])
+  }, [loading, error, projects, view.project, viewUnavailable, patch, toast])
 
   /* Col 3 renders from the store's `openSession` — a snapshot taken when the
    *  user opened a session, NOT from `sessions.find(…)`. That distinction is
@@ -457,11 +457,10 @@ export default function Mission() {
   }, [fetchProjects, refreshActive])
 
   const act = (fn, msg) => async () => {
-    setActionError('')
     try {
       await fn()
     } catch (e) {
-      setActionError(e?.error || e?.message || msg)
+      toast.error(e?.error || e?.message || msg, { duration: 10000 })
     }
   }
 
@@ -486,11 +485,10 @@ export default function Mission() {
       cancelText: 'Keep',
     })
     if (!ok) return
-    setActionError('')
     try {
       await deleteProject(p.id)
     } catch (e) {
-      setActionError(e?.error || e?.message || 'Could not delete the project')
+      toast.error(e?.error || e?.message || 'Could not delete the project', { duration: 10000 })
     }
   }
 
@@ -601,7 +599,7 @@ export default function Mission() {
               queueExpanded={queueExpanded}
               onQueueCollapsedChange={setQueueCollapsed}
               onConfigure={() => openPopup('runner-settings', session.runner.id)}
-              error={actionError || viewError}
+              error={viewError}
             />
             </>
           ) : (

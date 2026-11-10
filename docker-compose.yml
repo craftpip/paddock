@@ -13,8 +13,8 @@ services:
     volumes:
       - .:/workspace:rw
       - ./src:/app:rw
-      - /www2:/www2:ro
-      - /www1:/www1
+      - /www2:/www2:rw
+      - /www1:/www1:rw
       # Plan 92: read-write on purpose — lifecycle callback scripts run inside
       # this container and the human requires docker control from them
       # (container restart, network/IP changes). A rw socket is effectively

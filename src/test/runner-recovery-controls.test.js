@@ -27,12 +27,12 @@ function recoveryVerdict(runner, queue) {
 
 it('RunnerControls switches to Run only for the server-confirmed interrupted-turn verdict', () => {
   const runner = { id: 'run_a', control_state: 'enabled' };
-  const recovery = recoveryVerdict(runner, { scheduler: { recoveryRequired: true, reason: 'Worker turn interrupted or failed — explicit recovery required' } });
+  const recovery = recoveryVerdict(runner, { execution: { state: 'running', canPause: false }, scheduler: { recoveryRequired: true, reason: 'Worker turn interrupted or failed — explicit recovery required' } });
   assert.deepEqual(recovery, { recovery: true, running: false });
 
-  const ordinaryIdle = recoveryVerdict(runner, { scheduler: { recoveryRequired: false, schedulerDecision: 'wait_idle_grace' } });
+  const ordinaryIdle = recoveryVerdict(runner, { execution: { state: 'running', canPause: true }, scheduler: { recoveryRequired: false, schedulerDecision: 'wait_idle_grace' } });
   assert.deepEqual(ordinaryIdle, { recovery: false, running: true });
 
-  const unknown = recoveryVerdict(runner, { scheduler: { recoveryRequired: false, schedulerDecision: 'observation_unavailable' } });
+  const unknown = recoveryVerdict(runner, { execution: { state: 'running', canPause: true }, scheduler: { recoveryRequired: false, schedulerDecision: 'observation_unavailable' } });
   assert.deepEqual(unknown, { recovery: false, running: true });
 });

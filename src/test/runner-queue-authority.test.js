@@ -38,6 +38,15 @@ describe('plan 113 canonical runner queue', () => {
     assert.deepEqual(queue.events(runnerId).map((event) => event.action), ['queue_created', 'item_added']);
   });
 
+  it('normalizes path aliases before duplicate checks and queue storage', () => {
+    const runnerId = seedRunner();
+    let current = queue.ensure(runnerId);
+    current = queue.add(runnerId, 'plans/./release.md', current.revision);
+    assert.equal(current.items[0].plan, 'plans/release.md');
+    assert.throws(() => queue.add(runnerId, 'plans/release.md', current.revision), { code: 'queue_plan_duplicate' });
+    assert.throws(() => queue.add(runnerId, 'plans/../outside.md', current.revision), { code: 'queue_plan_invalid' });
+  });
+
   it('keeps need-input validation and queue facts inside one transaction', () => {
     const runnerId = seedRunner();
     const initial = queue.ensure(runnerId);

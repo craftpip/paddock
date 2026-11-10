@@ -152,7 +152,7 @@ const READ_TOOLS = new Set([
   // Plans reads (plan 64). `plan_write` is NOT here — see TOOL_GRANT_FOR.
   'plan_list', 'plan_activity',
   // Queue reads (plan 83): the queue is the runner's instruction file.
-  'queue_read',
+  'queue_read', 'agent_queue_read',
   // Runner reads (plan 83): inspect runner config, queue, and session state.
   'runner_list', 'runner_get',
 ]);
@@ -216,6 +216,10 @@ const TOOL_GRANT_FOR = {
   // write and ensure ride the `exec` bucket.
   queue_write: 'exec',
   queue_ensure: 'exec',
+  agent_queue_update_item: 'exec',
+  agent_queue_add_custom_instructions: 'exec',
+  agent_queue_reorder: 'exec',
+  agent_queue_resolve_need_input: 'exec',
   // Runner verbs (plan 83): runner lifecycle verbs steer real work in a PAD.
   runner_create: 'create',
   runner_start: 'exec',
@@ -2843,6 +2847,21 @@ function registerTools(server) {
       });
     }
   );
+  registerAgentQueueTools(registerToolBound, {
+    authorize: (runnerId, write) => {
+      const runner = mission.getRunner(runnerId);
+      if (!runner) throw new Error(`runner_not_found: ${runnerId}`);
+      try {
+        missionRequireProject(currentUser(), write ? 'queue_write' : 'queue_read', runner.project_id);
+      } catch (error) {
+        // The server wrapper intentionally converts ordinary errors into tool
+        // error results; rethrowing McpError escapes its catch in this SDK.
+        throw new Error(error?.message || String(error));
+      }
+      return runner;
+    },
+    actor: () => missionActor(currentUser()),
+  });
 }
 
 function authenticateRequest(req) {
@@ -2862,8 +2881,6 @@ function authenticateRequest(req) {
     scopes: auth.scopes,
     role: getUserRole(auth.userId),
   };
-// ─── Agent queue management (worker-facing) ────────────────────
-  registerAgentQueueTools(server);
 }
 
 function unauthorized(res) {

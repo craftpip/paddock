@@ -2477,6 +2477,12 @@ function missionRunner(req, res) {
   return { runner, project };
 }
 
+function missionRunnerResult(result) {
+  return result && result.runner
+    ? { ...result, runner: mission.publicRunner(result.runner) }
+    : result;
+}
+
 /** A session plus its project, access-checked. Returns { session, project }. */
 function missionSession(req, res) {
   let session;
@@ -2873,7 +2879,7 @@ app.delete('/api/mission/sessions/:id', csrfCheck, (req, res) => {
  *  the all-projects view merges infinite sessions into one list (plan 85). */
 app.get('/api/mission/runners', (req, res) => {
   try {
-    const runners = mission.listAllRunners({ allow: (agentName) => canTouchAgent(req, agentName) });
+    const runners = mission.listAllRunners({ allow: (agentName) => canTouchAgent(req, agentName) }).map(mission.publicRunner);
     res.json({ runners });
   } catch (e) {
     missionFail(res, e);
@@ -2884,7 +2890,7 @@ app.get('/api/mission/projects/:id/runners', (req, res) => {
   const project = missionProject(req, res);
   if (!project) return;
   try {
-    const runners = mission.listRunnersForProject(project.id);
+    const runners = mission.listRunnersForProject(project.id).map(mission.publicRunner);
     res.json({ runners });
   } catch (e) {
     missionFail(res, e);
@@ -2913,7 +2919,7 @@ app.post('/api/mission/projects/:id/runners', csrfCheck, async (req, res) => {
       recoveryBudget: req.body.recoveryBudget,
       promptTemplates: req.body.promptTemplates,
     });
-    res.json({ runner });
+    res.json({ runner: mission.publicRunner(runner) });
   } catch (e) {
     missionFail(res, e);
   }
@@ -2924,7 +2930,7 @@ app.get('/api/mission/runners/:id', async (req, res) => {
     const found = missionRunner(req, res);
     if (!found) return;
     const detail = await mission.readRunnerQueue(found.runner.id);
-    res.json({ runner: found.runner, project: detail.project, queue: detail.queue });
+    res.json({ runner: mission.publicRunner(found.runner), project: detail.project, queue: detail.queue });
   } catch (e) {
     missionFail(res, e);
   }
@@ -2973,7 +2979,10 @@ app.post('/api/mission/runners/:id/queue', csrfCheck, async (req, res) => {
   try {
     const found = missionRunner(req, res);
     if (!found) return;
-    const detail = await mission.setupRunnerQueue(found.runner.id, { actor: missionActorFor(req) });
+    const detail = await mission.setupRunnerQueue(found.runner.id, {
+      actor: missionActorFor(req),
+      confirmProjectionReset: req.body?.confirmProjectionReset === true,
+    });
     res.json(detail);
   } catch (e) {
     missionFail(res, e);
@@ -3013,6 +3022,20 @@ app.delete('/api/mission/runners/:id/queue/items/:itemId', csrfCheck, async (req
     const found = missionRunner(req, res);
     if (!found) return;
     res.json(await mission.removeRunnerQueueItem(found.runner.id, req.params.itemId, req.body?.revision, { actor: missionActorFor(req) }));
+  } catch (e) {
+    missionFail(res, e);
+  }
+});
+
+app.patch('/api/mission/runners/:id/queue/items/:itemId', csrfCheck, async (req, res) => {
+  try {
+    const found = missionRunner(req, res);
+    if (!found) return;
+    const { status, reason, revision } = req.body || {};
+    if (typeof status !== 'string') return res.status(400).json({ error: 'status must be text', code: 'queue_status_invalid' });
+    res.json(await mission.updateRunnerQueueItem(found.runner.id, req.params.itemId,
+      { status, ...(reason === undefined ? {} : { reason }) }, revision,
+      { actor: missionActorFor(req), source: 'review' }));
   } catch (e) {
     missionFail(res, e);
   }
@@ -3170,7 +3193,7 @@ app.patch('/api/mission/runners/:id', csrfCheck, async (req, res) => {  try {
       // Absent key is `undefined` → preserve; explicit null resets to defaults.
       promptTemplates: req.body.promptTemplates,
     });
-    res.json({ runner });
+    res.json({ runner: mission.publicRunner(runner) });
   } catch (e) {
     missionFail(res, e);
   }
@@ -3196,7 +3219,7 @@ app.post('/api/mission/runners/:id/start', csrfCheck, async (req, res) => {
     const found = missionRunner(req, res);
     if (!found) return;
     const result = await mission.startRunner(found.runner.id, { actor: missionActorFor(req) });
-    res.json(result);
+    res.json(missionRunnerResult(result));
   } catch (e) {
     missionFail(res, e);
   }
@@ -3214,7 +3237,7 @@ app.post('/api/mission/runners/:id/pause', csrfCheck, async (req, res) => {
       mode: mode === undefined ? undefined : mode,
       actor: missionActorFor(req),
     });
-    res.json({ runner });
+    res.json({ runner: mission.publicRunner(runner) });
   } catch (e) {
     missionFail(res, e);
   }
@@ -3225,7 +3248,7 @@ app.post('/api/mission/runners/:id/resume', csrfCheck, async (req, res) => {
     const found = missionRunner(req, res);
     if (!found) return;
     const result = await mission.resumeRunner(found.runner.id, { actor: missionActorFor(req) });
-    res.json(result);
+    res.json(missionRunnerResult(result));
   } catch (e) {
     missionFail(res, e);
   }
@@ -3259,7 +3282,7 @@ app.delete('/api/mission/runners/:id', csrfCheck, async (req, res) => {
   try {
     const found = missionRunner(req, res);
     if (!found) return;
-    await mission.removeRunner(found.runner.id);
+    await mission.removeRunner(found.runner.id, { actor: missionActorFor(req) });
     res.json({ removed: true });
   } catch (e) {
     missionFail(res, e);
@@ -3651,6 +3674,14 @@ const server = app.listen(6789, () => console.log('VM WebUI listening on port 67
 // unnecessary wake-ups. RevChanged path dispatches immediately on queue change
 // regardless of interval.
 mission.reconcileRunners().catch((e) => console.error('[runner reconcile]', e.message));
+try {
+  const result = mission.reconcileQueuePublications();
+  if (result.published || result.blocked) {
+    console.log(`[runner publications] republished ${result.published}; external edits blocked ${result.blocked}`);
+  }
+} catch (e) {
+  console.error('[runner publication reconcile]', e.message);
+}
 // Plan 92 §Phase 3: callback rows caught `running` across the restart never
 // launched to completion — finalize them `unknown` (honest, no replay), then
 // pump whatever is pending. `pending` rows never launched, so launching them

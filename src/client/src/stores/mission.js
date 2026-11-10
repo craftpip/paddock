@@ -573,7 +573,6 @@ queue: null,
       }
       return data.session
     } catch (e) {
-      if (token === startToken) set({ sessionsError: errText(e, 'Could not open the session') })
       throw e
     } finally {
       if (get().startingKey === key) set({ starting: false, startingKey: null })
@@ -887,12 +886,12 @@ queue: null,
 
   // Setup creates only the ABSENT file with instructions (plan 86 §1/2) — it
   // never starts execution and never overwrites an existing queue.
-  setupRunnerQueue: async (runnerId) => {
+  setupRunnerQueue: async (runnerId, { confirmProjectionReset = false } = {}) => {
     if (get().queueAction) return
     set({ queueAction: 'setup', queueError: '' })
     get().clearOperationFeedback(runnerId)
     try {
-      const data = await api(`/api/mission/runners/${runnerId}/queue`, { method: 'POST' })
+      const data = await api(`/api/mission/runners/${runnerId}/queue`, { method: 'POST', body: { confirmProjectionReset } })
       set({ queue: queueOf(data), queueForRunner: runnerId, queueLoading: false, queueError: '', queueStale: false })
       get().refreshActive()
       get().setOperationFeedback(runnerId, { severity: 'success', message: 'Queue set up successfully' })
@@ -945,6 +944,9 @@ queue: null,
       const data = await api(`/api/mission/runners/${runnerId}/queue/items`, { method: 'POST', body: { plans, revision } })
       set({ queue: queueOf(data), queueForRunner: runnerId, queueLoading: false, queueError: '', queueStale: false })
       return data
+    } catch (e) {
+      get().queueMutationFailed(runnerId, e)
+      throw e
     } finally {
       set({ queueAction: '' })
     }
@@ -957,6 +959,9 @@ queue: null,
       const data = await api(`/api/mission/runners/${runnerId}/queue/order`, { method: 'PUT', body: { itemIds, revision } })
       set({ queue: queueOf(data), queueForRunner: runnerId, queueLoading: false, queueError: '', queueStale: false })
       return data
+    } catch (e) {
+      get().queueMutationFailed(runnerId, e)
+      throw e
     } finally {
       set({ queueAction: '' })
     }
@@ -969,9 +974,37 @@ queue: null,
       const data = await api(`/api/mission/runners/${runnerId}/queue/items/${encodeURIComponent(itemId)}`, { method: 'DELETE', body: { revision } })
       set({ queue: queueOf(data), queueForRunner: runnerId, queueLoading: false, queueError: '', queueStale: false })
       return data
+    } catch (e) {
+      get().queueMutationFailed(runnerId, e)
+      throw e
     } finally {
       set({ queueAction: '' })
     }
+  },
+
+  updateRunnerQueueItem: async (runnerId, itemId, { status, reason = '' }, revision) => {
+    if (get().queueAction) return
+    set({ queueAction: 'status', queueError: '' })
+    try {
+      const data = await api(`/api/mission/runners/${runnerId}/queue/items/${encodeURIComponent(itemId)}`, {
+        method: 'PATCH', body: { status, reason, revision },
+      })
+      set({ queue: queueOf(data), queueForRunner: runnerId, queueLoading: false, queueError: '', queueStale: false })
+      get().setOperationFeedback(runnerId, { severity: 'success', message: 'Queue item status reviewed and saved' })
+      return data
+    } catch (e) {
+      get().queueMutationFailed(runnerId, e)
+      throw e
+    } finally {
+      set({ queueAction: '' })
+    }
+  },
+
+  queueMutationFailed: (runnerId, e) => {
+    const stale = ['queue_revision_conflict', 'queue_revision_required'].includes(e?.code)
+    const message = errText(e, 'Could not update the queue')
+    if (get().queueForRunner === runnerId) set({ queueError: message, queueStale: stale })
+    get().setOperationFeedback(runnerId, { severity: stale ? 'warning' : 'error', message })
   },
 
   getRunnerQueue: async (runnerId) => api(`/api/mission/runners/${runnerId}/queue`),
@@ -994,7 +1027,9 @@ queue: null,
         method: 'POST',
         body: { itemId, answer, revision },
       })
-      get().setOperationFeedback(runnerId, { severity: 'success', message: 'Answer sent — queue resumed' })
+      get().setOperationFeedback(runnerId, result?.awaitingReceipt
+        ? { severity: 'warning', message: 'Answer delivery is unconfirmed — no resend made. Reconcile the exact receipt before continuing.' }
+        : { severity: 'success', message: 'Answer accepted — queue resumed' })
       await get().reloadRunnerQueue()
       return result
     } catch (e) {

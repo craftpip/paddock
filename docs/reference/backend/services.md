@@ -1,6 +1,6 @@
 # Backend Services
 
-> Last updated: 2026-10-19
+> Last updated: 2026-10-24
 
 ## OpenCode Free Quota Detection (provider-limit.js)
 
@@ -17,6 +17,14 @@ The worker process is not restarted or interrupted by this observation.
 The callback must have a saved script and be enabled. Empty assistant steps do not
 establish recovery or re-arm the callback. Real output is required. A terminal
 capture that is missing the notice does not itself prove recovery.
+
+## Mission Queue Authority
+
+`runner-queue.js` stores canonical queue rows, ordered items, revisions and events. `QUEUE.md`
+is generated worker output, never queue authority. Worker tools require exact runner and item
+assignment, a numeric revision, project ownership and the caller's target grant. The queue,
+runner state machine, delivery guarantees, publication protocol and UI action snapshot are
+documented in the [Mission Queue and Runner reference](mission-queue.md).
 
 ## PAD Discovery (agent-registry.js)
 

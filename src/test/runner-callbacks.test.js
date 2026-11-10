@@ -22,6 +22,7 @@ fs.writeFileSync(path.join(WS, 'instances', PAD, 'meta.env'), 'AGENT=opencode\n'
 const { getDb, close } = require('../services/db');
 const mission = require('../services/mission');
 const callbacks = require('../services/runner-callbacks');
+const runnerTransition = require('../services/runner-transition');
 
 after(() => fs.rmSync(WS, { recursive: true, force: true }));
 
@@ -34,7 +35,7 @@ function seedPad() {
 
 const FOLDER = '/root/.opencode/workspace';
 function makeProject(name = 'proj') {
-  return mission.createProject({ name, agent: PAD, folder: FOLDER, plansFolder: 'plans' });
+  return mission.createProject({ name, agent: PAD, folder: FOLDER, plansFolder: `plans-${name}` });
 }
 
 function insertSession(projectId) {
@@ -49,7 +50,16 @@ function insertSession(projectId) {
 
 async function makeRunner(projectId, name = 'r') {
   const sid = insertSession(projectId);
-  return mission.createRunner({ projectId, name, sessionId: sid });
+  return mission.createRunner({ projectId, name, sessionId: sid, queueFile: `queues/${name}.md` });
+}
+
+function makeQuotaWaiting(runnerId) {
+  runnerTransition.applyRun(runnerId);
+  let runtime = runnerTransition.getRuntime(runnerId);
+  runnerTransition.applyDeliveryUnknown(runnerId, { details: { operationId: runtime.operation_id } });
+  runtime = runnerTransition.getRuntime(runnerId);
+  runnerTransition.applyReceipt(runnerId, { details: { operationId: runtime.operation_id, receiptInputId: 'quota-fixture-receipt' } });
+  runnerTransition.applyNeedInput(runnerId, { details: { cause: 'usage_exhausted', reason: 'fixture quota exhaustion' } });
 }
 
 beforeEach(() => {
@@ -71,7 +81,7 @@ describe('plan 92 — callback storage and settings', () => {
     const recovery = require('../services/quota-recovery');
     const p = makeProject();
     const r = await makeRunner(p.id);
-    getDb().prepare("UPDATE infinite_runners SET enabled = 0, control_state = 'need_input', stop_cause = 'usage_exhausted' WHERE id = ?").run(r.id);
+    makeQuotaWaiting(r.id);
     const row = { id: 'recover-one', runner_id: r.id, agent_name: PAD, event: 'usage_exhausted', script_body: 'true\n', recreate_resume: 1 };
     const context = await recovery.begin(row, { inspect: async () => 'old-container' });
     let resumes = 0;
@@ -95,7 +105,7 @@ describe('plan 92 — callback storage and settings', () => {
     ]) {
       const p = makeProject(id);
       const r = await makeRunner(p.id, id);
-      getDb().prepare("UPDATE infinite_runners SET enabled = 0, control_state = 'need_input', stop_cause = 'usage_exhausted' WHERE id = ?").run(r.id);
+      makeQuotaWaiting(r.id);
       const row = { id, runner_id: r.id, agent_name: PAD, event: 'usage_exhausted', script_body: 'true', recreate_resume: 1 };
       const context = await recovery.begin(row, { inspect: async () => 'same-container' });
       await recovery.complete(row, context, outcome, { recreate: async () => {}, inspect: async () => 'same-container', resume: async () => assert.fail('must not resume') });

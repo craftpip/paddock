@@ -259,20 +259,36 @@ describe('plan 86: setup creates only; update is a CAS write; neither calls Run'
     assert.ok(!calls.some((c) => c.includes('/start')));
   });
 
-  it('update sends items + revision and applies the response', async () => {
+  it('add sends plan paths + revision without client IDs and applies the canonical response', async () => {
     const s = await freshStore();
-    route(/\/api\/mission\/runners\/run_a\/queue$/, Q('rev2', { items: [] }));
+    route(/\/api\/mission\/runners\/run_a\/queue\/items$/, Q(2, { items: [] }));
     s.setState({ runners: [RUN_A], openSession: openA() });
-    await s.getState().updateRunnerQueue('run_a', [{ id: 'x', status: 'new' }], 'rev1');
+    await s.getState().addRunnerQueueItems('run_a', ['one.md'], 1);
     await settle();
-    const put = calls.find((c) => c.startsWith('PUT /api/mission/runners/run_a/queue'));
+    const put = calls.find((c) => c.startsWith('POST /api/mission/runners/run_a/queue/items'));
     assert.ok(put);
     const sent = bodies.find(Boolean);
-    assert.deepEqual(sent.items, [{ id: 'x', status: 'new' }]);
-    assert.equal(sent.revision, 'rev1');
-    assert.equal(s.getState().queue.revision, 'rev2');
+    assert.deepEqual(sent.plans, ['one.md']);
+    assert.equal(sent.items, undefined);
+    assert.equal(sent.revision, 1);
+    assert.equal(s.getState().queue.revision, 2);
     assert.equal(s.getState().queueStale, false);
     assert.ok(!calls.some((c) => c.includes('/start')));
+  });
+
+  it('human status review uses an item operation with CAS and applies the server snapshot', async () => {
+    const s = await freshStore();
+    route(/\/api\/mission\/runners\/run_a\/queue\/items\/item-1$/, Q(3, {
+      execution: { state: 'complete', label: 'Complete' },
+      items: [{ id: 'item-1', plan: 'one.md', status: 'done', reason: 'Reviewed evidence' }],
+    }));
+    s.setState({ runners: [RUN_A], openSession: openA(), queue: Q(2), queueForRunner: 'run_a' });
+    await s.getState().updateRunnerQueueItem('run_a', 'item-1', { status: 'done', reason: 'Reviewed evidence' }, 2);
+    const patch = calls.find((call) => call.startsWith('PATCH /api/mission/runners/run_a/queue/items/item-1'));
+    assert.ok(patch);
+    assert.deepEqual(bodies.find(Boolean), { status: 'done', reason: 'Reviewed evidence', revision: 2 });
+    assert.equal(s.getState().queue.revision, 3);
+    assert.equal(s.getState().queue.items[0].status, 'done');
   });
 
   it('a revision conflict keeps the snapshot, marks it STALE, and does not retry', async () => {
@@ -284,14 +300,14 @@ describe('plan 86: setup creates only; update is a CAS write; neither calls Run'
     assert.equal(s.getState().queueStale, false);
 
     routes.length = 0;
-    route(/\/api\/mission\/runners\/run_a\/queue$/, {
+    route(/\/api\/mission\/runners\/run_a\/queue\/items$/, {
       error: 'Queue was modified by another writer (expected rev1, current rev9). Reload and retry.',
       code: 'queue_revision_conflict',
     }, 400);
 
     let err = null;
     try {
-      await s.getState().updateRunnerQueue('run_a', [], 'rev1');
+      await s.getState().addRunnerQueueItems('run_a', ['one.md'], 1);
     } catch (e) {
       err = e;
     }

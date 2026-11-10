@@ -1,5 +1,6 @@
 const { after, beforeEach, describe, it } = require('node:test');
 const assert = require('node:assert/strict');
+const { spawn } = require('node:child_process');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -40,12 +41,23 @@ function seedRunner(projectId, sessionId) {
   return runner;
 }
 
+function applyUnknown(runnerId) {
+  const runtime = runnerTransition.getRuntime(runnerId);
+  return runnerTransition.applyDeliveryUnknown(runnerId, { details: { operationId: runtime.operation_id } });
+}
+
+function applyReceipt(runnerId) {
+  const runtime = runnerTransition.getRuntime(runnerId);
+  return runnerTransition.applyReceipt(runnerId, { details: { operationId: runtime.operation_id, receiptInputId: `receipt-${runtime.generation}` } });
+}
+
 function resetDb() {
   const db = getDb();
   // Disable FK checks temporarily to allow clean slate
   db.pragma('foreign_keys = OFF');
-  db.exec('DELETE FROM runner_transitions; DELETE FROM runner_queue_events; DELETE FROM runner_queue_items; DELETE FROM runner_queues; DELETE FROM infinite_runners; DELETE FROM mission_sessions; DELETE FROM mission_projects; DELETE FROM agents;');
+  db.exec('DELETE FROM runner_operations; DELETE FROM runner_publications; DELETE FROM runner_projection_owners; DELETE FROM runner_runtime; DELETE FROM runner_transitions; DELETE FROM runner_queue_events; DELETE FROM runner_queue_items; DELETE FROM runner_queues; DELETE FROM infinite_runners; DELETE FROM mission_sessions; DELETE FROM mission_projects; DELETE FROM agents;');
   db.pragma('foreign_keys = ON');
+  fs.rmSync(path.join(root, 'instances', PAD, 'opencode', 'workspace'), { recursive: true, force: true });
   seedPad();
 }
 
@@ -59,7 +71,73 @@ describe('plan 113 runner state machine — canonical transitions', () => {
     const withCanonical = runnerTransition.getRunnerWithCanonical(runner.id);
     assert.equal(withCanonical.canonicalState, 'paused');
     assert.equal(withCanonical.markerRequired, true);
-    assert.deepEqual(withCanonical.allowedActions.sort(), ['pause', 'close', 'run', 'projection_mismatch'].sort());
+    assert.deepEqual(withCanonical.allowedActions.sort(), ['adopt_active_turn', 'pause', 'close', 'run', 'projection_mismatch', 'queue_blocked', 'review_complete'].sort());
+  });
+
+  it('serializes concurrent Run attempts from independent database connections', async () => {
+    resetDb();
+    const project = seedProject();
+    const session = mission.createSession(project.id, { agentSessionId: 'ses_seq_race' });
+    const runner = await seedRunner(project.id, session.id);
+    const gate = path.join(root, 'run-race.go');
+    const ready = [path.join(root, 'run-race-a.ready'), path.join(root, 'run-race-b.ready')];
+    const service = path.resolve(__dirname, '../services/runner-transition');
+    const script = `
+      const fs = require('node:fs');
+      const transition = require(${JSON.stringify(service)});
+      const runtime = transition.getRuntime(process.env.RUNNER_ID);
+      fs.writeFileSync(process.env.READY_FILE, runtime.state);
+      const wait = new Int32Array(new SharedArrayBuffer(4));
+      while (!fs.existsSync(process.env.GATE_FILE)) Atomics.wait(wait, 0, 0, 5);
+      try { transition.applyRun(process.env.RUNNER_ID, { actor: process.env.WORKER }); console.log(JSON.stringify({ ok: true })); }
+      catch (error) { console.log(JSON.stringify({ ok: false, code: error.code })); }
+    `;
+    const children = ready.map((readyFile, index) => spawn(process.execPath, ['-e', script], {
+      cwd: path.resolve(__dirname, '..'),
+      env: { ...process.env, RUNNER_ID: runner.id, READY_FILE: readyFile, GATE_FILE: gate, WORKER: `race-${index}` },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }));
+    const outcomes = Promise.all(children.map((child) => new Promise((resolve, reject) => {
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk) => { stdout += chunk; });
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+      child.on('error', reject);
+      child.on('close', (code) => code === 0
+        ? resolve(JSON.parse(stdout.trim().split('\n').at(-1)))
+        : reject(new Error(`race child exited ${code}: ${stderr}`)));
+    })));
+    const deadline = Date.now() + 5000;
+    while (!ready.every((file) => fs.existsSync(file)) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(ready.every((file) => fs.existsSync(file)), 'both independent connections reached the pre-transaction barrier');
+    assert.deepEqual(ready.map((file) => fs.readFileSync(file, 'utf8')), ['paused', 'paused']);
+    fs.writeFileSync(gate, 'go');
+    const results = await outcomes;
+    assert.equal(results.filter((result) => result.ok).length, 1);
+    assert.equal(results.filter((result) => result.code === 'runner_transition_invalid' || result.code === 'runner_transition_conflict').length, 1);
+    assert.equal(runnerTransition.getRuntime(runner.id).state, 'dispatching');
+    assert.equal(getDb().prepare('SELECT COUNT(*) AS n FROM runner_transitions WHERE runner_id = ? AND event = \'run\'').get(runner.id).n, 1);
+    assert.equal(getDb().prepare('SELECT COUNT(*) AS n FROM runner_operations WHERE runner_id = ?').get(runner.id).n, 1);
+  });
+
+  it('reads execution authorization from runner_runtime, not legacy flags or stop fields', async () => {
+    resetDb();
+    const project = seedProject();
+    const session = mission.createSession(project.id, { agentSessionId: 'ses_seq' });
+    const runner = await mission.createRunner({ projectId: project.id, sessionId: session.id, name: 'runtime-source' });
+    runnerTransition.applyRun(runner.id);
+    runnerTransition.applyDeliveryUnknown(runner.id, { details: { operationId: runnerTransition.getRuntime(runner.id).operation_id } });
+    // These fields deliberately contradict the state row. The Mission-facing
+    // runner projection must still report the durable canonical state.
+    getDb().prepare("UPDATE infinite_runners SET enabled = 0, control_state = 'paused', operation_status = 'ended', stop_cause = 'bad-old-value' WHERE id = ?").run(runner.id);
+    const view = mission.getRunner(runner.id);
+    assert.equal(view.canonicalState, 'awaiting_receipt');
+    assert.equal(view.control_state, 'enabled');
+    assert.equal(view.enabled, 1);
+    assert.equal(view.operation_status, 'unconfirmed');
+    assert.equal(view.stop_cause, 'delivery_unknown');
   });
 
   it('run transitions paused -> dispatching', async () => {
@@ -81,7 +159,7 @@ describe('plan 113 runner state machine — canonical transitions', () => {
     const runner = await mission.createRunner({ projectId: project.id, sessionId: session.id, name: 'seq-runner-' + crypto.randomBytes(4).toString('hex') });
 
     runnerTransition.applyRun(runner.id);
-    const result = runnerTransition.applyDeliveryUnknown(runner.id);
+    const result = applyUnknown(runner.id);
     assert.equal(result.canonicalState, 'awaiting_receipt');
     assert.equal(result.markerRequired, false);
     assert.deepEqual(result.allowedActions.sort(), ['receipt', 'hold', 'pause', 'close', 'need_input', 'complete', 'projection_mismatch'].sort());
@@ -94,11 +172,63 @@ describe('plan 113 runner state machine — canonical transitions', () => {
     const runner = await mission.createRunner({ projectId: project.id, sessionId: session.id, name: 'seq-runner-' + crypto.randomBytes(4).toString('hex') });
 
     runnerTransition.applyRun(runner.id);
-    runnerTransition.applyDeliveryUnknown(runner.id);
-    const result = runnerTransition.applyReceipt(runner.id);
+    applyUnknown(runner.id);
+    const result = applyReceipt(runner.id);
     assert.equal(result.canonicalState, 'running');
     assert.equal(result.markerRequired, false);
-    assert.deepEqual(result.allowedActions.sort(), ['hold', 'pause', 'close', 'need_input', 'complete', 'projection_mismatch'].sort());
+    assert.deepEqual(result.allowedActions.sort(), ['dispatch_next', 'turn_completed', 'hold', 'pause', 'close', 'need_input', 'complete', 'projection_mismatch'].sort());
+  });
+
+  it('refuses a receipt from a different operation while leaving the owned attempt unchanged', async () => {
+    resetDb();
+    const project = seedProject();
+    const session = mission.createSession(project.id, { agentSessionId: 'ses_seq' });
+    const runner = await mission.createRunner({ projectId: project.id, sessionId: session.id, name: 'seq-wrong-receipt' });
+    runnerTransition.applyRun(runner.id, { details: { conversationId: session.agent_session_id } });
+    const operationId = runnerTransition.getRuntime(runner.id).operation_id;
+    runnerTransition.applyDeliveryUnknown(runner.id, { details: { operationId } });
+    const before = runnerTransition.getRuntime(runner.id);
+    assert.throws(
+      () => runnerTransition.applyReceipt(runner.id, { details: { operationId: 'rop_not_owned', receiptInputId: 'foreign-input' } }),
+      { code: 'runner_operation_superseded' }
+    );
+    assert.deepEqual(runnerTransition.getRuntime(runner.id), before);
+    assert.equal(getDb().prepare('SELECT status FROM runner_operations WHERE id = ?').get(operationId).status, 'awaiting_receipt');
+  });
+
+  it('completed turn retires its owned operation before next-item dispatch', async () => {
+    resetDb();
+    const project = seedProject();
+    const session = mission.createSession(project.id, { agentSessionId: 'ses_seq' });
+    const runner = await mission.createRunner({ projectId: project.id, sessionId: session.id, name: 'seq-turn' });
+    runnerTransition.applyRun(runner.id, { details: { conversationId: session.agent_session_id, itemId: 'item-1' } });
+    const first = runnerTransition.getRuntime(runner.id);
+    runnerTransition.applyReceipt(runner.id, { details: { operationId: first.operation_id, receiptInputId: 'input-1' } });
+    runnerTransition.applyTurnCompleted(runner.id, { details: { operationId: first.operation_id, receiptInputId: 'input-1' } });
+    assert.equal(runnerTransition.getRuntime(runner.id).state, 'running');
+    assert.equal(runnerTransition.getRuntime(runner.id).operation_id, null);
+    assert.equal(getDb().prepare('SELECT status FROM runner_operations WHERE id = ?').get(first.operation_id).status, 'completed');
+    const next = runnerTransition.applyDispatchNext(runner.id, { details: { conversationId: session.agent_session_id, itemId: 'item-2' } });
+    assert.equal(next.canonicalState, 'dispatching');
+    assert.notEqual(next.runtime.operation_id, first.operation_id);
+  });
+
+  it('Pause revokes receipt ownership; a late receipt leaves runtime and operation invalidated', async () => {
+    resetDb();
+    const project = seedProject();
+    const session = mission.createSession(project.id, { agentSessionId: 'ses_seq' });
+    const runner = await mission.createRunner({ projectId: project.id, sessionId: session.id, name: 'seq-late-receipt' });
+    runnerTransition.applyRun(runner.id, { details: { conversationId: session.agent_session_id } });
+    const operationId = runnerTransition.getRuntime(runner.id).operation_id;
+    runnerTransition.applyDeliveryUnknown(runner.id, { details: { operationId } });
+    runnerTransition.applyPause(runner.id, { actor: 'test' });
+    assert.throws(
+      () => runnerTransition.applyReceipt(runner.id, { details: { operationId, receiptInputId: 'late-input' } }),
+      { code: 'runner_transition_invalid' }
+    );
+    assert.equal(runnerTransition.getRuntime(runner.id).state, 'paused');
+    assert.equal(runnerTransition.getRuntime(runner.id).operation_id, null);
+    assert.equal(getDb().prepare('SELECT status FROM runner_operations WHERE id = ?').get(operationId).status, 'invalidated');
   });
 
   it('hold transitions awaiting_receipt/running -> held', async () => {
@@ -108,7 +238,7 @@ describe('plan 113 runner state machine — canonical transitions', () => {
     const runner = await mission.createRunner({ projectId: project.id, sessionId: session.id, name: 'seq-runner-' + crypto.randomBytes(4).toString('hex') });
 
     runnerTransition.applyRun(runner.id);
-    runnerTransition.applyDeliveryUnknown(runner.id);
+    applyUnknown(runner.id);
     let result = runnerTransition.applyHold(runner.id);
     assert.equal(result.canonicalState, 'held');
     assert.equal(result.markerRequired, true);
@@ -120,8 +250,8 @@ describe('plan 113 runner state machine — canonical transitions', () => {
     const runner2 = await mission.createRunner({ projectId: project2.id, sessionId: session2.id, name: 'seq-runner-' + crypto.randomBytes(4).toString('hex') });
 
     runnerTransition.applyRun(runner2.id);
-    runnerTransition.applyDeliveryUnknown(runner2.id);
-    runnerTransition.applyReceipt(runner2.id);
+    applyUnknown(runner2.id);
+    applyReceipt(runner2.id);
     result = runnerTransition.applyHold(runner2.id);
     assert.equal(result.canonicalState, 'held');
   });
@@ -153,7 +283,7 @@ describe('plan 113 runner state machine — canonical transitions', () => {
     const session = mission.createSession(project.id, { agentSessionId: 'ses_seq' });
     const runner = await mission.createRunner({ projectId: project.id, sessionId: session.id, name: 'seq-runner-' + crypto.randomBytes(4).toString('hex') });
     runnerTransition.applyRun(runner.id);
-    runnerTransition.applyDeliveryUnknown(runner.id);
+    applyUnknown(runner.id);
     const result = runnerTransition.applyPause(runner.id);
     assert.equal(result.canonicalState, 'paused');
     assert.equal(result.markerRequired, true);
@@ -165,8 +295,8 @@ describe('plan 113 runner state machine — canonical transitions', () => {
     const session = mission.createSession(project.id, { agentSessionId: 'ses_seq' });
     const runner = await mission.createRunner({ projectId: project.id, sessionId: session.id, name: 'seq-runner-' + crypto.randomBytes(4).toString('hex') });
     runnerTransition.applyRun(runner.id);
-    runnerTransition.applyDeliveryUnknown(runner.id);
-    runnerTransition.applyReceipt(runner.id);
+    applyUnknown(runner.id);
+    applyReceipt(runner.id);
     const result = runnerTransition.applyPause(runner.id);
     assert.equal(result.canonicalState, 'paused');
     assert.equal(result.markerRequired, true);
@@ -178,8 +308,8 @@ describe('plan 113 runner state machine — canonical transitions', () => {
     const session = mission.createSession(project.id, { agentSessionId: 'ses_seq' });
     const runner = await mission.createRunner({ projectId: project.id, sessionId: session.id, name: 'seq-runner-' + crypto.randomBytes(4).toString('hex') });
     runnerTransition.applyRun(runner.id);
-    runnerTransition.applyDeliveryUnknown(runner.id);
-    runnerTransition.applyReceipt(runner.id);
+    applyUnknown(runner.id);
+    applyReceipt(runner.id);
     runnerTransition.applyNeedInput(runner.id);
     const result = runnerTransition.applyPause(runner.id);
     assert.equal(result.canonicalState, 'paused');
@@ -192,8 +322,8 @@ describe('plan 113 runner state machine — canonical transitions', () => {
     const session = mission.createSession(project.id, { agentSessionId: 'ses_seq' });
     const runner = await mission.createRunner({ projectId: project.id, sessionId: session.id, name: 'seq-runner-' + crypto.randomBytes(4).toString('hex') });
     runnerTransition.applyRun(runner.id);
-    runnerTransition.applyDeliveryUnknown(runner.id);
-    runnerTransition.applyReceipt(runner.id);
+    applyUnknown(runner.id);
+    applyReceipt(runner.id);
     runnerTransition.applyHold(runner.id);
     const result = runnerTransition.applyPause(runner.id);
     assert.equal(result.canonicalState, 'paused');
@@ -243,10 +373,10 @@ describe('plan 113 runner state machine — canonical transitions', () => {
       const runner = await mission.createRunner({ projectId: project.id, sessionId: session.id, name: 'seq-runner-' + crypto.randomBytes(4).toString('hex') });
 
       runnerTransition.applyRun(runner.id);
-      if (from === 'awaiting_receipt') runnerTransition.applyDeliveryUnknown(runner.id);
+      if (from === 'awaiting_receipt') applyUnknown(runner.id);
       else if (from === 'running') {
-        runnerTransition.applyDeliveryUnknown(runner.id);
-        runnerTransition.applyReceipt(runner.id);
+        applyUnknown(runner.id);
+        applyReceipt(runner.id);
       }
       const result = runnerTransition.applyNeedInput(runner.id);
       assert.equal(result.canonicalState, 'waiting_input');
@@ -261,8 +391,8 @@ describe('plan 113 runner state machine — canonical transitions', () => {
     const runner = await mission.createRunner({ projectId: project.id, sessionId: session.id, name: 'seq-runner-' + crypto.randomBytes(4).toString('hex') });
 
     runnerTransition.applyRun(runner.id);
-    runnerTransition.applyDeliveryUnknown(runner.id);
-    runnerTransition.applyReceipt(runner.id);
+    applyUnknown(runner.id);
+    applyReceipt(runner.id);
     runnerTransition.applyNeedInput(runner.id);
     const result = runnerTransition.applyResolve(runner.id);
     assert.equal(result.canonicalState, 'paused');
@@ -277,10 +407,10 @@ describe('plan 113 runner state machine — canonical transitions', () => {
       const runner = await mission.createRunner({ projectId: project.id, sessionId: session.id, name: 'seq-runner-' + crypto.randomBytes(4).toString('hex') });
 
       runnerTransition.applyRun(runner.id);
-      if (from === 'awaiting_receipt') runnerTransition.applyDeliveryUnknown(runner.id);
+      if (from === 'awaiting_receipt') applyUnknown(runner.id);
       else if (from === 'running') {
-        runnerTransition.applyDeliveryUnknown(runner.id);
-        runnerTransition.applyReceipt(runner.id);
+        applyUnknown(runner.id);
+        applyReceipt(runner.id);
       }
       const result = runnerTransition.applyComplete(runner.id);
       assert.equal(result.canonicalState, 'complete');
@@ -320,8 +450,8 @@ describe('plan 113 runner state machine — canonical transitions', () => {
     const runner = await mission.createRunner({ projectId: project.id, sessionId: session.id, name: 'seq-runner-' + crypto.randomBytes(4).toString('hex') });
 
     runnerTransition.applyRun(runner.id);
-    runnerTransition.applyDeliveryUnknown(runner.id);
-    runnerTransition.applyReceipt(runner.id);
+    applyUnknown(runner.id);
+    applyReceipt(runner.id);
     runnerTransition.applyPause(runner.id);
 
     const transitions = runnerTransition.getTransitions(runner.id);
@@ -338,7 +468,7 @@ describe('plan 113 runner state machine — canonical transitions', () => {
     const runner = await mission.createRunner({ projectId: project.id, sessionId: session.id, name: 'seq-runner-' + crypto.randomBytes(4).toString('hex') });
 
     assert.throws(
-      () => runnerTransition.applyReceipt(runner.id),
+      () => applyReceipt(runner.id),
       (err) => err.code === 'runner_transition_invalid' && err.message.includes('paused') && err.message.includes('run')
     );
 
@@ -360,8 +490,8 @@ describe('plan 113 runner state machine — canonical transitions', () => {
     const runner = await mission.createRunner({ projectId: project.id, sessionId: session.id, name: 'seq-runner-' + crypto.randomBytes(4).toString('hex') });
 
     runnerTransition.applyRun(runner.id);
-    runnerTransition.applyDeliveryUnknown(runner.id);
-    runnerTransition.applyReceipt(runner.id);
+    applyUnknown(runner.id);
+    applyReceipt(runner.id);
     runnerTransition.applyHold(runner.id);
     const result = runnerTransition.applyRun(runner.id);
     assert.equal(result.canonicalState, 'dispatching');
@@ -377,6 +507,21 @@ describe('plan 113 runner state machine — canonical transitions', () => {
     runnerTransition.applyComplete(runner.id);
     const result = runnerTransition.applyRun(runner.id);
     assert.equal(result.canonicalState, 'dispatching');
+  });
+
+  it('adding work after complete atomically returns the persisted runtime to paused', async () => {
+    resetDb();
+    const project = seedProject();
+    const session = mission.createSession(project.id, { agentSessionId: 'ses_seq' });
+    const runner = await mission.createRunner({ projectId: project.id, sessionId: session.id, name: 'seq-runner-' + crypto.randomBytes(4).toString('hex') });
+    await mission.setupRunnerQueue(runner.id);
+    runnerTransition.applyRun(runner.id);
+    runnerTransition.applyComplete(runner.id);
+    const detail = await mission.readRunnerQueue(runner.id);
+    const updated = await mission.addRunnerQueueItems(runner.id, ['new-work.md'], detail.queue.revision);
+    assert.equal(updated.queue.execution.state, 'paused');
+    assert.equal(runnerTransition.getRuntime(runner.id).state, 'paused');
+    assert.equal(runnerTransition.getRuntime(runner.id).operation_id, null);
   });
 
   it('run from projection_error is NOT allowed (only pause, close, projection_mismatch, projection_regenerated allowed)', async () => {
@@ -426,6 +571,22 @@ describe('plan 113 runner state machine — integration with queue', () => {
 });
 
 describe('plan 113 runner state machine — mutation controls', () => {
+  it('execution authorization writes and marker writes have one service owner', () => {
+    const services = path.join(__dirname, '..', 'services');
+    const files = fs.readdirSync(services).filter((file) => file.endsWith('.js') && !['runner-transition.js', 'db.js'].includes(file));
+    const stateWrite = /UPDATE\s+infinite_runners\s+SET[\s\S]{0,260}\b(?:enabled|control_state|operation_status|operation_id|stop_cause)\s*=/i;
+    const markerWrite = /setQueuePausedMarker\s*\(/;
+    const publicationWrite = /(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+runner_publications\b/i;
+    for (const file of files) {
+      const src = fs.readFileSync(path.join(services, file), 'utf8');
+      assert.ok(!stateWrite.test(src), `${file} must not write runner authorization fields`);
+      if (!['runner-publication.js', 'plans.js'].includes(file)) assert.ok(!markerWrite.test(src), `${file} must not write the queue marker`);
+      if (!['runner-publication.js', 'runner-queue.js'].includes(file)) {
+        assert.ok(!publicationWrite.test(src), `${file} must not write publication state outside its owner`);
+      }
+    }
+  });
+
   it('markerRequired matches canonical states', () => {
     const { markerRequired, STATES } = require('../services/runner-state');
     const expectedMarker = {
