@@ -2,16 +2,19 @@ import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { useState, useEffect, useRef } from 'react'
 import { useNavigate, useParams, Link } from 'react-router-dom'
 import { api } from '../lib/api'
-import Console from '../components/Console'
 import Button from '../components/ui/Button'
-import { Input, Textarea, Select, Checkbox } from '../components/ui/Input'
-import Field from '../components/ui/Field'
+import { Input, Select } from '../components/ui/Input'
 import Card from '../components/ui/Card'
 import Badge from '../components/ui/Badge'
 import Switch from '../components/ui/Switch'
-import { TONES } from '../components/ui/tone'
-import { cx } from '../lib/cx'
 import { hostSourceIssue } from '../lib/workspace-guards'
+import WorkspaceSourceSection from './create-agent/WorkspaceSourceSection'
+import WorkspacePathSection from './create-agent/WorkspacePathSection'
+import ContainerOptionsSection from './create-agent/ContainerOptionsSection'
+import VolumesSection from './create-agent/VolumesSection'
+import PortsSection from './create-agent/PortsSection'
+import BuildCommandsSection from './create-agent/BuildCommandsSection'
+import CreateProgress from './create-agent/CreateProgress'
 
 const STEP_COMMANDS = {
   build: (name) => `docker compose -f instances/${name}/docker-compose.yml build`,
@@ -718,87 +721,26 @@ export default function CreateAgent() {
 
             {/* Workspace source folder — the heart of the form */}
             {!wsHidden && (
-              <div className="border-t border-line pt-4">
-                <Field
-                  htmlFor="ws-host"
-                  labelClassName="flex items-center justify-between"
-                  label={
-                    <>
-                      Host workspace path
-                      <span className="text-[11px] font-normal normal-case tracking-normal text-ink-faint">The project your agent works on</span>
-                    </>
-                  }
-                >
-                <div className="relative">
-                  <Input id="ws-host" type="text" value={wsHost} mono
-                         onChange={(e) => onWsHostChange(e.target.value)}
-                         onKeyDown={onWsKeyDown}
-                         onBlur={() => setTimeout(() => setSuggestOpen(false), 150)}
-                         placeholder={defaultWsHost}
-                         className="pr-9" />
-                  {hostWorkspaceRoot && !wsHidden && !wsFixed && wsHost.trim().startsWith('/') && !wsHost.trim().startsWith('instances/') && (
-                    <Button
-                            onClick={() => { wsDirTouched.current = true; setWsDir(wsHost.trim()) }}
-                            title={wsDir === wsHost.trim() ? 'Paths are synced' : 'Sync container path to this path'}
-                            variant="ghost"
-                            size="sm"
-                            icon
-                            className={cx(
-                              'absolute right-1.5 top-1/2 h-6 w-6 -translate-y-1/2',
-                              wsDir === wsHost.trim() && wsDir
-                                ? 'bg-success text-success-ink hover:bg-success'
-                                : 'text-ink-faint hover:bg-sunken hover:text-ink'
-                            )}>
-                      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
-                        <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
-                      </svg>
-                    </Button>
-                  )}
-                  {suggestOpen && suggestions.length > 0 && (
-                    <div className="absolute z-20 mt-1 w-full max-h-60 overflow-auto bg-raised border border-line rounded-card shadow-xl">
-                      {suggestions.map((s, i) => (
-                        <Button key={s} size="sm"
-                                onMouseDown={(e) => { e.preventDefault(); pickSuggestion(s) }}
-                                className={cx('block w-full px-3 py-2 text-left font-mono text-ink hover:bg-sunken', i === acIndex && 'bg-sunken')}>
-                          {s}
-                        </Button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-                </Field>
-                <p className="text-xs text-ink-dim mt-1.5">
-                  This folder is where your agent's files live on this PC — open it directly from your file manager.
-                </p>
-                {wsHostProblem && <p className="text-xs text-danger mt-1">{wsHostProblem}</p>}
-                {wsProbe && !wsProbe.forbidden && !wsProbe.exists && (
-                  <p className="text-xs text-warning mt-1">Folder not found in paddock — mount the project folder one-to-one (same path in host and container) to use it.</p>
-                )}
-                {wsProbe && !wsProbe.forbidden && wsProbe.exists && !wsProbe.compose && (
-                  <p className="text-xs text-success mt-1">Path resolves.</p>
-                )}
-                {wsProbe && !wsProbe.forbidden && wsProbe.exists && wsProbe.outsideProject && (
-                  /* Plan 72. Two facts that are easy to state wrongly, so they
-                     are stated from what the code does: the webui does NOT
-                     chown an outside-project source (that `ensureOwned` call is
-                     gated on `webuiVisible`), so ownership there belongs to
-                     whoever runs the agent; and `removeVm` only deletes a source
-                     under the project root, so deleting this agent leaves the
-                     folder alone. */
-                  <p className="text-xs text-ink-dim mt-1">
-                    Outside the Paddock folder, so this project&rsquo;s file browser and autocomplete stay
-                    container-only until the folder is mounted one-to-one. Files here are owned by whoever runs
-                    the agent (root, or the PAD user in user mode) &mdash; deleting the agent does <strong>not</strong>{' '}
-                    delete this folder.
-                  </p>
-                )}
-                {discovered && (
-                  <div className={cx('mt-2 rounded-card border px-3 py-2 text-xs', TONES.success.panel)}>
-                    {discovered.count} volume{discovered.count === 1 ? '' : 's'} found in <code className="font-mono">{discovered.project}</code>'s compose file — pre-filled under <span className="font-medium">Advanced settings → Additional volumes</span>. Review, edit or remove them before creating.
-                  </div>
-                )}
-              </div>
+              <WorkspaceSourceSection
+                wsHost={wsHost}
+                onWsHostChange={onWsHostChange}
+                onWsKeyDown={onWsKeyDown}
+                setSuggestOpen={setSuggestOpen}
+                defaultWsHost={defaultWsHost}
+                hostWorkspaceRoot={hostWorkspaceRoot}
+                wsHidden={wsHidden}
+                wsFixed={wsFixed}
+                wsDirTouched={wsDirTouched}
+                setWsDir={setWsDir}
+                wsDir={wsDir}
+                suggestOpen={suggestOpen}
+                suggestions={suggestions}
+                pickSuggestion={pickSuggestion}
+                acIndex={acIndex}
+                wsHostProblem={wsHostProblem}
+                wsProbe={wsProbe}
+                discovered={discovered}
+              />
             )}
 
             {/* Advanced settings — switch toggle inside the create card */}
@@ -829,339 +771,64 @@ export default function CreateAgent() {
             <div className="space-y-5">
           {/* Container workspace path — the host source is on the core card above */}
           {!wsHidden && (
-            <div className="border-t border-line pt-4">
-              <div className="flex items-center justify-between mb-2">
-                <h3 className="text-xs font-medium text-ink-faint uppercase tracking-wider">Container workspace path</h3>
-                {wsFixed && (
-                  <Badge tone="neutral" variant="outline" size="sm">
-                    <svg className="w-3 h-3" viewBox="0 0 20 20" fill="currentColor">
-                      <path fillRule="evenodd" d="M10 1a 4.5 4.5 0 0 0 -4.5 4.5V9H5a 2 2 0 0 0 -2 2v6a 2 2 0 0 0 2 2h10a 2 2 0 0 0 2 -2v-6a 2 2 0 0 0 -2 -2h-.5V5.5A 4.5 4.5 0 0 0 10 1zm3 8V5.5a 3 3 0 1 0 -6 0V9h6z" clipRule="evenodd" />
-                    </svg>
-                    Fixed
-                  </Badge>
-                )}
-              </div>
-              <p className="text-xs text-ink-dim mb-2">
-                The path inside the container where the agent sees the workspace folder. Leave empty to use the driver default.
-              </p>
-              <div className="relative">
-                <Input type="text" value={wsDir} mono
-                       onChange={(e) => { if (!wsFixed) { wsDirTouched.current = true; setWsDir(e.target.value) } }}
-                       readOnly={wsFixed}
-                       tabIndex={wsFixed ? -1 : 0}
-                       placeholder={defaultWsDir || '/root/.openclaw/workspace'}
-                       className={wsFixed
-                         ? 'border-dashed border-line-faint text-ink-dim cursor-not-allowed'
-                         : 'pr-9'} />
-                {!wsFixed && wsHost.trim().startsWith('/') && !wsHost.trim().startsWith('instances/') && (
-                  <Button
-                          onClick={() => { wsDirTouched.current = true; setWsDir(wsHost.trim()) }}
-                          title={wsDir === wsHost.trim() ? 'Paths are synced' : 'Sync container path to this path'}
-                          variant="ghost"
-                          size="sm"
-                          icon
-                          className={cx(
-                            'absolute right-1.5 top-1/2 h-6 w-6 -translate-y-1/2',
-                            wsDir === wsHost.trim() && wsDir
-                              ? 'bg-success text-success-ink hover:bg-success'
-                              : 'text-ink-faint hover:bg-sunken hover:text-ink'
-                          )}>
-                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
-                      <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
-                    </svg>
-                  </Button>
-                )}
-              </div>
-              {wsFixed && (
-                <p className="text-xs text-ink-dim mt-1">
-                  <span className="text-ink-faint">Locked —</span> fixed by {agentType}, whose CLI requires the workspace at this path.
-                </p>
-              )}
-              {wsDirErr && <p className="text-xs text-danger mt-1">{wsDirErr}</p>}
-            </div>
+            <WorkspacePathSection
+              wsFixed={wsFixed}
+              wsDir={wsDir}
+              wsDirTouched={wsDirTouched}
+              setWsDir={setWsDir}
+              defaultWsDir={defaultWsDir}
+              wsHost={wsHost}
+              agentType={agentType}
+              wsDirErr={wsDirErr}
+            />
           )}
 
           {/* Container options — docker + network */}
-          <div className="border-t border-line pt-4">
-            <h3 className="text-xs font-medium text-ink-faint uppercase tracking-wider">Container options</h3>
-
-            <div className="mt-3 flex items-start justify-between gap-4">
-              <div>
-                <p className="text-sm font-medium text-ink">Allow docker in the container</p>
-                <p className="text-xs text-ink-dim mt-1 max-w-md">
-                  Mounts the host docker socket + installs the docker CLI. Rebuilds the image during creation.
-                </p>
-              </div>
-              <Switch
-                checked={allowDocker}
-                onChange={setAllowDocker}
-                label="Allow docker in the container"
-              />
-            </div>
-            {allowDocker && (
-              <p className={cx('mt-3 rounded-card border px-3 py-2 text-xs', TONES.warning.panel)}>
-                ⚠ The docker socket is host-root equivalent — this agent can control the entire host.
-              </p>
-            )}
-
-            {/* Container user (plan 43 Phase 7): root vs the pad user */}
-            <div className="mt-4">
-              <Field
-                labelClassName="flex items-center justify-between"
-                label={
-                  <>
-                    Container user
-                    <span className="text-[11px] font-normal normal-case tracking-normal text-ink-dim">pad uid {prefix === 'vm' ? '1000:1000' : 'PUID:PGID'}</span>
-                  </>
-                }
-              >
-                <div className="inline-flex rounded-control border border-line-faint bg-sunken p-0.5">
-                  <Button size="sm"
-                          variant={userMode === 'root' ? 'primary' : 'ghost'}
-                          className="px-3 rounded-control"
-                          onClick={() => { userModeTouched.current = true; setUserMode('root') }}>
-                    Root
-                  </Button>
-                  <Button size="sm"
-                          variant={userMode === 'user' ? 'primary' : 'ghost'}
-                          disabled={agentType === 'hermes'}
-                          className="px-3 rounded-control"
-                          onClick={() => { userModeTouched.current = true; setUserMode('user') }}>
-                    Local user
-                  </Button>
-                </div>
-              </Field>
-              {agentType === 'hermes' ? (
-                <p className="text-xs text-ink-dim mt-1.5">
-                  Hermes already runs its daemon as its own user (/opt/data) — the option does not apply.
-                </p>
-              ) : (
-                <p className="text-xs text-ink-dim mt-1.5">
-                  {userMode === 'user'
-                    ? 'The agent daemon and terminal run as the pad user — every file they write is user-owned on the host. SSH stays the root admin door.'
-                    : 'The agent daemon runs as root (legacy default). Choose Local user to run agent processes as the pad user.'}
-                </p>
-              )}
-            </div>
-
-            <div className="mt-4">
-              <Field label="Network">
-                <div className="sm:w-96">
-                  <Select value={network} onChange={(e) => setNetwork(e.target.value)}>
-                    <option value="">Default (no override)</option>
-                    {networkOptions.map((c) => (
-                      <option key={c.name} value={c.name}>
-                        {c.name}{c.state !== 'running' ? '  (stopped)' : ''}
-                      </option>
-                    ))}
-                  </Select>
-                </div>
-              </Field>
-              <p className="text-xs text-ink-dim mt-1.5">
-                Route the agent through another running container by joining its network namespace (e.g. gluetun for VPN).
-              </p>
-              <p className="text-xs text-ink-dim mt-1.5">
-                In peer mode, published ports (web, additional ports) are forwarded through a socat door on the peer's bridge — no limitation.
-              </p>
-            </div>
-          </div>
+          <ContainerOptionsSection
+            allowDocker={allowDocker}
+            setAllowDocker={setAllowDocker}
+            prefix={prefix}
+            userMode={userMode}
+            userModeTouched={userModeTouched}
+            setUserMode={setUserMode}
+            agentType={agentType}
+            network={network}
+            setNetwork={setNetwork}
+            networkOptions={networkOptions}
+          />
 
           {/* Plan 28 + 40: Additional volumes */}
-          <div className="border-t border-line pt-4 space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="text-xs font-medium text-ink-faint uppercase tracking-wider">Additional volumes</h3>
-                <p className="text-xs text-ink-dim mt-1 max-w-md">
-                  Extra mounts beyond the data and workspace folders: host → container bind mounts or named Docker volumes. Changing them later requires a recreate.
-                </p>
-              </div>
-            </div>
-
-            {extraVolumes.length === 0 && (
-              <p className="text-xs text-ink-dim">No additional volumes.</p>
-            )}
-            {extraVolumes.length > 0 && (
-              <div className="rounded-card overflow-hidden border border-line-faint">
-                <div className="bg-sunken text-ink-faint uppercase tracking-wider text-[11px] px-2 py-2 flex items-center gap-2 font-medium">
-                  <span className="w-32 shrink-0">Type</span>
-                  <span className="flex-1 min-w-0">Host source / Volume name</span>
-                  <span className="flex-1 min-w-0">Container path</span>
-                  <span className="w-7 shrink-0 text-center" title="Read-only mount">Ro</span>
-                  <span className="w-7 shrink-0"></span>
-                </div>
-                {extraVolumes.map((v, i) => (
-                  <div key={i} className="border-t border-line-faint flex items-start gap-2 px-2 py-1.5">
-                    <div className="w-32 shrink-0">
-                      <Select size="sm" className="px-1.5" value={v.type || 'bind'}
-                              onChange={(e) => updateVolume(i, { type: e.target.value })}>
-                        <option value="bind">Bind mount</option>
-                        <option value="volume">Named volume</option>
-                      </Select>
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <Input size="sm" mono value={v.host}
-                             onChange={(e) => updateVolume(i, { host: e.target.value })}
-                             title={v.type === 'volume' ? (v.external ? `Attaches the existing volume ${v.external}` : 'Creates a fresh volume') : undefined}
-                             placeholder={v.type === 'volume' ? 'e.g. mempalace-dbdata' : 'e.g. /mnt/shared'} />
-                      {volumeErrors[i].host && <p className="text-xs text-danger mt-0.5">{volumeErrors[i].host}</p>}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <Input size="sm" mono value={v.container}
-                             onChange={(e) => updateVolume(i, { container: e.target.value })}
-                             placeholder="e.g. /data" />
-                      {volumeErrors[i].dir && <p className="text-xs text-danger mt-0.5">{volumeErrors[i].dir}</p>}
-                    </div>
-                    <div className="w-7 shrink-0 h-7 flex items-center justify-center" title="Read-only mount">
-                      <Checkbox size="sm" checked={!!v.readonly}
-                               onChange={(e) => updateVolume(i, { readonly: e.target.checked })}
-                               title="Read-only mount" />
-                    </div>
-                    <div className="w-7 shrink-0">
-                      <Button variant="ghost" size="sm" icon
-                              onClick={() => setExtraVolumes(prev => prev.filter((_, idx) => idx !== i))}
-                              className="hover:text-danger hover:bg-raised"
-                              title="Remove volume">✕</Button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <Button variant="secondary" size="sm" className="px-3"
-                    onClick={() => setExtraVolumes(prev => [...prev, { type: 'bind', host: '', container: '', readonly: false }])}>
-              + Add volume
-            </Button>
-            {hasVolumeErrors && (
-              <p className="text-xs text-danger">Fix the invalid volume fields — the source and container path must both be valid.</p>
-            )}
-          </div>
+          <VolumesSection
+            extraVolumes={extraVolumes}
+            updateVolume={updateVolume}
+            volumeErrors={volumeErrors}
+            setExtraVolumes={setExtraVolumes}
+            hasVolumeErrors={hasVolumeErrors}
+          />
 
           {/* Plan 28: Additional ports */}
-          <div className="border-t border-line pt-4 space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="text-xs font-medium text-ink-faint uppercase tracking-wider">Additional ports</h3>
-                <p className="text-xs text-ink-dim mt-1 max-w-md">
-                  Host → container TCP port mappings, independent of the SSH port.
-                </p>
-              </div>
-            </div>
-
-            {extraPorts.length === 0 && (
-              <p className="text-xs text-ink-dim">No port mappings.</p>
-            )}
-            {extraPorts.length > 0 && (
-              <div className="rounded-card overflow-hidden border border-line-faint">
-                <div className="bg-sunken text-ink-faint uppercase tracking-wider text-[11px] px-2 py-2 flex items-center gap-2 font-medium">
-                  <span className="flex-1 min-w-0">Host port</span>
-                  <span className="flex-1 min-w-0">Container port</span>
-                  <span className="w-7 shrink-0"></span>
-                </div>
-                {extraPorts.map((p, i) => (
-                  <div key={i} className="border-t border-line-faint flex items-start gap-2 px-2 py-1.5">
-                    <div className="flex-1 min-w-0">
-                      <Input size="sm" mono type="number" min="1" max="65535" value={p.host}
-                             onChange={(e) => updatePort(i, { host: e.target.value })}
-                             placeholder="e.g. 9000" />
-                      {portErrors[i] && <p className="text-xs text-danger mt-0.5">{portErrors[i]}</p>}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <Input size="sm" mono type="number" min="1" max="65535" value={p.container}
-                             onChange={(e) => updatePort(i, { container: e.target.value })}
-                             placeholder="e.g. 80" />
-                    </div>
-                    <div className="w-7 shrink-0">
-                      <Button variant="ghost" size="sm" icon
-                              onClick={() => setExtraPorts(prev => prev.filter((_, idx) => idx !== i))}
-                              className="hover:text-danger hover:bg-raised"
-                              title="Remove port">✕</Button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <Button variant="secondary" size="sm" className="px-3"
-                    onClick={() => setExtraPorts(prev => [...prev, { host: '', container: '' }])}>
-              + Add port
-            </Button>
-            {hasPortErrors && (
-              <p className="text-xs text-danger">Fix the invalid port fields.</p>
-            )}
-          </div>
+          <PortsSection
+            extraPorts={extraPorts}
+            updatePort={updatePort}
+            portErrors={portErrors}
+            setExtraPorts={setExtraPorts}
+            hasPortErrors={hasPortErrors}
+          />
 
           {/* Plan 41: Build & lifecycle commands */}
-          <div className="border-t border-line pt-4 space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="text-xs font-medium text-ink-faint uppercase tracking-wider">Build &amp; lifecycle commands</h3>
-                <p className="text-xs text-ink-dim mt-1 max-w-md">
-                  Dockerfile lines inserted into this PAD's own image (run on every build), and bash lines run once after creation (post-create), on every start (post-start), and on every terminal attach (post-attach).
-                </p>
-              </div>
-              {devContainer && (
-                <Badge tone="neutral" variant="outline" size="sm">
-                  from .devcontainer/devcontainer.json
-                </Badge>
-              )}
-            </div>
-
-            <Field label="Build commands (Dockerfile)">
-              <Textarea mono value={buildCommands} onChange={(e) => setBuildCommands(e.target.value)}
-                        rows={3}
-                        spellCheck={false}
-                        placeholder={'RUN apt-get install -y vim\n# or an ARG line, picked up by the next build'} />
-              <p className="text-xs text-ink-dim mt-1">
-                Runs inside <code className="text-ink-faint font-mono">instances/&lt;name&gt;/build/Dockerfile</code> on every image build. A <code className="text-ink-faint font-mono">FROM</code> line here fails the build (the current container stays up).
-              </p>
-            </Field>
-
-            <Field label="Post-create commands (bash)">
-              <Textarea mono value={postCreate} onChange={(e) => setPostCreate(e.target.value)}
-                        rows={3}
-                        spellCheck={false}
-                        placeholder={'npm install\n# project setup, run once after the container boots'} />
-              <p className="text-xs text-ink-dim mt-1">
-                Runs once in the running container (project mounted, services up) after creation. Pre-filled from the workspace's <code className="text-ink-faint font-mono">devcontainer.json</code> when present — edit freely.
-              </p>
-            </Field>
-
-            <Field label="Post-start commands (bash)">
-              <Textarea mono value={postStart} onChange={(e) => setPostStart(e.target.value)}
-                        rows={3}
-                        spellCheck={false}
-                        placeholder={'service cron start\n# runs on every container start'} />
-              <p className="text-xs text-ink-dim mt-1">
-                Runs on every container start (baked into <code className="text-ink-faint font-mono">start.sh</code>). Pre-filled from <code className="text-ink-faint font-mono">postStartCommand</code> in the workspace's devcontainer.
-              </p>
-            </Field>
-
-            <Field label="Post-attach commands (bash)">
-              <Textarea mono value={postAttach} onChange={(e) => setPostAttach(e.target.value)}
-                        rows={3}
-                        spellCheck={false}
-                        placeholder={'echo "terminal attached"\n# runs on every terminal attach'} />
-              <p className="text-xs text-ink-dim mt-1">
-                Runs on every terminal attach inside this PAD (workspace/project mounted). Pre-filled from <code className="text-ink-faint font-mono">postAttachCommand</code> in the workspace's devcontainer.
-              </p>
-            </Field>
-
-            {/* Plan 41 item 20: generate a devcontainer mirror in the workspace */}
-            <label className="flex items-start gap-2.5 rounded-control border border-line-faint bg-sunken/50 px-3 py-2.5 cursor-pointer select-none">
-              <Checkbox size="sm" className="mt-0.5"
-                     checked={generateDevContainer}
-                     onChange={(e) => setGenerateDevContainer(e.target.checked)} />
-              <span>
-                <span className="block text-xs font-medium text-ink">
-                  Generate <code className="text-ink-faint font-mono">.devcontainer/devcontainer.json</code> for this workspace
-                </span>
-                <span className="block text-xs text-ink-dim mt-0.5">
-                  When the workspace has no devcontainer, writes one mirroring this pad's settings (workspace folder, lifecycle commands, env, volumes, ports, user), marked <code className="text-ink-faint font-mono">x-paddock.generated</code>. {devContainer ? 'This workspace already ships a devcontainer — it is never overwritten.' : 'Leave on to keep the workspace openable as a dev container.'}
-                </span>
-              </span>
-            </label>
-          </div>
+          <BuildCommandsSection
+            devContainer={devContainer}
+            buildCommands={buildCommands}
+            setBuildCommands={setBuildCommands}
+            postCreate={postCreate}
+            setPostCreate={setPostCreate}
+            postStart={postStart}
+            setPostStart={setPostStart}
+            postAttach={postAttach}
+            setPostAttach={setPostAttach}
+            generateDevContainer={generateDevContainer}
+            setGenerateDevContainer={setGenerateDevContainer}
+          />
             </div>
           )}
           </Card>
@@ -1176,49 +843,15 @@ export default function CreateAgent() {
           </p>
         </form>
       ) : (
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <div className="text-sm text-ink-faint">
-              {phase === 'creating' && (
-                <>
-                  <span className="inline-block w-3 h-3 rounded-full border-2 border-accent-line border-t-transparent animate-spin mr-2 align-middle" />
-                  Creating <span className="text-ink font-medium">{jobName}</span>…
-                </>
-              )}
-              {phase === 'done' && (
-                <span className="text-success font-medium">
-                  Agent created! Setup complete.
-                </span>
-              )}
-              {phase === 'failed' && (
-                <span className="text-danger font-medium">Create failed</span>
-              )}
-            </div>
-            {phase !== 'creating' && (
-              <Button variant="ghost" size="sm" onClick={resetForm}>
-                ← Back to form
-              </Button>
-            )}
-          </div>
-
-          {phase === 'failed' && (
-            <div className={cx('rounded-card border px-4 py-3 text-sm', TONES.danger.panel)}>{error}</div>
-          )}
-
-          <Console
-            label="Create log"
-            runningCmd={runningCmd}
-            lines={lines}
-            emptyMessage="Waiting for output…"
-            className="h-[60vh]"
-          />
-
-          {phase === 'done' && (
-            <Button variant="primary" size="lg" block onClick={() => navigate('/agents/' + jobName)}>
-              Go to {jobName}
-            </Button>
-          )}
-        </div>
+        <CreateProgress
+          phase={phase}
+          jobName={jobName}
+          resetForm={resetForm}
+          error={error}
+          runningCmd={runningCmd}
+          lines={lines}
+          navigate={navigate}
+        />
       )}
     </div>
   )
