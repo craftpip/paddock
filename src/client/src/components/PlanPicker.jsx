@@ -27,6 +27,8 @@ export default function PlanPicker({ runner, project, existing, onClose, onAdd }
   const { location, patch } = useNavigation()
   const [rows, setRows] = useState(null)
   const [error, setError] = useState('')
+  // A refused add keeps the list (and the selection) so the user can retry.
+  const [addError, setAddError] = useState('')
   const showAll = new URLSearchParams(location.search).get('planAll') === '1'
   const setShowAll = (next) => patch({ planAll: (typeof next === 'function' ? next(showAll) : next) ? '1' : null })
   const [selected, setSelected] = useDraftState(`queue-add:${runner.id}`, [])
@@ -69,7 +71,9 @@ export default function PlanPicker({ runner, project, existing, onClose, onAdd }
 
   const add = () => {
     if (!selected.length) return
-    onAdd(selected.filter((p) => !existingSet.has(p.path)))
+    setAddError('')
+    Promise.resolve(onAdd(selected.filter((p) => !existingSet.has(p.path))))
+      .catch((e) => setAddError(e?.error || e?.message || 'Could not add the plans'))
   }
 
   return (
@@ -100,6 +104,7 @@ export default function PlanPicker({ runner, project, existing, onClose, onAdd }
         <p className="text-[11px] text-ink-faint">Loading plans…</p>
       ) : (
         <>
+          {addError && <p className="msn-queue-picker-error mb-2 rounded bg-danger-soft px-2 py-1 text-[11px] text-danger">{addError}</p>}
           <div className="flex items-center gap-2">
             <input
               type="search"

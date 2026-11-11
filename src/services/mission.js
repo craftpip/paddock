@@ -3111,6 +3111,9 @@ async function updateRunnerQueueItem(id, itemId, patch, revision, { actor = null
     runnerTransition.applyQueueBlocked(id, { actor: actor || 'user', details: { reason: 'Human-reviewed queue status requires input.' } });
   } else if (runtime?.state === 'complete' && !allDone) {
     runnerTransition.applyEvent(id, 'work_added', { actor: actor || 'user', details: { reason: 'Human-reviewed status correction reopened queue work.' } });
+    // Reopening a finished queue straight into a blocked item is a blocker, not
+    // a plain pause: without this the header read Paused beside a blocker card.
+    if (hasBlocker) runnerTransition.applyQueueBlocked(id, { actor: actor || 'user', details: { reason: 'Human-reviewed queue status requires input.' } });
   } else if (runtime?.state === 'paused' && allDone) {
     runnerTransition.applyReviewComplete(id, { actor: actor || 'user', details: { reason: 'Human reviewed all queue items complete.' } });
   }
@@ -3145,7 +3148,10 @@ async function mutateCanonicalQueue(id, revision, actor, mutate) {
     runnerHistory.record(runner, 'queue_reordered', { actor: actor || 'user', key: `${key}:reordered`, reason: `${queue.items.length} queued item positions updated` });
   }
   audit(project, 'runner_queue_update', { actor: actor ? (actor.name || actor) : null });
-  return readRunnerQueueFor(runner);
+  // Re-read: the mutation can change the runtime (adding work to a finished
+  // queue moves complete -> paused), and the row read above still said
+  // `complete`, so the response claimed "Queue is done" beside a Paused queue.
+  return readRunnerQueueFor(getRunner(id));
 }
 
 async function addRunnerQueueItems(id, plansToAdd, revision, { actor = null } = {}) {
@@ -4175,6 +4181,10 @@ function computeSchedulerState(runner, queue, turn, now = Date.now(), { explicit
     if (executionState === 'held') return decision('need_input', runner.runtimeReason || 'Operation is held');
     if (executionState === 'projection_error') return decision('blocked', runner.runtimeReason || 'Queue projection needs repair');
     if (executionState === 'setup_required') return decision('no_work', 'Set up the canonical runner runtime');
+    // A send in flight is not a pause: these two states said "Queue paused"
+    // under a Dispatching header.
+    if (executionState === 'dispatching') return decision('dispatching', 'Sending the next plan to the worker');
+    if (executionState === 'awaiting_receipt') return decision('dispatching', runner.runtimeReason || 'Waiting for the worker to acknowledge the plan');
     return decision('paused', 'Queue paused');
   }
   if (!queue || queue.aggregate.state === 'invalid') return decision('no_work', 'Queue unavailable or invalid');

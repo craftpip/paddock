@@ -61,7 +61,10 @@ function RowIcon({ d }) {
   )
 }
 
-function ItemRow({ item, current, index, total, busy, locked, canReviewStatus, onMove, onRemove, onEditStatus }) {
+function ItemRow({ item, current, index, total, busy, locked, running, canReviewStatus, onMove, onRemove, onEditStatus }) {
+  // The server refuses reorder/removal while the queue runs; say so on the
+  // control instead of offering a click that only produces an error.
+  const runLock = running ? 'Pause the queue to change its order or remove plans' : null
   const tone = ITEM_TONE[item.status] || 'bg-raised text-ink-faint'
   return (
     <li
@@ -85,13 +88,13 @@ function ItemRow({ item, current, index, total, busy, locked, canReviewStatus, o
         </span>
       </span>
       <span className="msn-queue-item-actions flex shrink-0 items-center gap-0.5">
-        <Button variant="link" size="bare" disabled={busy || locked || index === 0} onClick={() => onMove(index, -1)} className="msn-btn-queue-up rounded p-1 hover:bg-raised disabled:opacity-30" title={`Move ${item.title || item.plan} up`} aria-label={`Move ${item.title || item.plan} up`}>
+        <Button variant="link" size="bare" disabled={busy || locked || running || index === 0} onClick={() => onMove(index, -1)} className="msn-btn-queue-up rounded p-1 hover:bg-raised disabled:opacity-30" title={runLock || `Move ${item.title || item.plan} up`} aria-label={`Move ${item.title || item.plan} up`}>
           <RowIcon d="M6 15l6-6 6 6" />
         </Button>
-        <Button variant="link" size="bare" disabled={busy || locked || index === total - 1} onClick={() => onMove(index, 1)} className="msn-btn-queue-down rounded p-1 hover:bg-raised disabled:opacity-30" title={`Move ${item.title || item.plan} down`} aria-label={`Move ${item.title || item.plan} down`}>
+        <Button variant="link" size="bare" disabled={busy || locked || running || index === total - 1} onClick={() => onMove(index, 1)} className="msn-btn-queue-down rounded p-1 hover:bg-raised disabled:opacity-30" title={runLock || `Move ${item.title || item.plan} down`} aria-label={`Move ${item.title || item.plan} down`}>
           <RowIcon d="M6 9l6 6 6-6" />
         </Button>
-        <Button variant="dangerLink" size="bare" disabled={busy || locked || item.status === 'in progress'} onClick={() => onRemove(item)} className="msn-btn-queue-remove rounded p-1 hover:bg-danger-soft disabled:opacity-30" title={item.status === 'in progress' ? `Cannot remove ${item.title || item.plan} while it is working` : `Remove ${item.title || item.plan} from the queue`} aria-label={`Remove ${item.title || item.plan} from the queue`}>
+        <Button variant="dangerLink" size="bare" disabled={busy || locked || running || item.status === 'in progress'} onClick={() => onRemove(item)} className="msn-btn-queue-remove rounded p-1 hover:bg-danger-soft disabled:opacity-30" title={runLock ? runLock : item.status === 'in progress' ? `Cannot remove ${item.title || item.plan} while it is working` : `Remove ${item.title || item.plan} from the queue`} aria-label={`Remove ${item.title || item.plan} from the queue`}>
           <RowIcon d="M6 6l12 12M18 6L6 18" />
         </Button>
       </span>
@@ -218,9 +221,11 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
   const doAdd = (chosen) => {
     const existing = new Set(items.map((it) => it.plan))
     const fresh = chosen.filter((c) => !existing.has(c.path)).map((c) => c.path)
-    addRunnerQueueItems(id, fresh, queue.revision).then(
+    // Returned so the picker can show a refusal INSIDE the dialog: the panel's
+    // own feedback line sits behind the modal, so a refused add looked like a
+    // button that did nothing (and the bare .then left an unhandled rejection).
+    return addRunnerQueueItems(id, fresh, queue.revision).then(
       () => { drafts.delete(`queue-add:${id}`); closePopup({ saved: true, expected: popup?.value }) },
-      // Feedback is set by the store action
     )
   }
 
@@ -387,8 +392,12 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
             <>
               <p className={cx('msn-queue-paused mb-2 text-xs', (sessions.find((s) => s.id === sessionId)?.busy ? 'text-warning' : 'text-ink-dim'))}>
                 {sessions.find((s) => s.id === sessionId)?.busy
-                  ? 'Queue paused — current task is finishing; no next task will start.'
-                  : execution.reason || 'Queue paused.'}
+                  ? (runner.pause_mode === 'current_task'
+                    ? 'Queue paused — the worker was asked to stop at a safe point and save its progress.'
+                    : 'Queue paused — the plan in progress is finishing; no new plan will start.')
+                  : current
+                    ? `Queue paused — ${items.find((i) => i.id === current.id)?.title || current.plan} is part-way through. Run queue picks it up where it stopped.`
+                    : execution.reason || 'Queue paused.'}
               </p>
             </>
           )}
@@ -540,7 +549,7 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
               {items.length > 0 && (
                 <ul className={cx('msn-queue-items mt-3 divide-y divide-line-faint overflow-y-auto rounded-card border border-line-faint bg-panel', panelExpanded && 'min-h-0 flex-initial')}>
                   {items.map((it, index) => (
-                    <ItemRow key={it.id} item={it} current={current?.id === it.id} index={index} total={items.length} busy={busy} locked={condition !== 'ok'} canReviewStatus={execution?.canReviewStatuses === true} onEditStatus={editItemStatus} onMove={moveItem} onRemove={removeItem} />
+                    <ItemRow key={it.id} item={it} current={current?.id === it.id} index={index} total={items.length} busy={busy} locked={condition !== 'ok'} running={running} canReviewStatus={execution?.canReviewStatuses === true} onEditStatus={editItemStatus} onMove={moveItem} onRemove={removeItem} />
                   ))}
                 </ul>
               )}

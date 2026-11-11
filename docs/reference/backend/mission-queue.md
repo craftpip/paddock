@@ -13,6 +13,20 @@ stable item IDs, order, plan path, status and reason; `runner_queue_events` reco
 mutations. Writers submit the revision they read. A stale revision returns
 `queue_revision_conflict`; the server never silently retries or overwrites a draft.
 
+Two writers are exempt from hand-resolving that conflict, because their writes commute with
+whatever moved the revision. The page's **Add plans** re-reads the queue once and retries, and
+the worker tool `agent_queue_update_item` retries once against the current revision. The
+worker's write is guarded by ownership instead (its assigned item, a legal status step): a
+running worker bumps the revision on every status update, and a human adding a plan mid-turn
+bumps it under the worker.
+
+Membership and order change only while the runner is `paused` or `complete`
+(`queue_runtime_busy` otherwise), with one exception: plans may be **appended** while an ordinary
+queue operation is dispatching or running, since an append never disturbs the item the worker
+holds. Reorder and removal still need a pause, and the page disables those controls while the
+queue runs. Nothing may be changed during a blocker resolution, which is pinned to the revision
+it was sent against.
+
 `QUEUE.md` is generated worker output, not queue authority. Workers read and update through
 `agent_queue_read` and `agent_queue_update_item`; they never edit the file. A changed projection
 sets `projection_error`, keeps canonical rows visible and blocks dispatch. Regenerate rewrites
@@ -131,8 +145,9 @@ through the pad's web server; on an unpublished pad (the default) the driver sta
 `opencode serve` on a random loopback port as the pad user, `POST`s `/session` for the folder, and
 stops it (~4 s). It logs to stderr because the running TUI holds the log file.
 
-`sendText` waits for the driver's `tuiReadyPattern` (opencode: `ctrl+p commands`, shown both idle
-and mid-turn) before writing, for up to 15 s. A freshly launched TUI drops input for its first ~5 s,
+`sendText` waits for the driver's `tuiReadyPattern` (opencode: the `ctrl+p commands` footer hint,
+or a footer line ending in `commands` on a pane too narrow for the hint; shown both idle and
+mid-turn; a pane of 120+ columns puts sidebar text after the hint on the same line) before writing, for up to 15 s. A freshly launched TUI drops input for its first ~5 s,
 and that is where every new worker's startup instruction used to go. A TUI that never becomes ready
 gets `mission_tui_not_ready` with `attempted: false`, meaning nothing was written and a retry is safe.
 
@@ -140,6 +155,12 @@ After the write, the runner polls for 5 s for the exact receipt: a new user mess
 hashes to the instruction. It stops early if Pause, Close or a newer operation takes ownership.
 `sendText` confirms on new store activity, which can land before the user message's parts can be
 read, so a single read reported delivered instructions as unconfirmed.
+
+Pause invalidates the owned operation immediately, but the item it interrupted may still be
+**closed** by the worker while the runner is paused (`in_progress` to `done` or `need_input`).
+That is what lets "Pause before next task" finish the plan in flight; before it, the worker's
+closing write was refused with `queue_item_not_assigned` and the row stayed Working until the
+next Run. Starting any item while paused is still refused.
 
 An automatic dispatch withheld at the write boundary (lock, queue revision moved, projection
 drift, a new human turn) pauses the runner once and logs one `dispatch_failed`. Later watcher

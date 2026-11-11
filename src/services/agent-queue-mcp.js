@@ -45,7 +45,20 @@ function registerAgentQueueTools(registerAll, { authorize, actor, only = null })
     },
     async ({ runner_id, item_id, status, reason = '', revision }) => {
       const runnerId = requireRunner(runner_id, true).id;
-      const updated = await mission.updateRunnerQueueItem(runnerId, item_id, { status, reason }, revision, { actor: actor(), source: 'worker' });
+      // The worker's write is guarded by OWNERSHIP (its assigned item, a legal
+      // status step), not by the queue revision: the revision moves whenever a
+      // human adds a plan or pauses mid-turn, and a worker that met that
+      // conflict once tended to give up on closing its item at all. So a stale
+      // revision is retried once against the current one; every other refusal
+      // (not assigned, illegal transition) still stands.
+      const write = (rev) => mission.updateRunnerQueueItem(runnerId, item_id, { status, reason }, rev, { actor: actor(), source: 'worker' });
+      let updated;
+      try {
+        updated = await write(revision);
+      } catch (e) {
+        if (e?.code !== 'queue_revision_conflict') throw e;
+        updated = await write((await mission.readRunnerQueue(runnerId)).queue.revision);
+      }
       return { content: [{ type: 'text', text: JSON.stringify(updated, null, 2) }] };
     }
   );

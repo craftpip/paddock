@@ -321,6 +321,83 @@ it('does not copy the completed operation item into the next dispatch prompt', a
   assert.doesNotMatch(prompt, new RegExp(`assigned to item ${first.id}`));
 });
 
+// Browser-found: "Pause before next task" promises the plan in flight may
+// finish, but Pause invalidates the owned operation at once — the worker's
+// closing `done` was refused (`queue_item_not_assigned`) and the row stayed
+// "Working" until the next Run. The interrupted item may be CLOSED while paused;
+// nothing else may be touched and nothing may be started.
+it('lets the worker finish the item a pause interrupted, and nothing else', async () => {
+  const project = mission.createProject({ name: 'pause-finish', agent: PAD, folder: FOLDER, plansFolder: 'plans' });
+  const session = mission.createSession(project.id, { agentSessionId: 'ses_pause_finish' });
+  const runner = await mission.createRunner({ projectId: project.id, name: 'pause-finish', sessionId: session.id });
+  let detail = await mission.addRunnerQueueItems(runner.id, ['first.md', 'second.md'], 0);
+  const [first, second] = detail.queue.items;
+  runnerTransition.applyRun(runner.id, { details: { itemId: first.id, conversationId: session.agent_session_id } });
+  const operationId = runnerTransition.getRuntime(runner.id).operation_id;
+  runnerTransition.applyReceipt(runner.id, { details: { operationId, receiptInputId: 'pause-finish-turn' } });
+  const worker = { actor: 'test-worker', source: 'worker' };
+  detail = await mission.updateRunnerQueueItem(runner.id, first.id, { status: 'in_progress' }, detail.queue.revision, worker);
+  runnerTransition.applyPause(runner.id, { actor: 'user' });
+  assert.equal(runnerTransition.getRuntime(runner.id).state, 'paused');
+  // Starting the NEXT item while paused stays refused.
+  await assert.rejects(
+    mission.updateRunnerQueueItem(runner.id, second.id, { status: 'in_progress' }, detail.queue.revision, worker),
+    (e) => e.code === 'queue_item_not_assigned');
+  detail = await mission.updateRunnerQueueItem(runner.id, first.id, { status: 'done' }, detail.queue.revision, worker);
+  assert.equal(detail.queue.items.find((i) => i.id === first.id).status, 'done');
+  assert.equal(runnerTransition.getRuntime(runner.id).state, 'paused', 'finishing does not un-pause');
+  // Closed is closed: the same worker cannot reopen it afterwards.
+  await assert.rejects(
+    mission.updateRunnerQueueItem(runner.id, first.id, { status: 'in_progress' }, detail.queue.revision, worker),
+    (e) => e.code === 'queue_item_not_assigned');
+});
+
+// Browser-found: adding plans to a finished queue answered from the runner row
+// read BEFORE the mutation, so the header said Paused beside "Queue is done".
+it('answers an add to a finished queue from the post-mutation runtime', async () => {
+  const project = mission.createProject({ name: 'add-after-done', agent: PAD, folder: FOLDER, plansFolder: 'plans' });
+  const session = mission.createSession(project.id, { agentSessionId: 'ses_add_after_done' });
+  const runner = await mission.createRunner({ projectId: project.id, name: 'add-after-done', sessionId: session.id });
+  let detail = await mission.addRunnerQueueItems(runner.id, ['first.md'], 0);
+  detail = await mission.updateRunnerQueueItem(runner.id, detail.queue.items[0].id, { status: 'done' }, detail.queue.revision, { actor: 'user', source: 'review' });
+  assert.equal(detail.queue.execution.state, 'complete');
+  detail = await mission.addRunnerQueueItems(runner.id, ['second.md'], detail.queue.revision);
+  assert.equal(detail.queue.execution.state, 'paused');
+  assert.equal(detail.queue.execution.canRun, true);
+  assert.equal(detail.queue.scheduler.schedulerDecision, 'paused');
+  assert.doesNotMatch(detail.queue.scheduler.reason, /done/i);
+});
+
+it('reopening a finished queue into a blocked item lands on waiting_input, not paused', async () => {
+  const project = mission.createProject({ name: 'reopen-blocked', agent: PAD, folder: FOLDER, plansFolder: 'plans' });
+  const session = mission.createSession(project.id, { agentSessionId: 'ses_reopen_blocked' });
+  const runner = await mission.createRunner({ projectId: project.id, name: 'reopen-blocked', sessionId: session.id });
+  let detail = await mission.addRunnerQueueItems(runner.id, ['first.md'], 0);
+  const itemId = detail.queue.items[0].id;
+  detail = await mission.updateRunnerQueueItem(runner.id, itemId, { status: 'done' }, detail.queue.revision, { actor: 'user', source: 'review' });
+  assert.equal(detail.queue.execution.state, 'complete');
+  detail = await mission.updateRunnerQueueItem(runner.id, itemId, { status: 'need_input', reason: 'Which one?' }, detail.queue.revision, { actor: 'user', source: 'review' });
+  assert.equal(detail.queue.execution.state, 'waiting_input');
+});
+
+// Appending never disturbs the item a worker holds, so it is allowed mid-run;
+// reorder and removal still require a pause.
+it('accepts appended plans while a queue operation runs but refuses reorder and removal', async () => {
+  const project = mission.createProject({ name: 'append-running', agent: PAD, folder: FOLDER, plansFolder: 'plans' });
+  const session = mission.createSession(project.id, { agentSessionId: 'ses_append_running' });
+  const runner = await mission.createRunner({ projectId: project.id, name: 'append-running', sessionId: session.id });
+  let detail = await mission.addRunnerQueueItems(runner.id, ['first.md', 'second.md'], 0);
+  const [first, second] = detail.queue.items;
+  runnerTransition.applyRun(runner.id, { details: { itemId: first.id, conversationId: session.agent_session_id } });
+  const operationId = runnerTransition.getRuntime(runner.id).operation_id;
+  runnerTransition.applyReceipt(runner.id, { details: { operationId, receiptInputId: 'append-turn' } });
+  detail = await mission.addRunnerQueueItems(runner.id, ['third.md'], detail.queue.revision);
+  assert.deepEqual(detail.queue.items.map((i) => i.plan), ['first.md', 'second.md', 'third.md']);
+  assert.equal(runnerTransition.getRuntime(runner.id).state, 'running');
+  await assert.rejects(mission.reorderRunnerQueue(runner.id, [second.id, first.id, detail.queue.items[2].id], detail.queue.revision), (e) => e.code === 'queue_runtime_busy');
+  await assert.rejects(mission.removeRunnerQueueItem(runner.id, second.id, detail.queue.revision), (e) => e.code === 'queue_runtime_busy');
+});
+
 it('exposes authorized worker tools on the actual MCP surface and regenerates after status writes', async () => {
   const { registerTools, mcpContext } = require('../mcp');
   const handlers = {};
@@ -372,8 +449,18 @@ it('exposes authorized worker tools on the actual MCP surface and regenerates af
   const publication = runnerPublication.read(runner.id);
   assert.equal(publication.desired_revision, 2);
   assert.equal(publication.acknowledged_revision, 2);
+  // Browser-found: a human adding a plan mid-turn moves the revision under the
+  // worker. Its closing write is guarded by ownership, so a STALE revision is
+  // retried against the current one instead of leaving the row "Working".
+  const staleClose = await call('agent_queue_update_item', { ...args, status: 'done', revision: 1 });
+  assert.ok(!staleClose.isError, JSON.stringify(staleClose));
+  assert.equal((await mission.readRunnerQueue(runner.id)).queue.items[0].status, 'done');
+  // ...but ownership still refuses: runner A's worker cannot close B's item by retrying.
+  const foreign = await call('agent_queue_update_item', { runner_id: runner.id, item_id: otherDetail.queue.items[0].id, status: 'done', revision: 0 });
+  assert.equal(foreign.isError, true);
   assert.equal(publication.desired_marker, 0);
   assert.equal(fs.existsSync(plans.queuePausedPath(registry.getAgent(PAD), project)), false);
+  // A stale revision no longer refuses by itself; reopening a closed item does.
   const stale = await call('agent_queue_update_item', args);
   assert.equal(stale.isError, true);
   const deniedRead = await call('agent_queue_read', { runner_id: runner.id }, ['read', 'target:agent:pad-other']);

@@ -941,7 +941,19 @@ queue: null,
     if (get().queueAction) return
     set({ queueAction: 'add', queueError: '' })
     try {
-      const data = await api(`/api/mission/runners/${runnerId}/queue/items`, { method: 'POST', body: { plans, revision } })
+      // Appending commutes with whatever else changed the queue, and a running
+      // worker bumps the revision every time it updates an item — so a stale
+      // revision here is routine, not a conflict the user should resolve by
+      // hand. Re-read once and retry against the fresh revision.
+      const post = (rev) => api(`/api/mission/runners/${runnerId}/queue/items`, { method: 'POST', body: { plans, revision: rev } })
+      let data
+      try {
+        data = await post(revision)
+      } catch (e) {
+        if (e?.code !== 'queue_revision_conflict') throw e
+        const fresh = queueOf(await api(`/api/mission/runners/${runnerId}/queue`))
+        data = await post(fresh.revision)
+      }
       set({ queue: queueOf(data), queueForRunner: runnerId, queueLoading: false, queueError: '', queueStale: false })
       return data
     } catch (e) {
@@ -1079,6 +1091,12 @@ queue: null,
 
   // Centralized feedback for queue operations (plan 98 §Phase 1).
   setOperationFeedback: (runnerId, feedback) => {
+    // Server refusals end with a locator for MCP callers
+    // (` [project:… session:…]`). It is noise to a person looking at the very
+    // session it names, so the panel's line drops it.
+    if (feedback && typeof feedback.message === 'string') {
+      feedback = { ...feedback, message: feedback.message.replace(/\s*\[project:[^\]]*\]\s*$/, '') }
+    }
     set((s) => ({
       operationFeedback: { ...s.operationFeedback, [runnerId]: feedback }
     }))
@@ -1140,7 +1158,7 @@ queue: null,
         method: 'POST',
       })
       await get().refreshActive()
-      get().setOperationFeedback(runnerId, { severity: 'success', message: data.recovering ? 'Quota recovery started — running your callback before restoring the session' : 'Runner started' })
+      get().setOperationFeedback(runnerId, { severity: 'success', message: data.recovering ? 'Quota recovery started — running your callback before restoring the session' : 'Queue started' })
       return data
     } catch (e) {
       set({ runnersLoading: false, runnersError: errText(e, 'Could not start runner') })
@@ -1158,7 +1176,7 @@ queue: null,
         body: mode ? { mode } : undefined,
       })
       await get().refreshActive()
-      get().setOperationFeedback(runnerId, { severity: 'warning', message: `Runner paused (${mode || 'before_next_task'})` })
+      get().setOperationFeedback(runnerId, { severity: 'warning', message: mode === 'current_task' ? 'Asked the worker to stop the current plan' : 'Queue paused — the plan in progress will finish, no new plan will start' })
       return data
     } catch (e) {
       set({ runnersLoading: false, runnersError: errText(e, 'Could not pause runner') })

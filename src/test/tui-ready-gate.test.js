@@ -62,6 +62,9 @@ it('the opencode driver declares a ready marker that matches its idle and mid-tu
   assert.ok(opencode.tuiReadyPattern.test('/root/.opencode/workspace   8.2K (4%)  ctrl+p commands'));
   assert.ok(opencode.tuiReadyPattern.test('■■■⬝⬝ esc interrupt 8.2K (4%) ctrl+p commands'));
   assert.ok(opencode.tuiReadyPattern.test('  ┃  Build\n  ╹▀▀▀▀\n workspace commands'), 'a 40-column pane shortens the footer');
+  // Browser-found at 140 columns: the sidebar shares the footer's line.
+  assert.ok(opencode.tuiReadyPattern.test('   /root/.opencode/workspace      50.6K (25%)  ctrl+p commands    • OpenCode 1.19.5'), 'a wide pane puts sidebar text after the footer');
+  assert.ok(!opencode.tuiReadyPattern.test('  Starting opencode…\n  loading commands for you'), 'boot text is not the footer');
   assert.ok(!opencode.tuiReadyPattern.test(BOOT));
 });
 

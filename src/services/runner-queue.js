@@ -223,8 +223,17 @@ function mutate(runnerId, revision, actor, action, fn) {
   const run = db.transaction(() => {
     const queue = requireQueue(runnerId);
     requireRevision(queue, revision);
-    const runtime = db.prepare('SELECT state FROM runner_runtime WHERE runner_id = ?').get(runnerId);
-    if (runtime && !['paused', 'complete'].includes(runtime.state) && action !== 'item_updated') {
+    const runtime = db.prepare('SELECT state, operation_id FROM runner_runtime WHERE runner_id = ?').get(runnerId);
+    // APPENDING plans never disturbs the item a worker holds, so it is allowed
+    // while an ordinary queue operation runs (the next dispatch reads the
+    // canonical rows). Reorder/removal still need a pause, and so does anything
+    // during a resolution, which is pinned to the revision it was sent against.
+    const activeKind = runtime?.operation_id
+      ? db.prepare('SELECT operation_kind FROM runner_operations WHERE id = ?').get(runtime.operation_id)?.operation_kind
+      : null;
+    const appendWhileRunning = action === 'items_added' && activeKind === 'queue' &&
+      ['dispatching', 'awaiting_receipt', 'running'].includes(runtime?.state);
+    if (runtime && !appendWhileRunning && !['paused', 'complete'].includes(runtime.state) && action !== 'item_updated') {
       throw new RunnerQueueError('queue_runtime_busy', `Queue is ${runtime.state}; pause the runner before changing its order or membership.`);
     }
     const before = snapshot(queue);
@@ -280,6 +289,7 @@ function updateItem(runnerId, id, patch, revision, { actor = null, source = 'use
     const status = patch.status === undefined ? item.status : patch.status;
     const reason = patch.reason === undefined ? item.reason : patch.reason;
     validateStatus(status, reason);
+    let finishingPaused = false;
     if (source === 'resolution') {
       const runtime = getDb().prepare('SELECT state, operation_id FROM runner_runtime WHERE runner_id = ?').get(runnerId);
       const operation = runtime?.operation_id && getDb().prepare('SELECT item_id, operation_kind, status FROM runner_operations WHERE id = ? AND runner_id = ?').get(runtime.operation_id, runnerId);
@@ -292,7 +302,17 @@ function updateItem(runnerId, id, patch, revision, { actor = null, source = 'use
     if (source === 'worker') {
       const runtime = getDb().prepare('SELECT state, operation_id FROM runner_runtime WHERE runner_id = ?').get(runnerId);
       const operation = runtime?.operation_id && getDb().prepare('SELECT item_id, status FROM runner_operations WHERE id = ? AND runner_id = ?').get(runtime.operation_id, runnerId);
-      if (runtime?.state !== 'running' || operation?.status !== 'running' || operation.item_id !== id) {
+      // A pause invalidates the owned operation at once, but "Pause before next
+      // task" promises the plan in flight may FINISH. Without this the worker's
+      // closing `done` was refused and the row sat on "in progress" until Run.
+      // So while paused, the item the pause interrupted may still be closed
+      // (in_progress -> done / need_input) — never started.
+      const interrupted = runtime?.state === 'paused' && !runtime.operation_id
+        ? getDb().prepare('SELECT item_id, status FROM runner_operations WHERE runner_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1').get(runnerId)
+        : null;
+      finishingPaused = !!interrupted && interrupted.status === 'invalidated' && interrupted.item_id === id &&
+        item.status === 'in_progress' && ['done', 'need_input', 'in_progress'].includes(status);
+      if (!finishingPaused && (runtime?.state !== 'running' || operation?.status !== 'running' || operation.item_id !== id)) {
         throw new RunnerQueueError('queue_item_not_assigned', `Item ${id} is not assigned to the current worker operation (state=${runtime?.state || 'setup_required'}, operation=${operation?.status || 'none'}, assigned=${operation?.item_id || 'none'}).`);
       }
       const allowed = item.status === status || (item.status === 'new' && status === 'in_progress') ||
@@ -308,7 +328,8 @@ function updateItem(runnerId, id, patch, revision, { actor = null, source = 'use
       }
     }
     getDb().prepare('UPDATE runner_queue_items SET status = ?, reason = ?, updated_at = ? WHERE id = ?').run(status, reason, now(), id);
-    if (source === 'worker' && status === 'need_input' && item.status !== 'need_input') {
+    // Paused already stops dispatch; the blocked item itself holds the next Run.
+    if (source === 'worker' && !finishingPaused && status === 'need_input' && item.status !== 'need_input') {
       require('./runner-transition').applyNeedInput(runnerId, { actor: actor || 'worker', details: { itemId: id, reason } });
     }
     return id;

@@ -50,8 +50,11 @@ const OPENCODE = {
    *  readiness without blocking a deliberate mid-turn send. `sendText` waits for
    *  it before writing. */
   // A narrow pane shortens the footer: 60+ cols `… ctrl+p commands`, 40 cols
-  // `workspace commands` (measured). Match the footer line ending, not the hint.
-  tuiReadyPattern: /commands\s*$/m,
+  // `workspace commands` (measured) — so match the footer line ending. A WIDE
+  // pane (120+ cols) draws a sidebar to the right, so the footer line then ends
+  // in sidebar text (`ctrl+p commands    • OpenCode 1.19.5`) and only the hint
+  // itself matches; a line-ending-only pattern refused every send there.
+  tuiReadyPattern: /ctrl\+p\s+commands|commands\s*$/m,
 
   /** No gateway/onboard flow — opencode config is created on first run. */
   setupSteps: [],
