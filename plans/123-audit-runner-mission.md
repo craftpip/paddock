@@ -1,6 +1,6 @@
 # Plan 123 — Audit fixes: the runner and Mission services
 
-## Status: In progress — 2026-11-11 — 7/20 items fixed (#1–#7, all three high ones); remaining: #8–#20
+## Status: Complete — 2026-11-11 — 18/20 items fixed, 2 left as they are on purpose (#17, part of #20); one thing still open: a live run on the real worker once opencode's free limit resets
 
 ## Why
 
@@ -80,6 +80,26 @@ free limit has not reset (plan 75).
 | 6 | A pause that the plan outlives by asking a question, and an answer that could not be sent, both land in `waiting_input`; Resolve also accepts paused-with-blocker |
 | 7 | `endSession` stops the session's runner before killing the pane, like the page's Close |
 
+## Results, second batch (2026-11-11)
+
+`npm test`: 74 files, 1235 tests.
+
+| # | Outcome |
+|---|---|
+| 8 | The PAD-wide tmux options are set in the same invocation that creates the session, after `start-server` and before `new-session`. Confirmed live first: with no server, `set-option -g` exits 1 and a fresh server had `escape-time` 500. After the fix, on a PAD with no server: `escape-time: 10  status: off  history-limit: 10000`. Test + control |
+| 9 | A runner refuses `INDEX.md` / `README.md` and any existing file Paddock did not generate as its queue file, at create and when the queue file is renamed. Test |
+| 10 | The reserved-name check is made on the resolved file (`./QUEUE.md`, `x/../INDEX.md`). Test |
+| 11 | A callback whose recorded folder does not exist in the control plane runs from the temp directory and says so on stderr; a script that cannot start ends `error` with the reason, not `unknown` with nothing. Test + control |
+| 12 | `BUSY_CACHE` is capped at 2000 entries, expired first |
+| 13 | `setRunnerReason` leaves a stop code and its explanation alone |
+| 14 | The prompt-misconfiguration message names the step Run actually needs (Regenerate projection) |
+| 15 | Reconcile uses the shared timeout and answers "already confirmed" instead of throwing |
+| 16 | Deleting a runner or a project removes the runner's usage, observation, quota-recovery and resolution rows. **Not** its callback settings, script files, history or outbox: two existing tests pin that those outlive the runner on purpose (plan 92), so the reviewer's "orphans" there are by design |
+| 17 | **Left as it is.** Reporting a publish failure differently broke two existing tests that pin today's behaviour as a deliberate, recoverable state (`projection_error` with Regenerate). The reviewer listed it as a note, not a defect |
+| 18 | `listSessions` throws on a real failure (docker error on stderr) and returns empty for "no server"; a failed listing no longer dates every session on the PAD as gone (`liveUnread`). Test |
+| 19 | A plan's `session` must be a plain id |
+| 20 | The shell list gained `ash`, `fish`, `ksh`, `csh`, `tcsh`, `busybox` and login-shell spellings. **Editors and pagers are deliberately still "not a shell":** an existing test pins that, because the same flag stops a relaunch from typing a launch command into whatever the human has open. So `mission_send` into a pane running `vim` is still possible; closing that needs a positive "this is an agent" signal, not a longer deny-list |
+
 ## Progress
 
 - [x] 1 Watch `awaiting_receipt`; unanswered sends reach hold
@@ -89,16 +109,16 @@ free limit has not reset (plan 75).
 - [x] 5 `agentSessionId` validated and shell-quoted
 - [x] 6 Paused-with-blocker can be resolved
 - [x] 7 `endSession` stops the runner first
-- [ ] 8 tmux options applied when a server exists
-- [ ] 9 Runner creation does not overwrite an existing file
-- [ ] 10 Reserved plan names checked after resolving
-- [ ] 11 Callback spawn failures recorded; `cwd` valid in the control plane
-- [ ] 12 `BUSY_CACHE` bounded
-- [ ] 13 `setRunnerReason` keeps the stop code
-- [ ] 14 Prompt misconfiguration message matches what Run will do
-- [ ] 15 Reconcile uses the shared timeout and tolerates a confirmed operation
-- [ ] 16 Project and runner delete clean up after themselves
-- [ ] 17 Publish failure after a committed change is reported as what it is
-- [ ] 18 A failed probe is not a death
-- [ ] 19 Plan frontmatter escaped
-- [ ] 20 Unknown pane command is not treated as an agent
+- [x] 8 tmux options applied when a server exists
+- [x] 9 Runner creation does not overwrite an existing file
+- [x] 10 Reserved plan names checked after resolving
+- [x] 11 Callback spawn failures recorded; `cwd` valid in the control plane
+- [x] 12 `BUSY_CACHE` bounded
+- [x] 13 `setRunnerReason` keeps the stop code
+- [x] 14 Prompt misconfiguration message matches what Run will do
+- [x] 15 Reconcile uses the shared timeout and tolerates a confirmed operation
+- [x] 16 Project and runner delete clean up after themselves
+- [ ] 17 (left on purpose) Publish failure after a committed change is reported as what it is
+- [x] 18 A failed probe is not a death
+- [x] 19 Plan frontmatter escaped
+- [x] 20 Unknown pane command is not treated as an agent

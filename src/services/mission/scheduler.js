@@ -274,7 +274,7 @@ async function runnerWatchOnce(runnerId) {
   // an invalid queue) rather than dispatching a broken prompt or dying quiet.
   const promptEff = effectivePromptTemplates(fresh);
   if (promptEff.error) {
-    await stopWith('projection_mismatch', `Prompt templates misconfigured: ${promptEff.error.message} Repair them in Configure → Prompts, then Run again.`, 'prompts_misconfigured');
+    await stopWith('projection_mismatch', `Prompt templates misconfigured: ${promptEff.error.message} Repair them in Configure → Prompts, then press Regenerate projection and Run again.`, 'prompts_misconfigured');
     return;
   }
   // Observe pane/turn state
@@ -603,6 +603,11 @@ async function deliverRunnerInstruction(id, session, project, agent, queue, mess
 async function reconcileRunnerOperation(runnerId, { actor = null } = {}) {
   const runner = getRunner(runnerId);
   if (!runner) throw new MissionError('runner_not_found', `Runner ${runnerId} not found`);
+  // Already confirmed (the watcher got there first, or a second click): there
+  // is nothing to reconcile, and saying so beats an invalid-transition error.
+  if (runnerTransition.getRuntime(runnerId)?.state === 'running') {
+    return { reconciled: true, confirmed: true, alreadyConfirmed: true };
+  }
   const { project, agent, session, queue } = await getRunnerForSupervision(runnerId);
   if (queue.condition !== 'ok') {
     throw new MissionError('runner_invalid_queue', queue.error || 'Regenerate the queue projection before reconciling.');

@@ -72,6 +72,19 @@ function requireRunnerRow(runnerId) {
   return row;
 }
 
+/** Remove the working state a deleted runner leaves in tables no foreign key
+ *  reaches: usage state, queue observations, quota recoveries, resolutions.
+ *  Deliberately NOT its callback settings, script files, history or outbox:
+ *  those outlive the runner on purpose (plan 92), so a destroy callback can
+ *  still run and the record stays readable. Safe for a runner already gone. */
+function purgeRunnerState(runnerId) {
+  if (!runnerId) return;
+  const db = getDb();
+  for (const table of ['runner_usage_state', 'runner_queue_observations', 'runner_quota_recoveries', 'runner_resolutions']) {
+    try { db.prepare(`DELETE FROM ${table} WHERE runner_id = ?`).run(runnerId); } catch { /* table not present in an older database */ }
+  }
+}
+
 function scriptPath(runnerId, event) {
   validateEventKey(event);
   return path.join(callbacksDir(), path.basename(runnerId), `${path.basename(event)}.sh`);
@@ -414,15 +427,29 @@ async function launchCallback(row, { timeoutMs = CALLBACK_TIMEOUT_MS } = {}) {
     }, timeoutMs);
     if (timer.unref) timer.unref();
     try {
-      child = spawn('sh', [tmp], { cwd: row.cwd, env: callbackEnv(row), detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      // The recorded cwd is the project folder, which is a path INSIDE the PAD.
+      // The script runs here, in the control plane, where that path usually
+      // does not exist: spawn then failed before running a line and the row
+      // ended `unknown` with nothing to read. Fall back to a directory that
+      // exists, and say so in the output.
+      let cwd = row.cwd;
+      if (!cwd || !fs.existsSync(cwd)) {
+        feed('stderr', Buffer.from(`[paddock] working directory ${row.cwd || '(none)'} does not exist in the control plane; running in ${require('os').tmpdir()} instead\n`));
+        cwd = require('os').tmpdir();
+      }
+      child = spawn('sh', [tmp], { cwd, env: callbackEnv(row), detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
       child.once('spawn', () => history.record(journalRunner, 'script_started', { actor: 'recovery-script', groupId: row.id, key: `${row.id}:script-start`, plan: row.plan_path || '', reason: row.event }));
     } catch (e) {
-      done('unknown', null);
+      feed('stderr', Buffer.from(`[paddock] the script could not be started: ${e.message}\n`));
+      done('error', null);
       return;
     }
     if (child.stdout) child.stdout.on('data', (c) => feed('stdout', c));
     if (child.stderr) child.stderr.on('data', (c) => feed('stderr', c));
-    child.on('error', () => {
+    child.on('error', (spawnErr) => {
+      // Keep the reason: a script that never started is an error with a
+      // message, not an unknown with empty output.
+      try { feed('stderr', Buffer.from(`[paddock] the script could not be started: ${spawnErr && spawnErr.message}\n`)); } catch { /* output already closed */ }
       const cur = getDb().prepare('SELECT status FROM runner_callback_outbox WHERE id = ?').get(row.id);
       if (cur && cur.status === 'running') {
         done('unknown', null);
@@ -651,6 +678,7 @@ function observeUsage(runner, project, evidence, { busy = null, busyKnown = fals
 }
 
 module.exports = {
+  purgeRunnerState,
   CallbackError,
   CALLBACK_KEYS,
   CALLBACK_ENV_VARS,

@@ -193,7 +193,18 @@ async function createSession(vmName, session, { cwd = '', cols = 0, rows = 0 } =
   // blank line before the next prompt. bash emits a clean single newline.
   const bash = await runCmd('docker', ['exec', ...termUserArgs(vmName), vmName, 'sh', '-lc', 'command -v bash'], { timeout: 15000, check: false });
   const shellCmd = bash.code === 0 && bash.stdout.trim() ? bash.stdout.trim() : null;
-  const args = ['tmux', 'new-session', '-d', '-s', name];
+  // The PAD-wide options are set in the SAME tmux invocation, before the
+  // session's window exists. `set-option -g` cannot start a server, so setting
+  // them ahead of time (applyGlobalOptions, from ensureTmux) fails silently on
+  // a PAD with no session yet, and the PAD was then remembered as done: the
+  // first session came up with tmux's defaults, 500 ms ESC delay included.
+  // `start-server` first makes the options land on a fresh server too, and
+  // history-limit only applies to windows created after it is set.
+  const args = ['tmux', 'start-server', ';',
+    'set-option', '-g', 'history-limit', String(TMUX_HISTORY), ';',
+    'set-option', '-g', 'status', 'off', ';',
+    'set-option', '-g', 'escape-time', '10', ';',
+    'new-session', '-d', '-s', name];
   if (cwd) args.push('-c', cwd);
   args.push('-x', String(c), '-y', String(r));
   if (shellCmd) args.push(shellCmd);
@@ -304,6 +315,17 @@ async function listSessions(vmName) {
   // tmux 3.3a converts `\t` inside `-F` formats into `_`, so use a `|`
   // delimiter (session names are restricted to [a-zA-Z0-9._-], never `|`).
   const r = await tmuxExec(vmName, ['list-sessions', '-F', '#{session_name}|#{session_attached}|#{session_created}'], { timeout: 15000, check: false });
+  // "No tmux server" is a real answer: there are no sessions. Any other
+  // failure (the container is unreachable, docker timed out) is NOT an empty
+  // list, and returning one made every caller conclude the sessions had died.
+  if (r.code !== 0 && r.code !== undefined) {
+    const said = String(r.stderr || '');
+    // Docker and tmux both explain a real failure on stderr; silence with a
+    // non-zero exit is tmux having nothing to list.
+    if (said.trim() && !/no server running|no sessions|error connecting to|No such file or directory/i.test(said)) {
+      throw new Error(`Could not list tmux sessions in ${vmName}: ${said.trim().split('\n').pop() || `exit ${r.code}`}`);
+    }
+  }
   const sessions = [];
   for (const line of (r.stdout || '').split('\n')) {
     const [name, attached, created] = line.split('|');
@@ -357,7 +379,11 @@ async function listPanes(vmName) {
 function isShellCommand(command) {
   const c = String(command || '').trim();
   if (!c) return true;
-  return /^(ba|z|da)?sh$/.test(c);
+  // Every shell a pane can fall back to, including a login shell's leading
+  // dash. Only shells: a pane running vim or ssh is deliberately NOT a shell
+  // here, because `tuiAlive` is also what stops a relaunch from typing a
+  // launch command into whatever the human has open.
+  return /^-?((ba|z|da|a|k|c|tc|fi)?sh|busybox)$/.test(c);
 }
 
 module.exports = {

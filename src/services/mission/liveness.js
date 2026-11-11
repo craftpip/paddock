@@ -91,13 +91,20 @@ function stampTruth(s, probe) {
 async function liveAndPanes(vmName) {
   let names = new Set();
   let panes = new Map();
+  // `unread` says the listing itself FAILED (docker error, timeout). The rows
+  // are still shown as not live, because nothing proves they are, but they are
+  // not dated as dead: "I could not look" is not "it is gone", and one failed
+  // probe used to stamp every session on the PAD `ended_by: gone`.
+  let unread = false;
   try {
     names = new Set((await padTmux.listSessions(vmName)).map((r) => r.name));
-  } catch {}
+  } catch {
+    unread = true;
+  }
   try {
     if (typeof padTmux.listPanes === 'function') panes = await padTmux.listPanes(vmName);
   } catch {}
-  return { names, panes };
+  return { names, panes, unread };
 }
 
 function stampPaneKind(s, panes) {
@@ -142,6 +149,7 @@ function syncEnded(sessions) {
     for (const s of sessions || []) {
       if (!s || !s.id) continue;
       if (s.live === true) live.push(s.id);
+      else if (s.liveUnread) continue; // the probe failed: no death was observed
       else if (s.ended_at === null || s.ended_at === undefined) gone.push(s.id);
     }
     if (live.length) {
@@ -181,8 +189,8 @@ async function withLive(projects) {
     })
   );
   for (const p of projects) {
-    const { names, panes } = byPad.get(p.agent_name) || { names: new Set(), panes: new Map() };
-    p.sessions = (p.sessions || []).map((s) => stampPaneKind({ ...s, live: names.has(s.tmux_id) }, panes));
+    const { names, panes, unread } = byPad.get(p.agent_name) || { names: new Set(), panes: new Map() };
+    p.sessions = (p.sessions || []).map((s) => stampPaneKind({ ...s, live: names.has(s.tmux_id), ...(unread ? { liveUnread: true } : {}) }, panes));
     touchLiveRows(p.sessions);
     syncEnded(p.sessions);
     p.liveCount = p.sessions.filter((s) => s.live).length;
@@ -193,8 +201,8 @@ async function withLive(projects) {
 /** Stamp `live` (+ kind/cwd) on a plain session list (same O(PADs) budget). */
 async function withLiveSessions(sessions, agentName) {
   if (!sessions.length) return sessions;
-  const { names, panes } = await liveAndPanes(agentName);
-  const out = sessions.map((s) => stampPaneKind({ ...s, live: names.has(s.tmux_id) }, panes));
+  const { names, panes, unread } = await liveAndPanes(agentName);
+  const out = sessions.map((s) => stampPaneKind({ ...s, live: names.has(s.tmux_id), ...(unread ? { liveUnread: true } : {}) }, panes));
   touchLiveRows(out);
   syncEnded(out);
   return out;
@@ -219,7 +227,7 @@ async function withLiveSessionsByAgent(sessions, agentOf) {
   );
   const out = sessions.map((s) => {
     const entry = byPad.get(agentOf(s)) || { names: new Set(), panes: new Map() };
-    return stampPaneKind({ ...s, live: entry.names.has(s.tmux_id) }, entry.panes);
+    return stampPaneKind({ ...s, live: entry.names.has(s.tmux_id), ...(entry.unread ? { liveUnread: true } : {}) }, entry.panes);
   });
   touchLiveRows(out);
   syncEnded(out);
@@ -263,6 +271,7 @@ async function withLiveSessionsByAgent(sessions, agentOf) {
  */
 const BUSY_TTL = 5000;
 const BUSY_CACHE = new Map();
+const BUSY_CACHE_MAX = 2000;
 
 /** Probe `rows` (flat session rows carrying `agent_name` and
  *  `agent_session_id`) through each conversation's own store. Returns
@@ -302,6 +311,13 @@ async function busyForSessions(rows) {
       };
     } catch {
       value = { busy: false, known: false, title: '' };
+    }
+    // Bounded: every conversation ever probed used to stay here for the life
+    // of the process. Expired entries go first; past the cap, the oldest.
+    if (BUSY_CACHE.size >= BUSY_CACHE_MAX) {
+      const cutoff = Date.now() - BUSY_TTL;
+      for (const [k, v] of BUSY_CACHE) if (v.at < cutoff) BUSY_CACHE.delete(k);
+      while (BUSY_CACHE.size >= BUSY_CACHE_MAX) BUSY_CACHE.delete(BUSY_CACHE.keys().next().value);
     }
     BUSY_CACHE.set(key, { at: Date.now(), value });
     busyOf.set(id, value.busy);

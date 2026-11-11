@@ -146,7 +146,9 @@ async function createRunner({ projectId, name, sessionId, queueFile = 'QUEUE.md'
   const project = getProject(projectId);
   let normalizedQueueFile;
   try {
-    normalizedQueueFile = plans.normalizeQueueFile(requireAgent(project.agent_name), project, queueFile);
+    // Also refuses the folder's entry file and a hand-written file: the runner
+    // is about to write this file.
+    normalizedQueueFile = plans.assertQueueFileClaimable(requireAgent(project.agent_name), project, queueFile);
   } catch (e) {
     if (e instanceof plans.PlansError) throw new MissionError(e.code, e.message);
     throw e;
@@ -387,6 +389,8 @@ async function updateRunner(id, { name, idleGraceMs, minNudgeIntervalMs, noProgr
     let normalized;
     try {
       normalized = plans.normalizeQueueFile(requireAgent(project.agent_name), project, queueFile);
+      // Moving the queue to a different file claims that file.
+      if (normalized !== (runner.queue_file || 'QUEUE.md')) plans.assertQueueFileClaimable(requireAgent(project.agent_name), project, queueFile);
     } catch (e) {
       if (e instanceof plans.PlansError) throw new MissionError(e.code, e.message);
       throw e;
@@ -488,6 +492,17 @@ async function setRunnerEnabled(id, on) {
 /** Record the actionable reason a runner stopped or is waiting (shown in the
  *  terminal header). A refusal to Run writes this, never the runner's content. */
 function setRunnerReason(id, reason) {
+  // A stop code that other code branches on (usage_exhausted, operation_timeout,
+  // worker_recovery_failed…) survives a notice: a refused Run while waiting on
+  // the provider's quota used to overwrite it with `runner_notice`, and quota
+  // recovery then no longer recognised the runner as its own.
+  const runtime = runnerTransition.getRuntime(id);
+  const stopped = runtime && ['waiting_input', 'held', 'projection_error'].includes(runtime.state);
+  const keep = stopped && runtime.reason_code && runtime.reason_code !== 'runner_notice';
+  // Neither the code nor its explanation is replaced: the page shows that
+  // reason as why the runner stopped, and the notice goes back to the caller
+  // in the refusal itself.
+  if (keep) return;
   runnerTransition.setReason(id, reason ? 'runner_notice' : null, reason || null);
 }
 

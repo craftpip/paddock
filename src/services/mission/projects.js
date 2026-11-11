@@ -124,8 +124,12 @@ function updateProject(id, { name, folder, plansFolder } = {}) {
  *  kills them first, so a delete never leaves an orphan TUI running). */
 function deleteProject(id) {
   const project = getProject(id);
+  // The project's runners go with it (foreign key), but their working state is
+  // in tables no key reaches: remove that too.
+  const runnerIds = getDb().prepare('SELECT id FROM infinite_runners WHERE project_id = ?').all(project.id).map((row) => row.id);
   getDb().prepare('DELETE FROM mission_sessions WHERE project_id = ?').run(project.id);
   getDb().prepare('DELETE FROM mission_projects WHERE id = ?').run(project.id);
+  for (const runnerId of runnerIds) require('../runner-callbacks').purgeRunnerState(runnerId);
   return project;
 }
 

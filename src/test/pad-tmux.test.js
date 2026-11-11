@@ -89,6 +89,24 @@ describe('pad-tmux - session creation', () => {
     assert.equal(args[i + 5], '/www2/paddock');
   });
 
+  it('sets the PAD-wide options in the same invocation, before the session is created (plan 123 #8)', async () => {
+    // `set-option -g` cannot start a tmux server, so options set ahead of
+    // time are lost on a PAD with no session yet. They have to travel with
+    // the command that creates the first one, and come before it.
+    const { calls, fake } = recorder();
+    padTmux._setForTests({ runCmd: fake });
+    await padTmux.createSession('pad-x', 'msn-abcd1234', { cwd: '/www2/paddock' });
+    const args = findCall(calls, 'new-session').args;
+    const at = (word) => args.indexOf(word);
+    assert.notEqual(at('start-server'), -1, 'the server is started in this invocation');
+    assert.notEqual(at('escape-time'), -1, 'escape-time is set');
+    assert.notEqual(at('history-limit'), -1, 'history-limit is set');
+    assert.notEqual(at('new-session'), -1);
+    assert.ok(at('start-server') < at('escape-time') && at('escape-time') < at('new-session'), 'options come after start-server and before new-session');
+    assert.ok(at('history-limit') < at('new-session'), 'history-limit is in force for the first window');
+    assert.equal(args[at('escape-time') + 1], '10');
+  });
+
   it('omits -c entirely when no cwd is given (terminal sessions)', async () => {
     const { calls, fake } = recorder();
     padTmux._setForTests({ runCmd: fake });
@@ -261,12 +279,24 @@ describe('pad-tmux - reading a session back', () => {
     assert.deepEqual([...map.keys()], ['msn-efgh5678'], 'only the complete line survived');
   });
 
+  it('listSessions tells "no sessions" from "could not look" (plan 123 #18)', async () => {
+    // No tmux server is a real, empty answer.
+    let r = recorder({ 'list-sessions': { code: 1, stderr: 'no server running on /tmp/tmux-0/default' } });
+    padTmux._setForTests({ runCmd: r.fake });
+    assert.deepEqual(await padTmux.listSessions('pad-x'), []);
+    // A docker failure is not: returning [] here made every caller conclude
+    // that all the PAD's sessions had died, and date them so.
+    r = recorder({ 'list-sessions': { code: 1, stderr: 'Error response from daemon: container abc is not running' } });
+    padTmux._setForTests({ runCmd: r.fake });
+    await assert.rejects(() => padTmux.listSessions('pad-x'), /Could not list tmux sessions in pad-x: .*is not running/);
+  });
+
   it('isShellCommand knows the shells a pane actually falls back to', () => {
     // `pane_current_command` is a single word, so this is a closed list: an
     // unknown value is treated as a shell because "not evidence of a TUI" is the
     // safe direction — a wrong 'shell' refuses a send, a wrong 'agent' types
     // text into a bash pane.
-    for (const s of ['bash', 'zsh', 'sh', 'dash', ' sh ']) {
+    for (const s of ['bash', 'zsh', 'sh', 'dash', ' sh ', 'ash', 'fish', 'ksh', '-bash', 'busybox']) {
       assert.equal(padTmux.isShellCommand(s), true, `${s} is a shell`);
     }
     for (const c of ['node', 'opencode', 'python3', 'vim', 'ssh']) {

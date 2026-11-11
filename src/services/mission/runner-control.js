@@ -585,6 +585,8 @@ async function removeRunner(id, { actor = null } = {}) {
     throw e;
   }
   runnerHistory.record(runner, 'runner_removed', { actor: actor || 'user', key: `removed:${runner.run_generation}` });
+  // Rows and script files that no foreign key removes with the runner.
+  runnerCallbacks.purgeRunnerState(id);
   // "remove the runner configuration/designation. Keep any existing Mission
   // session/conversation and queue file. The row loses runner controls and
   // pinning." The Mission session row and QUEUE.md are separate and untouched,

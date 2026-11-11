@@ -399,6 +399,19 @@ describe('plan 92 — bounded executor (service level)', () => {
     }
   });
 
+  it('a recorded cwd that does not exist here still runs the script, and says where (plan 123 #11)', async () => {
+    // The recorded cwd is the project folder INSIDE the PAD; the script runs
+    // in the control plane, where that path usually is not there. It used to
+    // fail before running a line and end "unknown" with empty output.
+    const row = record('run-exec-nocwd', 'init', 'echo ran; pwd\n', '/root/.opencode/no/such/folder');
+    await CB.pumpCallbackOutbox();
+    assert.equal(await waitFor(row.id), 'ok');
+    const done = getDb().prepare('SELECT * FROM runner_callback_outbox WHERE id = ?').get(row.id);
+    assert.equal(done.status, 'ok', `status ${done.status}, stderr: ${done.stderr}`);
+    assert.match(done.stdout, /^ran\n/);
+    assert.match(done.stderr, /does not exist in the control plane/);
+  });
+
   it('the script runs with the recorded cwd', async () => {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cb-cwd-'));
     try {
