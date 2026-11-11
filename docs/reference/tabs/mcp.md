@@ -7,7 +7,7 @@ terminal** — buttons never call a backend action API. This flow is
 openclaw-only; other agent types manage MCP through their driver buttons (see
 [commands.md](commands.md)).
 
-> Last updated: 2026-08-09
+> Last updated: 2026-11-12
 
 ## The rule: paste commands, not APIs
 
@@ -44,6 +44,21 @@ trap that bypasses the visible terminal):
 
 The POST routes are kept for backward compatibility but are **not** wired to the
 SPA.
+
+The routes live in `src/routes/agent-integrations.js`. Two rules hold for the POST routes, which
+build a shell string that runs inside the PAD:
+
+- **Every caller-supplied value is single-quoted** before it joins the command: the server name,
+  URL, transport, command, each argument, the working directory, each `KEY=value` and the
+  timeout. A server name is required and is otherwise passed as given; quoting, not a name
+  pattern, is what keeps it from being read as shell.
+- **`test-url` validates the URL and probes from inside the PAD.** The URL must parse and be
+  `http` or `https` (`400` otherwise). The probe is a `curl` run in the PAD, where the MCP server
+  will be used from, so it reaches only what the PAD can reach. An unreachable URL answers
+  `{ ok: false, error }`, a reachable one `{ ok: true, status }`.
+
+The driver `mcp` command builders that CommandsPane pastes into the terminal quote their values
+the same way (`sq` in `src/services/drivers/mcp-util.js`).
 
 ## Components
 

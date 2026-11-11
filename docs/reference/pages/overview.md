@@ -1,6 +1,6 @@
 # Pages
 
-> Last updated: 2026-10-07
+> Last updated: 2026-11-12
 
 All pages are React components served from `src/client/src/pages/`. The built SPA lives at `src/public/` and is served by Express at the root path.
 
@@ -231,12 +231,15 @@ Modes are defined in the `MODES` array in AgentDetail.jsx:
 | Mode | Component | Feature |
 |------|-----------|---------|
 | commands | CommandsPane.jsx | Command pill flow + Run TUI + Vault dropdown (default landing mode) |
-| workspace | — | File browser, editor, upload |
-| config | — | Editor for the driver's config file (openclaw.json / opencode.json / config.yaml / config.toml / settings.json) |
+| workspace | WorkspaceTab.jsx | File browser, editor, upload |
+| config | ConfigTab.jsx | Editor for the driver's config file (openclaw.json / opencode.json / config.yaml / config.toml / settings.json) |
 | web | WebTab.jsx | "Web & Ports" — publish the web app, expose SSH, map extra TCP ports |
-| logs | — | Container logs viewer (persistent log store) |
-| activity | — | Event timeline |
+| logs | LogsTab.jsx | Container logs viewer (persistent log store) |
+| activity | ActivityTab.jsx | Event timeline |
 | settings | SettingsTab.jsx | Recreate, health checkup, docker, network, workspace, volumes, build commands, dev container, delete |
+
+Every mode component lives in `src/client/src/pages/agent/`, one file per tab. The cards of the
+Settings tab are one file each under `pages/agent/settings/`.
 
 The terminal is docked at the bottom of every mode — always mounted, one per
 agent, auto-collapsed outside Commands. See [tabs/terminal.md](../tabs/terminal.md).
@@ -262,110 +265,66 @@ plan 26 (native per-driver backup/import) lands.
 
 File: `Vault.jsx`
 
-Encrypted key-value store that replaced the Credentials page. One flat list of
-secret entries — no provider/type structure. Just Name, Description, Value.
+Encrypted key-value store for secrets such as API keys and bot tokens. One flat list of
+entries, each a Name, a Description and a Value. The page and its API are admin-only.
 
-### Data Model
+This section covers the page. Keys, encryption, the PIN operations, the wrong-PIN lockout, the
+routes and the storage tables are in the [Vault reference](../backend/vault.md).
 
-SQLite tables in `src/data/app.db`:
+### How the Vault Works
 
-`vault_items`:
+- **Values are encrypted at rest** with AES-256-GCM and never stored in plain text. Names and
+  descriptions are stored in the clear.
+- **The server key** is `VAULT_KEY` when it is set; otherwise a random key is generated on first
+  use and kept in `vault.key` beside the database. There is no built-in fallback value.
+- **A PIN (4 or 6 digits) is optional.** With a PIN set, the key that encrypts the items is
+  wrapped under both the PIN and the server key, so losing the server key loses the vault.
+- **The vault is always locked.** There is no unlock or lock route: every add, edit, delete and
+  paste supplies the PIN for that one operation.
+- **List responses never carry a value.** `GET /api/vault/:id/decrypt` returns one, and takes the
+  PIN in the `X-Vault-Pin` request header so that it is never part of a URL.
+- **Five wrong PINs in a row lock the vault** for 30 seconds, doubling up to 15 minutes; the route
+  answers `429` with `code: "vault_locked_out"`.
+- **Changing the PIN keeps every item.** It needs the current PIN and the account password.
+  Only the forgotten-PIN path erases the items; it needs the account password.
 
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | INTEGER | PK, autoincrement |
-| `name` | TEXT | UNIQUE, required |
-| `description` | TEXT | optional, defaults to `''` |
-| `enc_value` | TEXT | base64(`iv:tag:ciphertext`) |
-| `created_at` | TEXT | datetime |
-| `updated_at` | TEXT | datetime |
-
-`vault_meta` (single row `id=1`):
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `pin_set` | INTEGER | 0/1 |
-| `pin_salt` | TEXT | salt for the PIN-derived key |
-| `master_wrapped` | TEXT | master key wrapped by `pinKey` (AES-GCM) |
-| `pin_set_at` | TEXT | datetime |
-
-Value is **never stored plaintext**. The old `credentials.json` is not touched — this is a separate store.
-
-### Encryption
-
-Service: `src/services/vault.js` (Node built-in `crypto`, no new deps).
-
-Envelope encryption:
-
-```
-scrypt(pin, salt) ──► pinKey ──► AES-GCM ──► masterWrapped  (vault_meta)
-masterKey (random 32B) ──► AES-GCM ──► enc_value (per item)
-```
-
-- **Algorithm:** AES-256-GCM, random 12-byte IV per item, auth tag stored with ciphertext. Format stored: `iv:tag:data` all base64.
-- **Always locked (2026-08-07):** no module state, no unlock/lock. Every op (add/edit/delete/paste) supplies the PIN at that moment; `resolveMaster(pin)` unwraps the master key for the single op and discards it. Wrong PIN → GCM tag mismatch → `Wrong PIN`.
-- **No PIN set:** master key falls back to `VAULT_KEY` (32+ bytes) or a stable scrypt derivation from `SESSION_SECRET` (works out of the box, with a warning logged).
-- **PIN set:** `scrypt(pin, salt)` wraps a fresh random 32-byte master key into `vault_meta.master_wrapped`. PIN must be 4 or 6 digits.
-- **Decrypt** only inside the service. The API layer never returns plaintext in list responses.
-
-### API
-
-| Method | Path | Body | Returns |
-|--------|------|------|---------|
-| GET | `/api/vault` | — | `{ items: [...], meta: { pinSet, locked } }` — **no value**; `locked = !!pinSet` |
-| POST | `/api/vault/pin` | `{ pin, reset?, oldPin?, password? }` | `{ ok: true, meta }` — reset requires the logged-in user's `password` (401 if wrong) then `oldPin` (400 `Wrong PIN`), then wipes items |
-| POST | `/api/vault` | `{ name, description?, value, pin }` | `{ ok: true, item: {...} }` |
-| PUT | `/api/vault/:id` | `{ name?, description?, value?, pin }` — empty `value` = keep existing | `{ ok: true, item: {...} }` |
-| DELETE | `/api/vault/:id` | `{ pin }` | `{ ok: true }` |
-| GET | `/api/vault/:id/decrypt` | `?pin=` query param | `{ value }` — admin only, for terminal-paste integration |
-
-- POST rejects duplicate names (409). Wrong PIN → 400 `Wrong PIN`.
-- List responses never include plaintext or masked hints — UI always shows `••••••••••`.
-- All routes behind `requireAuth` + CSRF (`csrfCheck` for mutating methods).
-- There is no `/unlock` or `/lock` route — the vault is always locked by design.
-
-### UI
+### Vault Page UI
 
 - Table: Name | Description | Value | Updated | actions
-- Value cell: always `••••••••••` with a small lock icon (fixed, no first-4-last-4 mask — user said never display it again).
-- A small `locked` pill in the header while a PIN is set. No persistent banner.
-- **PIN on every action:** add/edit/delete ask for the PIN via a modal/inline form. Wrong PIN keeps the prompt open and shows `Wrong PIN` in place.
-- Add form: inline row above table — Name (required), Description (optional), Value (`type=password`, required). First-time setup (no PIN + zero items) opens a "Set PIN" modal; otherwise the add row opens directly and the PIN is asked on save.
-- Edit: inline form with name/description populated, value blank with placeholder "leave blank to keep existing value". Save does PUT + PIN prompt.
-- Delete: custom confirm dialog, then PIN prompt, then DELETE.
-- **CommandsPane (agent detail):** Vault dropdown shows a lock banner while locked, with inline PIN forms for paste (`Unlock & paste`) and add (`Unlock & add`).
-- Add/edit/delete use the existing `api()` helper — CSRF handled automatically.
+- Value cell: always `••••••••••` with a small lock icon. The page never shows a stored value.
+- A small `locked` pill in the header while a PIN is set, next to **Change PIN** (or **Set PIN**
+  while none is set).
+- **PIN on every action:** add, edit and delete ask for the PIN in a modal. A wrong PIN keeps the
+  prompt open and shows the error in place.
+- Add form: inline row above the table with Name (required), Description (optional) and Value
+  (`type=password`, required).
+- Edit: inline form with name and description filled in and the value blank ("leave blank to keep
+  existing value").
+- Delete: confirm dialog, then the PIN prompt, then `DELETE`.
+- **Change PIN** asks for the current PIN, the new PIN and the account password. Its **Forgot the
+  PIN?** link switches the dialog to "Erase the vault and set a new PIN", which states that every
+  item is permanently erased before it asks for the password.
+- **CommandsPane (agent detail):** the Vault dropdown shows a lock banner while a PIN is set, with
+  inline PIN forms for paste and add. See [Commands tab](../tabs/commands.md).
 
-### Security
+### Vault Files
 
-- **Always-locked PIN (4–6 digits):** backend is stateless; the PIN is required per operation. Note: a short PIN is brute-forceable offline if the DB leaks — acceptable for a local tool.
-- Value encrypted at rest; DB leak alone does not reveal secrets without the PIN (or `VAULT_KEY` when no PIN is set).
-- Value never travels back to the browser in list/read responses.
-- `/decrypt` is admin-only and intended for server-side paste flows, never for display.
-- Resetting the PIN verifies the user's password + old PIN, then wipes every item (old master key unrecoverable) — the UI warns loudly.
-- If the PIN/`VAULT_KEY` is lost, values are unrecoverable — nothing plaintext is ever stored.
-
-### Future Integration (not built now)
-
-- **Model setup terminal:** Vault list becomes a click-to-paste source when `openclaw models auth paste-api-key` waits for input. Uses `/decrypt` endpoint server-side → terminal stdin over WebSocket.
-- **Bot onboarding:** `--bot` / `--api-key` values pulled from Vault instead of `bot-prefixes.json`.
-- Anything else that needs a secret: just reference by name.
-
-### Files
-
-- `src/services/vault.js` — encrypt/decrypt + CRUD on SQLite
 - `src/client/src/pages/Vault.jsx` — the page
-- `src/services/db.js` — `vault_items` table in `migrate()`
-- `src/app.js` — vault API routes
+- `src/services/vault.js` — keys, encryption and item operations
+- `src/routes/vault.js` — the `/api/vault` routes
+- `src/services/db.js` — the `vault_items` and `vault_meta` tables
 
 ## Onboard (`/agents/:agentId/onboard`)
 
 File: `Onboard.jsx`
 
 Wizard for setting up a running PAD: Telegram bot token, channel user ID, and a
-model-provider API key. Submits to `POST /api/agents/:name/onboard` (the flow
-that was formerly `scripts/onboard-bot.sh`, absorbed into app.js route handlers
-and `vm-manager.js` config patching). Secrets live in the Vault, not a JSON file.
+model-provider API key. Submits to `POST /api/agents/:name/onboard`
+(`src/routes/agents.js`), which runs the `openclaw` CLI inside the PAD as the PAD's terminal
+user. The API key is written to the standard input of
+`openclaw models auth paste-api-key --provider <provider>` (`docker exec -i`), so it never
+appears in a process argument list; `runCmd` in `src/app.js` writes its `input` option to the
+child's stdin and then closes it. Secrets live in the Vault, not a JSON file.
 
 ## Mission (`/mission`)
 
@@ -374,8 +333,7 @@ File: `Mission.jsx` + `stores/mission.js` (zustand) + `components/SessionList.js
 Three-column workspace for the coding agents (opencode/codex/claude): col 1 lists
 the projects (a project is a PAD + folder pair), col 2 lists that project's
 sessions (or, in the all view, every session across projects), col 3 is the open
-session's terminal. Every element carries a stable `msn-*` class for points-at —
-the full selector map lives in `plans/53-mission-workspace.md` §6.
+session's terminal. Every element carries a stable `msn-*` class for points-at.
 
 **Selection is the scope — there is no toggle (plan 68).** The old
 `scope`/`setScope` ("This project" / "All projects" buttons) is gone. Scope is
@@ -488,8 +446,10 @@ for the journal/API contract.
   `cd src/client && npm run build` + `docker restart paddock`. Symptom: a new
   className never appears in the DOM. Verify the class string made it into
   `src/public/assets/index-*.js` before browser-testing.
-- **`api()` throws on non-2xx.** `src/client/src/lib/api.js` checks `res.ok`
-  and throws with the error payload on any non-2xx response (not just 401).
+- **`api()` rejects on non-2xx.** `src/client/src/lib/api.js` checks `res.ok` and, on any
+  non-2xx response (not just 401), rejects with a plain `{ status, error, code }` object, not
+  an `Error`. How to read it is in
+  [Client Conventions](../components/client-conventions.md#what-api-rejects-with).
 - **Safe state access on first render.** React 19 has no error boundary, so a
   render-time throw blanks the whole app. Tab components that fetch settings
   into `null`-initialized state must use `settings?.x` (or a derived safe

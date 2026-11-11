@@ -76,8 +76,15 @@ Business logic: See `overview/business-logic.md` — PAD Discovery and State.
 - `discoverAgents()` — full scan: instances/ + docker ps + merge + SQLite sync
 - `getAgent(name)` — single agent by name (reads docker cache, filesystem)
 - `getAgentById(id)` — try name first, then SQLite id lookup
-- `dockerPsList(force)` — cached docker ps -a (3s TTL). Returns `{ name: state }` map
-- `getAgentStats()` — SQLite query: total, running, exited, unknown
+- `dockerPsList(force)` — cached `docker ps -a` (3 s TTL). Returns a `{ name: state }` map. A
+  failed listing is not an empty one: the last good answer stands in for it for 30 s, after
+  which the returned map carries a failure mark and every PAD without a lifecycle override reads
+  `unknown`. See [PAD Lifecycle Rules](pad-lifecycle.md#status-of-a-pad).
+- `getAgentStats(ownerId, agents)` — counts the list it is given (the one `discoverAgents` just
+  returned) and returns `{ total, running, stopped, unknown }`; `stopped` counts `exited`,
+  `unknown` is everything else. Without a list it falls back to counting `agents` rows.
+- `removeAgentFromDb(name)` — deletes the PAD's `activity_events`, `sessions` and `agents` rows
+  and revokes the PAD's runner MCP token
 - `recordActivity(agentId, category, action, status, details)` — INSERT into activity_events, update agent's last_activity_at
 - `getActivity(agentId, limit)` — SELECT * from activity_events, ordered by timestamp DESC
 - `buildAgent(vmName, dockerState)` — construct agent object from filesystem metadata + docker state
@@ -285,8 +292,9 @@ logic: See `overview/business-logic.md` — Workspace as Project.
 - `findComposeFile(dir)` — first of `docker-compose.yml`/`.yaml`,
   `compose.yml`/`.yaml` present in the dir.
 
-**Routes (app.js, read-only GETs, no CSRF):** `GET /api/paths/probe?path=…`,
-`GET /api/paths/autocomplete?q=…`, `GET /api/paths/volumes?path=…`.
+**Routes (`src/routes/system.js`, admin-only, read-only GETs):** `GET /api/paths/probe?path=…`,
+`GET /api/paths/autocomplete?q=…`, `GET /api/paths/volumes?path=…`. They read the host's
+directories, so `requireAdmin` covers the whole `/api/paths` prefix.
 
 ### discoverVolumes — the model
 
@@ -401,11 +409,11 @@ and its own image tag (`paddock-vm-&lt;name&gt;:latest`). See
  - `usesProjectDefaultNetwork(services)` — true when a service in the model has **no** `network_mode`, i.e. it joins the project `default` network. A peer-networked pad's service shares the peer's namespace and its door rides the peer's own network, so nothing joins `default` and it must not reserve a `/24`.
  - `generateInstanceCompose(...)` — read-only preview: serializes the model with `JSON.stringify(..., null, 2)` (JSON is valid YAML) and, when `usesProjectDefaultNetwork` and the pad has a persisted `SUBNET`, merges `networks.default` with that explicit subnet alongside any door `webbridge` network. It never reserves or releases anything.
  - `writeInstanceCompose(name, agent, password, port, opts)` — resolves the subnet for the services that were just built, then writes the file. Default-network pad → `ensurePadSubnet(name)` (carve / re-pick / keep) and declare it; peer pad → `releasePadSubnet(name)` and declare no `default` network at all. Never both.
- - `writeInstanceCompose(name, agent, password, port, opts)` — write the serialized compose to disk. Calls `ensurePadSubnet(name)` first so a never-started pad is assigned its fixed `/24` (persisted as meta `SUBNET`) before the generator reads it.
- - **Pad subnet pool** — the host daemon's `default-address-pools` are finite (`192.168.0.0/16` at `/20`, plus the stock `172.16.0.0/12`). When every slot is taken, `docker compose up` for a new pad dies with `all predefined address pools have been fully subnetted` — the subnet is unspecified, so the daemon tries to allocate from the pool. New pads sidestep the pools: `ensurePadSubnet` carves the lowest free `/24` from `10.200.0.0/16` (256 pads; disjoint from the pools and the office LAN), persists it as meta `SUBNET`, and the generated compose declares it. **Only a pad with a service on the project `default` network gets a reservation** — a peer-networked pad reserves nothing, because such a reservation collides the moment that pad is switched to the default network (`Pool overlaps with other one on this address space`).
+ - **Pad subnet pool** — what counts as a claimed `/24`, and what the picker does when docker
+   cannot list its networks, is in [PAD Lifecycle Rules](pad-lifecycle.md#subnet-pool). The host daemon's `default-address-pools` are finite (`192.168.0.0/16` at `/20`, plus the stock `172.16.0.0/12`). When every slot is taken, `docker compose up` for a new pad dies with `all predefined address pools have been fully subnetted` — the subnet is unspecified, so the daemon tries to allocate from the pool. New pads sidestep the pools: `ensurePadSubnet` carves the lowest free `/24` from `10.200.0.0/16` (256 pads; disjoint from the pools and the office LAN), persists it as meta `SUBNET`, and the generated compose declares it. **Only a pad with a service on the project `default` network gets a reservation** — a peer-networked pad reserves nothing, because such a reservation collides the moment that pad is switched to the default network (`Pool overlaps with other one on this address space`).
    - **A reservation is not a network.** `claimedPadSubnetOctets(name)` unions live Docker networks (`usedPadSubnetOctets`) with every *other* pad's meta `SUBNET` (`reservedPadSubnetOctets`, hidden/quarantine dirs excluded), and `pickFreePadSubnet` only hands out an octet in neither. A reservation with no network behind it is still a claim — that is what stops two pads being handed the same `/24` and one of them failing at `docker compose up`.
-   - **A live network wins.** When `<name>_default` already exists, `ensurePadSubnet` returns empty and the compose stays subnet-less, so a regen can never force a disruptive network recreate (this is also how a pad that already carries a legacy compose-pool network keeps it).
-   - **`ensurePadSubnet` validates a persisted `SUBNET`** against both sources and re-picks a free octet when the value is claimed by another pad or disagrees with a live `<name>_default`; it still throws on genuine pool exhaustion. `releasePadSubnet(name)` drops a reservation only when **no** live `<name>_default` network holds it, so a peer pad whose network still exists keeps the claim and the two can never diverge.
+   - **A live network wins.** When `<name>_default` already exists, `ensurePadSubnet` returns the persisted `SUBNET` unchanged, so a regen can never force a disruptive network recreate. Only a pad with a live network and **no** persisted `SUBNET` (its network came from the daemon's own pools) gets an empty answer, and its compose stays subnet-less.
+   - **`ensurePadSubnet` validates a persisted `SUBNET` only while no `<name>_default` network is live**: it keeps a value that nothing else claims (or that lies outside the pool) and re-picks a free octet when a live network or another pad's reservation claims it. It throws when the pool is exhausted. `releasePadSubnet(name)` drops a reservation only when **no** live `<name>_default` network holds it, so a peer pad whose network still exists keeps the claim and the two can never diverge.
    - Deleting a pad (`removeVm`) removes `<name>_default` and frees its `/24`.
  - `cleanStaleDoorDirs({ isRegisteredAgent })` — boot sweep for legacy `<pad>-door` / `<pad>-web` **instance directories** left over from when the socat door was a real PAD. A candidate must match `^<existing-pad>-(door|web)$`, have no `AGENT=` in `meta.env`, no agent data dir, no registered-agent row, and either no container at all or only the managed socat door container. Matches are **moved** to `instances/.stale-door-dirs/<name>` (frees the `/24` and the name, stays reversible); the live door container is never removed. The SQLite `agents` table is not authoritative for the veto — pass the disk-derived registry list, or a deleted pad's stale row will protect its own leftover dir forever.
  - `applySettings(name, { allowDocker, userMode, network, sshPort, sshCport, workspaceHost, workspaceDir, extraVolumes, extraPorts, password })` — regenerates compose + writes the changed `meta.env` keys (`DOCKER`, `USER_MODE`, `NETWORK`, `PORT`, `SSH_CPORT`, `ROOT_PASSWORD`, `WORKSPACE_*`, `EXTRA_PORTS`, `EXTRA_VOLUMES`, `SUBNET`); returns the new state. **Async** — reads the active `web.json` binding itself and regenerates with `webService` + the resolved `webPeerNetwork` for the new network, so a network/docker-toggle change never drops a published web app.
@@ -578,34 +586,43 @@ resolution all derive paths from `driver.configFile` / `driver.workspaceDir` /
 
 Generic Docker-level container health checkup. **No agent/driver knowledge** — it diffs the *declared* compose settings (`docker compose -f instances/&lt;name&gt;/docker-compose.yml config --format json`) against the *actual* container (`docker inspect`) and reports what's out of line. Works on stopped containers (inspect + compose file both work while down) so it reports *why* a container stopped.
 
-Each check: `{ key, label, status: 'ok'|'warn'|'error', expected, actual, hint }`. No auto-fix — failing rows carry a hint (usually "Recreate to fix").
+Each check: `{ key, label, status: 'ok'|'warn'|'error', expected, actual, hint }`. A row whose
+question could not be answered also carries `checked: false`; a reader must not treat it as a
+negative. No auto-fix — failing rows carry a hint (usually "Recreate to fix").
 
 **Functions:**
 - `checkContainerHealth(name, onCheck?)` — runs all checks. With `onCheck`, each check is streamed as produced (health-check job); without, the full report is returned at once. Returns `{ name, status, checks, counts }` via `summarize(name, checks)`.
 - `summarize(name, checks)` — tallies counts, derives `status` (`error` if any, else `warn` if any, else `ok`).
+- `networkModeDrift(expected, actual)` — compares the *kind* of networking (peer-bound or not)
+  before any peer verdict; a non-empty answer is the `network` row's error hint.
+- `checkPublishedPorts(compose, ctr, door, doorCtr)` — the `ports` row as a pure function. When
+  the compose file declares a door, the door is the unit whose ports are compared.
 
-A **compose file that cannot be read is not a fact about the container.** Every check
-after the container block derives its *expectation* from it, so with no readable
-declaration there is nothing to compare against: the check records the missing
-declaration and returns, rather than carrying on (which dereferenced `null` and
-reported a `TypeError` in place of the report). Reproduced against `HEAD` on
-`paddock`; the hint names which checks were skipped.
+**What the checks hold to** (the rules, the reasons and the full key table are in
+[PAD Lifecycle Rules](pad-lifecycle.md#health-check)):
 
-What the early return still reports is the **declaration-independent** part —
-container exists, container status, docker `/healthz`. What it drops is every
-check that *compares* the declaration against the container: restart policy,
-**image**, network mode (so the peer verdict is absent too), bind mounts, env
-keys, published ports. `image` is a declared-vs-actual comparison, so with no
-compose file it has nothing to compare and is correctly omitted.
+- **A container lookup has three answers**: found; not found (docker says `No such container` /
+  `No such object`), an `error`; could not check (docker did not answer), a `warn` with
+  `checked: false` whose hint says not to recreate on this result. The same lookup is used for the
+  door.
+- **A compose file that is missing differs from one that cannot be read.** No file is an `error`
+  (recreate regenerates it). A file that exists but does not resolve is a `warn` with
+  `checked: false` and `actual: could not be read`; it is not a reason to recreate.
+- **With no readable declaration, only the declaration-independent rows are reported**
+  (`container`, `health`). Every row that compares the declaration against the container
+  (restart policy, image, network, door, volumes, docker socket, ports, environment) is skipped.
+- **The `network` row compares the kind first.** When the compose file declares
+  `network_mode: container:<peer>` and the container is not peer-bound, or the reverse, the row is
+  an `error`. Only when the kinds agree does it carry the shared peer verdict; see
+  § [Network peer truth](#network-peer-truth). `staleBinding` is a **warn**, not an error, because
+  the peer is healthy and recreating *it* would change nothing.
+- **The `door` row** is present when the compose file declares `<name>-door`: `ok` when the door
+  container runs, `error` when it is not found or stopped, `warn` with `checked: false` when
+  docker could not be asked.
 
-The network check **is** the shared peer verdict plus this service's own
-presentation — see § [Network peer truth](#network-peer-truth). `staleBinding` is a
-**warn**, not an error, because the peer is healthy and recreating *it* would
-change nothing.
+**Checks:** compose file (only when missing or unreadable) · container exists/status (with OOM-kill + exit-code reason) · Docker healthcheck probe (`healthy`/`starting` warn/otherwise error) · restart policy vs compose · image (declared vs actual; warn on mismatch) · network kind, then `container:` peer state · forwarding door · volumes/bind mounts (incl. `/workspace` host-path split-brain detection) · docker socket mount · published ports · environment keys (secrets excluded via `/(password|token|key|secret)/i`).
 
-**Checks (11):** compose file exists · container exists/status (with OOM-kill + exit-code reason) · Docker healthcheck probe (`healthy`/`starting` warn/otherwise error) · restart policy vs compose · image (declared vs actual; warn on mismatch) · network mode + `container:` peer existence/running state · volumes/bind mounts (incl. `/workspace` host-path split-brain detection) · docker socket mount · published ports · environment keys (secrets excluded via `/(password|token|key|secret)/i`).
-
-Driver-aware app-level checks are planned — see `plans/20-health-check-driver-aware.md`.
+The checks are Docker-level only; no check looks inside the agent's own application.
 
 ## Network peer truth (services/net-peer.js) — plan 66
 
@@ -1311,6 +1328,25 @@ with the same id and `agent_session_id`, rooted at the project folder after
 the directory is missing). `mission_project_delete` is **not** built: it can end
 other users' live sessions, and that is the human's call.
 
+**The tmux primitives refuse a bad name and never report a failure as "no sessions".** They
+live in `src/services/pad-tmux.js`:
+
+- **Names and ids are validated before the PAD is touched.** A tmux session name must match
+  `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$` (`assertSessionName` throws otherwise), and a Mission
+  session's tmux id must match `^msn-[0-9a-f]{8}$` (`mission_bad_session`). An
+  `agent_session_id` passed to `startSession` must be 1 to 128 letters, digits, `_` or `-`
+  (`400 mission_bad_agent_session_id`): the id is typed into the pane's shell as part of the
+  launch command, so anything else is refused, not quoted.
+- **`listSessions(vmName)` throws on a real tmux or docker failure**
+  (`Could not list tmux sessions in <pad>: …`). Only "no tmux server" and "no sessions" are an
+  empty list. The Mission liveness pass catches the throw and marks the listing unread: the rows
+  read as not live, and none is dated as ended, because "could not look" is not "it is gone".
+- **`createSession` sets the PAD-wide tmux options in the same invocation as `new-session`**:
+  `tmux start-server ; set-option -g history-limit … ; set-option -g status off ;
+  set-option -g escape-time 10 ; new-session -d -s <name> …`. `set-option -g` cannot start a
+  server, so options set ahead of the first session do not land on a PAD that has none, and
+  `history-limit` applies only to windows created after it is set.
+
 **A timeout is the client's, so the fix lives in the retry.**
 `mission_session_start {idempotency_key}` is project-scoped, and a partial unique
 index (`idx_mission_sessions_idem`) makes a *concurrent* retry dedupe at the
@@ -1617,6 +1653,17 @@ is not "nothing is happening". Its payload is
 note? }`, where `pipeline.reason` / `pipeline.detail` carry the park's reason
 and sentence.
 
+**After a webui restart a step can be left `running` with no driver.** It will not finish on
+its own, and `task_pipeline_start` refuses it with `task_pipeline_busy`. Both
+`task_pipeline_status` (in `note`) and that refusal name the way out: call `task_pipeline_stop`,
+which marks the leftover row `aborted`, then `task_pipeline_start`. `task_pipeline_stop` accepts
+a leftover running row even though no driver is present; it refuses `task_pipeline_idle` only
+when there is neither a driver nor a running row.
+
+**A stop is final for that run.** A run that is stopped or parked while its last await is in
+flight (the commit step awaits git) keeps that ending; the await's own result does not overwrite
+it with `done`.
+
 **Gate.** All six tools (`task_step_report` / `task_step_bug` /
 `task_step_commit` / `task_pipeline_start` / `_status` / `_stop`) sit inside
 the same `PADDOCK_TASK_QUEUE` gate as the rest of the `task_*` family, and
@@ -1728,23 +1775,18 @@ was built. Adding a tool that breaks them needs a re-check first.
 
 ## Vault (vault.js)
 
-Encrypted secret store replacing the old `creds.js` credential manager. Items
-live in the SQLite `vault_items` table in `src/data/app.db` (plus `vault_meta`
-holding the PIN salt + wrapped master key), AES-256-GCM encrypted.
+Encrypted secret store. Items live in the SQLite `vault_items` table in `src/data/app.db`,
+with `vault_meta` holding the PIN salt and the wrapped master key. The full reference (server
+key, encryption, PIN operations, lockout, routes, tables) is [Vault](vault.md).
 
-**PIN (2026-08-07):** The vault is **always locked** — no module state, no
-`unlock()`/`lock()`/`isLocked()`. Each operation (create/update/delete/decrypt)
-takes a `pin` in the request body and calls `resolveMaster(pin)` to unwrap the
-master key for that single operation, then discards it. Wrong PIN → GCM tag
-mismatch → throws `Wrong PIN`. Without a PIN set, the master key falls back to
-`VAULT_KEY` (or a scrypt derivation of `SESSION_SECRET`).
-
-Envelope encryption: `scrypt(pin, salt) → pinKey → AES-GCM → masterWrapped`
-(stored in `vault_meta`), with a random 32-byte `masterKey` per item via
-AES-GCM (`enc_value`). `setPin(pin, { reset, oldPin })` — reset verifies
-`oldPin` before wiping items (old master key unrecoverable). The item list is
-public; only values are protected.
-
-Routes: `GET /api/vault`, `POST /api/vault`, `PUT /api/vault/:id`,
-`DELETE /api/vault/:id`, `GET /api/vault/:id/decrypt`, `POST /api/vault/pin`.
-All mutating routes take `pin` in the body (decrypt takes it as a query param).
+- **Server key:** `VAULT_KEY` when set; otherwise a random key generated on first use and kept
+  in `vault.key` beside the database. There is no built-in fallback value.
+- **Always locked:** no module state and no unlock. `create`, `update`, `remove` and `getValue`
+  each take the PIN and unwrap the master key for that one operation. With a PIN set, the
+  wrapping key needs both the PIN and the server key.
+- **`setPin(pin, { reset, oldPin, wipe })`:** a first set and a change (`reset`, needs `oldPin`)
+  keep every item; only `wipe`, the forgotten-PIN path, erases them.
+- **Wrong PINs are counted:** five in a row lock every PIN operation for 30 seconds, doubling
+  up to 15 minutes (`code: vault_locked_out`).
+- **Routes:** `src/routes/vault.js`, all admin-only. The decrypt route takes the PIN in the
+  `X-Vault-Pin` header, never in the URL.

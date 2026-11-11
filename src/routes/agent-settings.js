@@ -151,12 +151,18 @@ module.exports = function register(app, ctx) {
       // INSTALL_DOCKER=0 for the next rebuild (the CLI stays in the current image
       // until then); the socket mount is controlled immediately by the compose
       // regen inside applyAgentChanges.
-      vm.setBuildEnv(name, { INSTALL_DOCKER: ctx.newAllow ? '1' : '0' });
+      // One change per PAD, refused here rather than in the background job —
+      // and BEFORE build.env is written, so a refused request changes nothing.
+      try { vm.claimPadChange(name); } catch (e) { return res.status(e.status || 409).json({ error: e.message, code: e.code }); }
+      try {
+        vm.setBuildEnv(name, { INSTALL_DOCKER: ctx.newAllow ? '1' : '0' });
+      } catch (e) {
+        vm.releasePadChange(name);
+        throw e;
+      }
 
       // Any change that needs a recreate runs as an SSE job (like Update) so the
       // frontend can stream the live command output in a popup console.
-      // One change per PAD, refused here rather than in the background job.
-      try { vm.claimPadChange(name); } catch (e) { return res.status(e.status || 409).json({ error: e.message, code: e.code }); }
       const jobKey = 'update:' + name;
       const job = jobLog.getOrCreateJob(jobKey);
       const log = (stream, text) => jobLog.line(job, stream, text);

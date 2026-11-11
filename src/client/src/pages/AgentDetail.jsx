@@ -16,7 +16,6 @@ import Badge from '../components/ui/Badge'
 import { cx } from '../lib/cx'
 import WorkspaceTab from './agent/WorkspaceTab'
 import LogsTab from './agent/LogsTab'
-import SessionsTab from './agent/SessionsTab'
 import ActivityTab from './agent/ActivityTab'
 import ConfigTab from './agent/ConfigTab'
 
@@ -352,7 +351,6 @@ export default function AgentDetail() {
         {mode === 'config' && <ConfigTab agent={agent} />}
         {mode === 'web' &&           <WebTab agent={agent} run={run} connected={termConnected} expandTerminal={() => setTermCollapsed(false)} />}
         {mode === 'logs' && <LogsTab agent={agent} />}
-        {mode === 'sessions' && <SessionsTab agent={agent} />}
         {mode === 'activity' && <ActivityTab agent={agent} />}
         {mode === 'settings' && <SettingsTab agent={agent} />}
       </div>

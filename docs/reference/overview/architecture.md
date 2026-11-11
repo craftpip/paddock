@@ -79,7 +79,7 @@ src/
   | File | Routes |
   |---|---|
   | `auth.js` | `/api/session`, `setup`, `login`, `logout`, `users`, `profile` |
-  | `agents.js` | `/api/agents` list, create and lifecycle; `/api/vms`, `/api/containers` |
+  | `agents.js` | `/api/agents` list, create and lifecycle; `/api/containers` |
   | `agent-settings.js` | `/api/agents/:name/` settings, devcontainer, web, ports, health, config |
   | `agent-workspace.js` | `/api/agents/:name/workspace/*` |
   | `agent-integrations.js` | `/api/agents/:name/` mcp, skills, channels, terminal sessions, orchestrator |
@@ -94,7 +94,8 @@ src/
   in its area's file; if it needs an `app.js` helper, add the name to that file's `ctx`
   destructure and to its registration in `app.js` (`route-table.test.js` checks the two
   match, and that no route file passes 700 lines)
-- POST routes require CSRF token via `x-csrf-token` header
+- Every non-GET `/api/*` request requires the CSRF token in the `x-csrf-token` header, except
+  `POST /api/login` and `POST /api/setup` (see [Security Model](../backend/security.md#csrf))
 - Responses are JSON
 - Backend commands use `runCmd()` (execFile wrapper) or `spawn()` for streaming
 - Long-running operations (create, update, settings, web, health) run as background
@@ -140,7 +141,7 @@ carries all host ports and forwards to the peer by name. See `tabs/web.md`.
 | Driver framework (`services/drivers/`) | Per-type behavior (openclaw/opencode/picoclaw/hermes/codex/claude) via one adapter |
 | No EJS rendering for modern pages | API-only for React |
 | Session-based auth with CSRF | Replaced Basic Auth; `AUTO_LOGIN=true` auto-logs in |
-| CSRF on all POST routes | Security |
+| CSRF on every non-GET `/api/*` request except login and setup | Enforced once for the prefix, so a new route cannot forget it |
 | Docker exec for all container commands | No agent-side daemon needed |
 | Per-PAD image `paddock-vm-&lt;name&gt;:latest` | Each PAD owns its build dir (`instances/&lt;name&gt;/build/`) |
 | 3s cache on docker ps | Reduces API latency |
@@ -159,7 +160,7 @@ carries all host ports and forwards to the peer by name. See `tabs/web.md`.
 | `SESSION_SECRET` | No | Auto-generated if not set |
 | `CONTAINER_PREFIX` | No | Default: `pad` (PAD container name prefix) |
 | `HOST_WORKSPACE_ROOT` | No | Real host path to project root (falls back to `WORKSPACE_ROOT`) |
-| `VAULT_KEY` | No | 32+ bytes for vault encryption (falls back to SESSION_SECRET) |
+| `VAULT_KEY` | No | Vault server key (hex of 32+ bytes, or any string). When unset, a random key is generated on first use and kept in `vault.key` beside the database; see [Vault](../backend/vault.md#server-key) |
 | `HOST_NAME` / `HOST_PROTO` | No | Override the base for published web-app links (IP or hostname + `http`/`https`) |
 | `GUARD_*` | No | Workspace-mount safety guards (on by default; set `GUARD_&lt;NAME&gt;=0` to disable) |
 

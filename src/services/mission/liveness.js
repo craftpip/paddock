@@ -359,8 +359,11 @@ async function withHistoryActivity(rows, project) {
   const vm = project.agent_name;
   const [probe, liveRows] = await Promise.all([
     busyForSessions(rows.map((r) => ({ agent_name: vm, agent_session_id: r.id }))),
-    padTmux.listSessions(vm).catch(() => []),
+    // null = the listing FAILED. That is not "no live sessions": the rows below
+    // then say `openKnown: false` instead of a confident `open: false`.
+    padTmux.listSessions(vm).catch(() => null),
   ]);
+  const listed = Array.isArray(liveRows);
   const liveNames = new Set((liveRows || []).map((r) => r.name));
   const resumedOpen = new Set(
     getDb()
@@ -371,7 +374,7 @@ async function withHistoryActivity(rows, project) {
   );
   return rows.map((r) => {
     const busy = probe.busyOf.get(r.id) === true;
-    return { ...r, busy, busyKnown: probe.knownOf.get(r.id) === true, open: busy || resumedOpen.has(r.id) };
+    return { ...r, busy, busyKnown: probe.knownOf.get(r.id) === true, open: busy || resumedOpen.has(r.id), openKnown: busy || listed };
   });
 }
 

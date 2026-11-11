@@ -49,10 +49,10 @@ input/textarea/contenteditable is focused:
 There is no global offline banner — unreachable-backend and SSE-drop states
 surface where they happen:
 
-- `lib/api.js` — `api()` throws on any non-2xx (details in
-  [`pages/overview.md`](../pages/overview.md) — Frontend Conventions); a
-  network failure rejects with the fetch error and the caller surfaces its own
-  message.
+- `lib/api.js` — `api()` rejects on any non-2xx with a plain `{ status, error, code }` object,
+  not an `Error` (see
+  [Client Conventions](client-conventions.md#what-api-rejects-with)); a network failure rejects
+  with the fetch error and the caller surfaces its own message.
 - Job modals (`HealthCheckModal`, `CommandModal`) show a "Connection lost"
   error row when a background job's SSE stream drops mid-run — the job itself
   continues server-side and the modal says so.

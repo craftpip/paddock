@@ -42,7 +42,7 @@ Skills, Memory) on top of its driver groups.
 
 ## Workspace
 
-File: `AgentDetail.jsx` — workspace content.
+File: `src/client/src/pages/agent/WorkspaceTab.jsx` (toolbar in `WorkspaceToolbar.jsx`).
 
 Full file browser rooted at the agent's data directory, defaults into the
 driver's `workspaceDir` (`/workspace` subfolder for openclaw).
@@ -59,6 +59,17 @@ driver's `workspaceDir` (`/workspace` subfolder for openclaw).
 
 **API:** `/api/agents/:name/workspace/*` (list, file, save, rename, delete,
 create-file, folder, upload, download, move).
+
+**Upload size caps** (`src/routes/agent-workspace.js`). Uploads are held in memory until they
+are written, so both the file and the whole request are bounded:
+
+| Route | Per file | Per request |
+|-------|----------|-------------|
+| `POST …/workspace/upload` | 50 MB | one file |
+| `POST …/workspace/upload-multiple` | 100 MB (`MAX_UPLOAD_SIZE`) | 512 MB by `Content-Length`, 2000 files |
+
+A multi-file request over 512 MB is refused with `413` before any file is read, and the message
+says to upload in smaller batches. A file over its per-file cap is refused with `400`.
 
 ## Config
 

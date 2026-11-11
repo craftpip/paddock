@@ -34,12 +34,12 @@ docs/
 └── reference/                        ← technical reference
     ├── STYLE-GUIDE.md                ← how to write docs
     ├── overview/                     ← architecture, business logic, react migration
-    ├── backend/                      ← services, Mission queue, drivers, middleware
+    ├── backend/                      ← services, Mission queue, drivers, middleware, security model, vault, PAD lifecycle
     ├── pages/                        ← top-level page docs
     ├── tabs/                         ← one file per Agent Detail tab
-    ├── components/                   ← stats, theme, ux
+    ├── components/                   ← stats, theme, ux, client conventions
     ├── lessons/                      ← the full account behind each rule in AGENTS.md
-    └── operations/                   ← runbooks: lifecycle, openclaw
+    └── operations/                   ← runbooks: lifecycle, openclaw, testing
 ```
 
 ## Adding new docs
@@ -52,6 +52,17 @@ Infinite runner timeline behavior is documented in
 
 Canonical queue, execution and publication behavior is documented in
 [Mission Queue and Runner](reference/backend/mission-queue.md).
+
+Who may do what, and what is redacted or refused, is in
+[Security Model](reference/backend/security.md). The secrets store is in
+[Vault](reference/backend/vault.md). The rules the create, change, delete and status paths hold to
+are in [PAD Lifecycle Rules](reference/backend/pad-lifecycle.md).
+
+The rules every page and store in the web client follows are in
+[Client Conventions](reference/components/client-conventions.md).
+
+Running the suite, proving a test bites and the host-footprint check are in
+[Testing](reference/operations/testing.md).
 
 Shell commands for PAD lifecycle and recovery scripts are in
 [Paddock command](reference/operations/paddock-cli.md).

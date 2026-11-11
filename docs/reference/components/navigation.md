@@ -69,8 +69,19 @@ can use the last-view preference; explicit cleared selections and history entrie
 Persisted terminal snapshots are revalidated rather than attached as authority.
 
 `restoreView` resolves a Mission row and its owner independently of the listing. Restoration
-uses GETs and never requests recovery. A closed pane shows its explicit reopen control. A fresh
-accepted row click can still opt into ordinary auto-reopen; Back/Forward and reload cannot.
+uses GETs and never requests recovery. A closed pane shows its explicit reopen control.
+
+Two callers may opt into auto-reopen, and each does so only for an open the user just made:
+
+- **The Mission page** opts in only on an accepted fresh row click (a `PUSH` navigation whose
+  `explicitOpen` state names that session). Back/Forward and reload cannot.
+- **The pop-out window** (`MissionSessionPopout.jsx`) opts in when it is opened, because opening
+  it is the user asking for the session. It does not opt in when the window is reloaded (the
+  navigation entry's type is `reload`): a reload never starts an agent process on its own.
+
+How the opt-in survives a superseding read is in
+[Client Conventions](client-conventions.md#the-reopen-opt-in).
+
 Changing only list/popup state preserves the pinned terminal and pane state. Generation tokens
 prevent late session, listing and workspace reads from replacing a newer view.
 

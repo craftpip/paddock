@@ -96,9 +96,15 @@ Both write their state to `meta.env` (`DOCKER`, `NETWORK`, `WORKSPACE_HOST`,
 ### Delete
 
 POST `/api/agents/:name/delete`:
-1. Stop + remove container, the `&lt;name&gt;-door` (both `-door`/`-web` suffixes), and the compose bridge network `&lt;name&gt;_default`
-2. Delete instance directory
-3. Remove from metadata store (`registry.removeAgentFromDb`)
+1. Capture the container's logs, then stop + remove the container, the `&lt;name&gt;-door` (both `-door`/`-web` suffixes), and the compose bridge network `&lt;name&gt;_default`
+2. Remove the workspace source folder, only when the create made it and no other PAD uses it
+3. Delete the instance directory (its `meta.env` holds the subnet reservation) and the per-PAD
+   image `paddock-vm-&lt;name&gt;:latest`
+4. Remove from the metadata store (`registry.removeAgentFromDb`), which also revokes the PAD's
+   runner MCP token, and clear the PAD's create and `update:<name>` job logs
+
+The MCP `delete_agent` tool runs the same removal. The full list and the workspace source rule
+are in [PAD Lifecycle Rules](../backend/pad-lifecycle.md#deleting-a-pad).
 
 ## Dev Workflow
 
@@ -190,27 +196,8 @@ checkout rewrites file times in no useful order.
 
 ### Testing
 
-Run everything with one command, inside the container:
-
-```bash
-docker exec paddock npm test                    # every suite, about 90 seconds
-docker exec paddock node test/run-all.mjs runner queue   # only files whose name contains a word
-```
-
-`test/run-all.mjs` runs each `*.test.js` in its own process and prints one line per file,
-then a total; it exits non-zero if any file fails or does not exit within the timeout
-(`TEST_TIMEOUT_MS`, default 240000). A file that hangs is reported `HUNG` and counts as a
-failure. `TEST_VERBOSE=1` prints the tail of each failing file's output.
-
-One process per file is the point: suites set `PAD_DB_PATH` / `WORKSPACE_ROOT` before they
-load the app and several replace module functions, so `node --test test/` in a single run
-shares state it must not and hangs. Do not use it.
-
-The runner clears the environment flags that would change a suite's subject:
-`PADDOCK_TASK_QUEUE` for `mcp.test.js` (it pins the default tool surface) and `GUARD_*` for
-`vm-manager.test.js` (it asserts the guard defaults, which `.env` disables). Run a single
-file directly with `timeout 120 docker exec paddock node --test test/<file>.test.js`; for
-those two, clear the same variables yourself.
+Run the whole suite with `docker exec paddock npm test`. Everything else (one file, filters,
+mutation controls, testing what is staged, the static checks) is in [Testing](testing.md).
 
 ## Git Workflow
 

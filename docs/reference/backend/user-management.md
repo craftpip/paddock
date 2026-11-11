@@ -82,7 +82,8 @@ On fresh install: first startup seeds admin/admin → user logs in → can chang
 - **`requireAuth()`** — checks `req.session.authenticated`. API/XHR: returns 401 JSON. Page loads: redirects to `/login` with `returnTo` saved. Bypassed entirely when `AUTO_LOGIN=true`.
 - **`requireAdmin()`** — checks `req.session.role === 'admin'`. Returns 403 if not admin.
 - **`checkNeedsSetup()`** — redirects to `/setup` when no users exist (first-run flow).
-- **CSRF** — token on every session, validated on all non-GET routes via `x-csrf-token` header.
+- **CSRF** — token on every session, validated on every non-GET `/api/*` request except login
+  and setup, via the `x-csrf-token` header.
 - **Owner scoping** — `app.param('name', …)` gates every `/api/agents/:name/*` route (and the terminal WebSocket inline): non-admin callers must own the agent.
 - **Session store** — in-memory (`MemoryStore`); cookie `vmf.sid`, httpOnly, sameSite lax, 24h expiry. `AUTO_LOGIN=true` re-establishes the admin session after a restart.
 
@@ -162,13 +163,12 @@ if (!agent || (role !== 'admin' && agent.owner_id !== userId)) {
 }
 ```
 
-### Vault — Not Owner-Scoped
+### Vault — Admin-Only
 
-Vault items (`vault_items` in SQLite) are encrypted at rest and shared by all
-authenticated users. They are **not** owner-scoped — the Vault replaced the old
-owner-scoped credentials system, which has been removed. The vault is always
-locked behind a 4–6 digit PIN: every operation requires the PIN (backend is
-stateless, no global unlock), and the item list stays visible while locked.
+The Vault is one shared store with one optional PIN, so every `/api/vault` route is admin-only
+(`requireAdmin` in `src/routes/vault.js`); a regular user gets `403`. Items (`vault_items` in
+SQLite) are encrypted at rest and are **not** owner-scoped: every admin sees the same items and
+shares the PIN. See [Vault](vault.md) for keys, the PIN and the routes.
 
 ### API Keys — Scoped by Owner
 

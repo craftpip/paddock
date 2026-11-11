@@ -105,3 +105,14 @@ describe('the kind of networking is compared before the peer is judged', () => {
     assert.notEqual(health.networkModeDrift('', 'container:b'), '');
   });
 });
+
+describe('a compose file that does not declare this PAD', () => {
+  it('says which services it has instead of "No compose file"', async () => {
+    fs.writeFileSync(composeFile, 'services: {}\n');
+    docker({ inspect: found(RUNNING), compose: async () => ({ stdout: JSON.stringify({ services: { 'pad-other': { image: 'x' } } }) }) });
+    const c = byKey(await health.checkContainerHealth(PAD), 'compose');
+    assert.equal(c.status, 'error');
+    assert.match(c.hint, /no service named pad-probe/);
+    assert.equal(c.actual, 'pad-other');
+  });
+});

@@ -265,7 +265,13 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   `timeout 120 docker exec paddock node --test test/<file>.test.js`. **Never
   `node --test test/`** in one go (shared process state, hangs). The runner
   clears `PADDOCK_TASK_QUEUE` for `mcp.test.js` and `GUARD_*` for
-  `vm-manager.test.js`; do the same when running those two by hand.
+  `vm-manager.test.js`; do the same when running those two by hand. Full how-to:
+  `docs/reference/operations/testing.md`.
+- **A test must never reach the real docker daemon or the real `instances/`
+  directory.** The runner fails any file after which a new container, network,
+  image or `instances/` entry exists. One test built a real container on every
+  run for a day and stayed green; stub the call (`_setApplyImpl`, `_setRunner`,
+  `_setPsRunner`, `_setNetworkSubnets` are the existing seams).
 
 ## Critical Operational Gotchas
 

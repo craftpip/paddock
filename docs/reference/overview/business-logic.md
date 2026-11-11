@@ -8,18 +8,24 @@
 
 1. **Filesystem scan**: Read all directories under `instances/` that match the `CONTAINER_PREFIX-*` pattern (e.g. `pad-*`)
 2. **Meta validation**: Each directory must contain a `meta.env` file with at minimum `AGENT=` line. Without it, the directory is skipped.
-3. **Docker state query**: Run <code v-pre>docker ps -a --format "{{.Names}}\t{{.State}}"</code> to get running/exited/missing for each discovered PAD
+3. **Docker state query**: Run <code v-pre>docker ps -a --format "{{.Names}}\t{{.State}}"</code> to get each discovered PAD's container state
 4. **Agent build**: Merge filesystem metadata + Docker state into an agent object with:
    - `name`, `display_name` (capitalized name without prefix)
-   - `status` (running/exited/missing)
+   - `status` (`running`, `exited` and docker's other states; `missing`; `unknown`)
    - `agent_type` from `meta.env` (openclaw/opencode/picoclaw/hermes/codex/claude)
    - `workspace_root` / `config_root` — resolved by probing the `instances/&lt;name&gt;/` directory
    - `default_model` / `default_provider` — parsed from the driver's `configFile` (e.g. `openclaw.json`) if it exists
-5. **SQLite sync**: Each discovered agent is upserted into the `agents` table for metadata tracking
+5. **SQLite sync**: Each discovered agent is upserted into the `agents` table for metadata
+   tracking, unless the docker listing failed
 
 **Docker cache**: `docker ps -a` results are cached for 3 seconds. Calling `dockerPsList(true)` forces a refresh.
 
-**Status resolution**: If `docker ps -a` reports a container name, use its state (`running` / `exited`). If the container is missing from Docker but the instance directory exists, status is `missing`.
+**Status resolution**: If `docker ps -a` reports a container name, use its state (`running` /
+`exited`). If the listing succeeded and has no container of that name, status is `missing`. If
+docker could not be asked (the listing failed or timed out), status is `unknown`: it says nothing
+about the PAD, and a failed listing does not overwrite the status recorded in the `agents` table.
+The full status table and the rules for a failed listing are in
+[PAD Lifecycle Rules](../backend/pad-lifecycle.md#status-of-a-pad).
 
 ### Workspace Root Resolution
 
@@ -439,7 +445,9 @@ Full user management and owner-based scoping docs: [`backend/user-management.md`
 - Admin creates all users (no public registration)
 - Every resource (agents) has an `owner_id` referencing `users(id)`
 - Admin sees all resources; regular users see only their own
-- Vault items (`vault_items` in SQLite) are encrypted and **not** owner-scoped; the vault is always locked behind a 4–6 digit PIN (per-op, no global unlock state)
+- The Vault is admin-only: one shared store, encrypted, **not** owner-scoped, with an optional
+  4 or 6 digit PIN that every value operation supplies (no unlock state). See
+  [Vault](../backend/vault.md)
 
 ### Auth Bypass Rules
 
@@ -451,9 +459,11 @@ Full user management and owner-based scoping docs: [`backend/user-management.md`
 
 - Each session gets a CSRF token (`crypto.randomBytes(32)`) on first request
 - Token set on `req.session.csrfToken` and exposed via `/api/session`
-- React SPA includes it in `x-csrf-token` header on all POST requests
-- Server validates: token from header/body must match session token
-- GET/HEAD/OPTIONS requests are exempt
+- React SPA includes it in the `x-csrf-token` header on every request
+- Server validates it on every `/api/*` request that is not GET/HEAD/OPTIONS: the token from
+  the header or body must match the session token
+- `POST /api/login` and `POST /api/setup` are exempt, because no token exists yet. See
+  [Security Model](../backend/security.md#csrf)
 
 ---
 

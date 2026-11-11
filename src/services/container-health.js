@@ -159,6 +159,12 @@ async function checkContainerHealth(name, onCheck) {
       key: 'compose', label: 'Compose file', status: 'warn', checked: false, expected: 'docker-compose.yml', actual: 'could not be read',
       hint: `The compose file at ${composePath(name)} exists but could not be resolved: ${declared.error}. Nothing was compared against it; this is not a reason to recreate the agent.`,
     });
+  } else if (composeMissing && services) {
+    // The file resolves; it just does not declare this PAD. Not "no file".
+    add({
+      key: 'compose', label: 'Compose file', status: 'error', expected: `a service named ${name}`, actual: Object.keys(services).join(', ') || '(no services)',
+      hint: `The compose file at ${composePath(name)} has no service named ${name}, so there is nothing to compare the container against. Recreate the agent to regenerate it.`,
+    });
   } else if (composeMissing) {
     add({
       key: 'compose', label: 'Compose file', status: 'error', expected: 'docker-compose.yml', actual: null,

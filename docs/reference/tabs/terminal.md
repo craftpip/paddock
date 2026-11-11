@@ -165,6 +165,13 @@ Props (current — see `Terminal.jsx` header for the full table):
 | `onCommandStart` / `onCommandDone` | fn | — | Fired when a tracked/locked injected command starts/finishes. |
 | `onConnChange` | fn | — | Called `true` when the PTY is ready and `false` while connecting/disconnected. AgentDetail gates command buttons on it. |
 | `disabled` | boolean | `false` | Lock input from outside. Injected commands still run. |
+| `sessionId` | string | `''` | Pins the pane to one tmux session. When set, the parent owns the session: nothing is read from or written to `localStorage`. Mission passes it. |
+
+The header's **Clear** button depends on what the pane is. On an ordinary shell it runs `clear`
+in the shell, which clears the real pane. On a pinned session (`sessionId` set) the pane is an
+agent's own screen, where `clear` would be delivered to the agent as a prompt, so the button
+clears only the scrollback held in the browser and sends nothing. See
+[Client Conventions](../components/client-conventions.md#terminal).
 
 Imperative API through `ref`:
 
