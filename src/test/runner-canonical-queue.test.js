@@ -459,8 +459,8 @@ it('Run confirms only an exact receipt; repaint without receipt remains observab
     tmux.sendText = async (_pad, _session, text) => {
       sends++;
       assert.match(text, /runner_id=run_/);
-      assert.match(text, /paddock_agent_queue_read/);
-      assert.match(text, /paddock_agent_queue_update_item/);
+      assert.match(text, /paddock_runner_agent_queue_read/);
+      assert.match(text, /paddock_runner_agent_queue_update_item/);
       assert.match(text, /NEVER edit it/);
       if (exact) turn = { state: 'working', userId: `receipt-${sends}`, inputHash: crypto.createHash('sha256').update(text.trimEnd()).digest('hex'), progressAt: new Date().toISOString() };
       return { lines: 1 };

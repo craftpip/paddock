@@ -962,6 +962,31 @@ async function awaitExactReceipt(agent, conversationId, baselineUserId, expected
 }
 function _setReceiptPollBudget(ms) { RECEIPT_POLL_BUDGET_MS = ms; }
 
+/** Plan 117: make sure the project's pad has the runner MCP surface
+ *  (`paddock_runner` → `/mcp/runner`, a per-pad token) connected. No user step.
+ *  Returns `{ state: 'connected', changed }`, `{ state: 'failed', detail }`, or
+ *  `{ state: 'unknown', detail }` (probe could not run — never blocks Run).
+ *  Drivers without the hooks are reported unknown. */
+async function ensureRunnerMcp(project) {
+  const driver = assertMissionAgent(project.agent_type);
+  if (typeof driver.mcpServerStatus !== 'function' || typeof driver.connectMcpServer !== 'function') {
+    return { state: 'unknown', detail: `${project.agent_type} cannot be wired automatically` };
+  }
+  const { getRunnerMcpUrl, RUNNER_MCP_SERVER } = require('./paddock-mcp');
+  const before = await driver.mcpServerStatus(project.agent_name, project.folder, RUNNER_MCP_SERVER);
+  if (before.state === 'connected') return { state: 'connected', changed: false };
+  if (before.state === 'unknown') return before;
+  const token = require('./runner-mcp-token').mint(project.agent_name);
+  const wired = await driver.connectMcpServer(project.agent_name, { server: RUNNER_MCP_SERVER, url: getRunnerMcpUrl(), token, folder: project.folder });
+  const after = await driver.mcpServerStatus(project.agent_name, project.folder, RUNNER_MCP_SERVER);
+  if (after.state === 'connected') return { state: 'connected', changed: true };
+  const tail = String(wired.output || '').trim().split('\n').slice(-2).join(' ').slice(0, 300);
+  return {
+    state: 'failed',
+    detail: `installing the runner MCP server (${getRunnerMcpUrl()}) in ${project.agent_name} did not connect: ${after.detail}${tail ? ` (${tail})` : ''}. Check that the pad can reach this Paddock host (HOST_NAME in .env), then press Run again.`,
+  };
+}
+
 async function confirmDeliveryViaStore(agentName, agentSessionId, baselineActivityAt, deadline) {
   if (!agentSessionId) return false;
   while (Date.now() < deadline) {
@@ -2410,7 +2435,7 @@ function renderRunnerPrompt(runner, project, queue, kind, extra = {}) {
       ? ` Current owned operation ${runner.activeOperationId} is assigned to item ${assignedItem}.`
       : ` This dispatch is assigned to item ${assignedItem}.`)
     : '';
-  const protocol = `Queue authority: runner_id=${runner.id}.${assignment} QUEUE.md is read-only generated output; NEVER edit it. Call paddock_agent_queue_read with this exact runner_id. Its result contains queue.items and queue.revision. Call paddock_agent_queue_update_item with the item's id as item_id, queue.revision as the numeric revision, and an accepted status: new, in_progress, need_input, done. Re-read after every accepted mutation and on a revision conflict. Only update the item assigned to the current operation; do not take a second item. Queue changes must go through these tools, including marking work started, done, or blocked; never choose a runner by PAD name. If the tools are unavailable, stop and report that instead of editing the file.`;
+  const protocol = `Queue authority: runner_id=${runner.id}.${assignment} QUEUE.md is read-only generated output; NEVER edit it. Call paddock_runner_agent_queue_read with this exact runner_id. Its result contains queue.items and queue.revision. Call paddock_runner_agent_queue_update_item with the item's id as item_id, queue.revision as the numeric revision, and an accepted status: new, in_progress, need_input, done. Re-read after every accepted mutation and on a revision conflict. Only update the item assigned to the current operation; do not take a second item. Queue changes must go through these tools, including marking work started, done, or blocked; never choose a runner by PAD name. If the tools are unavailable, stop and report that instead of editing the file.`;
   return { text: promptTemplates.normalizePromptForSend(`${text}\n\n${protocol}`), version: eff.version };
 }
 
@@ -3378,16 +3403,30 @@ async function startRunner(id, { actor = null } = {}) {
     setRunnerReason(id, queue.aggregate.reason || 'Queue is done.');
     return { started: false, reason: 'empty_queue', runner: getRunner(id) };
   }
-  // Plan 116: the worker can only read/update the queue through Paddock's MCP
-  // tools. Without them it (correctly) stops and reports, which the supervisor
-  // cannot see — Run then idled out the grace and nudged a toolless worker.
-  // Refuse up front, naming the fix. UNKNOWN (probe failed) does not block.
-  const workerDriver = assertMissionAgent(project.agent_type);
-  if (typeof workerDriver.paddockMcpStatus === 'function') {
-    const mcpStatus = await workerDriver.paddockMcpStatus(project.agent_name, project.folder);
-    if (mcpStatus.state === 'absent' || mcpStatus.state === 'failed') {
-      await refuse('runner_worker_tools_missing',
-        `The worker cannot reach the queue: ${mcpStatus.detail}. Connect Paddock's MCP server in ${project.agent_name} (agent page → MCP tab) with a key that can read and write this project's queue, then press Run again.`);
+  // Plan 116/117: the worker can only read/update the queue through the runner
+  // MCP tools. Without them it (correctly) stops and reports, which the
+  // supervisor cannot see. Wire them automatically; refuse only if that fails.
+  const wiring = await ensureRunnerMcp(project);
+  if (wiring.state === 'failed') {
+    await refuse('runner_worker_tools_missing', `The worker cannot reach the queue: ${wiring.detail}`);
+  }
+  if (wiring.changed) {
+    runnerHistory.record(getRunner(id), 'runner_tools_wired', { actor: actor || 'user', reason: `Installed the ${project.agent_name} runner MCP server (paddock_runner).` });
+  }
+  // MCP servers load when the TUI starts, so a worker TUI that was already
+  // running when the tools were (re)wired does not have them. Restart it into the
+  // SAME conversation — but never under a live turn.
+  if (wiring.changed && session) {
+    const pane = await padTmux.paneState(project.agent_name, session.tmux_id);
+    if (pane.live) {
+      const turn = session.agent_session_id ? agentStore.readTurn(agent, session.agent_session_id) : null;
+      if (turn && turn.state !== 'idle') {
+        await refuse('runner_worker_not_idle', 'The runner tools were just installed in this pad, and the worker must restart to load them, but it is mid-turn. Press Run again when its turn ends.');
+      }
+      await padTmux.killSession(project.agent_name, session.tmux_id);
+      await restartSession(session.id, { actor });
+      session = getSession(session.id);
+      runnerHistory.record(getRunner(id), 'worker_restarted', { actor: actor || 'user', reason: 'Restarted the worker TUI into the same conversation so it loads the runner MCP tools.' });
     }
   }
   if (runtime.state === 'projection_error') {
@@ -4558,6 +4597,7 @@ module.exports = {
   canDispatch,
   _setReceiptPollBudget,
   _setTuiReadyBudget,
+  ensureRunnerMcp,
   computeSchedulerState,
   observeRunnerTurn,
   withLive,

@@ -37,6 +37,8 @@ const TYPES = {
   recovery_resumed: ['recovery', 'Recovery completed — queue resumed'],
   recovery_held: ['recovery', 'Recovery held — queue remains paused'],
   recovery_failed: ['recovery', 'Recovery could not complete'],
+  runner_tools_wired: ['control', 'Runner MCP tools installed in the pad'],
+  worker_restarted: ['control', 'Worker TUI restarted to load runner tools'],
   quota_remains: ['recovery', 'Provider quota is still exhausted'],
   worker_exited: ['recovery', 'Worker process exited'],
   worker_restored: ['recovery', 'Worker session restored'],

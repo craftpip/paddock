@@ -21,7 +21,7 @@ const taskPipeline = require('./services/task-pipeline');
 const plans = require('./services/plans');
 const agentStore = require('./services/agent-store');
 const { termUserArgs } = require('./services/pad-tmux');
-const { registerAgentQueueTools } = require('./services/agent-queue-mcp');
+const { registerAgentQueueTools, WORKER_QUEUE_TOOLS } = require('./services/agent-queue-mcp');
 
 const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const PREFIX = process.env.CONTAINER_PREFIX || 'pad';
@@ -2930,11 +2930,70 @@ function mountMcp(app) {
   router.get('/', handle);
   router.delete('/', handle);
 
+  // Mounted first: `/mcp/runner` must never be mistaken for the control surface.
+  mountRunnerMcp(app);
   app.use('/mcp', router);
+}
+
+/** Plan 117: the RUNNER surface. A worker pad gets exactly the two queue tools
+ *  it needs, authenticated by its own per-pad token (never a user API key), and
+ *  only for runners whose project lives on that same pad. Wired into the pad
+ *  automatically by `mission.ensureRunnerMcp` when Run is pressed. */
+const { RUNNER_MCP_SERVER: RUNNER_SERVER_NAME } = require('./services/paddock-mcp');
+function createRunnerServer(padName) {
+  const server = new McpServer(
+    { name: RUNNER_SERVER_NAME, version: SERVER_VERSION },
+    { capabilities: { tools: {} } }
+  );
+  const registerToolBound = (name, config, handler) => registerTool(server, name, config, handler);
+  registerAgentQueueTools(registerToolBound, {
+    only: WORKER_QUEUE_TOOLS,
+    authorize: (runnerId) => {
+      const runner = mission.getRunner(runnerId);
+      if (!runner) throw new Error(`runner_not_found: ${runnerId}`);
+      const project = mission.getProject(runner.project_id);
+      // Same message for "not yours" as for "not found" would hide a real
+      // misconfiguration; the id is the caller's own input, so naming the
+      // mismatch leaks nothing it did not already send.
+      if (!project || project.agent_name !== padName) {
+        throw new Error(`runner_not_on_this_pad: runner ${runnerId} does not belong to ${padName}`);
+      }
+      return runner;
+    },
+    actor: () => `runner-mcp:${padName}`,
+  });
+  return server;
+}
+
+function mountRunnerMcp(app) {
+  const runnerTokens = require('./services/runner-mcp-token');
+  const handle = async (req, res) => {
+    const header = req.headers.authorization || '';
+    const padName = runnerTokens.authenticate(header.startsWith('Bearer ') ? header.slice(7).trim() : null);
+    if (!padName) {
+      return res.status(401).json({ jsonrpc: '2.0', id: null, error: { code: -32001, message: 'Unauthorized: missing or invalid runner token' } });
+    }
+    const server = createRunnerServer(padName);
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    try {
+      await server.connect(transport);
+      await mcpContext.run({ user: null, runnerPad: padName }, () => transport.handleRequest(req, res, req.body));
+    } catch (err) {
+      console.error('[mcp/runner] request error:', err);
+      if (!res.headersSent) {
+        res.status(500).json({ jsonrpc: '2.0', id: null, error: { code: ErrorCode.InternalError, message: 'Internal error' } });
+      }
+    }
+  };
+  const router = express.Router();
+  router.post('/', handle);
+  router.get('/', handle);
+  router.delete('/', handle);
+  app.use('/mcp/runner', router);
 }
 
 // The grant + Mission gate helpers are exported for the same reason the grant
 // ones are: they are the policy, and `mcp.test.js` asserts on them directly.
 // `mcpContext` is exported so a test can run a tool call under a synthetic
 // identity (it is the same store mountMcp fills per request).
-module.exports = { mountMcp, authenticateRequest, registerTools, createServer, SERVER_NAME, SERVER_VERSION, keyGrants, targetAllowed, toolAllowed, requireTool, mcpContext, missionVisibleAgents, missionMaySee, missionRequireProject, missionRequireSession, missionFail, publicAgent, resolveAgentName, notFoundMessage, shellQuote, missionSelectProjects, execDockerArgs };
+module.exports = { mountMcp, authenticateRequest, registerTools, createServer, createRunnerServer, RUNNER_SERVER_NAME, SERVER_NAME, SERVER_VERSION, keyGrants, targetAllowed, toolAllowed, requireTool, mcpContext, missionVisibleAgents, missionMaySee, missionRequireProject, missionRequireSession, missionFail, publicAgent, resolveAgentName, notFoundMessage, shellQuote, missionSelectProjects, execDockerArgs };

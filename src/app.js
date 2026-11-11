@@ -151,7 +151,7 @@ app.use((req, res, next) => {
   if (AUTO_LOGIN) return next();
   // Public paths — no auth needed (docs site is public)
   if (req.path === '/website' || req.path.startsWith('/website/')) return next();
-  const publicPaths = ['/api/setup', '/api/login', '/api/session', '/login', '/setup', '/mcp'];
+  const publicPaths = ['/api/setup', '/api/login', '/api/session', '/login', '/setup', '/mcp', '/mcp/runner'];
   if (publicPaths.includes(req.path)) return next();
   if (req.path.startsWith('/api/') || req.path.startsWith('/ws/')) {
     return requireAuth(req, res, next);

@@ -351,8 +351,7 @@ const OPENCODE = {
    *  `{ state: 'unknown', detail }` when the probe itself could not run —
    *  UNKNOWN is never reported as absent. Runs as the pad user, logs to stderr
    *  (the TUI holds the log file). */
-  async paddockMcpStatus(name, folder) {
-    const server = this.mcp.serverName;
+  async mcpServerStatus(name, folder, server = this.mcp.serverName) {
     try {
       const { termUserArgs } = require('../pad-tmux');
       const r = await runCmd('docker', ['exec', ...termUserArgs(name), ...(folder ? ['-w', folder] : []), name,
@@ -361,6 +360,42 @@ const OPENCODE = {
     } catch (e) {
       return { state: 'unknown', detail: `could not run opencode mcp list: ${e.message}` };
     }
+  },
+
+  /** Plan 117: (re)wire a remote MCP server into this pad's global opencode
+   *  config. Any existing entry of that name is removed first (`opencode mcp add`
+   *  will not replace one), then added with a bearer header. The token is read
+   *  from STDIN inside the pad — it never appears in an argv, a log or `ps` —
+   *  and the write goes through `spawn` + `stdin.end` (an execFile `input`
+   *  hangs a `read` through the docker CLI). Runs as the pad user. Resolves to
+   *  `{ ok, output }`; never throws. */
+  connectMcpServer(name, { server, url, token, folder }) {
+    const { spawn } = require('child_process');
+    const { termUserArgs } = require('../pad-tmux');
+    const remove = [
+      "const fs=require('fs');const p=process.argv[1],n=process.argv[2];",
+      'if(!fs.existsSync(p))process.exit(0);',
+      "function strip(s){let o='',q=!1,i=0;while(i<s.length){const c=s[i],m=s[i+1];if(q){if(c==='\\\\'){o+=c+m;i+=2;continue}o+=c;if(c==='\"')q=!1;i++;continue}if(c==='\"'){q=!0;o+=c;i++;continue}if(c==='/'&&m==='/'){while(i<s.length&&s[i]!=='\\n')i++;continue}if(c==='/'&&m==='*'){i+=2;while(i<s.length&&!(s[i]==='*'&&s[i+1]==='/'))i++;i+=2;continue}o+=c;i++}return o}",
+      'const c=JSON.parse(strip(fs.readFileSync(p,"utf8")));',
+      'if(c.mcp&&c.mcp[n]){delete c.mcp[n];fs.writeFileSync(p,JSON.stringify(c,null,2));}',
+    ].join('');
+    const script = [
+      'set -e',
+      'IFS= read -r T',
+      `node -e ${sq(remove)} /root/.opencode/config/opencode/opencode.jsonc ${sq(server)} 2>/dev/null || true`,
+      `opencode mcp add ${sq(server)} --url ${sq(url)} --header "Authorization=Bearer $T" --print-logs 2>/dev/null`,
+    ].join('\n');
+    return new Promise((resolve) => {
+      let out = '';
+      const child = spawn('docker', ['exec', '-i', ...termUserArgs(name), ...(folder ? ['-w', folder] : []), name, 'sh', '-lc', script]);
+      const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 60000);
+      child.stdout.on('data', (d) => { out += d; });
+      child.stderr.on('data', (d) => { out += d; });
+      child.on('error', (e) => { clearTimeout(timer); resolve({ ok: false, output: e.message }); });
+      child.on('close', (code) => { clearTimeout(timer); resolve({ ok: code === 0, output: out }); });
+      child.stdin.write(`${token}\n`);
+      child.stdin.end();
+    });
   },
 
   /** Pure parser for `opencode mcp list` (1.19.5 layout: `●  ✓ paddock connected`

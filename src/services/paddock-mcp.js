@@ -11,4 +11,11 @@ function getPaddockMcpUrl() {
   return `${proto}://${host}:${port}/mcp`;
 }
 
-module.exports = { getPaddockMcpUrl };
+/** Plan 117: the runner surface — `<control url>/runner`. */
+function getRunnerMcpUrl() {
+  return `${getPaddockMcpUrl().replace(/\/+$/, '')}/runner`;
+}
+
+const RUNNER_MCP_SERVER = 'paddock_runner';
+
+module.exports = { getPaddockMcpUrl, getRunnerMcpUrl, RUNNER_MCP_SERVER };

@@ -429,6 +429,14 @@ function migrate(db) {
       created_at TEXT NOT NULL,
       FOREIGN KEY (runner_id) REFERENCES infinite_runners(id) ON DELETE CASCADE
     );
+    -- Plan 117: one runner-MCP token per pad (sha256 only). It authenticates
+    -- /mcp/runner and reaches only runners whose project lives on that pad.
+    CREATE TABLE IF NOT EXISTS runner_mcp_tokens (
+      agent_name TEXT PRIMARY KEY,
+      token_hash TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL,
+      last_used_at TEXT
+    );
     -- Canonical execution authorization. Unlike historical runner configuration
     -- and telemetry columns, this row alone decides whether work may dispatch.
     CREATE TABLE IF NOT EXISTS runner_runtime (

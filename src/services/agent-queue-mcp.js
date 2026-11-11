@@ -1,7 +1,15 @@
 const { z } = require('zod');
 const mission = require('./mission');
 
-function registerAgentQueueTools(registerToolBound, { authorize, actor }) {
+/** Plan 117: the tools a WORKER needs. The runner MCP surface registers only
+ *  these; reorder, custom instructions and blocker resolution are management
+ *  and stay on the control surface (a worker cannot resolve its own blocker). */
+const WORKER_QUEUE_TOOLS = ['agent_queue_read', 'agent_queue_update_item'];
+
+function registerAgentQueueTools(registerAll, { authorize, actor, only = null }) {
+  const registerToolBound = only
+    ? (name, ...rest) => (only.includes(name) ? registerAll(name, ...rest) : undefined)
+    : registerAll;
   // Exact runner identity is mandatory: one PAD routinely hosts several
   // projects and conversations. Never pick a runner by enabled flag or recency.
   const requireRunner = (runnerId, write) => authorize(runnerId, write);
@@ -99,4 +107,4 @@ function registerAgentQueueTools(registerToolBound, { authorize, actor }) {
   );
 }
 
-module.exports = { registerAgentQueueTools };
+module.exports = { registerAgentQueueTools, WORKER_QUEUE_TOOLS };

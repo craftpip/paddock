@@ -208,8 +208,8 @@ describe('plan 91 — shipped defaults', () => {
 
   it('names queue tools with the Paddock MCP namespace exposed to OpenCode', () => {
     for (const key of ['start', 'resume', 'continue', 'recovery']) {
-      assert.match(DEFAULT_TEMPLATES[key], /paddock_agent_queue_read/);
-      assert.match(DEFAULT_TEMPLATES[key], /paddock_agent_queue_update_item/);
+      assert.match(DEFAULT_TEMPLATES[key], /paddock_runner_agent_queue_read/);
+      assert.match(DEFAULT_TEMPLATES[key], /paddock_runner_agent_queue_update_item/);
     }
   });
 

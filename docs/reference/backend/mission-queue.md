@@ -89,10 +89,31 @@ values rather than receiving guessed data.
 
 ## Worker and Mission APIs
 
-Worker tools require the exact `runner_id`, target grant, project ownership and assigned item.
-`agent_queue_update_item` accepts `new`, `in_progress`, `need_input` or `done` under a numeric
-revision. A worker cannot resolve its own blocker. Every prompt includes the mandatory server
-queue protocol, including saved custom prompts; unavailable tools mean stop, never file editing.
+Worker tools require the exact `runner_id` and the assigned item. `agent_queue_update_item`
+accepts `new`, `in_progress`, `need_input` or `done` under a numeric revision. A worker cannot
+resolve its own blocker. Every prompt includes the mandatory server queue protocol, including
+saved custom prompts; unavailable tools mean stop, never file editing.
+
+## Two MCP Surfaces
+
+| Server (in the pad) | Endpoint | Credential | Tools | For |
+|---|---|---|---|---|
+| `paddock` | `/mcp` | user API key (grants) | the full control surface, including all five `agent_queue_*` tools | humans, orchestrators |
+| `paddock_runner` | `/mcp/runner` | per-pad runner token (`prk_…`) | `agent_queue_read`, `agent_queue_update_item` only | infinite-queue workers |
+
+A runner token (`runner_mcp_tokens`, sha256 only, one per pad; minting replaces the old one)
+identifies a **pad**, not a user. It reaches only runners whose project lives on that pad; anything
+else returns `runner_not_on_this_pad`. User API keys are refused on `/mcp/runner` with a JSON 401.
+Queue events written through it carry the actor `runner-mcp:<pad>`. In opencode the tools appear as
+`paddock_runner_agent_queue_read` / `paddock_runner_agent_queue_update_item`, which is how the
+prompts name them.
+
+Nobody wires it by hand. On Run, `ensureRunnerMcp` probes `paddock_runner` (`opencode mcp list`, as
+the pad user). If it's connected, nothing happens. If it's absent or failed, Run mints a token,
+removes any stale entry, runs `opencode mcp add` with the token read from stdin (never argv), and
+re-probes. MCP servers load when a TUI starts, so if the wiring changed and the bound worker TUI
+is live and idle, Run restarts it into the same conversation (`worker_restarted`). If the worker is
+mid-turn, Run refuses rather than interrupting it.
 
 ## Worker Readiness and Delivery
 
@@ -100,7 +121,7 @@ Run checks the worker before it types anything, and refuses with a code that nam
 
 | Code | Meaning |
 |---|---|
-| `runner_worker_tools_missing` | The pad has no connected `paddock` MCP server (`driver.paddockMcpStatus`, via `opencode mcp list`). Without it the worker cannot read or update the queue. An unreadable probe (`unknown`) does not block. |
+| `runner_worker_tools_missing` | Automatic wiring of `paddock_runner` didn't connect; the message quotes opencode's reason and points at `HOST_NAME` (the pad must reach this host). An unreadable probe (`unknown`) neither wires nor blocks. |
 | `runner_worker_identity_unavailable` | The worker session has no conversation id, or the runner is bound to another session. Close the worker and Run again. |
 | `runner_worker_locked` | A human has solo-locked the worker session. |
 | `runner_worker_not_idle` | The worker is mid-turn. |

@@ -219,22 +219,22 @@ const DEFAULT_TEMPLATES = Object.freeze({
   start: '[Infinite runner {{runner_name}}] Read {{queue_path}} and {{index_path}} completely before acting. '
     + 'Work exactly ONE item per turn, then stop and end your turn — the supervisor sends the next instruction; do not continue to a second item yourself. '
     + 'Before starting ANY item, check that a file named `QUEUE.paused` does not exist here; if it does, do not start another item — stop and wait. '
-    + 'Resume the "in progress" item first, otherwise take the first "new" item and use paddock_agent_queue_update_item to set in_progress BEFORE doing work. Read with paddock_agent_queue_read. Do not edit QUEUE.md. '
+    + 'Resume the "in progress" item first, otherwise take the first "new" item and use paddock_runner_agent_queue_update_item to set in_progress BEFORE doing work. Read with paddock_runner_agent_queue_read. Do not edit QUEUE.md. '
     + 'If ANY item is "need input", stop immediately and explain its reason. When blocked, set the item to "need input" with the exact question in reason, then STOP. '
     + 'Mark "done" only when work AND verification are complete. When all done, report completion and wait. Do not invent work.',
   resume: '[Infinite runner {{runner_name}}] Read {{queue_path}} and {{index_path}} completely before acting. '
     + 'Work exactly ONE item per turn, then stop and end your turn — the supervisor sends the next instruction; do not continue to a second item yourself. '
     + 'Before starting ANY item, check that a file named `QUEUE.paused` does not exist here; if it does, do not start another item — stop and wait. '
-    + 'Resume the "in progress" item first, otherwise take the first "new" item and use paddock_agent_queue_update_item to set in_progress BEFORE doing work. Read with paddock_agent_queue_read. Do not edit QUEUE.md. '
+    + 'Resume the "in progress" item first, otherwise take the first "new" item and use paddock_runner_agent_queue_update_item to set in_progress BEFORE doing work. Read with paddock_runner_agent_queue_read. Do not edit QUEUE.md. '
     + 'If ANY item is "need input", stop immediately and explain its reason. When blocked, set the item to "need input" with the exact question in reason, then STOP. '
     + 'Mark "done" only when work AND verification are complete. When all done, report completion and wait. Do not invent work. '
     + 'The previous turn was PAUSED mid-task: read the saved progress and resume instructions in the "in progress" plan file, then CONTINUE that same plan from its checkpoint without repeating completed steps.',
   continue: '[Infinite runner {{runner_name}}] Continue: work exactly ONE queued item, then stop your turn. '
-    + `Read the server queue with paddock_agent_queue_read (and {{index_path}} for plan rules) first: resume the in_progress item, otherwise take the first new item and use paddock_agent_queue_update_item to set in_progress BEFORE doing work. {{queue_path}} is read-only generated output. `
+    + `Read the server queue with paddock_runner_agent_queue_read (and {{index_path}} for plan rules) first: resume the in_progress item, otherwise take the first new item and use paddock_runner_agent_queue_update_item to set in_progress BEFORE doing work. {{queue_path}} is read-only generated output. `
     + 'Check that {{paused_path}} does not exist before starting — if it does, stop and wait. '
     + `Mark 'done' only when work AND verification are complete, end your turn; do not take a second item. `
     + `If blocked, set the item to 'need input' with the exact question in reason and stop.`,
-  recovery: '[Infinite runner {{runner_name}}] This pane resumes the same conversation. Read the server queue with paddock_agent_queue_read; resume the in-progress item, otherwise take the next new item and use paddock_agent_queue_update_item to set in_progress before starting. Read {{index_path}} for plan rules. Check {{paused_path}} before starting. Work exactly one item, verify it, update the queue and end your turn. If blocked, mark need input with the exact reason and stop.',
+  recovery: '[Infinite runner {{runner_name}}] This pane resumes the same conversation. Read the server queue with paddock_runner_agent_queue_read; resume the in-progress item, otherwise take the next new item and use paddock_runner_agent_queue_update_item to set in_progress before starting. Read {{index_path}} for plan rules. Check {{paused_path}} before starting. Work exactly one item, verify it, update the queue and end your turn. If blocked, mark need input with the exact reason and stop.',
   pause: '[Infinite runner {{runner_name}}] PAUSE CURRENT TASK. Stop development on the current plan ({{current_plan}}) at the earliest safe checkpoint. Do not start another plan. '
     + 'Before stopping, save current progress, remaining work and explicit resume instructions into that plan file, and keep its server queue item in_progress (do not mark it done or requeue it). Never edit {{queue_path}}. Then stop and wait.',
 });
