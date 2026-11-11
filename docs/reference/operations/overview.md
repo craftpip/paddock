@@ -171,7 +171,15 @@ docker exec -d paddock sh -c 'cd /app/client && npm run dev'
 cd src/client && npm run build
 ```
 
-Output to `src/public/`, served by Express on port 6789.
+Output to `src/public/`, served by Express on port 6789. The bundle is tracked in git, so
+commit `src/public` together with the client change that produced it.
+
+The build also writes `src/public/build-stamp.json`: a SHA-256 over the client's inputs
+(`src/`, `index.html`, `vite.config.js`, `build-stamp.js`, `package-lock.json`), computed by
+`src/client/build-stamp.js`. `client-bundle-fresh.test.js` recomputes it, so `npm test` fails
+when the client source was edited without a rebuild, and `scripts/test-staged.sh` fails when
+the staged bundle does not match the staged source. It is a content hash because a git
+checkout rewrites file times in no useful order.
 
 ### Testing
 

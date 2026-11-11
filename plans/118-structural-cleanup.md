@@ -1,6 +1,6 @@
 # Plan 118 — Structural cleanup: one runner view, split files, instant dispatch
 
-## Status: In progress — 2026-11-11 — 6/7 phases done (Phases 1–6; Phase 6 partly, see its notes); remaining: Phase 7, which needs the user's go-ahead
+## Status: In progress — 2026-11-11 — 6/7 phases done, Phase 7 half done. Open: untracking `src/public` (Phase 7 steps 2–3, needs the user's go-ahead), the `AGENTS.md` trim and the SVG check (Phase 6, deliberately not done)
 
 ## Why
 
@@ -48,7 +48,7 @@ disagree, then makes the files small enough to read.
 - [x] Phase 4 — One test command that finishes (2026-11-11, see "Phase 4 — as built")
 - [x] Phase 5 — Split `app.js` routes (2026-11-11, see "Phase 5 — as built")
 - [x] Phase 6 — Turn `AGENTS.md` lessons into tools (2026-11-11; the `AGENTS.md` trim and the SVG check were NOT done, see "Phase 6 — as built")
-- [ ] Phase 7 — Stop tracking `src/public`
+- [ ] Phase 7 — Stop tracking `src/public` (the stale-bundle guard is built, as a test; untracking waits for the user)
 
 ---
 
@@ -504,6 +504,21 @@ brought up, and they may deploy by `git pull` + restart.
 and editing a `.jsx` without rebuilding shows the stale-bundle page.
 
 ---
+
+### Phase 7 — as built so far
+
+- The guard is a **test**, not a boot check that replaces the page. A boot
+  check would have to compare times, and a git checkout rewrites file times
+  in no useful order, so it would lock the page on a healthy tree. Instead the
+  build writes a content hash of its inputs to `src/public/build-stamp.json`
+  and `client-bundle-fresh.test.js` recomputes it (2 tests, in `npm test`).
+  Control: a comment appended to `App.jsx` in a copy, no rebuild → red.
+- With that test, the reason to untrack `src/public` is weaker: a bundle that
+  does not match its source can no longer be committed unnoticed, as long as
+  `npm test` or `scripts/test-staged.sh` is run.
+- **Not done, waiting for the user:** `git rm --cached src/public`, building
+  the client in the image, and the fresh-clone check. It changes how a
+  checkout is brought up.
 
 ## Out of scope
 
