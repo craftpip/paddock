@@ -1,6 +1,6 @@
 # Plan 118 — Structural cleanup: one runner view, split files, instant dispatch
 
-## Status: In progress — 2026-11-11 — 5/7 phases done (Phases 1–5); next: Phase 6
+## Status: In progress — 2026-11-11 — 6/7 phases done (Phases 1–6; Phase 6 partly, see its notes); remaining: Phase 7, which needs the user's go-ahead
 
 ## Why
 
@@ -47,7 +47,7 @@ disagree, then makes the files small enough to read.
 - [x] Phase 3 — Dispatch the next plan when the worker reports done (2026-11-11, see "Phase 3 — as built")
 - [x] Phase 4 — One test command that finishes (2026-11-11, see "Phase 4 — as built")
 - [x] Phase 5 — Split `app.js` routes (2026-11-11, see "Phase 5 — as built")
-- [ ] Phase 6 — Turn `AGENTS.md` lessons into tools
+- [x] Phase 6 — Turn `AGENTS.md` lessons into tools (2026-11-11; the `AGENTS.md` trim and the SVG check were NOT done, see "Phase 6 — as built")
 - [ ] Phase 7 — Stop tracking `src/public`
 
 ---
@@ -456,6 +456,28 @@ how-it-works material moved to `docs/reference/`.
 (recorded in this file) and `npm test` runs the lint and token checks.
 
 ---
+
+### Phase 6 — as built
+
+| Lesson | Tool | Seen to fail on a broken input |
+|---|---|---|
+| Mutation control must run in a copy | `scripts/mutate.sh` | all four outcomes exercised: bites (0), does not bite (1), expression matched nothing (2), mutant does not parse (2) |
+| Test the staged tree | `scripts/test-staged.sh` | ran three suites against the index |
+| Free variable in plain JS | `source-hygiene.test.js`: every identifier in every backend file resolves to a binding | dropping one import → red |
+| JSX missing import / free variable | `client-navigation-parse.test.js` now walks all 73 client files | (Phase 4) |
+| MCP tools must use the wrapper | `source-hygiene.test.js`: exactly one direct SDK registration, inside the wrapper | one direct `server.registerTool(` → red |
+| Colour utility not in `@theme` | `source-hygiene.test.js`: every colour-shaped class names a token | `bg-ok text-warn` in a copy → red, naming both |
+
+- ESLint was not added. The binding checks use `@babel/parser`, which the
+  client already installs, so there is no new dependency and nothing to
+  configure.
+- **Not done: the SVG path check.** `AGENTS.md` records two hand-written path
+  validators that were both wrong; a third without a real path grammar would
+  repeat that. The browser console remains the oracle.
+- **Not done: cutting `AGENTS.md` to 400 lines.** It is 1300+ lines of the
+  project's recorded lessons and other agents read it as their instructions.
+  Only a short tools section was added. Shrinking it means deciding which
+  lessons to drop or move, and that is the owner's call.
 
 ## Phase 7 — Stop tracking `src/public`
 

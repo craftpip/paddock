@@ -1483,6 +1483,20 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
 
 ## Workflow Commands
 
+- **Whole test suite:** `docker exec paddock npm test` (~90 s, one process per file).
+- **Mutation control** (prove a test bites): `scripts/mutate.sh <file under src/>
+  '<sed expr>' <test> [more tests]`. It mutates a COPY in the container, checks
+  the mutation landed and still parses, runs the tests, and confirms the original
+  is untouched. Exit 0 = guard bites, 1 = it does not, 2 = nothing was measured.
+  Use this instead of hand-rolling the copy; never mutate `/app`.
+- **Test what is staged, not the worktree:** `scripts/test-staged.sh [words]`.
+- **Static checks that run in `npm test`** (`source-hygiene.test.js`,
+  `client-navigation-parse.test.js`, `mission-exports.test.js`,
+  `route-table.test.js`): no unbound name in any backend or client file; the
+  client bundle parses; every MCP tool goes through the `registerTool` wrapper;
+  every colour utility in the client names a real `@theme` token; route table and
+  Mission export surface unchanged. A red here is a real defect, not a style note.
+
 - Restart webui (no rebuild): `docker restart paddock`
 - Rebuild + recreate webui after an image change:
   `docker compose build webui && docker compose up -d --no-deps --force-recreate webui`
