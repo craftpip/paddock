@@ -130,7 +130,7 @@ describe('plan 41 — the "Post-create commands" script', () => {
     const prevHost = process.env.HOST_WORKSPACE_ROOT;
     process.env.WORKSPACE_ROOT = TMP;
     process.env.HOST_WORKSPACE_ROOT = TMP;
-    delete require.cache[require.resolve('../services/vm-manager')];
+    require('./helpers/evict')('../services/vm-manager');
     const vm = require('../services/vm-manager');
     try {
       fn(TMP, vm);
@@ -138,7 +138,7 @@ describe('plan 41 — the "Post-create commands" script', () => {
       fs.rmSync(TMP, { recursive: true, force: true });
       process.env.WORKSPACE_ROOT = prevWs;
       process.env.HOST_WORKSPACE_ROOT = prevHost;
-      delete require.cache[require.resolve('../services/vm-manager')];
+      require('./helpers/evict')('../services/vm-manager');
     }
   }
 

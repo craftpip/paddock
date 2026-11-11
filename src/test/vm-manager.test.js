@@ -67,7 +67,7 @@ describe('vm-manager - Web door compose generation', () => {
     const tmp = `/tmp/recreate-services-${Date.now()}`;
     process.env.WORKSPACE_ROOT = tmp;
     process.env.HOST_WORKSPACE_ROOT = tmp;
-    delete require.cache[require.resolve('../services/vm-manager')];
+    require('./helpers/evict')('../services/vm-manager');
     const isolatedVm = require('../services/vm-manager');
     try {
       const instanceDir = path.join(tmp, 'instances', 'pad-recreate');
@@ -79,7 +79,7 @@ describe('vm-manager - Web door compose generation', () => {
       fs.rmSync(tmp, { recursive: true, force: true });
       process.env.WORKSPACE_ROOT = previousWorkspace;
       process.env.HOST_WORKSPACE_ROOT = previousHostWorkspace;
-      delete require.cache[require.resolve('../services/vm-manager')];
+      require('./helpers/evict')('../services/vm-manager');
     }
   });
 
@@ -89,7 +89,7 @@ describe('vm-manager - Web door compose generation', () => {
     const tmp = `/tmp/managed-door-${Date.now()}`;
     process.env.WORKSPACE_ROOT = tmp;
     process.env.HOST_WORKSPACE_ROOT = tmp;
-    delete require.cache[require.resolve('../services/vm-manager')];
+    require('./helpers/evict')('../services/vm-manager');
     const isolatedVm = require('../services/vm-manager');
     try {
       fs.mkdirSync(path.join(tmp, 'instances', 'pad-parent'), { recursive: true });
@@ -101,7 +101,7 @@ describe('vm-manager - Web door compose generation', () => {
       fs.rmSync(tmp, { recursive: true, force: true });
       process.env.WORKSPACE_ROOT = previousWorkspace;
       process.env.HOST_WORKSPACE_ROOT = previousHostWorkspace;
-      delete require.cache[require.resolve('../services/vm-manager')];
+      require('./helpers/evict')('../services/vm-manager');
     }
   });
 });
@@ -115,7 +115,7 @@ describe('vm-manager - pad default-network subnet (pool exhaustion fix)', () => 
     const prevHost = process.env.HOST_WORKSPACE_ROOT;
     process.env.WORKSPACE_ROOT = TMP;
     process.env.HOST_WORKSPACE_ROOT = TMP;
-    delete require.cache[require.resolve('../services/vm-manager')];
+    require('./helpers/evict')('../services/vm-manager');
     const vm = require('../services/vm-manager');
     try {
       fn(TMP, vm);
@@ -123,7 +123,7 @@ describe('vm-manager - pad default-network subnet (pool exhaustion fix)', () => 
       fs.rmSync(TMP, { recursive: true, force: true });
       process.env.WORKSPACE_ROOT = prevWs;
       process.env.HOST_WORKSPACE_ROOT = prevHost;
-      delete require.cache[require.resolve('../services/vm-manager')];
+      require('./helpers/evict')('../services/vm-manager');
     }
   }
 
@@ -187,7 +187,7 @@ describe('vm-manager - pad subnet pool: peer mode, reservations, collisions (pla
     const prevHost = process.env.HOST_WORKSPACE_ROOT;
     process.env.WORKSPACE_ROOT = TMP;
     process.env.HOST_WORKSPACE_ROOT = TMP;
-    delete require.cache[require.resolve('../services/vm-manager')];
+    require('./helpers/evict')('../services/vm-manager');
     const vm = require('../services/vm-manager');
     try {
       fn(TMP, vm);
@@ -195,7 +195,7 @@ describe('vm-manager - pad subnet pool: peer mode, reservations, collisions (pla
       fs.rmSync(TMP, { recursive: true, force: true });
       process.env.WORKSPACE_ROOT = prevWs;
       process.env.HOST_WORKSPACE_ROOT = prevHost;
-      delete require.cache[require.resolve('../services/vm-manager')];
+      require('./helpers/evict')('../services/vm-manager');
     }
   }
 
@@ -320,7 +320,7 @@ describe('vm-manager - legacy door-dir sweep (plan 59)', () => {
     const prevHost = process.env.HOST_WORKSPACE_ROOT;
     process.env.WORKSPACE_ROOT = TMP;
     process.env.HOST_WORKSPACE_ROOT = TMP;
-    delete require.cache[require.resolve('../services/vm-manager')];
+    require('./helpers/evict')('../services/vm-manager');
     const vm = require('../services/vm-manager');
     try {
       fn(TMP, vm);
@@ -328,7 +328,7 @@ describe('vm-manager - legacy door-dir sweep (plan 59)', () => {
       fs.rmSync(TMP, { recursive: true, force: true });
       process.env.WORKSPACE_ROOT = prevWs;
       process.env.HOST_WORKSPACE_ROOT = prevHost;
-      delete require.cache[require.resolve('../services/vm-manager')];
+      require('./helpers/evict')('../services/vm-manager');
     }
   }
 
@@ -424,7 +424,7 @@ describe('vm-manager - applySettings keeps a published web app alive', () => {
   const TMP = '/tmp/vmtest-' + Date.now();
   process.env.WORKSPACE_ROOT = TMP;
   process.env.HOST_WORKSPACE_ROOT = TMP;
-  delete require.cache[require.resolve('../services/vm-manager')];
+  require('./helpers/evict')('../services/vm-manager');
   const vm = require('../services/vm-manager');
 
   it('re-applies the web binding for the new network on a network switch', async () => {
@@ -500,7 +500,7 @@ describe('vm-manager - per-instance build files (plan 25)', () => {
     process.env.WORKSPACE_ROOT = TMP;
     process.env.HOST_WORKSPACE_ROOT = TMP;
     delete require.cache[require.resolve('../services/instance-image')];
-    delete require.cache[require.resolve('../services/vm-manager')];
+    require('./helpers/evict')('../services/vm-manager');
     vm = require('../services/vm-manager');
     fs.mkdirSync(buildDir, { recursive: true });
     // Fixture: the compose test reads its ARGs out of this Dockerfile, so it must
@@ -517,7 +517,7 @@ describe('vm-manager - per-instance build files (plan 25)', () => {
     process.env.WORKSPACE_ROOT = previousWorkspace;
     process.env.HOST_WORKSPACE_ROOT = previousHostWorkspace;
     delete require.cache[require.resolve('../services/instance-image')];
-    delete require.cache[require.resolve('../services/vm-manager')];
+    require('./helpers/evict')('../services/vm-manager');
     fs.rmSync(TMP, { recursive: true, force: true });
   });
 
@@ -607,7 +607,7 @@ describe('vm-manager - custom workspace mount compose emission (plan 24)', () =>
     const prevHost = process.env.HOST_WORKSPACE_ROOT;
     process.env.WORKSPACE_ROOT = TMP;
     process.env.HOST_WORKSPACE_ROOT = TMP;
-    delete require.cache[require.resolve('../services/vm-manager')];
+    require('./helpers/evict')('../services/vm-manager');
     const vm = require('../services/vm-manager');
     try {
       fn(TMP, vm);
@@ -615,7 +615,7 @@ describe('vm-manager - custom workspace mount compose emission (plan 24)', () =>
       fs.rmSync(TMP, { recursive: true, force: true });
       process.env.WORKSPACE_ROOT = prevWs;
       process.env.HOST_WORKSPACE_ROOT = prevHost;
-      delete require.cache[require.resolve('../services/vm-manager')];
+      require('./helpers/evict')('../services/vm-manager');
     }
   }
 
@@ -665,7 +665,7 @@ describe('vm-manager - workspace mount guards (GUARD_*)', () => {
     process.env.HOST_WORKSPACE_ROOT = TMP;
     fs.mkdirSync(TMP, { recursive: true });
     delete require.cache[require.resolve('../services/instance-image')];
-    delete require.cache[require.resolve('../services/vm-manager')];
+    require('./helpers/evict')('../services/vm-manager');
     const vm = require('../services/vm-manager');
     try {
       fn(TMP, vm);
@@ -675,7 +675,7 @@ describe('vm-manager - workspace mount guards (GUARD_*)', () => {
       process.env.HOST_WORKSPACE_ROOT = prevHost;
       for (const g of ['PROJECT_ROOT', 'INSTANCES_PARENT', 'AGENT_DATA']) delete process.env[`GUARD_${g}`];
       delete require.cache[require.resolve('../services/instance-image')];
-      delete require.cache[require.resolve('../services/vm-manager')];
+      require('./helpers/evict')('../services/vm-manager');
     }
   }
 
@@ -733,7 +733,7 @@ describe('vm-manager - compose validation gate (plan 29)', () => {
     const prevHost = process.env.HOST_WORKSPACE_ROOT;
     process.env.WORKSPACE_ROOT = TMP;
     process.env.HOST_WORKSPACE_ROOT = TMP;
-    delete require.cache[require.resolve('../services/vm-manager')];
+    require('./helpers/evict')('../services/vm-manager');
     const vm = require('../services/vm-manager');
     try {
       return await fn(TMP, vm);
@@ -741,7 +741,7 @@ describe('vm-manager - compose validation gate (plan 29)', () => {
       fs.rmSync(TMP, { recursive: true, force: true });
       process.env.WORKSPACE_ROOT = prevWs;
       process.env.HOST_WORKSPACE_ROOT = prevHost;
-      delete require.cache[require.resolve('../services/vm-manager')];
+      require('./helpers/evict')('../services/vm-manager');
     }
   }
 
@@ -786,7 +786,7 @@ describe('vm-manager - extra volumes & ports (plan 28)', () => {
     const prevHost = process.env.HOST_WORKSPACE_ROOT;
     process.env.WORKSPACE_ROOT = TMP;
     process.env.HOST_WORKSPACE_ROOT = TMP;
-    delete require.cache[require.resolve('../services/vm-manager')];
+    require('./helpers/evict')('../services/vm-manager');
     const vm = require('../services/vm-manager');
     try {
       fn(TMP, vm);
@@ -794,7 +794,7 @@ describe('vm-manager - extra volumes & ports (plan 28)', () => {
       fs.rmSync(TMP, { recursive: true, force: true });
       process.env.WORKSPACE_ROOT = prevWs;
       process.env.HOST_WORKSPACE_ROOT = prevHost;
-      delete require.cache[require.resolve('../services/vm-manager')];
+      require('./helpers/evict')('../services/vm-manager');
     }
   }
 
@@ -1138,7 +1138,7 @@ describe('vm-manager - lifecycle scripts (plan 41)', () => {
     const prevHost = process.env.HOST_WORKSPACE_ROOT;
     process.env.WORKSPACE_ROOT = TMP;
     process.env.HOST_WORKSPACE_ROOT = TMP;
-    delete require.cache[require.resolve('../services/vm-manager')];
+    require('./helpers/evict')('../services/vm-manager');
     const vm = require('../services/vm-manager');
     try {
       fn(TMP, vm);
@@ -1146,7 +1146,7 @@ describe('vm-manager - lifecycle scripts (plan 41)', () => {
       fs.rmSync(TMP, { recursive: true, force: true });
       process.env.WORKSPACE_ROOT = prevWs;
       process.env.HOST_WORKSPACE_ROOT = prevHost;
-      delete require.cache[require.resolve('../services/vm-manager')];
+      require('./helpers/evict')('../services/vm-manager');
     }
   }
 
@@ -1248,7 +1248,7 @@ describe('vm-manager - devcontainer plan (plan 41 items 12-16)', () => {
     const prevHost = process.env.HOST_WORKSPACE_ROOT;
     process.env.WORKSPACE_ROOT = TMP;
     process.env.HOST_WORKSPACE_ROOT = TMP;
-    delete require.cache[require.resolve('../services/vm-manager')];
+    require('./helpers/evict')('../services/vm-manager');
     const vm = require('../services/vm-manager');
     try {
       fn(TMP, vm);
@@ -1256,7 +1256,7 @@ describe('vm-manager - devcontainer plan (plan 41 items 12-16)', () => {
       fs.rmSync(TMP, { recursive: true, force: true });
       process.env.WORKSPACE_ROOT = prevWs;
       process.env.HOST_WORKSPACE_ROOT = prevHost;
-      delete require.cache[require.resolve('../services/vm-manager')];
+      require('./helpers/evict')('../services/vm-manager');
     }
   }
 
@@ -1271,7 +1271,7 @@ describe('vm-manager - devcontainer plan (plan 41 items 12-16)', () => {
     const prevHost = process.env.HOST_WORKSPACE_ROOT;
     process.env.WORKSPACE_ROOT = TMP;
     process.env.HOST_WORKSPACE_ROOT = TMP;
-    delete require.cache[require.resolve('../services/vm-manager')];
+    require('./helpers/evict')('../services/vm-manager');
     const vm = require('../services/vm-manager');
     try {
       await fn(TMP, vm);
@@ -1279,7 +1279,7 @@ describe('vm-manager - devcontainer plan (plan 41 items 12-16)', () => {
       fs.rmSync(TMP, { recursive: true, force: true });
       process.env.WORKSPACE_ROOT = prevWs;
       process.env.HOST_WORKSPACE_ROOT = prevHost;
-      delete require.cache[require.resolve('../services/vm-manager')];
+      require('./helpers/evict')('../services/vm-manager');
     }
   }
 

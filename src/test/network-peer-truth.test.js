@@ -244,7 +244,7 @@ describe("network peer truth — readSettings' answer (plan 66)", () => {
     // The other silent-failure site: readSettings caught and discarded the
     // error, leaving the default `{ state: 'ok' }`. An unreadable answer must
     // not read as the one healthy state there is.
-    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'vm-manager.js'), 'utf8');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'vm-manager', 'settings.js') /* readSettings; vm-manager.js was split in plan 118 */, 'utf8');
     assert.ok(
       /networkHealth = \{ state: 'none', checked: false, reason: `network health probe failed/.test(src),
       'a failed probe is reported as unchecked, not swallowed into ok'
@@ -257,7 +257,7 @@ describe("network peer truth — readSettings' answer (plan 66)", () => {
   });
 
   it('readSettings passes the declared peer name, so the lookup is total', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'vm-manager.js'), 'utf8');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'vm-manager', 'settings.js') /* readSettings; vm-manager.js was split in plan 118 */, 'utf8');
     assert.match(
       src,
       /getNetworkHealth\(name, \{ declaredPeer: meta\.NETWORK \|\| '' \}\)/,

@@ -349,9 +349,36 @@ and Regenerate are available from the UI — Sync writes 1:1 mapped fields in
 place (project-authored fields survive), Regenerate rewrites the whole file as
 a generated mirror (`x-paddock.generated`).
 
-## VM Manager (vm-manager.js)
+## VM Manager (services/vm-manager/)
 
 Business logic: See `overview/business-logic.md` — Agent Lifecycle, Bind-Mount Split-Brain.
+
+Callers require `services/vm-manager`, which resolves to `services/vm-manager/index.js`; it
+only assembles the public surface. Where this page or another says `vm-manager.js`, the code
+is in one of these modules:
+
+| Module | Holds |
+|---|---|
+| `internal.js` | Paths, naming rules, `runCmd`, `readMeta`, `setMetaFlag`; requires no sibling |
+| `subnets.js` | The PAD subnet pool |
+| `workspace-mount.js` | Workspace and extra-volume mounts and their guards |
+| `build-files.js` | Per-PAD Dockerfile / start.sh, lifecycle hook scripts, project image, managed blocks |
+| `compose.js` | The PAD's compose file, ports, running compose |
+| `devcontainer.js` | Reading, planning and writing dev container files |
+| `doors-network.js` | Network peers and socat door containers |
+| `web.js` | Publishing the web console: service record, start hook, auth, port checks |
+| `lifecycle.js` | Create, update, recreate, start, stop, reset, remove; image and container probes |
+| `settings.js` | `readSettings`, `applySettings`, `containerInfo` |
+| `settings-apply.js` | `prepareAgentChanges`, `applyAgentChanges`, `rollbackAgentChanges` |
+| `config-redaction.js` | `readAgentConfig` and secret redaction |
+
+The modules are cyclic and follow the same two rules as `services/mission/`: functions are
+exported before anything is required, and a constant another module needs lives in
+`internal.js`. Several modules compute paths and guards from the environment when they load,
+so a test that changes the environment must drop the **whole** directory from the require
+cache (`test/helpers/evict.js`), not just the index. `vm-manager-exports.test.js` pins the
+surface (135 names), loads each module first in its own process and caps module size at 900
+lines.
 
 Per-instance build model: every PAD owns its build files (`instances/&lt;name&gt;/build/`)
 and its own image tag (`paddock-vm-&lt;name&gt;:latest`). See

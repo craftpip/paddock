@@ -522,9 +522,15 @@ and editing a `.jsx` without rebuilding shows the stale-bundle page.
 
 ## Out of scope
 
-- `vm-manager.js` (5002 lines) and `mcp.js` (2999 lines). Same treatment
-  applies, but they are not where current bugs come from. Follow-up plan once
-  Phases 1–5 hold.
+- `mcp.js` (2999 lines). Its bulk is one 1880-line function registering 46
+  tools, and 13 tests read its source; it needs its own plan.
+- `vm-manager.js` was done as a follow-up on 2026-11-11: 5002 lines → 12
+  modules + index in `services/vm-manager/` (largest 802), by the same script
+  as Phase 2. Guard: `vm-manager-exports.test.js` (4). Tests that re-read the
+  environment now evict the whole directory (`test/helpers/evict.js`). Live:
+  a throwaway PAD was created, given an extra port (prepare/apply/recreate),
+  stopped, started and deleted through the app, leaving no container,
+  network, image or directory.
 - codex / claude runner workers (no auto-wiring or ready gate yet). Phase 1
   and 3 make that easier; it is its own plan.
 - Any visual redesign.
