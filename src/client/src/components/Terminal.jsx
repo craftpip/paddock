@@ -351,6 +351,11 @@ const Terminal = forwardRef(function Terminal(
    *  shell like any other text. */
   const pushResize = useCallback((cols, rows) => {
     if (!cols || !rows) return
+    // A squeezed-but-not-hidden terminal (e.g. Mission with the queue panel
+    // expanded over it) fits to a few cells. Pushing that shrinks the PAD's
+    // pane for everyone — a 10x6 agent TUI cannot draw its UI, and the runner
+    // then cannot tell it is ready. Too small to use = not a size worth sending.
+    if (cols < 40 || rows < 8) return
     const ws = wsRef.current
     if (!ws || ws.readyState !== WebSocket.OPEN) return
     try {

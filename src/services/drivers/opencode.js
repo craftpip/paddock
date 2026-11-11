@@ -49,7 +49,9 @@ const OPENCODE = {
    *  `ctrl+p commands` both idle and mid-turn (measured on 1.19.5), so it marks
    *  readiness without blocking a deliberate mid-turn send. `sendText` waits for
    *  it before writing. */
-  tuiReadyPattern: /ctrl\+p commands/,
+  // A narrow pane shortens the footer: 60+ cols `… ctrl+p commands`, 40 cols
+  // `workspace commands` (measured). Match the footer line ending, not the hint.
+  tuiReadyPattern: /commands\s*$/m,
 
   /** No gateway/onboard flow — opencode config is created on first run. */
   setupSteps: [],

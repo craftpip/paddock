@@ -1,3 +1,5 @@
+const MIN_COLS = 40;
+const MIN_ROWS = 8;
 // A WebSocket opens before the asynchronous tmux/PTY setup finishes. Listen
 // immediately: retain the latest layout size, but never queue shell input.
 function createTerminalInput({ cols, rows }) {
@@ -17,6 +19,11 @@ function createTerminalInput({ cols, rows }) {
         if (parsed.type === 'resize' && parsed.cols && parsed.rows) {
           const w = Math.max(2, parseInt(parsed.cols, 10) || 0);
           const h = Math.max(2, parseInt(parsed.rows, 10) || 0);
+          // A terminal squeezed to a few cells (Mission with the queue panel
+          // over it) must not shrink the PAD pane: a 10x6 agent TUI cannot draw
+          // its UI and the runner cannot see it become ready. Ignore the frame;
+          // the control frame is still consumed, never typed into the shell.
+          if (w < MIN_COLS || h < MIN_ROWS) return;
           size = { cols: w, rows: h };
           revision += 1;
           if (ready) exec.resize({ h, w }).catch(() => {});

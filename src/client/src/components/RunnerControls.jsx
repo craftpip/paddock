@@ -94,6 +94,10 @@ export default function RunnerControls({ runner, onConfigure }) {
     setBusy(true)
     try {
       await fn()
+    } catch {
+      // The store has already surfaced the refusal (operationFeedback in the
+      // queue panel) and rethrows for callers that chain; nothing chains here,
+      // so letting it escape was an unhandled rejection on every refused Run.
     } finally {
       setBusy(false)
     }

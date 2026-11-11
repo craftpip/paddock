@@ -74,3 +74,23 @@ test('failed initial resize does not enable commands', async () => {
   }), /resize failed/);
   input.onMessage(Buffer.from('not-ready\n'));
 });
+
+// A squeezed terminal (Mission with the queue panel over it) fitted to 10x6 and
+// shrank the worker's pane until its TUI could not draw. Tiny frames are
+// ignored — and still consumed, never typed into the shell.
+test('a resize below the usable floor is ignored, with a normal-size positive twin', async () => {
+  const input = createTerminalInput({ cols: 120, rows: 32 });
+  const sizes = [];
+  const writes = [];
+  await input.attach({ resize: async (size) => sizes.push(size) }, {
+    write: (data) => writes.push(data.toString()), destroyed: false,
+  });
+  input.onMessage(resize(10, 6));
+  input.onMessage(resize(120, 4));
+  input.onMessage(resize(39, 30));
+  assert.deepEqual(sizes, [{ h: 32, w: 120 }], 'no tiny size reached the PTY');
+  assert.deepEqual(writes, [], 'the control frames were not typed into the shell');
+  assert.deepEqual(input.size, { cols: 120, rows: 32 });
+  input.onMessage(resize(100, 30));
+  assert.deepEqual(sizes[1], { h: 30, w: 100 }, 'a usable size still applies');
+});

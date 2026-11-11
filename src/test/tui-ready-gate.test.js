@@ -61,6 +61,7 @@ beforeEach(() => {
 it('the opencode driver declares a ready marker that matches its idle and mid-turn footer', () => {
   assert.ok(opencode.tuiReadyPattern.test('/root/.opencode/workspace   8.2K (4%)  ctrl+p commands'));
   assert.ok(opencode.tuiReadyPattern.test('■■■⬝⬝ esc interrupt 8.2K (4%) ctrl+p commands'));
+  assert.ok(opencode.tuiReadyPattern.test('  ┃  Build\n  ╹▀▀▀▀\n workspace commands'), 'a 40-column pane shortens the footer');
   assert.ok(!opencode.tuiReadyPattern.test(BOOT));
 });
 
