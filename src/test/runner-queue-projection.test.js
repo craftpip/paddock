@@ -86,7 +86,8 @@ describe('plan 113 — the worker projection is not queue authority', () => {
     // Anchor on the DISPATCH function, not on the first `beforeWrite` in the
     // file: the quota-recovery path has one too, and slicing from the first
     // match asserts about the wrong function (a source-text pin on a NAME).
-    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'mission.js'), 'utf8');
+    // The dispatch function lives in the scheduler since plan 118's split.
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'mission', 'scheduler.js'), 'utf8');
     const fnStart = src.indexOf('async function deliverRunnerInstruction(');
     assert.ok(fnStart > 0, 'found deliverRunnerInstruction');
     const start = src.indexOf('const beforeWrite = () => {', fnStart);

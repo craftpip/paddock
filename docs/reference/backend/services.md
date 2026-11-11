@@ -26,6 +26,38 @@ assignment, a numeric revision, project ownership and the caller's target grant.
 runner state machine, delivery guarantees, publication protocol and UI action snapshot are
 documented in the [Mission Queue and Runner reference](mission-queue.md).
 
+## Mission service layout (services/mission/)
+
+Callers require `services/mission`; that resolves to `services/mission/index.js`, which only
+assembles the public surface. The code lives in the sibling modules:
+
+| Module | Holds |
+|---|---|
+| `errors.js` | `MissionError` and its machine codes |
+| `internal.js` | Small helpers and constants; requires no sibling |
+| `projects.js` | Project rows |
+| `sessions.js` | Session rows and the audit trail; no tmux |
+| `session-lifecycle.js` | Start, relaunch, restart, close and end a session's pane |
+| `session-io.js` | The send gate and send, permission prompts, screen reads |
+| `liveness.js` | `live` / `open` / `busy` stamps for listings |
+| `runners.js` | Runner rows, the runtime projection, the queue file projection |
+| `runner-prompts.js` | Prompt templates and callback configuration |
+| `runner-queue-api.js` | Queue read (with the execution view), mutations, blocker resolution |
+| `runner-control.js` | Run, pause, resume, remove; boot-time reconciliation |
+| `scheduler.js` | The watcher: observe turns, decide, deliver the next plan |
+
+The modules reference each other in cycles (a session send consults its runner; a runner starts
+sessions). Two rules keep that safe:
+
+- Each module exports its functions **before** it requires anything. Function declarations are
+  hoisted, so a sibling that requires it mid-cycle already sees every function.
+- A constant or class that another module needs lives in `errors.js` or `internal.js`, which
+  require no sibling. A value exported from inside a cycle would be `undefined` to whichever
+  module loaded first.
+
+`mission-exports.test.js` pins the public surface, loads every module first in its own process,
+resolves every identifier to a declaration or import, and fails when a module passes 900 lines.
+
 ## PAD Discovery (agent-registry.js)
 
 Business logic: See `overview/business-logic.md` — PAD Discovery and State.
@@ -987,7 +1019,7 @@ the services, never in the tool handlers (no duplication between REST and MCP).
 | `help` | The "how to use Paddock through MCP" guide (§§1–4, plan 35a) | `llm-guide.js` |
 | `agent_commands` | Set B — non-interactive command catalog for an agent type | `llm-guide.js` → `drivers` `llmCommands` |
 | `task_submit` … `task_cancel` (9 tools, incl. `task_retry`) | HIDDEN from the MCP surface (user decision 2026-09-29; re-enable with `PADDOCK_TASK_QUEUE=1`) — service kept, vocabulary per §Task Runner | `services/task-runner.js` |
-| `task_step_report` / `task_step_bug` / `task_step_commit` | The explicit single-step tools of plan 69's lifecycle: report one step's verdict, file a structured defect against it, or run the task's own commit. Same gate as the row above | `services/task-runner.js` + `services/mission.js` |
+| `task_step_report` / `task_step_bug` / `task_step_commit` | The explicit single-step tools of plan 69's lifecycle: report one step's verdict, file a structured defect against it, or run the task's own commit. Same gate as the row above | `services/task-runner.js` + `services/mission/` |
 | `task_pipeline_start` / `task_pipeline_status` / `task_pipeline_stop` | The server-side loop (plan 69): start it, read `{state, step, current_step, hotfix_runs}`, or stop at the next boundary. Same gate | `services/task-pipeline.js` |
 | `mission_projects` | The Mission projects (PAD + folder) the key may see, with session/live/open counts, the PAD's status, and per-session `busy`; narrow it with `project_id` / `name` / `folder`, and ask for nested sessions with `include_sessions` | `mission.listProjects` + `withLive` + `withAgentBusyProjects` |
 | `mission_sessions` | Sessions list (filter by `project_id` / `agent`), or one session's metadata + pane state + screen tail; every row carries `busy` / `busyKnown` / `open` / `kind`, rows whose death has been observed carry `endedAt` / `endedBy`, and detail mode also returns `canSend` (+ `sendRefusal`), `screenFrom` and `lastScreenAt` | `mission.listSessions` / `listAllSessions` / `screen` + `withAgentBusy` |

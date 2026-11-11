@@ -548,7 +548,7 @@ function stepRow(s) {
 // ─── Mission (plan 55) ─────────────────────────────────────────────
 // The agent-visible half of the Mission page: it can see the human's projects
 // and sessions, read what a session's TUI is showing, open a session, and type
-// into one. Every tool is a thin adapter over `src/services/mission.js` — the
+// into one. Every tool is a thin adapter over `src/services/mission/` — the
 // same functions `/api/mission/*` uses, so the two surfaces cannot drift.
 //
 // `/mcp` has no caller-PAD identity (it sees an API key and nothing else), so

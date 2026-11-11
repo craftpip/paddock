@@ -1,6 +1,6 @@
 # Plan 118 — Structural cleanup: one runner view, split files, instant dispatch
 
-## Status: In progress — 2026-11-11 — 1/7 phases done (Phase 1); next: Phase 2
+## Status: In progress — 2026-11-11 — 2/7 phases done (Phases 1–2); next: Phase 3
 
 ## Why
 
@@ -43,7 +43,7 @@ disagree, then makes the files small enough to read.
 ## Progress
 
 - [x] Phase 1 — One server-computed runner view (2026-11-11, see "Phase 1 — as built")
-- [ ] Phase 2 — Split `mission.js`
+- [x] Phase 2 — Split `mission.js` (2026-11-11, see "Phase 2 — as built")
 - [ ] Phase 3 — Dispatch the next plan when the worker reports done
 - [ ] Phase 4 — One test command that finishes
 - [ ] Phase 5 — Split `app.js` routes
@@ -209,6 +209,31 @@ Complete. Console has no errors.
 
 **Done when:** `wc -l src/services/mission/*.js` shows none over 900 and the
 suites above are green with unchanged pass counts.
+
+### Phase 2 — as built
+
+- 4676-line `mission.js` → 12 modules + `index.js` in `services/mission/`,
+  largest 685 lines. `mission.js` itself is deleted: `require('./mission')`
+  resolves to the directory's index, so no facade file is needed.
+- The move was done by a script over the syntax tree (scope-resolved
+  references), not by hand: every function body is byte-identical to before.
+- Session code is two files, not one (`session-lifecycle.js`, `session-io.js`),
+  and prompts/callback config got its own (`runner-prompts.js`), to stay under
+  the size limit.
+- The modules are cyclic. Each exports its hoisted functions before requiring
+  siblings; cross-module constants live in `errors.js` / `internal.js`. Making
+  the graph acyclic means changing behaviour (sessions should not know about
+  runners) and is left for a later plan.
+- `mission-exports.test.js` (4): same 107 exports in the same order, each
+  module loaded first in its own process, every identifier bound, 900-line cap.
+  Mutation control (drop one import in a `/tmp` copy): the file still passes
+  `node --check` and exactly the binding test goes red.
+- Suites after the move, counts unchanged: mission 129, mcp 141, queue 49,
+  runner-canonical-queue 27, runner-callbacks 42, runner-state-sequence 34,
+  plan-mcp 56, task-pipeline 22, plus 20 smaller ones.
+- Browser: a running queue finished across the restart onto the split code
+  (13/13, Complete); new session started, a sent line was answered, session
+  closed with its confirm; console clean.
 
 ---
 

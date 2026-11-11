@@ -2211,8 +2211,13 @@ describe('MCP Server - project lookup and provenance (plan 67)', () => {
       assert.match(src, /user\.keyId \? `key:\$\{user\.keyId\}` : null/);
     });
     it('the store INSERT and both start paths carry the actor through', () => {
-      const svc = fs.readFileSync(path.join(__dirname, '..', 'services', 'mission.js'), 'utf8');
-      assert.match(svc, /INSERT INTO mission_sessions \([^)]*created_by/, 'the column is written');
+      // Plan 118 split services/mission.js: the INSERT lives with the session
+      // rows, the start path with the pane lifecycle. Each fact is read from
+      // its own home.
+      const dir = path.join(__dirname, '..', 'services', 'mission');
+      const rows = fs.readFileSync(path.join(dir, 'sessions.js'), 'utf8');
+      const svc = fs.readFileSync(path.join(dir, 'session-lifecycle.js'), 'utf8');
+      assert.match(rows, /INSERT INTO mission_sessions \([^)]*created_by/, 'the column is written');
       // The insert helper was split out of `createSession` (plan 65 1f, so a
       // retry-token collision can be REPORTED rather than silently returned as a
       // bare row), which renamed the call site. Pin the FACT — `createdBy`
