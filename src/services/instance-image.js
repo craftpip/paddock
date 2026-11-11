@@ -81,7 +81,7 @@ function setBuildEnv(name, kv) {
     const re = new RegExp(`^${key}=.*$`, 'm');
     const line = `${key}=${value}`;
     if (re.test(content)) {
-      content = content.replace(re, line);
+      content = content.replace(re, () => line); // a function: user text is not a replacement pattern
     } else {
       content = content.replace(/\s*$/, '') + '\n' + line + '\n';
     }
@@ -174,7 +174,7 @@ function writeCustomBuild(name, text) {
   // Replace an existing managed block if present.
   const blockRe = /^#\s*\u2500\u2500 PADDOCK CUSTOM BUILD COMMANDS[\s\S]*?\n#\s*\u2500\u2500 END PADDOCK CUSTOM BUILD COMMANDS[^\n]*\n?/m;
   if (blockRe.test(content)) {
-    content = content.replace(blockRe, block);
+    content = content.replace(blockRe, () => block); // a function: user text is not a replacement pattern
   } else {
     const anchor = ENTRYPOINT_BANNER_RE.exec(content);
     if (anchor) {

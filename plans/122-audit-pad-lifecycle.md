@@ -1,6 +1,6 @@
 # Plan 122 — Audit fixes: PAD lifecycle, workspace and settings
 
-## Status: In progress — 2026-11-11 — 0/21 items fixed; all traced in code by a read-only review, none yet reproduced
+## Status: In progress — 2026-11-11 — 21/22 items done; remaining: #22, the second review pass over the files the first reviewer did not read
 
 ## Why
 
@@ -63,27 +63,59 @@ the drivers beyond their start commands. A second pass is item 22.
   `paddock` / `pad-*`.
 - `npm test` green.
 
+## Results (2026-11-11)
+
+Live checks ran on a throwaway PAD (`pad-audit`) and a deliberately failing
+create (`pad-failcheck`); nothing was done to `pad-dev` or to any container
+that is not ours. `npm test`: 74 files, 1222 tests.
+
+| # | Fix | Evidence |
+|---|---|---|
+| 2 | `removeVm` deletes a workspace source only when the create itself made it (`WORKSPACE_CREATED=1` in meta), nobody else mounts it, and it is strictly inside the project root without containing `instances/`. PADs created before today have no flag, so their source is kept | `pad-delete-workspace.test.js` (5), control bites. Not run against real data, by design |
+| 3 | Devcontainer plan: env files must be inside the workspace (real path), capabilities and sysctls are allow-listed, mount paths are normalised before the internals check. Also fixed: `--cap-add NAME` in the two-argument form was rejected | `devcontainer-safety.test.js` (3) + 4 in `vm-manager.test.js`, control bites |
+| 4 | The orphan-door sweep names only a socat container called `<this project's PAD name>-door` / `-web` with no instance folder; the dead duplicate is gone | `orphan-doors.test.js` (4), control bites. Not run against other containers, by design |
+| 6 | Create validates the password (no line break) and the port (a number) | `pad-input-safety.test.js` |
+| 7 | A web password with a quote, backslash or line break is refused before anything is written | Live: `ab'cd` → 400; `Good-pass$$1` published and the console answered 200 with it, 401 without |
+| 8 | Reset reads the web password before the wipe and restores the start hook and auth after it; the console is verified after a reset | Reproduced first: after a reset the port was published, nothing answered, `passwordConfigured: false`. After the fix: 200 with the password, 401 without, `passwordConfigured: true` |
+| 9 | Rollback also restores user mode, build commands, lifecycle scripts, the docker build flag and the web token | Code; suites green. Not forced live |
+| 10 | Function replacers wherever user text is the replacement | Test: `pa$$w0rd`, `$&`, `$'` stored verbatim on a second save; control bites. Live: `ROOT_PASSWORD=pa$$w0rd-2` in meta after two saves |
+| 11 | `INSTALL_DOCKER` is written in the shared apply path, so MCP `recreate` gets it too | Code; suites green |
+| 12 | `applyWebAuth` / `removeWebAuth` awaited in apply and rollback | Code; suites green |
+| 13 | A job's cleanup timer removes only its own job | Test, control bites |
+| 14 | Boot reconciliation leaves claimed tasks alone | Code (the task queue is off by default) |
+| 15 | Port-conflict scans read `"43817:4200/tcp"` | Code; suites green |
+| 16 | The parent-file save route is removed (it called a function that never existed) | Route table test |
+| 17 | One change set per PAD at a time; a second is refused with 409 `pad_change_in_progress` | Test, control bites |
+| 18 | A failed create removes its container, doors, network, instance folder and image; never the workspace source | Live: a create with `RUN exit 7` failed and left dir 0, containers 0, networks 0, images 0 |
+| 19 | A container path may not contain `:` or a line break | Code; suites green |
+| 20 | A log over 8 MB is cut to under it even when it is a few very long lines; a running task's output is bounded in memory | `log-store.test.js` |
+| 21 | Stop reports a real docker failure (a container already gone is fine); restart falls back to a compose recreate like start does | Live: stop and restart of `pad-audit` |
+
+While writing these fixes my own edit script corrupted two files with exactly
+the `$'`-in-a-replacement-string bug of #10. Both were restored from git and
+redone; the edit helper now splices by index.
+
 ## Progress
 
 - [x] 1 (done under plan 121 #5)
-- [ ] 2 `removeVm` deletes only a workspace it created and nobody shares
-- [ ] 3 Devcontainer plan: env files, capabilities, sysctls and mounts validated
-- [ ] 4 Orphan-door sweep limited to this project's doors
+- [x] 2 `removeVm` deletes only a workspace it created and nobody shares
+- [x] 3 Devcontainer plan: env files, capabilities, sysctls and mounts validated
+- [x] 4 Orphan-door sweep limited to this project's doors
 - [x] 5 Destructive workspace operations refuse an outside, missing or root path (done with plan 121 #5; live: `delete {}` → 400)
-- [ ] 6 Create validates password and port
-- [ ] 7 Web password shell-quoted in every driver
-- [ ] 8 Reset keeps the web console published and working, or unpublishes it
-- [ ] 9 Rollback restores everything apply changed
-- [ ] 10 Function replacers for user text
-- [ ] 11 `INSTALL_DOCKER` set in the shared apply path
-- [ ] 12 `applyWebAuth` / `removeWebAuth` awaited
-- [ ] 13 Job cleanup timer only removes its own job
-- [ ] 14 Boot reconciliation leaves claimed tasks alone
-- [ ] 15 Port-conflict scan reads `/tcp` ports
+- [x] 6 Create validates password and port
+- [x] 7 Web password shell-quoted in every driver
+- [x] 8 Reset keeps the web console published and working, or unpublishes it
+- [x] 9 Rollback restores everything apply changed
+- [x] 10 Function replacers for user text
+- [x] 11 `INSTALL_DOCKER` set in the shared apply path
+- [x] 12 `applyWebAuth` / `removeWebAuth` awaited
+- [x] 13 Job cleanup timer only removes its own job
+- [x] 14 Boot reconciliation leaves claimed tasks alone
+- [x] 15 Port-conflict scan reads `/tcp` ports
 - [x] 16 Parent-file save removed (it called a function that never existed; nothing used it)
-- [ ] 17 One apply per PAD at a time
-- [ ] 18 Failed create cleans up after itself
-- [ ] 19 Container paths validated
-- [ ] 20 Output and log growth bounded
-- [ ] 21 Stop / restart report docker failures
+- [x] 17 One apply per PAD at a time
+- [x] 18 Failed create cleans up after itself
+- [x] 19 Container paths validated
+- [x] 20 Output and log growth bounded
+- [x] 21 Stop / restart report docker failures
 - [ ] 22 Second review pass over the files listed under "Not reviewed"

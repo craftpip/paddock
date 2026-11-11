@@ -145,7 +145,7 @@ function collectPublishedHostPorts(name) {
       if (entry.name === name) continue;
       const composeFile = path.join(INSTANCES_DIR, entry.name, 'docker-compose.yml');
       if (fs.existsSync(composeFile)) {
-        for (const m of fs.readFileSync(composeFile, 'utf8').matchAll(/"(\d+):(\d+)"/g)) {
+        for (const m of fs.readFileSync(composeFile, 'utf8').matchAll(/"(\d+):(\d+)(?:\/(?:tcp|udp))?"/g)) {
           used.add(parseInt(m[1]));
         }
       }

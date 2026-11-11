@@ -118,9 +118,14 @@ function setMetaFlag(name, key, value) {
     }
     return;
   }
+  // meta.env is one KEY=value per line, so a line break in a value writes a
+  // second variable (EXTRA_VOLUMES, HOST_BROWSE, …) past every guard.
+  if (/[\r\n\0]/.test(String(value))) throw new Error(`${key}: the value cannot contain a line break`);
   const line = `${key}=${value}`;
   if (re.test(content)) {
-    content = content.replace(re, line);
+    // A function, not the string: in a replacement STRING the dollar sign
+    // starts a pattern, so a password like pa$$w0rd was stored as pa$w0rd.
+    content = content.replace(re, () => line);
   } else {
     content = content.replace(/\s*$/, '') + '\n' + line + '\n';
   }
@@ -132,4 +137,29 @@ function setMetaFlag(name, key, value) {
  *  backfill (`ensureWebHookUserDrop`) to detect a hook generated before it. */
 const WEB_USER_DROP_MARKER = 'PAD WEB USER DROP (plan 89)';
 
-Object.assign(exports, { INSTANCES_DIR, HOST_WORKSPACE, WORKSPACE, getDriver, BUILD_TEMPLATES_DIR, DEFAULT_SSH_CPORT, PREFIX_RE, getDriverOr, WEB_USER_DROP_MARKER, PREFIX, VM_NAME_RE, hasDriver, AGENT_TYPES, WEBUI_CONTAINER });
+/** A root/SSH password as it may be stored in meta.env and typed into chpasswd. */
+function assertRootPassword(password) {
+  if (password === undefined || password === null || password === '') return;
+  const pw = String(password);
+  if (/[\r\n\0]/.test(pw)) throw new Error('The password cannot contain a line break');
+  if (pw.length > 256) throw new Error('The password is too long (256 characters at most)');
+}
+
+/** A web-console password: it is written between single quotes in the PAD's
+ *  start hook and read back from there, so it must not be able to end the
+ *  quote. A quote used to break the hook; a crafted one ran a command as root
+ *  in the PAD on every boot. */
+function assertWebPassword(password) {
+  if (password === undefined || password === null || password === '') return;
+  const pw = String(password);
+  if (/['\\\r\n\0]/.test(pw)) throw new Error('The web password cannot contain a single quote, a backslash or a line break');
+  if (pw.length > 256) throw new Error('The web password is too long (256 characters at most)');
+}
+
+/** A host or container port from a request: digits only, 1 to 65535. */
+function assertPort(value, label = 'port') {
+  if (value === undefined || value === null || value === '') return;
+  if (!/^\d{1,5}$/.test(String(value)) || Number(value) < 1 || Number(value) > 65535) throw new Error(`${label} must be a number from 1 to 65535`);
+}
+
+Object.assign(exports, { assertRootPassword, assertWebPassword, assertPort, INSTANCES_DIR, HOST_WORKSPACE, WORKSPACE, getDriver, BUILD_TEMPLATES_DIR, DEFAULT_SSH_CPORT, PREFIX_RE, getDriverOr, WEB_USER_DROP_MARKER, PREFIX, VM_NAME_RE, hasDriver, AGENT_TYPES, WEBUI_CONTAINER });

@@ -75,10 +75,18 @@ function trim(name) {
   try {
     const f = logFile(name);
     if (fs.statSync(f).size < MAX_FILE_BYTES) return;
-    const lines = fs.readFileSync(f, 'utf8').split('\n');
-    if (lines.length > MAX_LINES) {
-      fs.writeFileSync(f, lines.slice(-MAX_LINES).join('\n'));
+    let lines = fs.readFileSync(f, 'utf8').split('\n');
+    if (lines.length > MAX_LINES) lines = lines.slice(-MAX_LINES);
+    // The file is over its byte limit, so it must come out UNDER it. Cutting
+    // by line count alone left a file of a few very long lines (a minified
+    // bundle, a base64 dump) growing for ever: it never had enough lines.
+    let text = lines.join('\n');
+    while (Buffer.byteLength(text) >= MAX_FILE_BYTES && lines.length > 1) {
+      lines = lines.slice(Math.ceil(lines.length / 2));
+      text = lines.join('\n');
     }
+    if (Buffer.byteLength(text) >= MAX_FILE_BYTES) text = text.slice(-Math.floor(MAX_FILE_BYTES / 2));
+    fs.writeFileSync(f, text);
   } catch {}
 }
 
@@ -176,4 +184,4 @@ async function captureAll(containerNames) {
   await Promise.all(containerNames.map((n) => capture(n)));
 }
 
-module.exports = { capture, captureAll, readLogs, logFile, newLinesFromDockerOutput };
+module.exports = { capture, captureAll, readLogs, logFile, newLinesFromDockerOutput, trim };

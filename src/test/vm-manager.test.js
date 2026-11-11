@@ -1367,6 +1367,44 @@ describe('vm-manager - devcontainer plan (plan 41 items 12-16)', () => {
     });
   });
 
+  // Plan 122 #3: devcontainer.json is agent-writable, and its plan is applied
+  // at the operator's next settings change.
+  const planFor = (TMP, vm, extra) => {
+    const ws = makeWorkspace(TMP, extra);
+    fs.mkdirSync(path.join(TMP, 'instances', 'pad-dc'), { recursive: true });
+    fs.writeFileSync(path.join(TMP, 'instances', 'pad-dc', 'meta.env'), 'AGENT=opencode\n');
+    const wsMount = vm.validateWorkspaceMount('pad-dc', 'opencode', ws, '/root/.opencode/workspace');
+    return () => vm.resolveDevContainerPlan('pad-dc', 'opencode', wsMount, { allocatePorts: false });
+  };
+
+  it('refuses capabilities that let a process leave its container', () => {
+    for (const cap of ['ALL', 'SYS_ADMIN', 'CAP_SYS_ADMIN', 'sys_module', 'DAC_READ_SEARCH']) {
+      withTmp((TMP, vm) => assert.throws(planFor(TMP, vm, { runArgs: ['--cap-add=' + cap] }), /--cap-add .* is not allowed/, cap));
+    }
+    withTmp((TMP, vm) => assert.deepStrictEqual(planFor(TMP, vm, { runArgs: ['--cap-add=cap_sys_ptrace', '--cap-add', 'NET_ADMIN'] })().runArgs.caps, ['SYS_PTRACE', 'NET_ADMIN']));
+  });
+
+  it('refuses sysctls that are not namespaced', () => {
+    for (const key of ['kernel.core_pattern', 'vm.overcommit_memory', 'kernel.modprobe', 'fs.file-max']) {
+      withTmp((TMP, vm) => assert.throws(planFor(TMP, vm, { runArgs: ['--sysctl', key + '=1'] }), /--sysctl .* is not allowed/, key));
+    }
+    withTmp((TMP, vm) => assert.doesNotThrow(planFor(TMP, vm, { runArgs: ['--sysctl', 'kernel.shmmax=1'] })));
+  });
+
+  it('refuses an env file outside the workspace', () => {
+    withTmp((TMP, vm) => {
+      const plan = planFor(TMP, vm, { runArgs: ['--env-file', path.join(TMP, '.env')] }); // creates the tree
+      fs.writeFileSync(path.join(TMP, '.env'), 'VAULT_KEY=x\n');
+      assert.throws(plan, /outside the workspace/);
+    });
+    withTmp((TMP, vm) => assert.throws(planFor(TMP, vm, { runArgs: ['--env-file=../.env'] }), /outside the workspace/));
+  });
+
+  it('judges a mount by its normalised path, so a doubled slash cannot reach project internals', () => {
+    withTmp((TMP, vm) => assert.throws(planFor(TMP, vm, { mounts: [{ source: TMP + '//instances', target: '/x' }] }), /project internals/));
+    withTmp((TMP, vm) => assert.throws(planFor(TMP, vm, { mounts: [{ source: TMP + '/ws/../instances', target: '/x' }] }), /project internals/));
+  });
+
   it('rejects unsupported runArgs', () => {
     withTmp((TMP, vm) => {
       const ws = makeWorkspace(TMP, { runArgs: ['--privileged'] });

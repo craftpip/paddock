@@ -317,9 +317,12 @@ function queuePosition(id) {
   return ahead + 1;
 }
 
+const LIVE_OUTPUT_MAX = 8 * 1024 * 1024;  // characters held in memory per stream of a running task
+const LIVE_OUTPUT_HEAD = 64 * 1024;
+
 function reconcileOrphanedTasks() {
   return getDb().prepare(
-    "UPDATE tasks SET status = 'error', finished_at = datetime('now'), result_summary = ? WHERE status = 'running'"
+    "UPDATE tasks SET status = 'error', finished_at = datetime('now'), result_summary = ? WHERE status = 'running' AND (claimed_by IS NULL OR claimed_by = '')"
   ).run(ORPHAN_SUMMARY).changes;
 }
 
@@ -330,8 +333,14 @@ function attachProcess(id, child, timeoutMs, runtimeRef, cap) {
     pid: child.pid || null, sinceFlush: false,
   };
 
-  child.stdout.on('data', (d) => { state.out += d.toString('utf8'); state.sinceFlush = true; });
-  child.stderr.on('data', (d) => { state.err += d.toString('utf8'); state.sinceFlush = true; });
+  // Bounded: a task that prints for hours must not grow this process without
+  // limit. The head (how it started) and the tail (how it ended, and the
+  // result the extractor reads) are kept; the middle is dropped once.
+  const keepBounded = (text) => (text.length > LIVE_OUTPUT_MAX
+    ? `${text.slice(0, LIVE_OUTPUT_HEAD)}\n… [output trimmed while running] …\n${text.slice(-(LIVE_OUTPUT_MAX - LIVE_OUTPUT_HEAD - 64))}`
+    : text);
+  child.stdout.on('data', (d) => { state.out = keepBounded(state.out + d.toString('utf8')); state.sinceFlush = true; });
+  child.stderr.on('data', (d) => { state.err = keepBounded(state.err + d.toString('utf8')); state.sinceFlush = true; });
 
   const flushLive = () => {
     // Throttled live flush (plan 48): while running, persist capped output +

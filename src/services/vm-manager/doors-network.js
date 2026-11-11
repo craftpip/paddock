@@ -5,6 +5,7 @@
 // Exported before anything is required: function declarations are hoisted, so a
 // sibling module that requires this one mid-cycle already sees every function.
 Object.assign(exports, {
+  orphanDoorNames,
   recreateServices, doorName, getPeerNetworkName, currentNetworkPeer, startDoors, stopDoors,
   getNetworkHealth, removeDoors, syncDoors, isManagedDoorContainer, cleanStaleDoorDirs,
   staleDoorDirActions, isSocatDoorContainer, listDoors, doorPorts, desiredDoors, listContainers,
@@ -224,21 +225,32 @@ async function removeDoors(name, log = () => {}) {
   }
 }
 
-/** Boot-time sweep: drop any <name>-door / <name>-web forwarding containers
- *  whose agent (instances/<name>) no longer exists. Door containers survive
- *  `removeVm` of the agent in older code, so a deleted agent's door keeps
- *  holding its host port forever and blocks other agents from reusing it. */
-async function cleanOrphanDoors() {
-  for (const cname of await psNames()) {
-    const m = /^(.*)-(door|web)$/.exec(cname);
+/**
+ * Which containers are door containers this project left behind?
+ *
+ * A door is the socat sidecar `<pad>-door` (or the legacy `<pad>-web`) that
+ * publishes a peer-networked PAD's ports. When its PAD is deleted by hand the
+ * door survives and keeps the host ports, so they are swept at boot. The sweep
+ * ends in `docker rm -f`, so it must only ever name OUR doors: the name has to
+ * be a PAD name of this project plus the suffix, the image has to be socat, and
+ * no instance folder may exist for either name. It used to match any container
+ * on the host called `*-web` or `*-door`, which would have removed another
+ * project's `shop-web` on every boot.
+ *
+ * Pure: `containers` is `[{ name, image }]`, `instanceExists(name)` answers
+ * for a folder under instances/.
+ */
+function orphanDoorNames(containers, instanceExists) {
+  const out = [];
+  for (const c of containers || []) {
+    const m = /^(.+)-(door|web)$/.exec(String((c && c.name) || ''));
     if (!m) continue;
-    // Never remove a real agent whose name happens to end in -door/-web.
-    if (fs.existsSync(path.join(INSTANCES_DIR, cname))) continue;
-    const base = m[1];
-    if (fs.existsSync(path.join(INSTANCES_DIR, base))) continue;
-    console.log(`[orphan-door] removing ${cname} (agent ${base} gone)`);
-    await runCmd('docker', ['rm', '-f', cname], { timeout: 30000 }).catch(() => {});
+    if (!VM_NAME_RE.test(m[1])) continue;                 // not a PAD name of this project
+    if (!/socat/i.test(String(c.image || ''))) continue;   // not a door
+    if (instanceExists(c.name) || instanceExists(m[1])) continue; // a real PAD, or its PAD still exists
+    out.push(c.name);
   }
+  return out;
 }
 
 /** Where a stale door dir is parked instead of deleted. A hidden subdirectory of

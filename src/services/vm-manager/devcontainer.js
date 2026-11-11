@@ -6,6 +6,7 @@
 // Exported before anything is required: function declarations are hoisted, so a
 // sibling module that requires this one mid-cycle already sees every function.
 Object.assign(exports, {
+  resolveDevContainerEnvFile,
   readDevContainerPlan, resolveDevContainerPlan, generateWorkspaceDevContainer,
   readWorkspaceDevContainer, syncDevContainer, padsOnSameWorkspace, devContainerStatus,
   regenerateDevContainer, _setPadWriteRunner, defaultPadWriteRunner,
@@ -39,6 +40,39 @@ function readDevContainerPlan(name) {
 /** Other pads mounted on the same workspace host. A shared workspace means
  *  ONE `.devcontainer/devcontainer.json` for N pads — knowing the others is
  *  what tells a reader the file is not this pad's alone. */
+/** Capabilities a devcontainer.json may ask for. None of these lets a process
+ *  leave its container; SYS_ADMIN, SYS_MODULE, DAC_READ_SEARCH and ALL do. */
+const DC_ALLOWED_CAPS = new Set(['SYS_PTRACE', 'NET_ADMIN', 'NET_RAW', 'NET_BIND_SERVICE', 'IPC_LOCK', 'SYS_NICE']);
+const DC_ALLOWED_SYSCTL_RE = /^(net\.[a-z0-9_.-]+|kernel\.(shm[a-z_]*|msg[a-z_]*|sem)|fs\.mqueue\.[a-z_]+)$/;
+
+/** An `--env-file` from a devcontainer.json, as a host path that is safe to
+ *  hand to compose. Compose reads the file from the CONTROL PLANE's filesystem
+ *  and puts every line into the PAD's environment, so a path outside the
+ *  workspace (the control plane's own .env, another PAD's meta.env) would
+ *  deliver those secrets to the agent that wrote the devcontainer.json. */
+function resolveDevContainerEnvFile(workspaceHost, value) {
+  const host = path.normalize(String(value).startsWith('/') ? String(value) : path.join(workspaceHost, String(value)));
+  const root = path.normalize(workspaceHost);
+  if (!(host.startsWith(root + path.sep))) {
+    throw new Error(`Devcontainer --env-file ${value} is outside the workspace — only files inside the workspace folder are allowed`);
+  }
+  // The lexical check is not enough: the agent can make a symlink inside its
+  // workspace. Resolve what the control plane would actually open.
+  const view = containerViewOf(host);
+  const rootView = containerViewOf(root);
+  if (!view || !rootView) {
+    throw new Error(`Devcontainer --env-file ${value} cannot be used: this workspace is not readable by the control plane`);
+  }
+  if (fs.existsSync(view)) {
+    const real = fs.realpathSync(view);
+    const realRoot = fs.realpathSync(rootView);
+    if (!(real.startsWith(realRoot + path.sep))) {
+      throw new Error(`Devcontainer --env-file ${value} points outside the workspace through a symlink`);
+    }
+  }
+  return host;
+}
+
 function padsOnSameWorkspace(name, workspaceHost) {
   if (!workspaceHost) return [];
   const target = path.normalize(String(workspaceHost));
@@ -150,9 +184,11 @@ function resolveDevContainerPlan(name, agent, wsMount, opts = {}) {
   // dirs, project internals, agent-data swallow, protected container paths).
   for (const m of dc.mounts) {
     if (!m || !m.host || !m.container) continue;
-    const hostPath = m.host.startsWith('/')
+    // Normalised BEFORE the checks: `/workspace//instances` or `/workspace/x/../.env`
+    // must be judged as the path they really are.
+    const hostPath = path.normalize(m.host.startsWith('/')
       ? m.host
-      : path.join(wsMount.host, m.host);
+      : path.join(wsMount.host, m.host));
     if (hostPath === HOST_WORKSPACE || hostPath.startsWith(HOST_WORKSPACE + path.sep)) {
       if (!(hostPath === wsMount.host || hostPath.startsWith(wsMount.host + path.sep))) {
         throw new Error(`Devcontainer mount '${m.host}' would reach project internals — only paths inside the workspace or outside the project root are allowed`);
@@ -171,12 +207,22 @@ function resolveDevContainerPlan(name, agent, wsMount, opts = {}) {
     if (!DC_RUNARG_KEYS.has(key)) {
       throw new Error(`Unsupported devcontainer runArg '${raw}' — only ${[...DC_RUNARG_KEYS].join(', ')} are supported`);
     }
-    if (!value && key !== '--cap-add') {
+    // Both spellings docker accepts: `--key=value` and `--key value`. (The
+    // two-argument form of --cap-add used to leave its value behind, where it
+    // was then rejected as an unknown argument.)
+    if (!value) {
       value = args[++i];
       if (value === undefined) throw new Error(`Missing value for devcontainer runArg '${key}'`);
     }
     if (key === '--cap-add') {
-      if (value && !plan.runArgs.caps.includes(value)) plan.runArgs.caps.push(value);
+      // devcontainer.json lives in the workspace, which the AGENT can write. A
+      // capability it names is granted at the operator's next Apply, so only
+      // ones that cannot be used to leave the container are accepted.
+      const cap = String(value || '').toUpperCase().replace(/^CAP_/, '');
+      if (cap && !DC_ALLOWED_CAPS.has(cap)) {
+        throw new Error(`Devcontainer --cap-add ${value} is not allowed — supported: ${[...DC_ALLOWED_CAPS].join(', ')}`);
+      }
+      if (cap && !plan.runArgs.caps.includes(cap)) plan.runArgs.caps.push(cap);
     } else if (key === '--ulimit') {
       const um = /^([a-z_]+)=(\d+)(?::(\d+))?$/.exec(value);
       if (!um) throw new Error(`Invalid devcontainer --ulimit '${value}' — expected name=soft[:hard]`);
@@ -184,9 +230,12 @@ function resolveDevContainerPlan(name, agent, wsMount, opts = {}) {
     } else if (key === '--sysctl') {
       const sm = /^([^=]+)=(.+)$/.exec(value);
       if (!sm) throw new Error(`Invalid devcontainer --sysctl '${value}' — expected key=value`);
+      if (!DC_ALLOWED_SYSCTL_RE.test(sm[1])) {
+        throw new Error(`Devcontainer --sysctl ${sm[1]} is not allowed — only namespaced settings (net.*, kernel.shm*, kernel.msg*, kernel.sem, fs.mqueue.*) are supported`);
+      }
       plan.runArgs.sysctls[sm[1]] = sm[2];
     } else if (key === '--env-file') {
-      plan.runArgs.envFiles.push(value.startsWith('/') ? value : path.join(wsMount.host, value));
+      plan.runArgs.envFiles.push(resolveDevContainerEnvFile(wsMount.host, value));
     }
   }
 

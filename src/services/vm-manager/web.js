@@ -15,6 +15,7 @@ const path = require('path');
 const { ensureOwned, USER_UID, USER_GID, writeFileOwned } = require('../ownership');
 const {
   INSTANCES_DIR, readMeta, PREFIX_RE, getDriver, runCmd, WEB_USER_DROP_MARKER, getDriverOr,
+  assertWebPassword,
 } = require('./internal');
 const { seedBuildDir } = require('./build-files');
 const { writeInstanceCompose, readExtraPorts, readSshCport } = require('./compose');
@@ -156,6 +157,7 @@ async function resolveWebRequest(name, agent, web, { sshHostPort = '', extraPort
     throw new Error(`Host port ${hPort} is already in use by another agent`);
   }
   const password = web.password === undefined || web.password === null ? '' : String(web.password);
+  assertWebPassword(password);
   // Required-auth drivers (openclaw — fails closed on non-loopback binds) have
   // no token to fall back on at create time, so publishing needs one.
   if (driver.webApp.auth && driver.webApp.auth.required && !password) {
@@ -179,7 +181,7 @@ async function hostPortInUse(hostPort, excludeName) {
       if (entry.name === excludeName) continue;
       const cf = path.join(INSTANCES_DIR, entry.name, 'docker-compose.yml');
       if (fs.existsSync(cf)) {
-        for (const m of fs.readFileSync(cf, 'utf8').matchAll(/"(\d+):\d+"/g)) {
+        for (const m of fs.readFileSync(cf, 'utf8').matchAll(/"(\d+):\d+(?:\/(?:tcp|udp))?"/g)) {
           if (m[1] === h) return true;
         }
       }
@@ -232,6 +234,7 @@ function buildWebHook(driver, agent, webService, password) {
   const dataDir = driver.dataDir;
   const pidFile = `${dataDir}/web.pid`;
   const logFile = `${dataDir}/web.log`;
+  assertWebPassword(password); // every publish path builds the hook here
   const startCmd = driver.webApp.startCommand({ password, containerPort: webService.containerPort });
   return `#!/bin/bash
 # Paddock web publishing — start the published web server on boot.

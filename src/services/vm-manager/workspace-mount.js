@@ -230,6 +230,9 @@ function validateWorkspaceMount(name, agent, workspaceHost, workspaceDir) {
   // ── Container destination ──
   const dir = path.normalize(dirRaw.replace(/\/{2,}/g, '/').replace(/\/+$/, ''));
   if (!dir.startsWith('/')) throw new Error('Container workspace path must be absolute');
+  // `host:container[:mode]` is how the bind is written, so a colon in the
+  // container path would be read as the start of a mode (`/work:ro`).
+  if (/[:\r\n\0]/.test(dir)) throw new Error('Container workspace path cannot contain ":" or a line break');
   if (dir === '/') throw new Error('Container workspace path cannot be the host root');
   for (const p of CONTAINER_PROTECTED) {
     if (guard('CONTAINER_PROTECTED') && (dir === p || dir.startsWith(p + '/'))) {
@@ -399,6 +402,7 @@ function validateExtraVolume(name, agent, hostPath, container, readonly, type, e
   // ── Container destination ──
   const dir = path.normalize(dirRaw.replace(/\/{2,}/g, '/').replace(/\/+$/, ''));
   if (!dir.startsWith('/')) throw new Error('Container path must be absolute');
+  if (/[:\r\n\0]/.test(dir)) throw new Error('Container path cannot contain ":" or a line break');
   if (dir === '/') throw new Error('Container path cannot be the host root');
   for (const p of CONTAINER_PROTECTED) {
     if (guard('CONTAINER_PROTECTED') && (dir === p || dir.startsWith(p + '/'))) {

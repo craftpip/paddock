@@ -22,8 +22,11 @@ function scheduleCleanup(job) {
   // open (it would delay shutdown by up to 5 min), and clearJob cancels it.
   if (job.cleanupTimer) clearTimeout(job.cleanupTimer);
   job.cleanupTimer = setTimeout(() => {
+    // Only this job: a second job under the same key (an update started while
+    // the first one's five minutes were still running) must not be deleted by
+    // the first one's timer, or its log vanishes mid-build.
     const live = jobs.get(job.name);
-    if (live && live.subs.size === 0) jobs.delete(job.name);
+    if (live === job && live.subs.size === 0) jobs.delete(job.name);
   }, CLEANUP_MS);
   if (typeof job.cleanupTimer.unref === 'function') job.cleanupTimer.unref();
 }

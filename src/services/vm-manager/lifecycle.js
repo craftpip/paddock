@@ -8,7 +8,7 @@ Object.assign(exports, {
   imageProbe, psStateMap, psNames, isContainerRunning, removeInstanceDir, imageHasDockerCli,
   imageHasSshPortSupport, imageHasWebStartSupport, updateAgent, createVm, removeVm, resetVm,
   recreateAgent, getComposePath, existingServices, startAgent, stopAgent, restartAgent,
-  effectiveUserMode, validateAgentCreate, createAgent,
+  effectiveUserMode, validateAgentCreate, createAgent, workspaceSourceRemoval,
 });
 
 const fs = require('fs');
@@ -20,6 +20,7 @@ const devcontainer = require('../devcontainer');
 const {
   readMeta, INSTANCES_DIR, PREFIX_RE, runCmd, DEFAULT_SSH_CPORT, WORKSPACE, PREFIX, getDriver,
   instanceComposePath, VM_NAME_RE, hasDriver, HOST_WORKSPACE,
+  assertRootPassword, assertPort,
 } = require('./internal');
 const {
   validateExtraVolumes, validateWorkspaceMount, containerViewOf, workspaceMountInfo,
@@ -30,7 +31,7 @@ const {
 } = require('./build-files');
 const { runCompose, writeInstanceCompose, autoSshPort, validateExtraPorts } = require('./compose');
 const { getPeerNetworkName, startDoors, stopDoors } = require('./doors-network');
-const { resolveDevContainerPlan, generateWorkspaceDevContainer } = require('./devcontainer');
+const { resolveDevContainerPlan, generateWorkspaceDevContainer, padsOnSameWorkspace } = require('./devcontainer');
 const {
   readWebService, resolveWebRequest, webServicePath, writeWebStartHook, buildWebHook,
   applyWebAuth, webPortReachable, hostPortInUse,
@@ -174,6 +175,8 @@ async function createVm(name, options = {}) {
     throw new Error(`Agent '${name}' already exists`);
   }
 
+  assertRootPassword(password);
+  assertPort(port, 'SSH port');
   const pw = password || name.replace(PREFIX_RE, '');
   let finalPort = '';
   if (sshEnabled) {
@@ -241,10 +244,12 @@ async function createVm(name, options = {}) {
   // land. Only when the source is under the project root — the webui is the
   // only thing that can create dirs there (host sources outside HOST_WORKSPACE
   // are expected to already exist, e.g. a shared data drive).
+  let workspaceCreatedHere = false;
   if (wsMount && wsMount.webuiVisible) {
     const view = containerViewOf(wsMount.host);
     if (view && !fs.existsSync(view)) {
       mkdirOwned(view, { boundary: WORKSPACE });
+      workspaceCreatedHere = true;
       onLog('system', `Created workspace source: ${wsMount.host}`);
     }
   }
@@ -352,6 +357,10 @@ async function createVm(name, options = {}) {
   // Workspace mount flags MUST be written before writeInstanceCompose — the
   // compose generator reads them from meta to emit the extra bind.
   if (wsMount) metaTxt += `WORKSPACE_HOST=${wsMount.host}\nWORKSPACE_DIR=${wsMount.container}\n`;
+  // Recorded so a later delete removes ONLY a folder this create made. A
+  // folder that already existed (the repo, docs/, another PAD's source) is the
+  // user's and is never deleted with the PAD.
+  if (wsMount && workspaceCreatedHere) metaTxt += 'WORKSPACE_CREATED=1\n';
   if (dcPlan) metaTxt += `DC_PLAN=${JSON.stringify(dcPlan)}\n`;
   // Extra volumes / ports (plan 28): single-line JSON, read back by the
   // compose generator (readExtraVolumes/readExtraPorts) on every regen path.
@@ -594,17 +603,47 @@ async function validateAgentCreate(name, opts = {}) {
  *  request fields (sshEnabled/port/sshContainerPort/workspaceHost/
  *  workspaceDir); normalizes them exactly like the route used to before
  *  delegating. Returns the created PAD name. */
+/** Remove what a failed create left: its container, doors, network, instance
+ *  folder and image. Never the workspace source. Best-effort, and it reports
+ *  what it could not remove instead of hiding the original error. */
+async function removeFailedCreate(name, instDir, log) {
+  const quiet = async (args) => { try { await runCmd('docker', args, { timeout: 30000 }); } catch { /* nothing there */ } };
+  await quiet(['rm', '-f', name]);
+  await quiet(['rm', '-f', `${name}-door`]);
+  await quiet(['rm', '-f', `${name}-web`]);
+  await quiet(['network', 'rm', `${name}_default`]);
+  try {
+    if (fs.existsSync(instDir)) await removeInstanceDir(name, instDir);
+    log('system', `Create failed; removed the partial ${name} so the name can be used again`);
+  } catch (cleanupErr) {
+    log('system', `Create failed, and its leftovers could not be removed: ${cleanupErr.message}`);
+  }
+  await quiet(['rmi', imageFor(name)]);
+}
+
 async function createAgent(name, opts = {}) {
   const v = await validateAgentCreate(name, opts);
-  return createVm(name, {
-    ...opts,
-    mode: 'fresh',
-    sshEnabled: !!opts.sshEnabled,
-    port: v.sshHostPort,
-    sshCport: v.sshCport,
-    workspaceHost: v.wsMount ? v.wsMount.host : '',
-    workspaceDir: v.wsMount ? v.wsMount.container : '',
-  });
+  const instDir = path.join(INSTANCES_DIR, name);
+  const existedBefore = fs.existsSync(instDir);
+  try {
+    return await createVm(name, {
+      ...opts,
+      mode: 'fresh',
+      sshEnabled: !!opts.sshEnabled,
+      port: v.sshHostPort,
+      sshCport: v.sshCport,
+      workspaceHost: v.wsMount ? v.wsMount.host : '',
+      workspaceDir: v.wsMount ? v.wsMount.container : '',
+    });
+  } catch (err) {
+    // A create that failed part-way (a build error, a port taken at the last
+    // moment) used to leave instances/<name>/ behind: the PAD then "existed",
+    // could not be created again under that name, and had to be deleted by
+    // hand. Remove what this attempt made. The workspace source is left alone:
+    // only a successful PAD's delete may ever remove one.
+    if (!existedBefore) await removeFailedCreate(name, instDir, typeof opts.onLog === 'function' ? opts.onLog : () => {});
+    throw err;
+  }
 }
 /** Remove an instance directory (or an agent data dir inside it). The webui
  *  container runs as root (plan 43), so a plain `fs.rmSync` can always delete
@@ -613,6 +652,30 @@ async function createAgent(name, opts = {}) {
 async function removeInstanceDir(name, instDir) {
   if (!fs.existsSync(instDir)) return;
   fs.rmSync(instDir, { recursive: true, force: true });
+}
+
+/**
+ * May deleting a PAD also delete its workspace source folder? Pure, so the
+ * rule can be tested without touching a disk.
+ *
+ * It used to be "any source under the project root and outside the PAD's data
+ * dir", which deleted the whole repository when a PAD had mounted it, deleted
+ * docs/ or .git when a PAD pointed there, and wiped a folder a second PAD was
+ * still using. Now: only a folder the create itself made, that nobody else
+ * mounts, and that is strictly inside the project root without containing
+ * instances/.
+ */
+function workspaceSourceRemoval({ createdByPaddock, view, workspaceRoot, instancesDir, sharedWith = [] }) {
+  if (!view) return { remove: false, why: 'it is not visible to the control plane' };
+  if (!createdByPaddock) return { remove: false, why: 'it existed before this PAD was created' };
+  if (sharedWith.length) return { remove: false, why: `${sharedWith.join(', ')} still use${sharedWith.length === 1 ? 's' : ''} it` };
+  const v = path.resolve(view);
+  const root = path.resolve(workspaceRoot);
+  const inst = path.resolve(instancesDir);
+  const contains = (outer, inner) => inner === outer || inner.startsWith(outer + path.sep);
+  if (!contains(root, v) || v === root) return { remove: false, why: 'it is not a folder inside the project root' };
+  if (contains(v, inst)) return { remove: false, why: 'it contains the instances folder' };
+  return { remove: true, why: '' };
 }
 
 async function removeVm(name) {
@@ -637,7 +700,15 @@ async function removeVm(name) {
       const dataHost = path.join(HOST_WORKSPACE, 'instances', name, agent);
       if (info.webuiVisible && info.host !== dataHost && !info.host.startsWith(dataHost + path.sep)) {
         const view = containerViewOf(info.host);
-        if (view && fs.existsSync(view)) fs.rmSync(view, { recursive: true, force: true });
+        const verdict = workspaceSourceRemoval({
+          createdByPaddock: meta.WORKSPACE_CREATED === '1',
+          view,
+          workspaceRoot: WORKSPACE,
+          instancesDir: INSTANCES_DIR,
+          sharedWith: padsOnSameWorkspace(name, meta.WORKSPACE_HOST),
+        });
+        if (verdict.remove && fs.existsSync(view)) fs.rmSync(view, { recursive: true, force: true });
+        else if (!verdict.remove) console.log(`[delete ${name}] workspace source ${info.host} kept: ${verdict.why}`);
       }
     } catch {}
   }
@@ -716,13 +787,29 @@ async function startAgent(name) {
  *  while the agent is down — stop it so it isn't a stray open listener. No-op
  *  for already-stopped containers (errors swallowed). */
 async function stopAgent(name) {
-  await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 }).catch(() => {});
+  // A container that is already gone has nothing left to stop. Any other
+  // failure (daemon unreachable, timeout) is reported: swallowing it made the
+  // route answer ok for a PAD that was still running.
+  let failure = null;
+  try {
+    await runCmd('docker', ['stop', '-t', '30', name], { timeout: 60000 });
+  } catch (e) {
+    if (!/No such container/i.test(String(e.stderr || e.message || ''))) failure = e;
+  }
   await stopDoors(name);
+  if (failure) throw new Error(`Could not stop ${name}: ${String(failure.stderr || failure.message).trim().split('\n').pop()}`);
 }
 
 /** Restart the agent and bring its socat door(s) back up. */
 async function restartAgent(name) {
-  await runCmd('docker', ['restart', '-t', '30', name], { timeout: 60000 }).catch(() => {});
+  try {
+    await runCmd('docker', ['restart', '-t', '30', name], { timeout: 60000 });
+  } catch {
+    // Same recovery as startAgent: a stale network peer cannot be rejoined by
+    // id, so recreate through compose. If that fails too, the error is the
+    // caller's to see (it used to be swallowed and reported as a restart).
+    await runCompose(name, ['up', '-d', '--no-deps', '--force-recreate', name], { timeout: 180000 });
+  }
   await startDoors(name);
 }
 

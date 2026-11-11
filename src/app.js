@@ -590,14 +590,12 @@ const pathProbe = require('./services/path-probe');
  *  holding its host port forever and blocks other agents from reusing it. */
 async function cleanOrphanDoors() {
   const all = await dockerPsList();
-  for (const cname of Object.keys(all)) {
-    const m = /^(.*)-(door|web)$/.exec(cname);
-    if (!m) continue;
-    // Never remove a real agent whose name happens to end in -door/-web.
-    if (fs.existsSync(path.join(INSTANCES_DIR, cname))) continue;
-    const base = m[1];
-    if (fs.existsSync(path.join(INSTANCES_DIR, base))) continue;
-    console.log(`[orphan-door] removing ${cname} (agent ${base} gone)`);
+  const containers = Object.entries(all).map(([name, c]) => ({ name, image: (c && c.Image) || '' }));
+  // The rule for "is this ours to remove" lives in one tested function.
+  const orphans = require('./services/vm-manager/doors-network').orphanDoorNames(
+    containers, (name) => fs.existsSync(path.join(INSTANCES_DIR, name)));
+  for (const cname of orphans) {
+    console.log(`[orphan-door] removing ${cname} (its PAD is gone)`);
     await runCmd('docker', ['rm', '-f', cname], { timeout: 30000 }).catch(() => {});
   }
 }

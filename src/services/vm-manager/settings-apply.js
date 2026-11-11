@@ -12,10 +12,11 @@ const fs = require('fs');
 const path = require('path');
 const { runCmdStream } = require('../cmd');
 const hostPowers = require('../host-powers');
-const { imageFor, buildDir, readCustomBuild, writeCustomBuild } = require('../instance-image');
+const { imageFor, buildDir, readCustomBuild, writeCustomBuild, setBuildEnv } = require('../instance-image');
 const { ensureOwned, USER_UID, USER_GID } = require('../ownership');
 const {
   INSTANCES_DIR, readMeta, getDriverOr, setMetaFlag, runCmd, getDriver,
+  assertWebPassword,
 } = require('./internal');
 const {
   readExtraVolumes, readWorkspaceMount, validateWorkspaceMount, validateExtraVolumes,
@@ -243,6 +244,9 @@ async function prepareAgentChanges(name, opts = {}) {
     webChanged = (oldWeb ? `${oldWeb.hostPort}:${oldWeb.containerPort}` : '')
       !== (newWeb ? `${newWeb.hostPort}:${newWeb.containerPort}` : '')
       || newWebPassword !== oldWebPassword;
+    // Refused here, before anything is written or a job is started, so the
+    // caller gets a 400 with the reason instead of a job that fails later.
+    if (newWebPassword !== oldWebPassword) assertWebPassword(newWebPassword);
   }
 
   // ── extra ports (full-replace list; conflict-checked vs ssh + web) ──
@@ -367,7 +371,26 @@ async function prepareAgentChanges(name, opts = {}) {
  *  cport) → force-recreate → reconcile the socat door → re-exec the start-web
  *  hook + verify (web publish) → restore the stopped state. Rolls everything
  *  back on failure. Throws with the failure message. */
-async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = () => {} } = {}) {
+// One change set per PAD at a time. Two concurrent applies (two tabs, or the
+// page and an MCP caller) each rewrote meta.env and the compose file and ran
+// `compose up`, interleaved; the second is refused instead.
+const applyingNow = new Set();
+async function applyAgentChanges(name, opts = {}, hooks = {}) {
+  if (applyingNow.has(name)) {
+    const err = new Error(`Another change is being applied to ${name}. Wait for it to finish, then try again.`);
+    err.code = 'pad_change_in_progress';
+    err.status = 409;
+    throw err;
+  }
+  applyingNow.add(name);
+  try {
+    return await applyAgentChangesLocked(name, opts, hooks);
+  } finally {
+    applyingNow.delete(name);
+  }
+}
+
+async function applyAgentChangesLocked(name, opts = {}, { onLog = () => {}, onStep = () => {} } = {}) {
   const ctx = await prepareAgentChanges(name, opts);
 
   const {
@@ -433,13 +456,15 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
         ensureOwned(p);
         // Patch the config before the recreate (openclaw gateway reads
         // gateway.bind/auth on startup); env-target drivers need nothing here.
-        applyWebAuth(name, driver, ctx.newWebPassword);
+        // Awaited: a config that cannot be patched must stop the apply here with
+        // its own reason, not surface later as "the web server did not come up".
+        await applyWebAuth(name, driver, ctx.newWebPassword);
         onStep('web-hook', 'start', `Write web start hook for ${name}`);
         await writeWebStartHook(name, agentType, buildWebHook(driver, agentType, newWeb, ctx.newWebPassword));
         onStep('web-hook', 'end');
       } else {
         // Unpublish: restore the pre-publish gateway config, drop the hook.
-        removeWebAuth(name, driver);
+        await removeWebAuth(name, driver);
         await removeWebStartHook(name, agentType);
         if (fs.existsSync(p)) fs.rmSync(p);
       }
@@ -449,6 +474,10 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
     if (ctx.changed) {
       // Build commands (plan 41): write the Dockerfile block FIRST so the
       // compose regen picks up any custom `ARG` lines (argsFromDockerfile).
+      // The docker CLI is baked in at build time from build.env. Setting it
+      // here, in the path every caller shares, is what makes the MCP recreate
+      // tool build an image that can actually use the socket it mounts.
+      if (ctx.dockerChanged) setBuildEnv(name, { INSTALL_DOCKER: newAllow ? '1' : '0' });
       if (buildCommandsChanged) writeCustomBuild(name, newBuildCommands);
       if (postCreateChanged) writePostCreateScript(name, newPostCreate);
       if (postStartChanged) writePostStartScript(name, newPostStart);
@@ -485,11 +514,26 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
     // ── 3. reset: wipe the data dir (kills the container first) ──
     if (opts.reset) {
       onStep('reset', 'start', `docker rm -f ${name} && rm -rf instances/${name}/${agentType}/*`);
+      // The web console's start hook, and for some agents its password, live
+      // INSIDE the data dir that is about to be wiped, while the record that
+      // says "published" lives outside it. Read the password now and put the
+      // hook back afterwards, or the PAD keeps a published port nothing
+      // listens on and a console with no password.
+      const webToRestore = ctx.effectiveWeb || null;
+      let webPasswordToRestore = '';
+      if (webToRestore) {
+        try { webPasswordToRestore = ctx.newWebPassword || ctx.oldWebPassword || readWebAuth(driver, name) || ''; } catch { /* unreadable: publish without one */ }
+      }
       try { await runCmd('docker', ['rm', '-f', name], { timeout: 30000 }); } catch {}
       const agentDir = path.join(instDir, agentType);
       await removeInstanceDir(name, agentDir);
       fs.mkdirSync(agentDir, { recursive: true });
       ensureOwned(agentDir);
+      if (webToRestore) {
+        await applyWebAuth(name, driver, webPasswordToRestore);
+        await writeWebStartHook(name, agentType, buildWebHook(driver, agentType, webToRestore, webPasswordToRestore));
+        onLog('system', 'Web console start hook restored after the reset');
+      }
       onStep('reset', 'end');
       runningNow = false;
     }
@@ -613,7 +657,8 @@ async function applyAgentChanges(name, opts = {}, { onLog = () => {}, onStep = (
     }
 
     // ── 8. re-exec the start-web hook + verify a published web app ──
-    if (ctx.effectiveWeb && runningNow) {
+    // After a reset the container is brought back up, so it is verified too.
+    if (ctx.effectiveWeb && (runningNow || opts.reset)) {
       onStep('web-verify', 'start', `docker exec ${name} ${driver.dataDir}/start-web.sh`);
       const hookPath = `${driver.dataDir}/start-web.sh`;
       await runCmd('docker', ['exec', name, 'bash', hookPath], { timeout: 20000 }).catch(() => {});
@@ -672,26 +717,42 @@ async function rollbackAgentChanges(name, ctx, touched, onLog) {
     agentType, wasRunning, oldAllow, oldNetwork, oldSshPort, oldSshCport, oldRootPw,
     oldWeb, oldVols, oldPorts, oldMount,
   } = ctx;
+  // Everything apply may have written is put back, not only the compose
+  // inputs: a failed user-mode toggle used to leave USER_MODE=user on an
+  // image with no pad user, and a failing build-commands edit stayed in the
+  // Dockerfile and broke every later rebuild.
+  if (ctx.buildCommandsChanged) writeCustomBuild(name, ctx.oldBuildCommands || '');
+  if (ctx.postCreateChanged) writePostCreateScript(name, ctx.oldPostCreate || '');
+  if (ctx.postStartChanged) writePostStartScript(name, ctx.oldPostStart || '');
+  if (ctx.postAttachChanged) writePostAttachScript(name, ctx.oldPostAttach || '');
+  if (ctx.dockerChanged) { try { setBuildEnv(name, { INSTALL_DOCKER: oldAllow ? '1' : '0' }); } catch { /* no build dir yet */ } }
   // Restore web.json + hook + gateway config FIRST so the applySettings compose
   // regen (which reads web.json) picks the old binding back up.
   const p = webServicePath(name);
   const driver = getDriver(agentType);
   if (oldWeb) {
-    fs.writeFileSync(p, JSON.stringify({ containerPort: oldWeb.containerPort, hostPort: String(oldWeb.hostPort) }, null, 2));
-    ensureOwned(p);
     // The old password is the pre-change one (ctx.oldWebPassword), not the
     // current config value — a failed apply may already have patched it. Keep
     // the saved pre-publish state so a later unpublish still restores the
     // original bind/auth.
     const oldPw = ctx.oldWebPassword || readWebAuth(driver, name);
-    applyWebAuth(name, driver, oldPw, { preserveState: true });
+    fs.writeFileSync(p, JSON.stringify({
+      containerPort: oldWeb.containerPort,
+      hostPort: String(oldWeb.hostPort),
+      // Same shape apply writes: without the token a token-auth console's
+      // open link stopped working after any rolled-back change.
+      authToken: driver.webApp && driver.webApp.auth && driver.webApp.auth.urlToken ? String(oldPw || '') : '',
+    }, null, 2));
+    ensureOwned(p);
+    await applyWebAuth(name, driver, oldPw, { preserveState: true });
     await writeWebStartHook(name, agentType, buildWebHook(driver, agentType, oldWeb, oldPw));
   } else {
-    removeWebAuth(name, driver);
+    await removeWebAuth(name, driver);
     await removeWebStartHook(name, agentType);
     if (fs.existsSync(p)) fs.rmSync(p);
   }
   await applySettings(name, {
+    ...(ctx.userModeChanged ? { userMode: ctx.oldUserMode || '' } : {}),
     allowDocker: oldAllow,
     network: oldNetwork,
     workspaceHost: oldMount ? oldMount.host : '',
