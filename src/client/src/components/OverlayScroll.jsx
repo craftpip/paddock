@@ -100,7 +100,13 @@ export default function OverlayScroll({ className = '', scrollerClassName = '', 
     const max = el.scrollHeight - el.clientHeight
     if (max <= 1) return
     const travel = el.clientHeight - thumb.height
-    const ratio = travel > 0 ? (clientY - EDGE - d.offset - thumb.height / 2) / travel : 0
+    // d.offset is where the thumb was grabbed, measured from the THUMB's top
+    // in the scroller's own coordinates. So the pointer must be brought into
+    // the same coordinates before subtracting it; using the raw viewport Y
+    // (and half the thumb besides) made the list jump by the scroller's
+    // distance from the top of the window and never reach its start.
+    const top = clientY - el.getBoundingClientRect().top - EDGE - d.offset
+    const ratio = travel > 0 ? top / travel : 0
     el.scrollTop = Math.min(max, Math.max(0, ratio * max))
   }, [thumb.height])
 

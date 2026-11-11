@@ -30,10 +30,17 @@ trap 'rm -rf "$COPY"' EXIT
 before=$(sha256sum "/app/$FILE" | cut -d' ' -f1)
 mkdir -p "$COPY"
 cd /app
-tar cf - --exclude=./node_modules --exclude=./client --exclude=./public --exclude=./data . | tar xf - -C "$COPY"
+tar cf - --exclude=./node_modules --exclude=./client/node_modules --exclude=./public --exclude=./data . | tar xf - -C "$COPY"
 ln -s /app/node_modules "$COPY/node_modules"
-ln -s /app/client "$COPY/client"
+# The client SOURCE is copied for real. It used to be a symlink to /app/client,
+# so mutating a client file edited the worktree through the link, and the
+# "changed nothing" check below (which compared the file with itself) hid it.
+[ ! -d /app/client/node_modules ] || ln -s /app/client/node_modules "$COPY/client/node_modules"
 cd "$COPY"
+case "$(realpath "$FILE")" in
+  "$COPY"/*) ;;
+  *) echo "mutate: $FILE does not resolve inside the copy; refusing to edit it"; exit 2 ;;
+esac
 sed -i "$EXPR" "$FILE"
 if cmp -s "$FILE" "/app/$FILE"; then echo "mutate: the expression changed nothing in $FILE; nothing was measured"; exit 2; fi
 case "$FILE" in

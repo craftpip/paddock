@@ -61,6 +61,15 @@ export function Modal({
       } else if (e.key === 'Tab') {
         const items = [...panel.querySelectorAll(FOCUSABLE)].filter((el) => el.offsetParent !== null)
         const first = items[0], last = items.at(-1)
+        // Focus can end up outside the panel (a click on the backdrop, or the
+        // focused button disabling itself on submit). Tab from there must come
+        // back into the dialog, not walk the page behind it.
+        if (first && !panel.contains(document.activeElement)) {
+          e.preventDefault()
+          e.stopImmediatePropagation()
+          ;(e.shiftKey ? last : first).focus()
+          return
+        }
         if (!first || (e.shiftKey && (document.activeElement === first || document.activeElement === panel)) || (!e.shiftKey && document.activeElement === last)) {
           e.preventDefault()
           e.stopImmediatePropagation()

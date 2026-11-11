@@ -1,6 +1,6 @@
 # Plan 120 — Audit fixes: the web client
 
-## Status: In progress — 2026-11-11 — 19/19 findings fixed; 9 exercised in the browser, the rest by build + static checks; remaining: #20, the second review pass
+## Status: Complete — 2026-11-12 — 30/30: first pass 19 fixed, second pass 10 fixed (#21–#30); to be absorbed into docs/
 
 ## Why
 
@@ -86,6 +86,46 @@ the wrong component) and the bundle-freshness check.
 | 18 | The early return is below the last hook | Build; the panel renders and works (browser) |
 | 19 | Sign out failure is toasted | Browser, logout stubbed to fail: toast shown, still signed in |
 
+## Second pass (2026-11-11): the files the first reviewer did not read
+
+Read in full: `Terminal.jsx`, `stores/mission.js`, `Tooltip`, `Splitter`,
+`OverlayScroll`, `SessionCreateSplit`, `CallbackScriptEditor`,
+`PromptTemplateEditor`, `Console`, the `ui/` primitives, `lib/web.js`,
+`workspace-guards`, `theme`, `cx`, `callback-output`, `navigation`,
+`url-state`, `GlobalBackups`, `main.jsx`. Twenty of them were clean.
+
+| # | Sev | Where | What is wrong | What the user sees |
+|---|---|---|---|---|
+| 21 | H | `stores/mission.js:306` (with 321-323, 482-485) | `a \|\| b ? x : ''` parses as `(a \|\| b) ? x : ''`, and `a` (`navigateView`) is always set on the Mission page, so a vanished project is never deselected | Deleting the selected project starts an endless, zero-delay loop of `GET /projects` and a 404 on its sessions; column 2 never recovers |
+| 22 | M | `stores/mission.js:571-572` (with 250, 261, 630-634) | `restoreView` bumps its token before its "same session" early return, cancelling the pane read `startSession` just issued | "+ New session" with nothing open sits on "Checking session…" until the 15 s poll |
+| 23 | M | `components/Terminal.jsx:1155`, `:1139` | Header buttons call `ref.current?.clear()` through the forwarded ref, which is `null` when the parent passes none (Mission does not) | "Clear" on the Mission terminal throws and does nothing |
+| 24 | M | `components/Terminal.jsx:614-617` | `ws.onerror` lacks the generation guard its siblings have; a superseded socket's error resets the state of the new one | Switching tabs quickly opens an extra connection; on Mission sessions the superseded socket stays attached |
+| 25 | L | `components/OverlayScroll.jsx:103` | The drag offset is taken relative to the scroller but applied to a viewport coordinate | Grabbing the Mission list's scrollbar thumb makes the list jump, and it cannot reach the top |
+| 26 | L | `stores/mission.js:629-634` | A later plain pane read supersedes an `autoReopen` read and drops the flag | Clicking a dead row while a refresh lands shows "closed" instead of reopening |
+| 27 | L | `components/Terminal.jsx:651-659` | The auto-reconnect uses the first render's closure, where the font size is 14 | After a reconnect the terminal is back at 14 px while the header shows the chosen size |
+| 28 | L | `components/Terminal.jsx:304-346` | Queued commands are not cleared on a session switch | A command queued for one session is typed into the next one |
+| 29 | L | `components/Terminal.jsx:1012-1022` | Tracked-command state is never reset on close (latent: no caller uses it today) | — |
+| 30 | L | `components/ui/Modal.jsx:61-68` | The Tab trap only acts when focus is on the first or last control | After focus falls to the page body, Tab reaches controls behind the modal |
+
+### Second-pass results (2026-11-12)
+
+| # | Fix | How it was checked |
+|---|---|---|
+| 21 | The precedence slip is gone; a vanished project is deselected and dropped from the URL; a 404 on its sessions clears the selection | Browser, with the project list stubbed empty and its sessions 404: one request each over 18 s, selection cleared. Store test + mutation control |
+| 22 | `restoreView` returns for "same session, nothing changed" **before** it starts a new view generation | Browser: terminal appeared 0.4 s after the session was created (was ~8 s, at the next poll). Store test + mutation control. The first attempt (reordering two calls in `startSession`) did not fix it and was removed |
+| 23 | Header buttons call the terminal directly instead of through the optional ref. On a pinned agent session (Mission) "Clear" clears the local scrollback only | Browser: no exception, nothing sent on the socket. The first version typed `clear` + Enter, which an agent screen takes as a **prompt**; caught in the browser, never committed |
+| 24 | `onerror` ignores a superseded socket | Build + static checks |
+| 25 | Thumb drag offset measured from the scroller's own top | Build + static checks (the headless browser produces no pointer frames) |
+| 26 | The reopen opt-in is remembered per session for 5 s and spent by the first read that lands | Two store tests (a superseding read still reopens; a later poll does not inherit it), each with a mutation control |
+| 27 | Reconnect reads the font size from a ref | Build + static checks |
+| 28, 29 | Queued commands, markers and the tracked-command flag are cleared on teardown | Build + static checks |
+| 30 | Tab from outside the panel moves focus back into it | Build + static checks |
+
+Found while proving these: `scripts/mutate.sh` symlinked `client/` into its
+"copy", so a mutation of a client file edited the worktree and the script
+reported "changed nothing". The client source is now copied for real and the
+script refuses a path that resolves outside the copy.
+
 ## Progress
 
 - [x] 1 PlanPicker checkbox and `existing.length`
@@ -107,4 +147,14 @@ the wrong component) and the bundle-freshness check.
 - [x] 17 SettingsTab clears `loadError`
 - [x] 18 QueuePanel hooks above the early return
 - [x] 19 Sign out failure handled
-- [ ] 20 Second review pass over the files listed under "Not reviewed"
+- [x] 20 Second review pass done (findings #21–#30)
+- [x] 21 Deselect a vanished project; no fetch loop
+- [x] 22 New session does not cancel its own pane read
+- [x] 23 Terminal header buttons work without a forwarded ref
+- [x] 24 `onerror` ignores a superseded socket
+- [x] 25 Scrollbar thumb drag offset
+- [x] 26 `autoReopen` survives a competing read
+- [x] 27 Font size survives a reconnect
+- [x] 28 Queued commands cleared on session switch
+- [x] 29 Tracked-command state reset on close
+- [x] 30 Modal traps Tab from anywhere

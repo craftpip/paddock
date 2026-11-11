@@ -264,3 +264,56 @@ describe('plan 68: the guard covers the whole reopen', () => {
     assert.equal(restarts().length, 1, 'a failure must not become a retry loop');
   });
 });
+// Plan 120 second pass — three store defects found by reading, each reproduced
+// in the browser first.
+describe('plan 120: navigation does not cancel what it did not change', () => {
+  it('a URL change to the session already open keeps the pane read in flight (#22)', async () => {
+    stubFetch({ paneReads: [{ live: true }] });
+    store.setState({ openSession: { ...SNAPSHOT }, sessionState: null, selectedProjectId: '' });
+
+    const read = store.getState().fetchSessionState(SESSION_ID);
+    // What startSession's navigateView leads to: a restore for the same session.
+    store.getState().restoreView({ session: SESSION_ID });
+    await read;
+    await settle();
+
+    assert.deepEqual(store.getState().sessionState, { live: true, cwd: '/www2/paddock' },
+      'the read must land; otherwise col 3 sits on "Checking session…" until the poll');
+    assert.equal(paneReads().length, 1, 'and it must be that same read, not a second one');
+  });
+
+  it('a plain read that supersedes an opening read still reopens the dead pane (#26)', async () => {
+    stubFetch({ paneReads: [{ live: false }, { live: false }, { live: true }] });
+
+    store.getState().fetchSessionState(SESSION_ID, { autoReopen: true });
+    await store.getState().fetchSessionState(SESSION_ID); // a refresh landing on top of it
+    await settle();
+
+    assert.equal(restarts().length, 1, 'the opt-in belongs to the open action, not to one request');
+  });
+
+  it('the opt-in is spent by the read that honours it: a later poll does not inherit it (#26)', async () => {
+    stubFetch({ paneReads: [{ live: true }, { live: false }] });
+
+    await store.getState().fetchSessionState(SESSION_ID, { autoReopen: true }); // pane was fine
+    await settle();
+    await store.getState().fetchSessionState(SESSION_ID); // it dies later, under the poll
+    await settle();
+
+    assert.deepEqual(restarts(), [], 'a pane that dies while watched is never restarted unasked');
+  });
+
+  it('a selected project that no longer exists is deselected, with the page router present (#21)', async () => {
+    stubFetch({});
+    const moves = [];
+    store.setState({ selectedProjectId: 'prj_gone', navigateView: (v) => moves.push(v) });
+
+    await store.getState().fetchProjects();
+    await settle();
+
+    assert.equal(store.getState().selectedProjectId, '', 'the vanished project must not stay selected');
+    assert.ok(moves.some((v) => v.project === ''), 'and the URL must drop it too');
+    const sessionReads = fetchStub.calls.filter((c) => c.includes('/projects/prj_gone/'));
+    assert.ok(sessionReads.length <= 1, `no request loop on the dead project, saw ${sessionReads.length}`);
+  });
+});

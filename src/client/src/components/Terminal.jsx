@@ -189,6 +189,11 @@ const Terminal = forwardRef(function Terminal(
 
   const [connState, setConnState] = useState('connecting') // connecting | connected | disconnected
   const [fontSize, setFontSize] = useState(14)
+  // Read by initTerminal, which an automatic reconnect calls from an old
+  // closure: without the ref a reconnect rebuilt the terminal at 14 px while
+  // the header still showed the size the user had chosen.
+  const fontSizeRef = useRef(14)
+  fontSizeRef.current = fontSize
   const [initError, setInitError] = useState('')
   const [cmdRunning, setCmdRunning] = useState(false)
   const [shellBusy, setShellBusy] = useState(false)
@@ -416,7 +421,7 @@ const Terminal = forwardRef(function Terminal(
       const fitAddon = new FitAddonCtor()
       term = new TerminalCtor({
         cursorBlink: true,
-        fontSize,
+        fontSize: fontSizeRef.current,
         fontFamily: '"Cascadia Code", "Fira Code", monospace',
         scrollback: 10000,
       })
@@ -612,6 +617,10 @@ const Terminal = forwardRef(function Terminal(
     }
 
     ws.onerror = () => {
+      // Same guard as onopen / onmessage / onclose: closing a socket that is
+      // still connecting fires `error` on it, and without the guard that
+      // superseded socket reset the state of the one that replaced it.
+      if (gen !== genRef.current) return
       initInFlightRef.current = false
       setStateSafe(setConnState, 'disconnected')
     }
@@ -637,6 +646,16 @@ const Terminal = forwardRef(function Terminal(
       }
     }
     setStateSafe(setConnState, 'disconnected')
+    // Nothing queued or tracked for the session that just ended may carry over
+    // to the next one: a queued command used to be typed into whichever
+    // session connected next, and a tracked command whose echo was lost left
+    // the terminal believing a command was still running for ever.
+    pendingCmdsRef.current = []
+    if (pendingMarkersRef.current && typeof pendingMarkersRef.current.clear === 'function') pendingMarkersRef.current.clear()
+    if (cmdRunningRef.current) {
+      cmdRunningRef.current = false
+      setStateSafe(setCmdRunning, false)
+    }
     shellBusyRef.current = false
     busySinceRef.current = null
     shellBusyShowRef.current = false
@@ -1136,7 +1155,7 @@ const Terminal = forwardRef(function Terminal(
             <Button
               variant="dangerGhost"
               size="sm"
-              onClick={() => ref.current?.close()}
+              onClick={() => sendToShell('\x03')}
               title="Send Ctrl+C to interrupt the running command"
               aria-label="Stop command"
               className="self-center mx-1 my-1 shrink-0"
@@ -1152,7 +1171,10 @@ const Terminal = forwardRef(function Terminal(
           <span className="text-xs text-ink-dim w-6 text-center">{fontSize}</span>
           <Button variant="ghost" size="sm" onClick={() => setFontSize((s) => Math.min(24, s + 1))} className="text-ink-faint">A+</Button>
           <span className="w-px h-4 bg-raised" />
-          <Button variant="ghost" size="sm" onClick={() => ref.current?.clear()} className="text-ink-faint">Clear</Button>
+          {/* A pinned session (Mission) is an agent's own screen, not a shell: typing
+              `clear` there would be SENT TO THE AGENT as a prompt. Clear only the
+              local scrollback in that case. */}
+          <Button variant="ghost" size="sm" onClick={() => (controlled ? termRef.current?.clear() : sendToShell('clear\n'))} title={controlled ? 'Clear the scrollback shown here' : 'Run clear in the shell'} className="msn-term-clear text-ink-faint">Clear</Button>
           <Button variant="ghost" size="sm" onClick={reconnect} className="text-ink-faint">Reconnect</Button>
 
           {onToggleCollapse && showCollapse && !fullscreen && (

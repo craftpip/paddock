@@ -161,6 +161,12 @@ let listToken = 0
 let historyToken = 0
 let projectToken = 0
 let paneToken = 0
+// session id → when its open action asked for an automatic reopen. Honoured by
+// the first pane read that lands for that session within a few seconds, then
+// forgotten: the periodic poll must never inherit it (it never restarts a
+// dead session on its own).
+const pendingAutoReopen = new Map()
+const AUTO_REOPEN_WINDOW_MS = 5000
 
 export const useMission = create((set, get) => {
   // Idea 2 (plan 68) hydrate: read the persisted view ONCE at store creation.
@@ -247,7 +253,6 @@ queue: null,
   // Restoration is a READ, independent of the listing. Only an accepted fresh
   // row-click navigation may opt into recovery; POP/reload never does.
   restoreView: async ({ project = '', session = '', conversation = '', terminalProject = '', subfolders = false }, { autoReopen = false, fresh = false } = {}) => {
-    const token = ++viewToken
     ++startToken
     const changedScope = project !== get().selectedProjectId || subfolders !== get().includeSubfolders
     if (changedScope) {
@@ -258,7 +263,13 @@ queue: null,
       if (project) get().fetchHistory(project, subfolders)
     }
     // Popup/list navigation for the same terminal must not reset its pane state.
+    // This return sits ABOVE the view-generation bump on purpose: a navigation
+    // that changes nothing about col 3 must not cancel the pane read already in
+    // flight for it. `startSession` opens the session and then moves the URL,
+    // which lands here; bumping first threw its pane read away and the new
+    // session sat on "Checking session…" until the next poll.
     if (!fresh && session && get().openSession?.id === session && !get().viewError) return
+    const token = ++viewToken
     set({ viewLoading: !!(session || conversation), viewError: '', viewUnavailable: false, historyView: null })
     if (!session && !conversation) {
       set({ openSession: null, sessionState: null, selectedConversationId: '', viewLoading: false })
@@ -294,6 +305,7 @@ queue: null,
       const data = await api('/api/mission/projects')
       if (token !== projectToken) return
       const projects = data.projects || []
+      const selectedBefore = get().selectedProjectId
       set((s) => {
         const patch = {
           projects,
@@ -303,9 +315,11 @@ queue: null,
           // gone (deleted elsewhere), THAT becomes the no-selection / all view —
           // plan 68 did away with the "always one selected" fallback (Finding A),
           // and restoring it would be the same dead-end the finding named.
-          selectedProjectId: s.navigateView || projects.some((p) => p.id === s.selectedProjectId)
-            ? s.selectedProjectId
-            : '',
+          // (This read `navigateView || some(...) ? sel : ''`, which parses as
+          // `(navigateView || some(...)) ? …`; navigateView is always set on the
+          // Mission page, so a vanished project was never deselected and its
+          // 404 looped against this read for ever.)
+          selectedProjectId: projects.some((p) => p.id === s.selectedProjectId) ? s.selectedProjectId : '',
         }
         // The open terminal is resolved by its OWN detail read. A listing is
         // not authority to clear another view's pinned snapshot.
@@ -316,6 +330,10 @@ queue: null,
       // scope, so there is exactly one "re-read what the selection resolves to":
       // the aggregate when there is none, the project's own rows when there is.
       const sel = get().selectedProjectId
+      // The URL owns the selection on the Mission page: when the selected
+      // project is gone, take it out of the URL too, or the next navigation
+      // event would put the dead id straight back.
+      if (!sel && selectedBefore) get().navigateView?.({ project: '' }, { replace: true })
       if (!sel) {
         if (!get().allLoaded) get().fetchAll()
       } else if (get().loadedFor !== sel) {
@@ -480,7 +498,10 @@ queue: null,
       // broken with nothing to click — re-read the list instead, which reselects
       // whatever exists now.
       if (e?.status === 404) {
-        set({ sessions: [], history: null, loadedFor: '', sessionsError: '' })
+        // Drop the selection FIRST: re-reading the projects while still
+        // pointing at the dead id is what made this branch call itself.
+        set({ sessions: [], history: null, loadedFor: '', sessionsError: '', sessionsLoading: false, selectedProjectId: get().selectedProjectId === id ? '' : get().selectedProjectId })
+        get().navigateView?.({ project: '' }, { replace: true })
         await get().fetchProjects()
         return
       }
@@ -568,8 +589,8 @@ queue: null,
         // for the session that is now open — it is the one on screen.
         // A start whose pane somehow did not come up reopens rather than showing
         // the closed notice, for the same reason a row click does.
-        get().fetchSessionState(data.session.id, { autoReopen: true })
         get().navigateView?.({ session: data.session.id })
+        get().fetchSessionState(data.session.id, { autoReopen: true })
       }
       return data.session
     } catch (e) {
@@ -626,6 +647,11 @@ queue: null,
   fetchSessionState: async (sessionId, { autoReopen = false } = {}) => {
     const id = sessionId || get().openSession?.id
     if (!id) return null
+    // A later plain read (a poll, a refresh after a mutation) supersedes this
+    // one. The user's opt-in to reopen must not be lost with it, so it is
+    // remembered for the session and honoured by whichever read lands.
+    if (autoReopen) pendingAutoReopen.set(id, Date.now())
+    else if (Date.now() - (pendingAutoReopen.get(id) || 0) < AUTO_REOPEN_WINDOW_MS) autoReopen = true
     const token = ++paneToken
     const generation = viewToken
     let state = null
@@ -661,6 +687,7 @@ queue: null,
       } : s))
       return null
     }
+    pendingAutoReopen.delete(id) // a read landed: the opt-in is spent either way
     if (!autoReopen || !state || state.live !== false) return state
     // They left on a different row while the read was in flight — restarting now
     // would relaunch a conversation nobody is looking at.
