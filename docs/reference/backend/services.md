@@ -4,9 +4,19 @@
 
 ## OpenCode Free Quota Detection (provider-limit.js)
 
-`screenUsageEvidence` recognizes the measured OpenCode 1.19.0 live-terminal status
-`Free usage exceeded, subscribe to Go [retrying in … attempt #…]`. A generic 429,
-empty assistant message, or idle worker is not this explicit terminal signal.
+`screenUsageEvidence` recognizes OpenCode's exhausted free-model notice in the live
+terminal, measured on 1.19.0 and 1.19.5. It accepts either of two forms:
+
+- the status line `Free usage exceeded, subscribe to Go [retrying in … attempt #…]`,
+  which must start its row;
+- the modal: a row with `Free limit reached`, padding and `esc`, followed within eight rows
+  by `Subscribe to OpenCode Go`.
+
+The status line needs about 75 columns and is clipped, not wrapped, in a narrower pane; the
+modal wraps. Matching both keeps detection working at any pane size (a 40x12 pane is normal
+when the queue panel is open). `evidence.via` says which form matched. A generic 429, an
+empty assistant message, an idle worker, or worker output that quotes the notice is not
+this signal.
 
 `mission.observeRunnerUsage` captures the runner's bound tmux pane. An explicit quota
 notice disables queue dispatch, sets `control_state: need_input` and

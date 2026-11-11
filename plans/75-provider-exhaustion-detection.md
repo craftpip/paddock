@@ -160,6 +160,43 @@ quota reset`. The original retry notice remains visible. No provider request,
 worker restart, or notice dismissal was used. The empty newest assistant now
 returns unknown for recovery, preventing episode re-arming during quota retries.
 
+## Live Capture — 2026-11-11 (second occurrence, different host)
+
+Captured on `meridian` before any retry, restart, dismissal or input to the worker.
+The only thing changed during capture was the browser's terminal width (the queue
+panel was collapsed), which makes tmux redraw the pane; the narrow capture was taken
+first.
+
+- PAD: `pad-dev` (opencode, root mode); project `prj_068ab7bddac910c6`.
+- Mission session `msn_4224a5941e23dc54`; runner `run_0b9f48cc913daae7`; tmux `msn-dd46743a`.
+- Agent conversation id: `ses_e381679c5ffe1gKNIfbjx4nWWs`.
+- OpenCode `1.19.5`; provider `opencode`, model `big-pickle` (label "Big Pickle").
+- Instruction sent 12:47:39 UTC; last completed step 12:48:01.916 (`finish: tool-calls`,
+  total 99385 tokens).
+- Store, read-only: newest assistant `msg_1caa6a785001zusxmYA2fRox6q`, created
+  12:48:01.925, **zero tokens, no `completed`, no `error`, no parts**. Same signature as
+  2026-10-19. It is still not the old newest-user signature.
+- Modal title `Free limit reached` with `esc` on the same row; body `Subscribe to OpenCode
+  Go for reliable access to the best open-source models for $10/month.`; link
+  `https://opencode.ai/go`; actions `don't show again`, `subscribe`.
+- Status line, visible only once the pane was wide:
+  `Free usage exceeded, subscribe to Go [retrying in 11h 55m attempt #1]`.
+
+**New finding: the detector was blind in a narrow pane.** With the queue panel open the
+pane was 40x12. At that width the status line is not drawn (only its closing `]`), and
+`provider-limit.js` matched that line alone. The runner read `Running` / "Waiting for
+current turn" from 12:48 until 12:50, when the pane was widened to 117x51; the next
+usage pass then moved it to `waiting_input` with the quota reason (12:50:44).
+
+Fix: `screenUsageEvidence` also recognises the modal, which wraps instead of clipping:
+a row with `Free limit reached`, padding, then `esc`, followed within eight rows by
+`Subscribe to OpenCode Go`. The two real panes are fixtures
+(`src/test/fixtures/opencode-quota-40x12.txt`, `-117x51.txt`); provider-limit tests 5/5,
+and removing the modal branch turns exactly the narrow-pane test red.
+
+Still not established: recovery after the reset (retry is ~12 h out), and callback
+execution (this runner has no callback script).
+
 ## 1. The one question, and why the answer picks the architecture
 
 > When the model provider's subscription/plan is exhausted, **does anything land

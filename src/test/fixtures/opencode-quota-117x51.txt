@@ -1,0 +1,51 @@
+  ┃        lima. Then mark this plan done.
+  ┃
+
+     ⚙ paddock_runner_agent_queue_update_item [item_id=rqi_f1b9f822-3386-43de-a42d-36db2526dac5, revision=56,
+       runner_id=run_0b9f48cc913daae7, status=done]
+
+     Lima done: created /root/.opencode/workspace/lima.txt containing lima (after sleep 8), marked lima.md done,
+     item done. Queue complete 16/16. Stopping.
+
+     ▣  Build · Big Pickle · 23.9s
+
+  ┃
+  ┃  [Infinite runner devrunner] Read /root/.opencode/workspace/plans/QUEUE.md and /root/.opencode/workspace/plans/
+  ┃  INDEX.md completely befo                                                             your turn — the
+  ┃  supervisor sends the nex   Free limit reached                                 esc   fore starting ANY item,
+  ┃  check that a file named                                                              another item — stop and
+  ┃  wait. Resume the "in pro   Subscribe to OpenCode Go for reliable access to the      se
+  ┃  paddock_runner_agent_que   best open-source models for $10/month.                   th
+  ┃  paddock_runner_agent_que                                                            stop immediately and
+  ┃  explain its reason. When                         █▀▀▀ █▀▀█                          on in reason, then STOP.
+  ┃  Mark "done" only when wo                         █ ▀█ █  █                          letion and wait. Do not
+  ┃  invent work. Queue autho                         ▀▀▀▀ ▀▀▀▀                          ned to item rqi_37aed054-
+  ┃  4626-4ee7-94a2-a55f7fa2a                                                            Call
+  ┃  paddock_runner_agent_que                                                            .items and queue.revision.
+  ┃   Call paddock_runner_age                   https://opencode.ai/go                   vision as the numeric
+  ┃  revision, and an accepte                                                            every accepted mutation
+  ┃  and on a revision confli                                                            do not take a second item.
+  ┃   Queue changes must go t     don't show again                         subscribe      blocked; never choose a
+  ┃  runner by PAD name. If t                                                            iting the file.
+  ┃
+
+  ┃
+  ┃  $ test -f /root/.opencode/workspace/plans/QUEUE.paused && echo "PAUSED EXISTS" || echo "no pause file"
+  ┃
+  ┃  no pause file
+  ┃
+
+     → Read plans/QUEUE.md
+     → Read plans/INDEX.md
+     ⚙ paddock_runner_agent_queue_read [runner_id=run_0b9f48cc913daae7]
+     → Read plans/mike.md
+
+     ▣  Build · Big Pickle
+
+  ┃
+  ┃
+  ┃
+  ┃  Build · Big Pickle OpenCode
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+   ■⬝⬝⬝⬝⬝⬝⬝ Free usage exceeded, subscribe to Go [retrying in 11h 55m attempt #1]                     esc interrupt
+
