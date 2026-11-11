@@ -684,7 +684,7 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   image `paddock-webui:latest`) — the **control plane**: Node.js/Express on
   port 6789 managing all PADs via `/var/run/docker.sock`.
 - **`src/`** — webui source, bind-mounted to `/app` (backend edits need no
-  rebuild). Express `app.js` + `services/`; **`src/services/drivers/`** = one
+  rebuild). Express `app.js` (boot, middleware, terminal WebSocket) + `routes/` (the REST API, one file per area) + `services/`; **`src/services/drivers/`** = one
   module per agent type (openclaw, opencode, picoclaw, hermes, codex).
 - **`src/vm-builds/<type>/`** — per-type Dockerfile + start.sh; images tag
   `paddock-vm-<type>:latest`.

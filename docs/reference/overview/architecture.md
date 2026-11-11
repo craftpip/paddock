@@ -32,7 +32,8 @@ Container names use the `CONTAINER_PREFIX` from `.env` (`pad` here) — never ha
 
 ```
 src/
-├── app.js                    Express server, API routes, WebSocket terminal, auth
+├── app.js                    Express boot, middleware, timers, WebSocket terminal, shared helpers
+├── routes/                   The REST API, one file per area (see "API Pattern")
 ├── mcp.js                    The paddock's own /mcp Streamable HTTP server (19 tools)
 ├── middleware/
 │   ├── auth.js               Session-based auth, CSRF tokens, login/logout
@@ -71,7 +72,28 @@ src/
 4. Return to frontend as agent list
 
 ### API Pattern
-- All modern API endpoints live in `app.js` under `/api/agents/:name/*`
+- The REST API lives in `src/routes/`, one file per area. Each exports
+  `register(app, ctx)` and `app.js` calls them in turn, after its middleware and
+  before the page catch-all:
+
+  | File | Routes |
+  |---|---|
+  | `auth.js` | `/api/session`, `setup`, `login`, `logout`, `users`, `profile` |
+  | `agents.js` | `/api/agents` list, create and lifecycle; `/api/vms`, `/api/containers` |
+  | `agent-settings.js` | `/api/agents/:name/` settings, devcontainer, web, ports, health, config |
+  | `agent-workspace.js` | `/api/agents/:name/workspace/*` |
+  | `agent-integrations.js` | `/api/agents/:name/` mcp, skills, channels, terminal sessions, orchestrator |
+  | `system.js` | `/api/paths`, `/api/env`, `/api/config`, `/api/agent-types`, `/api/admin` |
+  | `mission.js` | `/api/mission` projects and sessions |
+  | `mission-runners.js` | `/api/mission/runners/*` |
+  | `vault.js` | `/api/vault` |
+
+  A route file requires the services it uses itself. `ctx` carries only helpers that
+  `app.js` owns: ones shared by several areas or by the terminal WebSocket, and any that
+  touch `app.js`'s reassignable state (`dockerCache`, `envCache`). To add a route, put it
+  in its area's file; if it needs an `app.js` helper, add the name to that file's `ctx`
+  destructure and to its registration in `app.js` (`route-table.test.js` checks the two
+  match, and that no route file passes 700 lines)
 - POST routes require CSRF token via `x-csrf-token` header
 - Responses are JSON
 - Backend commands use `runCmd()` (execFile wrapper) or `spawn()` for streaming

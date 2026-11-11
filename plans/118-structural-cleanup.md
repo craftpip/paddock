@@ -1,6 +1,6 @@
 # Plan 118 — Structural cleanup: one runner view, split files, instant dispatch
 
-## Status: In progress — 2026-11-11 — 4/7 phases done (Phases 1–4); next: Phase 5
+## Status: In progress — 2026-11-11 — 5/7 phases done (Phases 1–5); next: Phase 6
 
 ## Why
 
@@ -46,7 +46,7 @@ disagree, then makes the files small enough to read.
 - [x] Phase 2 — Split `mission.js` (2026-11-11, see "Phase 2 — as built")
 - [x] Phase 3 — Dispatch the next plan when the worker reports done (2026-11-11, see "Phase 3 — as built")
 - [x] Phase 4 — One test command that finishes (2026-11-11, see "Phase 4 — as built")
-- [ ] Phase 5 — Split `app.js` routes
+- [x] Phase 5 — Split `app.js` routes (2026-11-11, see "Phase 5 — as built")
 - [ ] Phase 6 — Turn `AGENTS.md` lessons into tools
 - [ ] Phase 7 — Stop tracking `src/public`
 
@@ -406,6 +406,33 @@ no console errors.
 **Done when:** `app.js` is under 1200 lines and the route table is unchanged.
 
 ---
+
+### Phase 5 — as built
+
+- `app.js` 4161 → 1188 lines. 157 API routes moved to nine files in
+  `src/routes/`: `auth`, `agents`, `agent-settings`, `agent-workspace`,
+  `agent-integrations`, `system`, `mission`, `mission-runners`, `vault`
+  (largest 519 lines). The page catch-all, middleware, timers and the terminal
+  WebSocket stay in `app.js`.
+- Shape: each file exports `register(app, ctx)` and keeps the original
+  `app.get(...)` calls, rather than an `express.Router()` per area. A router
+  would have needed every path rewritten; this way the handlers are moved
+  byte-for-byte (scripted over the syntax tree, as in Phase 2).
+- A helper used by one area moved with it (26 moved). A helper used by several
+  areas, or one that reads or writes a reassignable top-level variable
+  (`dockerCache`, `envCache`), stays in `app.js` and is handed over in `ctx`:
+  a `let` passed to another module would be a stale copy.
+- The dead EJS `routes/agents.js` is gone (replaced by the new file of that name).
+- Guard is static, not a booted app: requiring `app.js` starts the server.
+  `route-table.test.js` (5) reads the table by following the registrations:
+  same 158 routes, no duplicate, every overlapping pair in its original order
+  (only the catch-all overlaps anything, and it is still last), no unbound
+  name in `app.js` or any route file, and each `ctx` matches what its file
+  destructures.
+- Live: all 72 GET routes called against `pad-dev` and `devrunner` (61 × 200,
+  the rest ordinary validation replies, nothing in the server log); every page
+  and agent tab loaded with no failed request; terminal attached.
+- `npm test`: 64 files, 1175 tests.
 
 ## Phase 6 — Turn `AGENTS.md` lessons into tools
 

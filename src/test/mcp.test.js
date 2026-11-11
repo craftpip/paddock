@@ -2228,7 +2228,8 @@ describe('MCP Server - project lookup and provenance (plan 67)', () => {
         /(?:create|insert)Session\(\s*project\.id,\s*\{[^}]*createdBy[^}]*\}\s*\)/,
         'startSession threads createdBy into the insert'
       );
-      const app = fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8');
+      // The Mission REST routes live in routes/mission.js since plan 118.
+      const app = fs.readFileSync(path.join(__dirname, '..', 'routes', 'mission.js'), 'utf8');
       assert.match(app, /createdBy: req\.session && req\.session\.userId \? `user:\$\{req\.session\.userId\}` : null/, 'the UI stamps the human too');
     });
     it('the migration adds the column for existing databases without back-filling a guess', () => {
