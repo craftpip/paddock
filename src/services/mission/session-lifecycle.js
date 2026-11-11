@@ -127,7 +127,18 @@ async function agentHistory(projectId, { limit = 50, includeSubfolders = false }
   };
 }
 
+/** What an agent conversation id may look like (opencode `ses_…`, codex and
+ *  claude UUIDs). It ends up in a shell command line. */
+const AGENT_SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+
 async function startSession(projectId, { label = '', origin = 'human', cols = 0, rows = 0, agentSessionId = '', createdBy = null, idempotencyKey = '' } = {}) {
+  // Checked before the PAD is touched at all. The id is typed into the pane's
+  // shell as part of the launch command, and typed again on every relaunch.
+  // Every agent's conversation ids are plain tokens, so anything else is
+  // refused rather than quoted and hoped for.
+  if (String(agentSessionId || '').trim() && !AGENT_SESSION_ID_RE.test(String(agentSessionId).trim())) {
+    throw new MissionError('mission_bad_agent_session_id', 'agent_session_id must be 1 to 128 letters, digits, "_" or "-" (the id the agent itself printed).', 400);
+  }
   const project = getProject(projectId);
   const driver = assertMissionAgent(project.agent_type);
   assertPadRunning(project.agent_name);
@@ -387,6 +398,10 @@ async function endSession(sessionId, { actor = null } = {}) {
     throw new MissionError('mission_session_dead', `Session ${sessionId} has no live pane — it already ended (its row is dated by the next listing). There is nothing to close.`, 409);
   }
   noteOutput(session.id, captured.text);
+  // Same order as the page's Close: a runner bound to this session is stopped
+  // FIRST. Otherwise the watcher sees a dead pane on its next pass and
+  // restarts the TUI in the session that was just closed on purpose.
+  disableRunnerForSession(session.id);
   if (await padTmux.hasSession(vmName, session.tmux_id)) {
     await padTmux.killSession(vmName, session.tmux_id);
   }

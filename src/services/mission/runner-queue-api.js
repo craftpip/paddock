@@ -444,7 +444,14 @@ async function updateRunnerQueueCustomInstructions(id, customInstructions, revis
 async function resolveRunnerQueue(id, itemId, answer, revision, idempotencyKey, { actor = null } = {}) {
   const runner = getRunner(id);
   if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
-  const runtime = runnerTransition.getRuntime(id);
+  let runtime = runnerTransition.getRuntime(id);
+  // Paused with a blocked plan is the same situation as waiting for input,
+  // reached another way (a pause that the plan outlived, or an earlier answer
+  // that could not be sent). Name it, so the answer can go through.
+  if (runtime?.state === 'paused' && runnerQueue.snapshot(id).items.some((queued) => queued.id === itemId && queued.status === 'need_input')) {
+    runnerTransition.applyQueueBlocked(id, { actor: actor || 'user', details: { itemId, reason: 'Answering a blocked plan while paused.' } });
+    runtime = runnerTransition.getRuntime(id);
+  }
   if (!runtime || runtime.state !== 'waiting_input') {
     throw new MissionError('runner_invalid_state', `Runner must be waiting_input to resolve (current: ${runtime?.state || 'setup_required'})`);
   }
@@ -499,7 +506,11 @@ async function resolveRunnerQueue(id, itemId, answer, revision, idempotencyKey, 
     // Reserve the answer as its own durable operation before typing. It may
     // resume only after the exact answer receipt is observed.
     const baseline = agentStore.readTurn(agent, session.agent_session_id);
-    const answerText = `Resolution for "${item.plan}": ${answer}`;
+    // One line, like every other instruction the runner sends. The pane
+    // submits each line with its own Enter, so a two-line answer arrived as two
+    // messages, neither of which hashed to what was recorded: the receipt could
+    // never be matched and the runner stuck on "Waiting for worker".
+    const answerText = require('../prompt-templates').normalizePromptForSend(`Resolution for "${item.plan}": ${answer}`);
     const operationId = `rop_${crypto.randomUUID()}`;
     const resolveOperation = runnerTransition.applyResolveBegin(id, { actor: actor || 'user', details: {
       operationId, kind: 'resolution', conversationId: session.agent_session_id,
@@ -560,6 +571,13 @@ async function resolveRunnerQueue(id, itemId, answer, revision, idempotencyKey, 
     const currentRuntime = runnerTransition.getRuntime(id);
     if (currentRuntime?.state === 'dispatching') {
       runnerTransition.applyPause(id, { actor: actor || 'user', details: { reason: 'Resolution did not reach a confirmed receipt.' } });
+      // The plan is still blocked, so the runner is still waiting for input,
+      // not merely paused: leave it where the answer can be sent again.
+      try {
+        if (runnerQueue.snapshot(id).items.some((queued) => queued.id === itemId && queued.status === 'need_input')) {
+          runnerTransition.applyQueueBlocked(id, { actor: actor || 'user', details: { itemId, reason: 'The answer could not be delivered; the plan still needs it.' } });
+        }
+      } catch { /* stays paused, which the entry check above also accepts */ }
       runnerTransition.setReason(id, 'resolution_failed', e.message);
       syncQueuePausedMarker(id, true);
     }

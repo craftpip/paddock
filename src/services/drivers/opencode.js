@@ -1,3 +1,8 @@
+/** A conversation id as it is typed into a shell: anything that is not a plain
+ *  token character is dropped. startSession already refuses such an id; this
+ *  is the second lock, for ids already stored before that check existed. */
+const safeSessionId = (id) => String(id == null ? '' : id).replace(/[^A-Za-z0-9_-]/g, '');
+
 const { execFile } = require('child_process');
 const { imageFor } = require('../instance-image');
 const { sq, bootstrap } = require('./mcp-util');
@@ -40,7 +45,7 @@ const OPENCODE = {
    *  no path flag is needed (and `opencode` has no `--cwd` to invent one with). */
   tuiLaunch: {
     fresh: () => OPENCODE.tuiCommand,
-    resume: ({ sessionId }) => `${OPENCODE.tuiCommand} -s ${sessionId}`,
+    resume: ({ sessionId }) => `${OPENCODE.tuiCommand} -s ${safeSessionId(sessionId)}`,
     continueLatest: () => `${OPENCODE.tuiCommand} -c`,
   },
 

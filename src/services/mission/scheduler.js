@@ -129,7 +129,11 @@ async function dispatchNext(runnerId, session, project, agent, queue, kind, gen 
 
 /** The supervisor watch loop — called periodically for enabled runners. */
 async function runnerWatchTick() {
-  const runners = getDb().prepare("SELECT runner_id AS id FROM runner_runtime WHERE state = 'running'").all();
+  // `awaiting_receipt` is watched too. Nothing used to look at it, so an
+  // instruction whose receipt landed just after the dispatch stopped waiting
+  // left the runner on "Waiting for worker" until a human pressed Reconcile,
+  // with the worker's own queue updates refused in the meantime.
+  const runners = getDb().prepare("SELECT runner_id AS id FROM runner_runtime WHERE state IN ('running', 'awaiting_receipt')").all();
   for (const r of runners) {
     try {
       await watchRunner(r.id);
@@ -207,6 +211,17 @@ function kickRunnerWatch(runnerId) {
 async function runnerWatchOnce(runnerId) {
   const runner = getRunner(runnerId);
   const runtime = runnerTransition.getRuntime(runnerId);
+  if (runner && runtime && runtime.state === 'awaiting_receipt') {
+    // The same reconciliation the Reconcile button runs: confirm the exact
+    // receipt if the worker's store now shows it, hold once the deadline has
+    // passed with the worker idle, otherwise keep waiting. Never a resend.
+    try {
+      await reconcileRunnerOperation(runnerId, { actor: 'watcher' });
+    } catch (e) {
+      console.log(`[runner watch] ${runnerId}: awaiting receipt, not reconciled: ${e.code || e.message}`);
+    }
+    return;
+  }
   if (!runner || !runtime || runtime.state !== 'running') return;
   const gen = runner.run_generation;
 
@@ -290,7 +305,7 @@ async function runnerWatchOnce(runnerId) {
   const decision = computeSchedulerState(observed, queue, turn, Date.now());
   recordSchedulerDecision(runnerId, gen, decision);
   if (decision.schedulerDecision === 'dispatch') {
-    const kind = observed.last_dispatch_revision !== queue.hash ? 'rev' : 'retry';
+    const kind = sameRevision(observed.last_dispatch_revision, queue.hash) ? 'retry' : 'rev';
     await dispatchNext(runnerId, session, project, agent, queue, kind, gen);
   } else if (decision.schedulerDecision === 'need_input') {
     await stopWith('need_input', decision.reason, 'scheduler_need_input');
@@ -343,9 +358,21 @@ function computeSchedulerState(runner, queue, turn, now = Date.now(), { explicit
   const lastDispatch = Date.parse(runner.last_nudge_at || runner.last_dispatch_at);
   const intervalRemaining = runner.min_nudge_interval_ms - (now - lastDispatch);
   if (Number.isFinite(lastDispatch) && intervalRemaining > 0) return decision('wait_nudge_interval', `Waiting for nudge interval (${Math.ceil(intervalRemaining / 1000)}s)`, intervalRemaining);
-  const changed = runner.last_dispatch_revision !== queue.hash;
+  const changed = !sameRevision(runner.last_dispatch_revision, queue.hash);
   if (!changed && runner.retry_count >= runner.no_progress_budget) return decision('need_input', `No progress after ${runner.no_progress_budget} dispatches — the queue needs a human`);
   return decision('dispatch', changed ? 'Worker idle — ready for next queued item' : 'Worker idle — ready to continue current item');
+}
+
+/** Is the queue at the revision the last instruction was sent for? The column
+ *  is TEXT and a JS number is bound as a float, so revision 2 is stored and
+ *  read back as the string "2.0" while the live revision is the number 2.
+ *  Compared with `!==` the two were never equal: every send counted as "the
+ *  queue changed" and the no-progress budget could never run out. */
+function sameRevision(stored, live) {
+  if (stored === null || stored === undefined || stored === '' || live === null || live === undefined) return false;
+  const a = Number(stored);
+  const b = Number(live);
+  return Number.isFinite(a) && Number.isFinite(b) ? a === b : String(stored) === String(live);
 }
 
 function recordSchedulerDecision(id, gen, decision) {
@@ -362,7 +389,7 @@ function observeRunnerTurn(runner, session, turn) {
   const sameIdle = runner.worker_state === 'idle' && runner.worker_turn_id === turn.userId;
   const idleSince = turn.state === 'idle' ? (sameIdle ? runner.idle_since : (turn.completedAt || new Date().toISOString())) : null;
   getDb().prepare('UPDATE infinite_runners SET worker_state = ?, worker_turn_id = ?, idle_since = ?, last_progress_at = ?, retry_count = ? WHERE id = ? AND run_generation = ? AND operation_generation = ?')
-    .run(turn.state, turn.userId || null, idleSince, advanced ? turn.progressAt : runner.last_progress_at, advanced ? 0 : runner.retry_count, runner.id, runner.run_generation, runner.operation_generation);
+    .run(turn.state, turn.userId || null, idleSince, advanced ? turn.progressAt : runner.last_progress_at, runner.retry_count, runner.id, runner.run_generation, runner.operation_generation);
   if (runner.operation_session_id === session.agent_session_id && runner.operation_id) {
     const accepted = turn.userId && turn.userId !== runner.operation_baseline_user_id && turn.inputHash === runner.operation_prompt_hash;
     const received = runner.operation_receipt_user_id || (accepted ? turn.userId : null);
@@ -398,7 +425,12 @@ function observeRunnerTurn(runner, session, turn) {
  * Uses atomic DB check-and-set for ownership to prevent duplicate dispatches
  * from overlapping ticks or concurrent requests.
  */
-async function canDispatch(runnerId, { session, project, agent, queue, kind, gen }) {
+/** The turn as it really stands once its pane is known to be gone: over. */
+function interruptedByDeadPane(turn) {
+  return { ...turn, state: 'idle', completedAt: turn.completedAt || turn.progressAt || new Date().toISOString(), interruptedBy: 'pane_gone' };
+}
+
+async function canDispatch(runnerId, { session, project, agent, queue, kind, gen, paneDead = false }) {
   let fresh = getRunner(runnerId);
   const explicit = kind === 'start';
   const quotaRecovery = kind === 'quota-recovery';
@@ -422,7 +454,11 @@ async function canDispatch(runnerId, { session, project, agent, queue, kind, gen
   if (!session?.agent_session_id) return { allowed: false, code: 'runner_worker_identity_unavailable', reason: 'The worker session has no conversation id, so its turns cannot be observed. Close the worker session and press Run to start a fresh one.', freshRunner: fresh };
   if (fresh.session_id !== session.id) return { allowed: false, code: 'runner_worker_identity_unavailable', reason: 'The runner is bound to a different worker session than this one.', freshRunner: fresh };
   if (getSession(session.id)?.locked) return { allowed: false, code: 'runner_worker_locked', reason: 'The worker session is solo-locked by a human; unlock it to let the runner send.', freshRunner: fresh };
-  const turn = agentStore.readTurn(agent, session.agent_session_id);
+  let turn = agentStore.readTurn(agent, session.agent_session_id);
+  // A turn the store calls "working" cannot be real when the pane that was
+  // running it is gone: nothing is left to finish it, so the store says
+  // "working" for ever and the idle gate below would refuse every recovery.
+  if (turn.state === 'working' && paneDead) turn = interruptedByDeadPane(turn);
   fresh = observeRunnerTurn(fresh, session, turn);
   const currentQueue = canonicalQueueProjection(fresh, project, agent, runnerQueue.snapshot(fresh.id));
   if (currentQueue.condition !== 'ok') {
@@ -465,7 +501,12 @@ function acquireDispatchOwnership(runnerId, gen, kind, queueHash, session, messa
     });
     const result = db.prepare(`UPDATE infinite_runners SET last_dispatch_at = ?, last_nudge_at = ?,
       last_dispatch_revision = ?, retry_count = ?, updated_at = ? WHERE id = ?`)
-      .run(nowIso, nowIso, queueHash || null, kind === 'retry' ? fresh.retry_count + 1 : fresh.retry_count,
+      // The count is of consecutive nudges for an UNCHANGED queue. A send for a
+      // changed queue starts it over; conversation activity alone does not (a
+      // worker that answers every nudge without touching its plan is exactly
+      // the stuck worker this budget exists to stop, and each answer used to
+      // reset the count).
+      .run(nowIso, nowIso, queueHash || null, kind === 'retry' ? fresh.retry_count + 1 : 0,
         nowIso, runnerId);
     if (!result.changes) throw new MissionError('runner_dispatch_owned', 'Another instruction owns this runner.', 409);
     return { operationId, operationGeneration, gen: transitionResult.runtime.generation, runtimeGeneration: transitionResult.runtime.generation };
@@ -627,7 +668,7 @@ async function reconcileRunnerOperation(runnerId, { actor = null } = {}) {
 
   // No exact receipt yet — check if we should hold the operation
   const deadline = Date.parse(runner.operation_deadline_at);
-  const noResponseTimeout = 10 * 60 * 1000; // RUNNER_NO_RESPONSE_TIMEOUT_MS
+  const noResponseTimeout = RUNNER_NO_RESPONSE_TIMEOUT_MS;
   const unanswered = turn.state === 'idle'
     && !runner.operation_receipt_user_id
     && Number.isFinite(deadline)
@@ -656,8 +697,14 @@ async function reconcileRunnerOperation(runnerId, { actor = null } = {}) {
 }
 async function recoverWorkerSession(runnerId, gen, project, deadSession) {
   const sup = await getRunnerForSupervision(runnerId);
-  const can = await canDispatch(runnerId, { ...sup, session: deadSession, kind: 'recovery', gen });
-  if (!can.allowed) return;
+  // This function is only reached after the watch pass saw the pane dead.
+  const can = await canDispatch(runnerId, { ...sup, session: deadSession, kind: 'recovery', gen, paneDead: true });
+  if (!can.allowed) {
+    // Say why, where the page shows it. Returning silently left the runner
+    // "running" with no worker and no explanation.
+    setRunnerReason(runnerId, `Worker pane is gone; recovery is waiting: ${can.reason || 'not ready yet'}`);
+    return;
+  }
   await ensureRunnerIndex(sup.agent, project);
   // Plan 91 §Phase 4: recovery speaks the rendered `recovery` template. A
   // template failure withholds the recovery send with a reason — it must never

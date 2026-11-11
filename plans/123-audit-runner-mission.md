@@ -1,6 +1,6 @@
 # Plan 123 — Audit fixes: the runner and Mission services
 
-## Status: In progress — 2026-11-11 — 0/20 items fixed; all traced in code by a read-only review, none yet reproduced
+## Status: In progress — 2026-11-11 — 7/20 items fixed (#1–#7, all three high ones); remaining: #8–#20
 
 ## Why
 
@@ -62,15 +62,33 @@ handling in reorder and remove; the opencode runner-MCP wiring.
   and this file says so.
 - `npm test` green.
 
+## Results so far (2026-11-11)
+
+Every fix below had a failing test first, on the fake-pane harness in
+`runner-dispatch-invariants.test.js` (28 tests now) or
+`runner-canonical-queue.test.js`, and a mutation control that bites.
+`npm test`: 74 files, 1230 tests. No live run on the real worker: opencode's
+free limit has not reset (plan 75).
+
+| # | Fix |
+|---|---|
+| 1 | The periodic watch also covers `awaiting_receipt`: it runs the same reconciliation as the Reconcile button (confirm the exact receipt, or hold once the deadline has passed with the worker idle; never a resend) |
+| 2 | Revisions are compared as numbers. The trace showed the stored value was the text `2.0` (a float bound into a TEXT column) against the number `2`. And the no-progress count now means what it says: consecutive nudges for an unchanged queue. It used to be reset by any conversation activity, so a worker that answered each nudge without touching its plan was never stopped |
+| 3 | A turn the store calls "working" is treated as over when its pane is gone. The watch pass recovers the worker (or says why it is waiting); Run no longer answers "worker not idle" and no longer adopts a dead worker as an active turn |
+| 4 | The resolve answer is normalised to one line before it is hashed and sent. The test's fake pane now submits per line, like the real one |
+| 5 | `agent_session_id` must be a plain token and is refused before the PAD is touched; the three `tuiLaunch.resume` builders also strip anything else from ids already stored |
+| 6 | A pause that the plan outlives by asking a question, and an answer that could not be sent, both land in `waiting_input`; Resolve also accepts paused-with-blocker |
+| 7 | `endSession` stops the session's runner before killing the pane, like the page's Close |
+
 ## Progress
 
-- [ ] 1 Watch `awaiting_receipt`; unanswered sends reach hold
-- [ ] 2 Revision compared as a number
-- [ ] 3 A dead pane mid-turn is recovered or held, never ignored
-- [ ] 4 Resolve answer normalised before hashing and sending
-- [ ] 5 `agentSessionId` validated and shell-quoted
-- [ ] 6 Paused-with-blocker can be resolved
-- [ ] 7 `endSession` stops the runner first
+- [x] 1 Watch `awaiting_receipt`; unanswered sends reach hold
+- [x] 2 Revision compared as a number
+- [x] 3 A dead pane mid-turn is recovered or held, never ignored
+- [x] 4 Resolve answer normalised before hashing and sending
+- [x] 5 `agentSessionId` validated and shell-quoted
+- [x] 6 Paused-with-blocker can be resolved
+- [x] 7 `endSession` stops the runner first
 - [ ] 8 tmux options applied when a server exists
 - [ ] 9 Runner creation does not overwrite an existing file
 - [ ] 10 Reserved plan names checked after resolving

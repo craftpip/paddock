@@ -598,8 +598,11 @@ it('resolves a blocker through one owned answer operation and resumes only on ex
     store.readTurn = () => turn;
     tmux.sendText = async (_pad, _tmux, text) => {
       sent++;
-      turn = { state: 'working', userId: `answer-${sent}`, inputHash: crypto.createHash('sha256').update(text.trimEnd()).digest('hex'), progressAt: new Date().toISOString() };
-      return { lines: 1 };
+      // Like the real pane: each line is submitted with its own Enter, so the
+      // worker's newest input is only the LAST line of whatever was typed.
+      const typed = text.trimEnd().split('\n');
+      turn = { state: 'working', userId: `answer-${sent}`, inputHash: crypto.createHash('sha256').update(typed.at(-1)).digest('hex'), progressAt: new Date().toISOString() };
+      return { lines: typed.length };
     };
     const project = mission.createProject({ name: 'resolve', agent: PAD, folder: FOLDER, plansFolder: 'plans' });
     const session = mission.createSession(project.id, { agentSessionId: 'ses_resolve' });
@@ -613,7 +616,9 @@ it('resolves a blocker through one owned answer operation and resumes only on ex
     queue = await mission.updateRunnerQueueItem(runner.id, itemId, { status: 'in_progress' }, queue.queue.revision, { actor: 'worker', source: 'worker' });
     queue = await mission.updateRunnerQueueItem(runner.id, itemId, { status: 'need_input', reason: 'Which option?' }, queue.queue.revision, { actor: 'worker', source: 'worker' });
     assert.equal(queue.queue.execution.state, 'waiting_input');
-    const result = await mission.resolveRunnerQueue(runner.id, itemId, 'Use option A.', queue.queue.revision, 'resolve-key-1');
+    // A two-line answer (plan 123 #4): it must still arrive as ONE message,
+    // or its receipt can never be matched.
+    const result = await mission.resolveRunnerQueue(runner.id, itemId, 'Use option A.\nAnd keep the tests.', queue.queue.revision, 'resolve-key-1');
     assert.ok(result.delivered);
     assert.equal(result.awaitingReceipt, undefined);
     assert.equal(sent, 1);

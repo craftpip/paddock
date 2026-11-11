@@ -197,7 +197,17 @@ async function startRunner(id, { actor = null } = {}) {
   // A resolution can write successfully but lack a pane/store confirmation. If
   // its worker already moved the same queue forward, an explicit Run adopts that
   // verified active turn instead of sending a duplicate startup instruction.
-  if (runtime.state === 'paused' && queue.aggregate.state === 'in progress' && session?.agent_session_id) {
+  // Was the worker's pane already gone when Run was pressed? Then whatever
+  // turn the store still calls "working" died with it: it must not be adopted
+  // as a live worker, and it must not make Run refuse "worker not idle".
+  let workerWasGone = false;
+  if (session) {
+    try {
+      const paneAtStart = await padTmux.paneState(project.agent_name, session.tmux_id);
+      workerWasGone = !paneAtStart.live || paneAtStart.tuiAlive === false;
+    } catch { /* unreadable: assume it is there, the gates below still apply */ }
+  }
+  if (runtime.state === 'paused' && queue.aggregate.state === 'in progress' && session?.agent_session_id && !workerWasGone) {
     const activeTurn = agentStore.readTurn(agent, session.agent_session_id);
     if (activeTurn.state === 'working') {
       runnerTransition.applyAdoptActiveTurn(id, { actor: actor || 'user', details: { conversationId: session.agent_session_id, reason: 'adopting verified active turn' } });
@@ -234,7 +244,7 @@ async function startRunner(id, { actor = null } = {}) {
       runnerTransition.applyTurnCompleted(id, { actor: actor || 'user', details: { operationId: runner.operation_id, reason: 'interrupted turn explicitly recovered' } });
     }
   }
-  const can = await canDispatch(id, { session, project, agent, queue, kind: 'start', gen: runner.run_generation });
+  const can = await canDispatch(id, { session, project, agent, queue, kind: 'start', gen: runner.run_generation, paneDead: workerWasGone });
   if (!can.allowed) await refuse(can.code || 'runner_worker_not_idle', can.reason);
   // Send the startup message FIRST, enable dispatch only after it lands. It is
   // ONE logical submission: Mission types line by line with an Enter each, so

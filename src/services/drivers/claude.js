@@ -1,3 +1,8 @@
+/** A conversation id as it is typed into a shell: anything that is not a plain
+ *  token character is dropped. startSession already refuses such an id; this
+ *  is the second lock, for ids already stored before that check existed. */
+const safeSessionId = (id) => String(id == null ? '' : id).replace(/[^A-Za-z0-9_-]/g, '');
+
 const { execFile } = require('child_process');
 const { imageFor } = require('../instance-image');
 const { sq, bootstrap } = require('./mcp-util');
@@ -37,7 +42,7 @@ const CLAUDE = {
    *  `continueLatest` is only meaningful for a folder claude has worked in. */
   tuiLaunch: {
     fresh: () => CLAUDE.tuiCommand,
-    resume: ({ sessionId }) => `${CLAUDE.tuiCommand} -r ${sessionId}`,
+    resume: ({ sessionId }) => `${CLAUDE.tuiCommand} -r ${safeSessionId(sessionId)}`,
     continueLatest: () => `${CLAUDE.tuiCommand} -c`,
   },
 

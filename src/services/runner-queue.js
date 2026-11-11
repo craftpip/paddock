@@ -337,6 +337,12 @@ function updateItem(runnerId, id, patch, revision, { actor = null, source = 'use
     if (source === 'worker' && !finishingPaused && status === 'need_input' && item.status !== 'need_input') {
       require('./runner-transition').applyNeedInput(runnerId, { actor: actor || 'worker', details: { itemId: id, reason } });
     }
+    // The plan a pause interrupted ended in a question. The runner is paused,
+    // and a paused runner with a blocked plan had no way out: Resolve wanted
+    // `waiting_input`, Run refused a blocked queue. Say what it is waiting for.
+    if (source === 'worker' && finishingPaused && status === 'need_input' && item.status !== 'need_input') {
+      require('./runner-transition').applyQueueBlocked(runnerId, { actor: actor || 'worker', details: { itemId: id, reason: reason || 'The plan needs input.' } });
+    }
     return id;
   });
 }
