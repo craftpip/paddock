@@ -120,6 +120,11 @@ hashes to the instruction. It stops early if Pause, Close or a newer operation t
 `sendText` confirms on new store activity, which can land before the user message's parts can be
 read, so a single read reported delivered instructions as unconfirmed.
 
+An automatic dispatch withheld at the write boundary (lock, queue revision moved, projection
+drift, a new human turn) pauses the runner once and logs one `dispatch_failed`. Later watcher
+ticks do not retry it; only an explicit Run resumes. Pre-113 code retried such a refusal every
+nudge interval indefinitely.
+
 `publicRunner` (served by `/api/mission/runners`) never contradicts the canonical runtime. When no
 session is bound, the worker fields read `unknown`. When the runtime is inactive, the
 `scheduler_*` fields follow `execution.state`, so a stale idle-grace countdown does not outlive

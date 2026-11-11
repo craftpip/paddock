@@ -303,3 +303,31 @@ it('unreadable project INDEX preparation withholds the prompt and exposes a repa
     plans.initProjectPlans = originalInit;
   }
 });
+
+// Plan 114 §4: an automatic dispatch refused at the write boundary must STOP the
+// runner, not retry every tick (lap logged 25+ identical dispatch_failed rows,
+// one every 2 minutes, under the pre-113 code). The refusal is made
+// deterministic by solo-locking the worker from inside sendText's store-baseline read.
+it('a dispatch refused at the write boundary pauses once and is not retried by later ticks', async () => {
+  turn = { ...turn, state: 'idle', completedAt: new Date(Date.now() - 5000).toISOString(), progressAt: new Date(Date.now() - 5000).toISOString() };
+  // sendText reads the store baseline immediately before its write-boundary
+  // check, so locking there lands between canDispatch and the write.
+  const activity = store.readActivity;
+  let armed = true;
+  store.readActivity = (...args) => {
+    if (armed) { getDb().prepare('UPDATE mission_sessions SET locked = 1 WHERE id = ?').run(session.id); armed = false; }
+    return activity(...args);
+  };
+  const detail = await mission.readRunnerQueue(runner.id);
+  await mission.updateRunnerQueueItem(runner.id, detail.queue.items[0].id, { status: 'done' }, detail.queue.revision, { actor: 'worker', source: 'worker' });
+  await mission.runnerWatchOnce(runner.id).catch(() => {});
+  assert.equal(sends.length, 1, 'the refused instruction was never typed');
+  assert.equal(runnerTransition.getRuntime(runner.id).state, 'paused', 'a refusal stops automatic dispatch');
+
+  // Unlock: the worker is eligible again, but only an explicit Run may resume.
+  getDb().prepare('UPDATE mission_sessions SET locked = 0 WHERE id = ?').run(session.id);
+  for (let i = 0; i < 3; i++) await mission.runnerWatchOnce(runner.id).catch(() => {});
+  assert.equal(sends.length, 1, 'later ticks do not retry');
+  const failures = getDb().prepare("SELECT COUNT(*) AS n FROM runner_history WHERE runner_id = ? AND type IN ('dispatch_failed','delivery_unconfirmed')").get(runner.id).n;
+  assert.equal(failures, 1, 'exactly one refusal is logged, not one per tick');
+});
