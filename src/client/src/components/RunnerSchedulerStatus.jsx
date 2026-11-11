@@ -2,7 +2,9 @@ import { useEffect, useState } from 'react'
 
 export default function RunnerSchedulerStatus({ execution, scheduler }) {
   const [seconds, setSeconds] = useState(null)
-  const timed = ['wait_idle_grace', 'wait_nudge_interval'].includes(scheduler?.schedulerDecision)
+  // The server names the countdown (scheduler.countdownLabel); this component
+  // only keeps the clock ticking between polls.
+  const timed = !!scheduler?.countdownLabel
   const deadline = scheduler?.deadline
   const observedAt = scheduler?.observedAt
 
@@ -27,9 +29,8 @@ export default function RunnerSchedulerStatus({ execution, scheduler }) {
 
   const word = scheduler?.workerState || 'unknown'
   let reason = execution?.reason || scheduler?.reason || 'Waiting for worker observation'
-  if (execution?.state === 'complete') reason = 'Queue is done'
   if (timed && seconds !== null) {
-    const label = scheduler.schedulerDecision === 'wait_idle_grace' ? 'Idle grace' : 'Nudge interval'
+    const label = scheduler.countdownLabel
     const clock = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
     reason = seconds > 0 ? `${label}: ${clock} remaining` : `${label} elapsed — waiting for next check`
   }

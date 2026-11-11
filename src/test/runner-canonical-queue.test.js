@@ -57,9 +57,9 @@ it('serves canonical queue rows and regenerates the worker projection after ever
   fs.appendFileSync(plans.queuePath(registry.getAgent(PAD), project), 'external edit');
   detail = await mission.readRunnerQueue(runner.id);
   assert.equal(detail.queue.condition, 'projection_error');
-  assert.equal(detail.queue.execution.label, 'Projection error');
-  assert.equal(detail.queue.execution.canRun, false);
-  assert.equal(detail.queue.execution.canReconcile, false);
+  assert.equal(detail.queue.execution.label, 'Queue file out of sync');
+  assert.equal(detail.queue.execution.actions.run.allowed, false);
+  assert.equal(detail.queue.execution.actions.reconcile.allowed, false);
   assert.deepEqual(detail.queue.items.map((item) => item.plan), ['one.md', 'two.md']);
   assert.match(fs.readFileSync(plans.queuePath(registry.getAgent(PAD), project), 'utf8'), /external edit/,
     'an integrity read must never silently repair the worker projection');
@@ -74,7 +74,7 @@ it('serves canonical queue rows and regenerates the worker projection after ever
   detail = await mission.setupRunnerQueue(runner.id, { confirmProjectionReset: true });
   assert.equal(detail.queue.condition, 'ok');
   assert.equal(detail.queue.execution.state, 'paused');
-  assert.equal(detail.queue.execution.canRun, true);
+  assert.equal(detail.queue.execution.actions.run.allowed, true);
   assert.equal(mission.getRunner(runner.id).operation_status, 'invalidated');
   assert.equal(mission.getRunner(runner.id).enabled, 0);
   detail = await mission.removeRunnerQueueItem(runner.id, detail.queue.items[0].id, detail.queue.revision);
@@ -277,11 +277,11 @@ it('does not reconstruct missing runtime authorization; explicit setup initializ
   getDb().prepare('DELETE FROM runner_runtime WHERE runner_id = ?').run(runner.id);
   detail = await mission.readRunnerQueue(runner.id);
   assert.equal(detail.queue.execution.state, 'setup_required');
-  assert.equal(detail.queue.execution.canRun, false);
+  assert.equal(detail.queue.execution.actions.run.allowed, false);
   assert.equal(detail.queue.items[0].plan, 'one.md');
   detail = await mission.setupRunnerQueue(runner.id);
   assert.equal(detail.queue.execution.state, 'paused');
-  assert.equal(detail.queue.execution.canRun, true);
+  assert.equal(detail.queue.execution.actions.run.allowed, true);
   assert.equal(mission.getRunner(runner.id).enabled, 0, 'legacy enabled flag cannot authorize work');
 });
 
@@ -295,10 +295,10 @@ it('keeps a stale runtime projection error visible until explicit regeneration e
   let detail = await mission.readRunnerQueue(runner.id);
   assert.equal(detail.queue.condition, 'ok');
   assert.equal(detail.queue.execution.state, 'projection_error');
-  assert.equal(detail.queue.execution.canRegenerate, true);
+  assert.equal(detail.queue.execution.actions.regenerate.allowed, true);
   detail = await mission.setupRunnerQueue(runner.id);
   assert.equal(detail.queue.execution.state, 'paused');
-  assert.equal(detail.queue.execution.canRun, true);
+  assert.equal(detail.queue.execution.actions.run.allowed, true);
 });
 
 it('does not copy the completed operation item into the next dispatch prompt', async () => {
@@ -363,7 +363,7 @@ it('answers an add to a finished queue from the post-mutation runtime', async ()
   assert.equal(detail.queue.execution.state, 'complete');
   detail = await mission.addRunnerQueueItems(runner.id, ['second.md'], detail.queue.revision);
   assert.equal(detail.queue.execution.state, 'paused');
-  assert.equal(detail.queue.execution.canRun, true);
+  assert.equal(detail.queue.execution.actions.run.allowed, true);
   assert.equal(detail.queue.scheduler.schedulerDecision, 'paused');
   assert.doesNotMatch(detail.queue.scheduler.reason, /done/i);
 });

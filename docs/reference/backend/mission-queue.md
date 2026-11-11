@@ -22,9 +22,10 @@ bumps it under the worker.
 
 Membership and order change only while the runner is `paused` or `complete`
 (`queue_runtime_busy` otherwise), with one exception: plans may be **appended** while an ordinary
-queue operation is dispatching or running, since an append never disturbs the item the worker
-holds. Reorder and removal still need a pause, and the page disables those controls while the
-queue runs. Nothing may be changed during a blocker resolution, which is pinned to the revision
+queue operation is dispatching or running, and while the queue waits for input, since an append
+never disturbs the item the worker holds. Reorder and removal still need a pause, and the page
+disables those controls with the reason. The rule is one function,
+`runner-state.queueEditVerdict`, called by both the write and the view. Nothing may be changed during a blocker resolution, which is pinned to the revision
 it was sent against.
 
 `QUEUE.md` is generated worker output, not queue authority. Workers read and update through
@@ -58,11 +59,44 @@ verdict from legacy columns or item progress.
 | `complete` | All queue items are done | Add work; the runner returns to Paused |
 | `projection_error` | Generated output differs from its acknowledged version | Regenerate; Run is disabled |
 
-`execution.canRun`, `canPause`, `canReconcile` and `canRegenerate` are the action verdicts.
-When an interrupted turn is verified idle, `scheduler.recoveryRequired` is true, `canRun` is
-true and `canPause` is false: the page offers an explicit recovery Run. A normal active turn
-keeps Pause available. `working`, `idle` and `unknown` describe worker observation separately
-from authorization; an unreadable or unknown observation never means idle.
+### The view the page renders
+
+`services/runner-view.js` builds `execution` with one pure function, `buildExecution`. It reads
+no database: the caller passes the runtime state, queue condition, items, scheduler decision,
+active operation, pause mode and whether the worker is mid-turn. The page renders the result
+and derives nothing.
+
+| Field | Meaning |
+|---|---|
+| `state` | Runtime state; a queue repair condition (`projection_error`, `setup_required`) wins |
+| `label`, `tone` | Header word and its colour family (`active`, `success`, `danger`, `idle`) |
+| `reason` | One sentence for the status strip |
+| `banner` | `{ kind, tone, text }` shown above the list, or `null`. Paused only, today |
+| `operation` | The operation that owns the runner, or `null` |
+| `actions` | One `{ allowed, reason }` per control; `reason` is the disabled tooltip |
+
+`actions` carries `setup`, `run`, `pause`, `regenerate`, `reconcile`, `reviewStatus`,
+`resolve`, `addItems`, `reorder` and `removeItem`. Each is computed from the predicate the
+write path enforces, so an offered control is an accepted write:
+
+- `run` uses the state machine's `EVENTS.run`.
+- `addItems`, `reorder` and `removeItem` use `runner-state.queueEditVerdict`, the same call
+  `runner-queue.mutate` makes before any change.
+- `reviewStatus` uses `REVIEWABLE_STATES`, which `updateRunnerQueueItem` also enforces
+  (`runner_invalid_state` otherwise).
+
+`runner-view.test.js` pins the parity by attempting each write in every state on a throwaway
+database and comparing the outcome with the verdict.
+
+When an interrupted turn is verified idle, `scheduler.recoveryRequired` is true, `actions.run`
+is allowed and `actions.pause` is not: the page offers an explicit recovery Run. A normal active
+turn keeps Pause available. `working`, `idle` and `unknown` describe worker observation
+separately from authorization; an unreadable or unknown observation never means idle.
+`scheduler.countdownLabel` names a running countdown (idle grace, nudge interval) so the page
+only keeps the clock.
+
+A refusal raised by an action taken inside a dialog renders inside that dialog
+(`components/ui/DialogError.jsx`): plan picker, status review and resolve.
 
 ### Operation Delivery
 

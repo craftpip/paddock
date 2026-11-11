@@ -160,8 +160,8 @@ it('an interrupted idle turn exposes the explicit recovery Run verdict, not an a
   assert.equal(detail.queue.scheduler.recoveryRequired, true);
   assert.equal(detail.queue.execution.state, 'running');
   assert.equal(detail.queue.execution.active, true, 'canonical runtime remains running until explicit recovery');
-  assert.equal(detail.queue.execution.canRun, true, 'Run is the explicit recovery action');
-  assert.equal(detail.queue.execution.canPause, false, 'verified idle recovery is not presented as active work to pause');
+  assert.equal(detail.queue.execution.actions.run.allowed, true, 'Run is the explicit recovery action');
+  assert.equal(detail.queue.execution.actions.pause.allowed, false, 'verified idle recovery is not presented as active work to pause');
 });
 
 it('a fresh process observes an unconfirmed operation without replaying its instruction', async () => {

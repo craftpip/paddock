@@ -14,6 +14,8 @@ const runnerCallbacks = require('./runner-callbacks');
 const runnerHistory = require('./runner-history');
 const runnerQueue = require('./runner-queue');
 const runnerTransition = require('./runner-transition');
+const runnerView = require('./runner-view');
+const { REVIEWABLE_STATES } = require('./runner-state');
 const runnerPublication = require('./runner-publication');
 
 /** Look up a PAD by name, throwing if not found (shared with plans.js). */
@@ -2912,7 +2914,8 @@ async function readRunnerQueueFor(runner) {
     ? (current.worker_state === 'idle' && current.worker_turn_id === turn.userId ? current.idle_since : turn.completedAt || new Date(now).toISOString())
     : null;
   const scheduler = computeSchedulerState({ ...current, idle_since: idleSince }, q, turn, now);
-  const execution = runnerQueueExecution(current, q, scheduler);
+  const items = (q.parsed.items || []).map((it) => enrichRunnerQueueItem(it, agent, project));
+  const execution = runnerQueueExecution(current, q, scheduler, { items, workerBusy: turn.state === 'working' });
   // Plan 91 §Phase 2: the Configure dialog reads saved prompts from this same
   // detail read, so the subset carries the effective set (never the raw column).
   const eff = effectivePromptTemplates(current);
@@ -2931,7 +2934,7 @@ async function readRunnerQueueFor(runner) {
       revision: q.hash,
       path: q.path,
       workerPath: runnerContainerPaths(project, current.queue_file).queue,
-      items: (q.parsed.items || []).map((it) => enrichRunnerQueueItem(it, agent, project)),
+      items,
       repairItems: q.repairItems || [],
       repairDuplicateIds: q.repairDuplicateIds || [],
       customInstructions: q.parsed.customInstructions || '',
@@ -2942,6 +2945,7 @@ async function readRunnerQueueFor(runner) {
         ...scheduler,
         ...(q.condition !== 'ok' || execution.state === 'projection_error' ? { schedulerDecision: 'blocked', reason: q.error || execution.reason || q.aggregate.reason, nextCheckMs: null } : {}),
         deadline: scheduler.nextCheckMs === null ? null : new Date(now + scheduler.nextCheckMs).toISOString(),
+        countdownLabel: { wait_idle_grace: 'Idle grace', wait_nudge_interval: 'Nudge interval' }[scheduler.schedulerDecision] || null,
         observedAt: new Date(now).toISOString(),
       },
     },
@@ -2949,24 +2953,18 @@ async function readRunnerQueueFor(runner) {
   };
 }
 
-/** The one display/action verdict for the queue panel and terminal controls.
- * Item progress is not runner authorization; projection repair wins over stale
- * operation and stop fields. The client renders this snapshot without guessing. */
-function runnerQueueExecution(runner, queue, scheduler) {
-  const projectionError = queue.condition === 'projection_error';
-  const state = projectionError ? 'projection_error'
-    : queue.condition === 'setup_required' ? 'setup_required'
-    : queue.condition === 'missing' ? 'setup_required'
-    : runnerTransition.getRunnerCanonicalState(runner);
-  const labels = { setup_required: 'Runner setup required', paused: 'Paused', dispatching: 'Dispatching', awaiting_receipt: 'Awaiting receipt', running: 'Running', waiting_input: 'Needs input', held: 'Operation held', complete: 'Complete', projection_error: 'Projection error' };
-  const active = ['dispatching', 'awaiting_receipt', 'running'].includes(state);
-  const hasWork = queue.parsed.items.some((item) => item.status !== 'done');
-  const blocked = queue.parsed.items.some((item) => item.status === 'need input');
-  const outstanding = !!runnerTransition.getRuntime(runner.id)?.operation_id;
-  const canRun = queue.condition === 'ok' && hasWork && !blocked && (!outstanding || scheduler.recoveryRequired === true)
-    && (['paused', 'held', 'complete'].includes(state) || scheduler.recoveryRequired === true);
-  return {
-    state, label: labels[state], active, setupRequired: state === 'setup_required',
+/** Gather the facts the pure view needs (services/runner-view.js builds the
+ * verdict). Item progress is not runner authorization; projection repair wins
+ * over stale operation and stop fields. */
+function runnerQueueExecution(runner, queue, scheduler, { items = null, workerBusy = false } = {}) {
+  const runtime = runnerTransition.getRuntime(runner.id);
+  return runnerView.buildExecution({
+    runtimeState: runtime ? runtime.state : null,
+    queueCondition: queue.condition,
+    queueError: queue.error || null,
+    items: items || queue.parsed.items,
+    summary: queue.summary,
+    scheduler,
     operation: runner.activeOperationId ? {
       id: runner.activeOperationId,
       kind: runner.operation_kind,
@@ -2975,20 +2973,10 @@ function runnerQueueExecution(runner, queue, scheduler) {
       queueRevision: runner.operation_queue_revision,
       deadlineAt: runner.operation_deadline_at,
     } : null,
-    // An interrupted/error turn still owns a persisted operation, but the
-    // worker is verified idle and needs an explicit Run to replace it. Expose
-    // that recovery action instead of presenting Pause as though work were
-    // still active; callers can still use the server's recoveryRequired flag
-    // to distinguish this Run from an ordinary start.
-    canRun, canPause: active && scheduler.recoveryRequired !== true,
-    canRegenerate: state === 'projection_error',
-    canReviewStatuses: ['paused', 'waiting_input', 'held', 'complete', 'projection_error'].includes(state),
-    canReconcile: !projectionError && ['dispatching', 'awaiting_receipt', 'held'].includes(state),
-    reason: queue.error || (blocked ? queue.summary.blocked?.reason : null) || scheduler.reason,
-    runReason: canRun ? 'Run the queue on this session' : state === 'setup_required' ? 'Set up the canonical queue first' : projectionError ? 'Regenerate the worker projection first'
-      : blocked ? 'Resolve the blocked item first' : !hasWork ? 'Add plans to the queue before running'
-      : outstanding ? 'An instruction is outstanding; reconcile or pause it before running again' : scheduler.reason,
-  };
+    outstanding: !!runtime?.operation_id,
+    pauseMode: runner.pause_mode || null,
+    workerBusy,
+  });
 }
 
 /** Set a runner's queue up: create QUEUE.md from the template if it does not
@@ -3095,6 +3083,15 @@ async function updateRunnerQueue(id, _items, _revision, { actor = null } = {}) {
 }
 
 async function updateRunnerQueueItem(id, itemId, patch, revision, { actor = null, source = 'review' } = {}) {
+  // The page only offers a hand correction in these states (runner-view's
+  // reviewStatus verdict reads the same list); the write must refuse the rest
+  // or a status flipped under a working worker races its own report.
+  if (source === 'review') {
+    const state = runnerTransition.getRuntime(id)?.state;
+    if (state && !REVIEWABLE_STATES.includes(state)) {
+      throw new MissionError('runner_invalid_state', `Pause the queue before changing a plan's status (current: ${state}).`, 409);
+    }
+  }
   const detail = await mutateCanonicalQueue(id, revision, actor, () => runnerQueue.updateItem(id, itemId, patch, revision, { actor, source }));
   if (source !== 'review') return detail;
   let runtime = runnerTransition.getRuntime(id);

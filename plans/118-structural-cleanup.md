@@ -1,6 +1,6 @@
 # Plan 118 — Structural cleanup: one runner view, split files, instant dispatch
 
-## Status: Proposed — 2026-11-11 — 0/7 phases done, design complete
+## Status: In progress — 2026-11-11 — 1/7 phases done (Phase 1); next: Phase 2
 
 ## Why
 
@@ -42,7 +42,7 @@ disagree, then makes the files small enough to read.
 
 ## Progress
 
-- [ ] Phase 1 — One server-computed runner view
+- [x] Phase 1 — One server-computed runner view (2026-11-11, see "Phase 1 — as built")
 - [ ] Phase 2 — Split `mission.js`
 - [ ] Phase 3 — Dispatch the next plan when the worker reports done
 - [ ] Phase 4 — One test command that finishes
@@ -136,8 +136,32 @@ view: {
 - Force a refusal inside each of the four dialogs; the message is visible
   inside the dialog element.
 
-**Done when:** `grep -n "execution\.\(state\|reason\)\|pause_mode" src/client/src`
-returns nothing outside the fallback-free view reader.
+**Done when:** the client holds no runner-state derivation of its own.
+
+### Phase 1 — as built
+
+- The server already had a partial verdict named `execution`, so the view **is**
+  `execution`, extended, rather than a second object called `view`. One name.
+- `services/runner-view.js` → pure `buildExecution`. Old flat fields
+  (`canRun`, `canPause`, `canReconcile`, `canRegenerate`, `canReviewStatuses`,
+  `runReason`, `setupRequired`) are gone; `actions.<name>.{allowed,reason}`
+  replaces them. `currentItemId`/`nextItemId` were not added: `queue.summary`
+  already carries current/next/blocked.
+- Shared predicates live in `runner-state.js`: `queueEditVerdict`,
+  `REVIEWABLE_STATES`. `runner-queue.mutate` and `updateRunnerQueueItem` call them.
+- Two behaviour changes, both pinned by the parity test: a hand status
+  correction is now **refused by the server** while the queue runs (it was only
+  disabled in the page), and plans can be appended while the queue waits for input.
+- Labels in plain words: "Sending plan", "Waiting for worker", "Held",
+  "Setup required", "Queue file out of sync".
+- `components/ui/DialogError.jsx` used by the plan picker, status review and
+  resolve dialogs. Configure already showed its errors in place.
+- Tests: `runner-view.test.js` (8). Mutation control (view ignores the edit
+  predicate) → 2 red, 6 green, run in `/tmp/mut`.
+- Browser (devrunner): Complete, Paused, Sending plan, Running, Needs input
+  labels and tones match the API; row controls disabled with the server's
+  sentence while running; status-review and resolve refusals render inside
+  their dialogs; real resolve resumed the queue.
 
 ---
 

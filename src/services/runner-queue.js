@@ -2,6 +2,13 @@ const crypto = require('crypto');
 const path = require('path');
 
 const { getDb } = require('./db');
+const { queueEditVerdict } = require('./runner-state');
+
+// Queue event name → the edit kind runner-state.queueEditVerdict judges.
+const EDIT_ACTION = Object.freeze({
+  item_added: 'append', items_added: 'append', item_updated: 'item_update',
+  item_removed: 'remove', items_reordered: 'reorder', instructions_updated: 'instructions',
+});
 
 const ITEM_STATUSES = Object.freeze(['new', 'in_progress', 'need_input', 'done']);
 
@@ -231,11 +238,9 @@ function mutate(runnerId, revision, actor, action, fn) {
     const activeKind = runtime?.operation_id
       ? db.prepare('SELECT operation_kind FROM runner_operations WHERE id = ?').get(runtime.operation_id)?.operation_kind
       : null;
-    const appendWhileRunning = action === 'items_added' && activeKind === 'queue' &&
-      ['dispatching', 'awaiting_receipt', 'running'].includes(runtime?.state);
-    if (runtime && !appendWhileRunning && !['paused', 'complete'].includes(runtime.state) && action !== 'item_updated') {
-      throw new RunnerQueueError('queue_runtime_busy', `Queue is ${runtime.state}; pause the runner before changing its order or membership.`);
-    }
+    // One predicate shared with the view (runner-state.queueEditVerdict).
+    const editVerdict = queueEditVerdict(runtime?.state || null, EDIT_ACTION[action] || 'reorder', { activeKind });
+    if (!editVerdict.allowed) throw new RunnerQueueError(editVerdict.code, editVerdict.reason);
     const before = snapshot(queue);
     const itemIdValue = fn(queue, before);
     const stamp = now();

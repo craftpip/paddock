@@ -77,4 +77,29 @@ function transition(state, event) {
   return { state: next, markerRequired: markerRequired(next), allowedActions: allowedActions(next) };
 }
 
-module.exports = { STATES, EVENTS, RunnerStateError, markerRequired, allowedActions, transition };
+/** States in which a human may correct a queue item's status by hand. */
+const REVIEWABLE_STATES = Object.freeze(['paused', 'waiting_input', 'held', 'complete', 'projection_error']);
+
+/**
+ * May the queue's order or membership change right now? One predicate for the
+ * write path (runner-queue.mutate) and the view (runner-view), so a control
+ * the page offers is a write the server accepts.
+ *
+ * action: 'append' | 'reorder' | 'remove' | 'instructions' | 'item_update'
+ * A missing runtime (state null) gates nothing: there is no execution to
+ * disturb. Appending never touches the item a worker holds, so it is allowed
+ * while an ordinary queue operation runs and while the queue waits for input.
+ * Anything during a resolution stays refused: it is pinned to the revision it
+ * was sent against.
+ */
+function queueEditVerdict(state, action, { activeKind = null } = {}) {
+  if (!state || action === 'item_update') return { allowed: true };
+  if (['paused', 'complete'].includes(state)) return { allowed: true };
+  if (action === 'append') {
+    if (state === 'waiting_input') return { allowed: true };
+    if (activeKind === 'queue' && ['dispatching', 'awaiting_receipt', 'running'].includes(state)) return { allowed: true };
+  }
+  return { allowed: false, code: 'queue_runtime_busy', reason: `Queue is ${state}; pause the runner before changing its order or membership.` };
+}
+
+module.exports = { STATES, EVENTS, REVIEWABLE_STATES, RunnerStateError, markerRequired, allowedActions, transition, queueEditVerdict };

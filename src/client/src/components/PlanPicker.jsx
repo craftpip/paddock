@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useNavigation, useQueryInput, useDraftState, useDirtyNavigation, popupIdentity } from '../lib/navigation'
 import Button from './ui/Button'
 import Modal from './ui/Modal'
+import DialogError from './ui/DialogError'
 import { api } from '../lib/api'
 import { cx } from '../lib/cx'
 
@@ -104,7 +105,7 @@ export default function PlanPicker({ runner, project, existing, onClose, onAdd }
         <p className="text-[11px] text-ink-faint">Loading plans…</p>
       ) : (
         <>
-          {addError && <p className="msn-queue-picker-error mb-2 rounded bg-danger-soft px-2 py-1 text-[11px] text-danger">{addError}</p>}
+          <DialogError className="msn-queue-picker-error">{addError}</DialogError>
           <div className="flex items-center gap-2">
             <input
               type="search"

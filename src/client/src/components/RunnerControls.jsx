@@ -34,7 +34,7 @@ export function requiresExplicitRecovery(runner, queue, queueForRunner) {
 }
 
 export function runnerIsRunning(runner, queue, queueForRunner) {
-  return queueForRunner === runner?.id && queue?.execution?.canPause === true
+  return queueForRunner === runner?.id && queue?.execution?.actions?.pause?.allowed === true
 }
 
 export default function RunnerControls({ runner, onConfigure }) {
@@ -73,21 +73,15 @@ export default function RunnerControls({ runner, onConfigure }) {
   if (!runner) return null
   const landed = queue && queueForRunner === runner.id
   const execution = landed ? queue.execution : null
-  const running = execution ? execution.canPause : runnerIsRunning(runner, queue, queueForRunner)
+  // Every verdict below is the server's (services/runner-view.js); nothing here
+  // works runner state out for itself.
+  const running = runnerIsRunning(runner, queue, queueForRunner)
   const stateWord = execution?.label || 'Loading runner state'
-  // Run needs a queue that parses AND has work: `ok` with zero items is an
-  // empty queue (Run does nothing), `missing` needs setup, `unreadable` /
-  // `malformed` need repair. Only judge the queue actually landed for this
-  // runner; before it lands, keep Run clickable and let the server validate.
-  const runDisabled =
-    busy || (execution ? !execution.canRun : (landed && (queue.condition !== 'ok' || !(queue.items || []).length)))
-  const runTitle = execution?.runReason || (landed && !runDisabled
-    ? 'Run the queue on this session'
-    : landed && queue.condition !== 'ok'
-      ? `The queue ${queue.condition} — see the queue panel`
-      : landed
-        ? 'Add plans to the queue before running'
-        : 'Run the queue on this session')
+  // Before the queue lands for this runner, keep Run clickable and let the
+  // server validate.
+  const run = execution?.actions?.run
+  const runDisabled = busy || (run ? !run.allowed : false)
+  const runTitle = run?.reason || 'Run the queue on this session'
 
   const act = async (fn) => {
     if (busy) return
@@ -176,7 +170,7 @@ export default function RunnerControls({ runner, onConfigure }) {
           className="msn-btn-runner-toggle px-3 py-1 text-xs font-medium"
           title={runTitle}
         >
-          {busy ? 'Starting…' : execution?.setupRequired ? 'Set up first' : 'Run queue'}
+          {busy ? 'Starting…' : execution?.state === 'setup_required' ? 'Set up first' : 'Run queue'}
         </Button>
       )}
       <Button
@@ -195,6 +189,3 @@ export default function RunnerControls({ runner, onConfigure }) {
   )
 }
 
-function pauseWith(mode) {
-  act(() => pauseRunner(runner.id, mode))
-}

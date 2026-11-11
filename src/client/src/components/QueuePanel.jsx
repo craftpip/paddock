@@ -4,6 +4,7 @@ import { parsePopups } from '../lib/url-state'
 import Button from './ui/Button'
 import { Input } from './ui/Input'
 import Modal from './ui/Modal'
+import DialogError, { errorText } from './ui/DialogError'
 import PlanPicker from './PlanPicker'
 import RunnerSchedulerStatus from './RunnerSchedulerStatus'
 import RunnerHistory from './RunnerHistory'
@@ -39,6 +40,13 @@ const ITEM_TONE = {
   done: 'bg-success-soft text-success',
 }
 
+const TONE_CLASS = {
+  active: 'bg-accent-soft text-accent-text',
+  success: 'bg-success-soft text-success',
+  danger: 'bg-danger-soft text-danger',
+  idle: 'bg-raised text-ink-muted',
+}
+
 function normItem(it) {
   // Rewriting the queue writes the STRICT persisted fields only — the
   // enriched title/planStatus/statusRaw/exists are read-side decorations and
@@ -61,10 +69,12 @@ function RowIcon({ d }) {
   )
 }
 
-function ItemRow({ item, current, index, total, busy, locked, running, canReviewStatus, onMove, onRemove, onEditStatus }) {
-  // The server refuses reorder/removal while the queue runs; say so on the
-  // control instead of offering a click that only produces an error.
-  const runLock = running ? 'Pause the queue to change its order or remove plans' : null
+function ItemRow({ item, current, index, total, busy, actions, onMove, onRemove, onEditStatus }) {
+  // Each verdict and its sentence come from the server (execution.actions): a
+  // control the server would refuse is disabled and says why.
+  const review = actions?.reviewStatus
+  const reorderWhy = actions?.reorder?.allowed ? null : actions?.reorder?.reason || 'Loading…'
+  const removeWhy = actions?.removeItem?.allowed ? null : actions?.removeItem?.reason || 'Loading…'
   const tone = ITEM_TONE[item.status] || 'bg-raised text-ink-faint'
   return (
     <li
@@ -74,8 +84,8 @@ function ItemRow({ item, current, index, total, busy, locked, running, canReview
       )}
     >
       <span className="msn-queue-item-index w-4 shrink-0 text-right font-mono text-[11px] tabular-nums text-ink-faint">{index + 1}</span>
-      <button type="button" disabled={!canReviewStatus || busy} onClick={() => onEditStatus(item)}
-        title={canReviewStatus ? `Review status for ${item.title || item.plan}` : 'Pause the runner before reviewing queue statuses'}
+      <button type="button" disabled={!review?.allowed || busy} onClick={() => onEditStatus(item)}
+        title={review?.allowed ? `Review status for ${item.title || item.plan}` : review?.reason}
         className={cx('msn-queue-item-status w-[5.25rem] shrink-0 rounded-full px-2 py-0.5 text-center text-[11px] font-medium disabled:cursor-not-allowed', tone)}>
         {ITEM_WORD[item.status] || item.status}
       </button>
@@ -88,13 +98,13 @@ function ItemRow({ item, current, index, total, busy, locked, running, canReview
         </span>
       </span>
       <span className="msn-queue-item-actions flex shrink-0 items-center gap-0.5">
-        <Button variant="link" size="bare" disabled={busy || locked || running || index === 0} onClick={() => onMove(index, -1)} className="msn-btn-queue-up rounded p-1 hover:bg-raised disabled:opacity-30" title={runLock || `Move ${item.title || item.plan} up`} aria-label={`Move ${item.title || item.plan} up`}>
+        <Button variant="link" size="bare" disabled={busy || !!reorderWhy || index === 0} onClick={() => onMove(index, -1)} className="msn-btn-queue-up rounded p-1 hover:bg-raised disabled:opacity-30" title={reorderWhy || `Move ${item.title || item.plan} up`} aria-label={`Move ${item.title || item.plan} up`}>
           <RowIcon d="M6 15l6-6 6 6" />
         </Button>
-        <Button variant="link" size="bare" disabled={busy || locked || running || index === total - 1} onClick={() => onMove(index, 1)} className="msn-btn-queue-down rounded p-1 hover:bg-raised disabled:opacity-30" title={runLock || `Move ${item.title || item.plan} down`} aria-label={`Move ${item.title || item.plan} down`}>
+        <Button variant="link" size="bare" disabled={busy || !!reorderWhy || index === total - 1} onClick={() => onMove(index, 1)} className="msn-btn-queue-down rounded p-1 hover:bg-raised disabled:opacity-30" title={reorderWhy || `Move ${item.title || item.plan} down`} aria-label={`Move ${item.title || item.plan} down`}>
           <RowIcon d="M6 9l6 6 6-6" />
         </Button>
-        <Button variant="dangerLink" size="bare" disabled={busy || locked || running || item.status === 'in progress'} onClick={() => onRemove(item)} className="msn-btn-queue-remove rounded p-1 hover:bg-danger-soft disabled:opacity-30" title={runLock ? runLock : item.status === 'in progress' ? `Cannot remove ${item.title || item.plan} while it is working` : `Remove ${item.title || item.plan} from the queue`} aria-label={`Remove ${item.title || item.plan} from the queue`}>
+        <Button variant="dangerLink" size="bare" disabled={busy || !!removeWhy || item.status === 'in progress'} onClick={() => onRemove(item)} className="msn-btn-queue-remove rounded p-1 hover:bg-danger-soft disabled:opacity-30" title={removeWhy ? removeWhy : item.status === 'in progress' ? `Cannot remove ${item.title || item.plan} while it is working` : `Remove ${item.title || item.plan} from the queue`} aria-label={`Remove ${item.title || item.plan} from the queue`}>
           <RowIcon d="M6 6l12 12M18 6L6 18" />
         </Button>
       </span>
@@ -120,7 +130,6 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
   const reloadRunnerQueue = useMission((s) => s.reloadRunnerQueue)
   const reconcileRunnerOperation = useMission((s) => s.reconcileRunnerOperation)
   const confirm = useConfirm()
-  const sessions = useMission((s) => s.sessions)
   // Centralized operation feedback (plan 98 §Phase 1)
   const operationFeedback = useMission((s) => s.operationFeedback?.[runner?.id])
 
@@ -165,8 +174,9 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
   const current = summary?.current || null
   const next = summary?.next || null
   const blocked = summary?.blocked || null
-  // The server owns this verdict; the client never reconstructs runner state.
-  const running = execution?.active === true
+  // The server owns every verdict (services/runner-view.js); the client never
+  // reconstructs runner state.
+  const actions = execution?.actions || null
   const busy = !!queueAction
   const doneCount = counts?.done || 0
   // Stable draft key: item id from popup args when open, else from blocked summary.
@@ -176,6 +186,8 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
   const [statusItem, setStatusItem] = useState(null)
   const [statusValue, setStatusValue] = useState('')
   const [statusReason, setStatusReason] = useState('')
+  const [statusError, setStatusError] = useState('')
+  const [resolveError, setResolveError] = useState('')
   const updateRunnerQueueItem = useMission((s) => s.updateRunnerQueueItem)
   const draftIdentity = location.pathname + ':' + (new URLSearchParams(location.search).get('session') || '')
   useDirtyNavigation(!!resolveText && (!!resolve || !!blocked), () => draftIdentity, () => setResolveText(''))
@@ -203,18 +215,22 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
     setStatusItem(item)
     setStatusValue(item.status.replaceAll(' ', '_'))
     setStatusReason(item.reason || '')
+    setStatusError('')
   }
 
   const saveItemStatus = async () => {
     if (!statusItem || !queue || (statusValue === 'need_input' && !statusReason.trim())) return
+    setStatusError('')
     try {
       await updateRunnerQueueItem(id, statusItem.id, {
         status: statusValue,
         reason: statusReason,
       }, queue.revision)
       setStatusItem(null)
-    } catch {
-      // Keep the review modal and the person's correction draft open on conflict.
+    } catch (e) {
+      // Keep the review modal and the person's correction draft open, and say
+      // why inside it.
+      setStatusError(errorText(e))
     }
   }
 
@@ -258,12 +274,13 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
   // which atomically: delivers answer, requeues item, lifts marker, enables supervision.
   const doResolve = async () => {
     if (!resolve || !resolveText.trim()) return
+    setResolveError('')
     try {
       await resolveRunnerQueue(id, { itemId: resolve.id, answer: resolveText.trim(), revision: queue.revision })
       closePopup({ saved: true, expected: popup?.value })
       setResolveText('')
-    } catch {
-      // Feedback is set by the store action
+    } catch (e) {
+      setResolveError(errorText(e))
     }
   }
 
@@ -290,11 +307,7 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
         >
           <svg className={cx('h-3 w-3 text-ink-faint transition-transform', !collapsed && 'rotate-90')} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
           <span className="msn-queue-title text-ink">Queue</span>
-          <span className={cx('msn-queue-state rounded-full px-2 py-0.5 text-[11px] font-medium',
-            running ? 'bg-accent-soft text-accent-text'
-              : execution?.state === 'complete' ? 'bg-success-soft text-success'
-                : ['waiting_input', 'held', 'projection_error'].includes(execution?.state) ? 'bg-danger-soft text-danger'
-                  : 'bg-raised text-ink-muted')}>
+          <span className={cx('msn-queue-state rounded-full px-2 py-0.5 text-[11px] font-medium', TONE_CLASS[execution?.tone] || TONE_CLASS.idle)}>
             {headerWord}
           </span>
           {counts && items.length > 0 && (
@@ -325,18 +338,18 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
             <Button
               variant="secondary"
               size="bare"
-              disabled={busy}
+              disabled={busy || !actions?.addItems?.allowed}
               onClick={(e) => {
                 e.stopPropagation()
                 setPickerOpen(true)
               }}
               className="msn-btn-queue-add px-2 py-1 text-[11px]"
-              title="Add plans from this project's plans directory to the queue"
+              title={actions?.addItems?.reason || "Add plans from this project's plans directory to the queue"}
             >
               Add plans
             </Button>
           )}
-          {execution?.setupRequired && (
+          {actions?.setup?.allowed && (
             <Button variant="primary" size="bare" disabled={busy} onClick={doSetup}
               className="msn-btn-runner-runtime-setup px-2 py-1 text-[11px]" title="Explicitly initialize this runner's canonical execution state">
               {queueAction === 'setup' ? 'Setting up…' : 'Set up runner'}
@@ -388,20 +401,12 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
             </div>
           )}
           {/* Canonical execution state and server-provided reason */}
-          {execution?.state === 'paused' && (
-            <>
-              <p className={cx('msn-queue-paused mb-2 text-xs', (sessions.find((s) => s.id === sessionId)?.busy ? 'text-warning' : 'text-ink-dim'))}>
-                {sessions.find((s) => s.id === sessionId)?.busy
-                  ? (runner.pause_mode === 'current_task'
-                    ? 'Queue paused — the worker was asked to stop at a safe point and save its progress.'
-                    : 'Queue paused — the plan in progress is finishing; no new plan will start.')
-                  : current
-                    ? `Queue paused — ${items.find((i) => i.id === current.id)?.title || current.plan} is part-way through. Run queue picks it up where it stopped.`
-                    : execution.reason || 'Queue paused.'}
-              </p>
-            </>
+          {execution?.banner && (
+            <p className={cx('msn-queue-paused mb-2 text-xs', execution.banner.tone === 'warning' ? 'text-warning' : 'text-ink-dim')}>
+              {execution.banner.text}
+            </p>
           )}
-          {execution?.canReconcile && (
+          {actions?.reconcile?.allowed && (
             <div className="msn-queue-reconcile mt-1.5 flex items-center gap-2">
               <p className="msn-queue-reconcile-text text-[10px] text-ink-dim">Instruction delivery is awaiting its exact receipt. No resend will be made.</p>
               <Button variant="secondary" size="bare" disabled={busy} onClick={() => reconcileRunnerOperation(id)} className="msn-btn-queue-reconcile px-2 py-1 text-xs">Reconcile</Button>
@@ -523,7 +528,7 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
                       value={resolveText}
                       onChange={(e) => setResolveText(e.target.value)}
                       onKeyDown={(e) => {
-                        if (e.key === 'Enter' && !e.nativeEvent?.isComposing && resolveText.trim() && !busy) {
+                        if (e.key === 'Enter' && !e.nativeEvent?.isComposing && resolveText.trim() && !busy && actions?.resolve?.allowed) {
                           e.preventDefault()
                           setResolve(blocked)
                         }
@@ -534,7 +539,8 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
                     <Button
                       variant="primary"
                       size="bare"
-                      disabled={busy || !resolveText.trim()}
+                      disabled={busy || !resolveText.trim() || !actions?.resolve?.allowed}
+                      title={actions?.resolve?.reason || undefined}
                       onClick={() => setResolve(blocked)}
                       className="msn-btn-queue-resolve-open px-2 py-1 text-[10px]"
                     >
@@ -549,7 +555,7 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
               {items.length > 0 && (
                 <ul className={cx('msn-queue-items mt-3 divide-y divide-line-faint overflow-y-auto rounded-card border border-line-faint bg-panel', panelExpanded && 'min-h-0 flex-initial')}>
                   {items.map((it, index) => (
-                    <ItemRow key={it.id} item={it} current={current?.id === it.id} index={index} total={items.length} busy={busy} locked={condition !== 'ok'} running={running} canReviewStatus={execution?.canReviewStatuses === true} onEditStatus={editItemStatus} onMove={moveItem} onRemove={removeItem} />
+                    <ItemRow key={it.id} item={it} current={current?.id === it.id} index={index} total={items.length} busy={busy} actions={actions} onEditStatus={editItemStatus} onMove={moveItem} onRemove={removeItem} />
                   ))}
                 </ul>
               )}
@@ -585,7 +591,7 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
           title="Resolve blocker"
           z="z-80"
           width="max-w-md"
-          onClose={() => setResolve(null)}
+          onClose={() => { setResolveError(''); setResolve(null) }}
           footer={
             <>
               <Button variant="ghost" size="bare" onClick={() => setResolve(null)} className="px-2 py-1 text-xs">
@@ -597,6 +603,7 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
             </>
           }
         >
+          <DialogError className="msn-queue-resolve-error">{resolveError}</DialogError>
           <p className="text-xs text-ink-dim">
             Send this answer to the agent, then requeue{' '}
             <span className="font-medium text-ink">{titleOf(items, resolve.id) || resolve.plan}</span> to continue.
@@ -631,6 +638,7 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
             </>
           )}
         >
+          <DialogError className="msn-queue-status-error">{statusError}</DialogError>
           <p className="text-xs text-ink-dim">This is a human correction to the server queue; saving also regenerates QUEUE.md from the reviewed server state. No file status is imported. Mark Done only when the plan's work and verification are actually complete.</p>
           <p className="mt-2 truncate font-mono text-[11px] text-ink" title={statusItem.plan}>{statusItem.plan}</p>
           <label className="mt-3 block text-xs text-ink-dim">Status
