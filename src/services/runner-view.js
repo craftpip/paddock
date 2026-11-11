@@ -61,11 +61,17 @@ function buildExecution({
     : outstanding ? 'A plan was sent and has not been acknowledged; reconcile or pause before running again'
     : scheduler.reason || 'The queue cannot run right now';
 
+  const stopReason = queueError || scheduler.reason || null;
   const edit = (action) => {
     if (!queueOk) return verdict(false, state === 'setup_required' ? 'Set up the queue first' : 'Repair the queue first');
     const v = queueEditVerdict(runtimeState, action, { activeKind: operation?.kind || null });
     // Say what actually unlocks the edit: "pause" is only true advice while
     // the queue is running.
+    // A queue can also wait for input with no blocked plan (the provider's
+    // quota ran out): then the stop reason itself is the honest answer.
+    if (state === 'waiting_input' && !blocked) {
+      return verdict(v.allowed, `Not available while the queue is stopped: ${stopReason || 'it is waiting for input'}`);
+    }
     const unlock = state === 'waiting_input' ? 'Answer the blocked plan first'
       : state === 'held' ? 'Reconcile the held instruction first'
       : 'Pause the queue first';

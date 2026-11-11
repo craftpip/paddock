@@ -98,6 +98,8 @@ module.exports = {
   reconcileQueuePublications: runnerControl.reconcileQueuePublications,
   runnerWatchTick: scheduler.runnerWatchTick,
   runnerWatchOnce: scheduler.runnerWatchOnce,
+  kickRunnerWatch: scheduler.kickRunnerWatch,
+  _setFastWatch: scheduler._setFastWatch,
   readRunnerQueue: runnerQueueApi.readRunnerQueue,
   setupRunnerQueue: runnerQueueApi.setupRunnerQueue,
   updateRunnerQueue: runnerQueueApi.updateRunnerQueue,

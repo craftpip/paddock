@@ -78,6 +78,9 @@ beforeEach(async () => {
     readTurn: store.readTurn,
     readActivity: store.readActivity,
   };
+  // The fast watch runs on timers; these tests drive the watcher by hand and
+  // switch it on only where it is the thing under test.
+  mission._setFastWatch({ enabled: false, intervalMs: 20, budgetMs: 5000 });
   turn = { state: 'idle', userId: 'baseline', inputHash: 'baseline', completedAt: new Date(Date.now() - 60000).toISOString(), progressAt: new Date(Date.now() - 60000).toISOString() };
   sends = [];
   screenCalls = 0;
@@ -131,13 +134,100 @@ it('unknown worker observations withhold dispatch even when the canonical queue 
 });
 
 it('a recent confirmed dispatch suppresses queue-revision nudges until its interval elapses', async () => {
+  // The revision changes (a plan is appended) but the assigned plan is NOT
+  // done, so a send now would be a nudge and the interval applies.
   await mission.updateRunner(runner.id, { minNudgeIntervalMs: 60000 });
   turn = { ...turn, state: 'idle', completedAt: new Date(Date.now() - 5000).toISOString(), progressAt: new Date(Date.now() - 5000).toISOString() };
+  await mission.runnerWatchOnce(runner.id); // the owned turn is observed complete
   const detail = await mission.readRunnerQueue(runner.id);
-  await mission.updateRunnerQueueItem(runner.id, detail.queue.items[0].id, { status: 'done' }, detail.queue.revision, { actor: 'worker', source: 'worker' });
+  await mission.addRunnerQueueItems(runner.id, ['third.md'], detail.queue.revision);
   await mission.runnerWatchOnce(runner.id);
   assert.equal(sends.length, 1);
   assert.equal(mission.getRunner(runner.id).scheduler_decision, 'wait_nudge_interval');
+});
+
+// ---- plan 118 Phase 3: the worker's own "done" starts the next plan ----
+const idleNow = () => { turn = { ...turn, state: 'idle', completedAt: new Date().toISOString(), progressAt: new Date().toISOString() }; };
+const workerSet = async (index, status) => {
+  const detail = await mission.readRunnerQueue(runner.id);
+  return mission.updateRunnerQueueItem(runner.id, detail.queue.items[index].id, { status }, detail.queue.revision, { actor: 'worker', source: 'worker' });
+};
+const workerDone = (index) => workerSet(index, 'done');
+const settle = async (check, ms = 2000) => {
+  const until = Date.now() + ms;
+  while (Date.now() < until) { if (check()) return true; await new Promise((r) => setTimeout(r, 15)); }
+  return check();
+};
+
+it('a plan the worker reported done is followed at once, whatever the idle grace and nudge interval say', async () => {
+  await mission.updateRunner(runner.id, { idleGraceMs: 600000, minNudgeIntervalMs: 600000 });
+  turn = { ...turn, state: 'working' };
+  await workerDone(0);
+  idleNow();
+  await mission.runnerWatchOnce(runner.id);
+  assert.equal(sends.length, 2, 'the next plan is sent without waiting out either timer');
+  const transitions = runnerTransition.getTransitions(runner.id).map((t) => t.event);
+  assert.equal(transitions.filter((e) => e === 'dispatch_next').length, 1);
+});
+
+it('a worker that goes quiet WITHOUT reporting done still waits out the idle grace', async () => {
+  await mission.updateRunner(runner.id, { idleGraceMs: 600000, minNudgeIntervalMs: 600000 });
+  idleNow();
+  await mission.runnerWatchOnce(runner.id);
+  await mission.runnerWatchOnce(runner.id);
+  assert.equal(sends.length, 1, 'no nudge inside the grace');
+  assert.equal(mission.getRunner(runner.id).scheduler_decision, 'wait_idle_grace');
+});
+
+it('the fast watch sends the next plan when the reported turn ends, with no tick', async () => {
+  await mission.updateRunner(runner.id, { idleGraceMs: 600000, minNudgeIntervalMs: 600000 });
+  mission._setFastWatch({ enabled: true });
+  turn = { ...turn, state: 'working' };
+  await workerDone(0);
+  await new Promise((r) => setTimeout(r, 120));
+  assert.equal(sends.length, 1, 'nothing is sent while the reporting turn is still running');
+  idleNow();
+  assert.equal(await settle(() => sends.length === 2), true, 'the next plan went out on its own');
+  await new Promise((r) => setTimeout(r, 120));
+  assert.equal(sends.length, 2, 'exactly once');
+  assert.equal(getDb().prepare("SELECT COUNT(*) AS n FROM runner_operations WHERE runner_id = ?").get(runner.id).n, 2);
+});
+
+it('the fast watch completes the queue when the last plan is reported done', async () => {
+  mission._setFastWatch({ enabled: true });
+  turn = { ...turn, state: 'working' };
+  await workerDone(0);
+  idleNow();
+  assert.equal(await settle(() => sends.length === 2), true, 'second plan sent');
+  // The send made the fake worker busy on plan two; it reports done and stops.
+  assert.equal(await settle(() => runnerTransition.getRuntime(runner.id).state === 'running'), true, 'receipt observed');
+  await workerSet(1, 'in_progress');
+  await workerDone(1);
+  idleNow();
+  assert.equal(await settle(() => runnerTransition.getRuntime(runner.id).state === 'complete'), true);
+  assert.equal(sends.length, 2, 'completion sends nothing');
+});
+
+it('a pause between the report and the end of the turn cancels the fast dispatch', async () => {
+  mission._setFastWatch({ enabled: true });
+  turn = { ...turn, state: 'working' };
+  await workerDone(0);
+  runnerTransition.applyPause(runner.id, { actor: 'user' });
+  idleNow();
+  await new Promise((r) => setTimeout(r, 250));
+  assert.equal(sends.length, 1);
+  assert.equal(runnerTransition.getRuntime(runner.id).state, 'paused');
+});
+
+it('the tick and the fast watch together still send the next plan once', async () => {
+  mission._setFastWatch({ enabled: true });
+  turn = { ...turn, state: 'working' };
+  await workerDone(0);
+  idleNow();
+  await Promise.all([mission.runnerWatchTick(), mission.runnerWatchOnce(runner.id), settle(() => sends.length >= 2)]);
+  await new Promise((r) => setTimeout(r, 150));
+  assert.equal(sends.length, 2);
+  assert.equal(getDb().prepare("SELECT COUNT(*) AS n FROM runner_operations WHERE runner_id = ?").get(runner.id).n, 2);
 });
 
 it('concurrent watcher ticks acquire one next-item operation and send once', async () => {

@@ -531,6 +531,9 @@ export default function RunnerDialog({ runner, project, session, onClose }) {
 
             <div className="msn-field msn-field-timing flex flex-col gap-1">
               <span className="msn-field-label text-[11px] font-semibold uppercase tracking-wider text-ink-muted">Timing</span>
+              <p className="msn-field-timing-help text-[11px] text-ink-dim">
+                A plan the worker reports done is followed by the next one straight away. These timers only apply when the worker goes quiet without reporting: how long to wait before nudging it, and how often.
+              </p>
               <div className="grid grid-cols-2 gap-2">
                 <label className="msn-field msn-field-idle flex flex-col gap-1">
                   <span className="msn-field-label text-[11px] font-semibold uppercase tracking-wider text-ink-muted">Idle grace (ms)</span>

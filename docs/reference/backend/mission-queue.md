@@ -98,6 +98,32 @@ only keeps the clock.
 A refusal raised by an action taken inside a dialog renders inside that dialog
 (`components/ui/DialogError.jsx`): plan picker, status review and resolve.
 
+### When the next plan is sent
+
+The watcher (`mission/scheduler.js`) runs one pass per running runner every 20 seconds. A pass
+sends the next plan only when the worker's turn is verified idle and no instruction is
+outstanding.
+
+- **The worker reported the assigned plan done.** The next plan is sent on the first pass after
+  its turn ends. The idle grace and nudge interval do not apply: the send starts a new plan, it
+  is not a nudge. The assigned plan is the active operation's `item_id`.
+- **The worker went quiet without reporting.** The pass waits out `idle_grace_ms`, then
+  `min_nudge_interval_ms` since the last send, then nudges, up to `no_progress_budget` times.
+
+A worker `done` also starts a **fast watch** (`kickRunnerWatch`): every 750 ms, for up to 90
+seconds, it reads the worker's turn from the agent's store and runs an ordinary pass once the
+turn is idle. It decides nothing itself. One fast watch exists per runner generation, so a
+pause, a new Run or the dispatch it caused ends it, and a report for the next plan replaces a
+loop left over from the previous one. Passes for one runner never overlap in a process
+(`watchRunner`), and a pass that loses the dispatch compare-and-swap sends nothing.
+
+Measured on `devrunner` with both timers at their 120-second default: `done` at 12:44:49.5,
+turn ended 12:44:52.038, `dispatch_next` 12:44:52.041. The last plan's turn end and `complete`
+shared a timestamp.
+
+While a queue is running the page re-reads it every 3 seconds; otherwise it follows the page's
+15-second poll.
+
 ### Operation Delivery
 
 Before sending, Mission persists an operation ID, generation, conversation ID, item assignment,

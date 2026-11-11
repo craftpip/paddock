@@ -88,16 +88,17 @@ const REVIEWABLE_STATES = Object.freeze(['paused', 'waiting_input', 'held', 'com
  * action: 'append' | 'reorder' | 'remove' | 'instructions' | 'item_update'
  * A missing runtime (state null) gates nothing: there is no execution to
  * disturb. Appending never touches the item a worker holds, so it is allowed
- * while an ordinary queue operation runs and while the queue waits for input.
- * Anything during a resolution stays refused: it is pinned to the revision it
- * was sent against.
+ * while an ordinary queue operation runs, between two plans (running with no
+ * operation outstanding) and while the queue waits for input. Anything during
+ * a resolution or quota recovery stays refused: it is pinned to the revision
+ * it was sent against.
  */
 function queueEditVerdict(state, action, { activeKind = null } = {}) {
   if (!state || action === 'item_update') return { allowed: true };
   if (['paused', 'complete'].includes(state)) return { allowed: true };
   if (action === 'append') {
     if (state === 'waiting_input') return { allowed: true };
-    if (activeKind === 'queue' && ['dispatching', 'awaiting_receipt', 'running'].includes(state)) return { allowed: true };
+    if (['dispatching', 'awaiting_receipt', 'running'].includes(state) && (activeKind === 'queue' || activeKind === null)) return { allowed: true };
   }
   return { allowed: false, code: 'queue_runtime_busy', reason: `Queue is ${state}; pause the runner before changing its order or membership.` };
 }

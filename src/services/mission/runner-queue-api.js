@@ -36,7 +36,7 @@ const { getSession, audit } = require('./sessions');
 const { sendText, awaitExactReceipt } = require('./session-io');
 const { getRunner, canonicalQueueProjection, queueMissionError, syncQueuePausedMarker, runnerContainerPaths, writeCanonicalQueueProjection, getRunnerForSupervision } = require('./runners');
 const { effectivePromptTemplates } = require('./runner-prompts');
-const { computeSchedulerState } = require('./scheduler');
+const { computeSchedulerState, kickRunnerWatch } = require('./scheduler');
 
 /** A queue item with the plan's own display metadata attached (plan 86 §Phase 1).
  *  The queue file names a plan path; the panel shows its TITLE and plan Status,
@@ -346,6 +346,9 @@ async function updateRunnerQueueItem(id, itemId, patch, revision, { actor = null
     }
   }
   const detail = await mutateCanonicalQueue(id, revision, actor, () => runnerQueue.updateItem(id, itemId, patch, revision, { actor, source }));
+  // The worker's own "done" is the signal that its plan ended; start watching
+  // for its turn to finish now rather than at the next 20 s tick.
+  if (source === 'worker' && patch?.status === 'done') kickRunnerWatch(id);
   if (source !== 'review') return detail;
   let runtime = runnerTransition.getRuntime(id);
   if (runtime?.state === 'projection_error') {

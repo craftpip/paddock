@@ -456,6 +456,19 @@ export default function Mission() {
     }
   }, [fetchProjects, refreshActive])
 
+  // While the open session's queue is running, re-read it every 3 s so a plan
+  // that just started or finished shows promptly: the server now moves between
+  // plans in milliseconds, and the 15 s poll above would lag it badly. The
+  // server says whether it is running (execution.active); nothing is polled
+  // faster for an idle queue or a hidden tab.
+  const queueActive = useMission((s) => s.queue?.execution?.active === true)
+  const fetchOpenRunnerQueue = useMission((s) => s.fetchOpenRunnerQueue)
+  useEffect(() => {
+    if (!queueActive) return undefined
+    const t = setInterval(() => { if (!document.hidden) fetchOpenRunnerQueue() }, 3000)
+    return () => clearInterval(t)
+  }, [queueActive, fetchOpenRunnerQueue])
+
   const act = (fn, msg) => async () => {
     try {
       await fn()

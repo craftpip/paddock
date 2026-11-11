@@ -94,6 +94,8 @@ const SURFACE = [
   'reconcileQueuePublications',
   'runnerWatchTick',
   'runnerWatchOnce',
+  'kickRunnerWatch',
+  '_setFastWatch',
   'readRunnerQueue',
   'setupRunnerQueue',
   'updateRunnerQueue',

@@ -1,6 +1,6 @@
 # Plan 118 — Structural cleanup: one runner view, split files, instant dispatch
 
-## Status: In progress — 2026-11-11 — 2/7 phases done (Phases 1–2); next: Phase 3
+## Status: In progress — 2026-11-11 — 3/7 phases done (Phases 1–3); next: Phase 4
 
 ## Why
 
@@ -44,7 +44,7 @@ disagree, then makes the files small enough to read.
 
 - [x] Phase 1 — One server-computed runner view (2026-11-11, see "Phase 1 — as built")
 - [x] Phase 2 — Split `mission.js` (2026-11-11, see "Phase 2 — as built")
-- [ ] Phase 3 — Dispatch the next plan when the worker reports done
+- [x] Phase 3 — Dispatch the next plan when the worker reports done (2026-11-11, see "Phase 3 — as built")
 - [ ] Phase 4 — One test command that finishes
 - [ ] Phase 5 — Split `app.js` routes
 - [ ] Phase 6 — Turn `AGENTS.md` lessons into tools
@@ -294,6 +294,37 @@ timers (restore `devrunner` idle grace to 120000 first). Time from row 1
 the last row turning Done.
 
 ---
+
+### Phase 3 — as built
+
+- No new send path. The decision changed in one place
+  (`computeSchedulerState`): when the plan the last instruction assigned is
+  `done` and the turn has ended, dispatch without the idle grace or nudge
+  interval. Both timers still gate a worker that went quiet without reporting.
+- `kickRunnerWatch` (fast watch) is started by the worker's `done`: it polls
+  the worker's turn in the agent store every 750 ms for up to 90 s and runs an
+  ordinary `runnerWatchOnce` pass when the turn is idle. Completion needs no
+  special case: the pass already applies `complete` when every plan is done.
+- The 2-second "wait for the pane to be ready" step in the design was dropped:
+  the pass already checks the pane, permission prompts and the send verdict.
+- `watchRunner` keeps passes for one runner from overlapping; a pass that
+  loses the dispatch compare-and-swap returns quietly.
+- Found by the tests, fixed: a report for the next plan was dropped while the
+  previous plan's fast watch was still winding down (now one loop per runner
+  generation); and plans could not be appended between two plans, when the
+  queue runs with no operation outstanding.
+- The page re-reads a running queue every 3 s (was the 15 s page poll).
+  Configure explains that the two timers are for a quiet worker only.
+- Tests: 7 new in `runner-dispatch-invariants.test.js` (20 total), stable over
+  three runs. Controls in `/tmp/mut`: removing the assigned-done rule reds the
+  two dispatch tests; removing the kick reds the two fast-watch tests.
+- Live, default 120 s timers on `devrunner`: three plans in 97 s end to end
+  (would have been over four minutes). `done` 12:44:49.5 → turn ended
+  12:44:52.038 → `dispatch_next` 12:44:52.041. `complete` shared the last
+  turn-end timestamp.
+- Not measured: the page's lag with the 3 s refresh over a full run. The
+  check run hit OpenCode's free-usage limit on its first plan (captured in
+  plan 75; that capture found and fixed a blind spot in the quota detector).
 
 ## Phase 4 — One test command that finishes
 

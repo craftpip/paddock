@@ -14,6 +14,8 @@ Object.assign(exports, {
   reconcileRunnerOperation,
   runnerWatchTick,
   runnerWatchOnce,
+  kickRunnerWatch,
+  _setFastWatch,
   observeRunnerQueues,
   observeRunnerUsage,
 });
@@ -130,11 +132,74 @@ async function runnerWatchTick() {
   const runners = getDb().prepare("SELECT runner_id AS id FROM runner_runtime WHERE state = 'running'").all();
   for (const r of runners) {
     try {
-      await runnerWatchOnce(r.id);
+      await watchRunner(r.id);
     } catch (e) {
       console.error(`[runner watch] Runner ${r.id} tick error:`, e.message);
     }
   }
+}
+
+// One watch pass per runner at a time. The periodic tick and the fast watch
+// below both come through here; a pass already running makes the other a no-op
+// instead of a second observer racing the first.
+const watchInflight = new Set();
+async function watchRunner(runnerId) {
+  if (watchInflight.has(runnerId)) return false;
+  watchInflight.add(runnerId);
+  try {
+    await runnerWatchOnce(runnerId);
+    return true;
+  } finally {
+    watchInflight.delete(runnerId);
+  }
+}
+
+// Fast watch: when the worker reports a plan done, do not wait for the 20 s
+// tick. Poll the worker's own turn (a cheap store read) and run an ordinary
+// watch pass the moment the turn has ended. Everything that decides and sends
+// is still runnerWatchOnce, so the gates, the ownership compare-and-swap and
+// the completion rule are the tick's own; this only changes WHEN a pass runs.
+const fastWatch = new Map();
+let FAST_WATCH = { enabled: true, intervalMs: 750, budgetMs: 90000 };
+function _setFastWatch(patch) { FAST_WATCH = { ...FAST_WATCH, ...patch }; }
+
+function kickRunnerWatch(runnerId) {
+  if (!FAST_WATCH.enabled) return false;
+  const started = runnerTransition.getRuntime(runnerId);
+  if (!started || started.state !== 'running') return false;
+  // One loop per runner GENERATION. A loop left over from the previous plan
+  // is about to stop itself (its generation no longer owns the runner), so a
+  // report for the new plan must replace it, not be dropped behind it.
+  const existing = fastWatch.get(runnerId);
+  if (existing) {
+    if (existing.generation === started.generation) return false;
+    clearTimeout(existing.timer);
+  }
+  const until = Date.now() + FAST_WATCH.budgetMs;
+  const mine = (entry) => fastWatch.get(runnerId) === entry;
+  const entry = { generation: started.generation, timer: null };
+  const stop = () => { if (mine(entry)) fastWatch.delete(runnerId); };
+  const step = async () => {
+    try {
+      const runtime = runnerTransition.getRuntime(runnerId);
+      // A pause, a new Run, a dispatch or completion all end the fast watch:
+      // only the generation that saw the report may act on it.
+      if (!runtime || runtime.state !== 'running' || runtime.generation !== started.generation || Date.now() > until) return stop();
+      const { agent, session } = await getRunnerForSupervision(runnerId);
+      if (!session?.agent_session_id) return stop();
+      if (agentStore.readTurn(agent, session.agent_session_id).state === 'idle') await watchRunner(runnerId);
+    } catch (e) {
+      console.error(`[runner fast watch] ${runnerId}:`, e.message);
+      return stop();
+    }
+    if (!mine(entry)) return;
+    entry.timer = setTimeout(step, FAST_WATCH.intervalMs);
+    entry.timer.unref?.();
+  };
+  entry.timer = setTimeout(step, FAST_WATCH.intervalMs);
+  entry.timer.unref?.();
+  fastWatch.set(runnerId, entry);
+  return true;
 }
 
 /** Single watch tick for one runner.
@@ -267,6 +332,12 @@ function computeSchedulerState(runner, queue, turn, now = Date.now(), { explicit
   if (explicit) return decision('dispatch', 'Worker idle — ready to start');
   const idleSince = Date.parse(runner.idle_since);
   if (!Number.isFinite(idleSince)) return decision('observation_unavailable', 'Idle transition not yet observed');
+  // The idle grace and the nudge interval exist for a worker that went quiet
+  // WITHOUT finishing: they delay a nudge. When the plan the last instruction
+  // assigned is now done, the worker said so itself and its turn has ended, so
+  // the next send starts a new plan, not a nudge, and neither timer applies.
+  const assigned = runner.operation_item_id && queue.parsed?.items?.find((item) => item.id === runner.operation_item_id);
+  if (assigned?.status === 'done') return decision('dispatch', 'Previous plan reported done — starting the next one');
   const graceRemaining = runner.idle_grace_ms - (now - idleSince);
   if (graceRemaining > 0) return decision('wait_idle_grace', `Worker idle — grace ${Math.ceil(graceRemaining / 1000)}s remaining`, graceRemaining);
   const lastDispatch = Date.parse(runner.last_nudge_at || runner.last_dispatch_at);
@@ -401,7 +472,9 @@ function acquireDispatchOwnership(runnerId, gen, kind, queueHash, session, messa
   });
   try { return tx.immediate(); }
   catch (e) {
-    if (e.code === 'runner_dispatch_owned') return null;
+    // Losing the race to another pass (the tick and the fast watch can both
+    // decide to dispatch) is not an error: the winner owns the send.
+    if (['runner_dispatch_owned', 'runner_transition_conflict', 'runner_transition_invalid'].includes(e.code)) return null;
     throw e;
   }
 }

@@ -86,6 +86,15 @@ it('words the paused banner from what the worker is doing', () => {
   assert.equal(view('complete', ITEMS.done).reason, 'Queue is done');
 });
 
+it('explains a locked edit by what actually unlocks it', () => {
+  assert.match(view('running', ITEMS.queued).actions.reorder.reason, /Pause the queue first/);
+  assert.match(view('waiting_input', ITEMS.blocked).actions.reorder.reason, /Answer the blocked plan first/);
+  // Stopped with nothing to answer (provider quota): quote the stop reason.
+  const quota = view('waiting_input', ITEMS.queued, { scheduler: { reason: 'OpenCode free usage limit reached' } });
+  assert.match(quota.actions.reorder.reason, /stopped: OpenCode free usage limit reached/);
+  assert.doesNotMatch(quota.actions.reorder.reason, /blocked plan/);
+});
+
 it('lets a repair state win over the runtime state', () => {
   assert.equal(view('running', ITEMS.queued, { queueCondition: 'projection_error' }).state, 'projection_error');
   assert.equal(view('paused', ITEMS.queued, { queueCondition: 'missing' }).state, 'setup_required');
@@ -143,6 +152,16 @@ it('a queue edit the view offers is a queue edit the server accepts, in every st
     snap = runnerQueue.snapshot(id);
     assert.equal(attempt(() => runnerQueue.remove(id, snap.items.at(-1).id, snap.revision)), v.actions.removeItem.allowed, `${state} remove`);
   }
+});
+
+it('lets a plan be appended between two plans, when the queue runs with no operation outstanding', async () => {
+  const id = await runnerIn('running');
+  getDb().prepare('UPDATE runner_runtime SET operation_id = NULL WHERE runner_id = ?').run(id);
+  const snap = runnerQueue.snapshot(id);
+  assert.equal(attempt(() => runnerQueue.addPlans(id, ['between.md'], snap.revision)), true);
+  assert.equal(view('running', ITEMS.queued, { operation: null, outstanding: false }).actions.addItems.allowed, true);
+  // A resolution in flight still refuses it.
+  assert.equal(view('running', ITEMS.queued, { operation: { id: 'op', kind: 'resolution' } }).actions.addItems.allowed, false);
 });
 
 it('refuses a hand status correction in exactly the states the view withdraws it', async () => {
