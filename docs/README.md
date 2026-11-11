@@ -38,6 +38,7 @@ docs/
     ├── pages/                        ← top-level page docs
     ├── tabs/                         ← one file per Agent Detail tab
     ├── components/                   ← stats, theme, ux
+    ├── lessons/                      ← the full account behind each rule in AGENTS.md
     └── operations/                   ← runbooks: lifecycle, openclaw
 ```
 

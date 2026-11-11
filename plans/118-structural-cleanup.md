@@ -1,6 +1,6 @@
 # Plan 118 — Structural cleanup: one runner view, split files, instant dispatch
 
-## Status: In progress — 2026-11-11 — 6/7 phases done, Phase 7 half done. Open: untracking `src/public` (Phase 7 steps 2–3, needs the user's go-ahead), the `AGENTS.md` trim and the SVG check (Phase 6, deliberately not done)
+## Status: In progress — 2026-11-11 — 6/7 phases done, Phase 7 half done. Open: untracking `src/public` (Phase 7 steps 2–3, needs the user's go-ahead), the SVG check (Phase 6, deliberately not done)
 
 ## Why
 
@@ -474,10 +474,13 @@ how-it-works material moved to `docs/reference/`.
 - **Not done: the SVG path check.** `AGENTS.md` records two hand-written path
   validators that were both wrong; a third without a real path grammar would
   repeat that. The browser console remains the oracle.
-- **Not done: cutting `AGENTS.md` to 400 lines.** It is 1300+ lines of the
-  project's recorded lessons and other agents read it as their instructions.
-  Only a short tools section was added. Shrinking it means deciding which
-  lessons to drop or move, and that is the owner's call.
+- **`AGENTS.md` trim: done 2026-11-11 after the owner said yes.** 1669 →
+  636 lines, and nothing was dropped: each of the 102 long lessons keeps its
+  one-line rule in `AGENTS.md` with a link, and its full text moved to
+  `docs/reference/lessons/` (`surface-and-testing.md` S01–S50,
+  `operations.md` O01–O52). Checked line by line against the old file. The
+  stale host facts (lap's address as "this host") were corrected at the same
+  time. 636, not 400: the rest is short rules that belong there.
 
 ## Phase 7 — Stop tracking `src/public`
 

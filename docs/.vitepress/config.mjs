@@ -104,6 +104,14 @@ export default defineConfig({
             ],
           },
           {
+            text: 'Lessons',
+            collapsed: true,
+            items: [
+              { text: 'UI, MCP surface, testing', link: '/reference/lessons/surface-and-testing' },
+              { text: 'Operations', link: '/reference/lessons/operations' },
+            ],
+          },
+          {
             text: 'Style Guide',
             link: '/reference/STYLE-GUIDE',
           },
