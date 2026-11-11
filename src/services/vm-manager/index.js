@@ -144,6 +144,8 @@ module.exports = {
   isManagedDoorName: doorsNetwork.isManagedDoorName,
   prepareAgentChanges: settingsApply.prepareAgentChanges,
   applyAgentChanges: settingsApply.applyAgentChanges,
+  claimPadChange: settingsApply.claimPadChange,
+  releasePadChange: settingsApply.releasePadChange,
   validateAgentCreate: lifecycle.validateAgentCreate,
   createAgent: lifecycle.createAgent,
   hostPortInUse: web.hostPortInUse,

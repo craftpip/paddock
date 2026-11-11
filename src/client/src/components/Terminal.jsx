@@ -652,6 +652,7 @@ const Terminal = forwardRef(function Terminal(
     // the terminal believing a command was still running for ever.
     pendingCmdsRef.current = []
     if (pendingMarkersRef.current && typeof pendingMarkersRef.current.clear === 'function') pendingMarkersRef.current.clear()
+    markerCmdRef.current.clear() // the sentinel → command map belongs to the socket that is going away
     if (cmdRunningRef.current) {
       cmdRunningRef.current = false
       setStateSafe(setCmdRunning, false)

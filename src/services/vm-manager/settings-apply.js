@@ -5,7 +5,7 @@
 // Exported before anything is required: function declarations are hoisted, so a
 // sibling module that requires this one mid-cycle already sees every function.
 Object.assign(exports, {
-  prepareAgentChanges, applyAgentChanges, _setApplyImpl,
+  prepareAgentChanges, applyAgentChanges, claimPadChange, releasePadChange, _setApplyImpl,
 });
 
 const fs = require('fs');
@@ -380,7 +380,14 @@ const applyingNow = new Set();
 // after its fixture on every run. The lock is tested against a stand-in.
 let applyImpl = null;
 function _setApplyImpl(fn) { applyImpl = fn || null; }
-async function applyAgentChanges(name, opts = {}, hooks = {}) {
+/** Take the PAD's change lock, or throw `pad_change_in_progress` (409).
+ *
+ *  A route claims it AT THE DOOR, before it answers 202 and before it touches
+ *  the job log. Claiming only inside the background work was too late: the
+ *  second request had by then been handed the FIRST request's job (they share
+ *  the `update:<name>` key), and when its apply was refused it marked that
+ *  running job failed and cleared the PAD's `restarting` state. */
+function claimPadChange(name) {
   if (applyingNow.has(name)) {
     const err = new Error(`Another change is being applied to ${name}. Wait for it to finish, then try again.`);
     err.code = 'pad_change_in_progress';
@@ -388,6 +395,14 @@ async function applyAgentChanges(name, opts = {}, hooks = {}) {
     throw err;
   }
   applyingNow.add(name);
+}
+/** Give the lock back. Safe to call when it is not held. */
+function releasePadChange(name) { applyingNow.delete(name); }
+
+/** `hooks.claimed: true` means the caller already holds the lock (see
+ *  `claimPadChange`); it is released here either way when the apply ends. */
+async function applyAgentChanges(name, opts = {}, hooks = {}) {
+  if (!hooks.claimed) claimPadChange(name);
   try {
     return await (applyImpl || applyAgentChangesLocked)(name, opts, hooks);
   } finally {

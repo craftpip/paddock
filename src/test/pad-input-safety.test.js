@@ -91,3 +91,25 @@ it('refuses a second change set for a PAD while one is still being applied', asy
     apply._setApplyImpl(null);
   }
 });
+
+it('a lock claimed at the door is honoured by the apply, and given back when it ends', async () => {
+  const apply = require('../services/vm-manager/settings-apply');
+  const done = [];
+  apply._setApplyImpl(async () => { done.push('ran'); return 'ok'; });
+  try {
+    apply.claimPadChange(PAD); // what a route does before it answers 202
+    assert.throws(() => apply.claimPadChange(PAD), (e) => e.code === 'pad_change_in_progress' && e.status === 409,
+      'a second request must be refused at the door, before it can touch the first one\'s job');
+    await assert.rejects(apply.applyAgentChanges(PAD, {}), (e) => e.code === 'pad_change_in_progress',
+      'an apply that did not claim it is refused too');
+    assert.deepEqual(done, []);
+
+    assert.equal(await apply.applyAgentChanges(PAD, {}, { claimed: true }), 'ok', 'the holder runs');
+    assert.doesNotThrow(() => apply.claimPadChange(PAD), 'and the lock is free again afterwards');
+    apply.releasePadChange(PAD);
+    apply.releasePadChange(PAD); // releasing twice is harmless
+  } finally {
+    apply._setApplyImpl(null);
+    apply.releasePadChange(PAD);
+  }
+});

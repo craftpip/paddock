@@ -1,3 +1,4 @@
+import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { useEffect, useState } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
 import MissionSessionView from '../components/MissionSessionView'
@@ -18,11 +19,15 @@ export default function MissionSessionPopout() {
   const session = openSession?.id === sessionId ? openSession : null
   const project = session ? projects.find((p) => p.id === session.projectId) || null : null
   const queueExpanded = !!session?.runner && search.get('queue') !== 'closed'
+  useDocumentTitle('Mission session')
   useEffect(() => {
-    document.title = 'Mission session — Paddock'
     fetchProjects()
     if (!useAgents.getState().agents.length) fetchAgents()
-    restoreView({ session: sessionId }, { fresh: true, autoReopen: true })
+    // Opening this window is the user asking for the session, so a dead pane is
+    // restarted. RELOADING it is not: a reload must never start an agent
+    // process on its own, the same rule the Mission page holds to.
+    const reloaded = performance.getEntriesByType?.('navigation')?.[0]?.type === 'reload'
+    restoreView({ session: sessionId }, { fresh: true, autoReopen: !reloaded })
   }, [sessionId, fetchProjects, fetchAgents, restoreView])
   useEffect(() => {
     if (sent || !window.opener) return

@@ -680,6 +680,7 @@ queue: null,
         : s))
     } catch (e) {
       if (token !== paneToken || generation !== viewToken) return null
+      pendingAutoReopen.delete(id) // a read that failed has landed too: nothing to reopen from it
       set((s) => (s.openSession?.id === id ? {
         viewError: errText(e, 'Could not read session state'),
         viewUnavailable: [403, 404].includes(e?.status),

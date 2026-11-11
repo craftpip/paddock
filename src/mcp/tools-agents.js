@@ -407,6 +407,7 @@ module.exports = function register(registerToolBound, ctx) {
       }
       // Same job key the REST apply route uses, so a recreate that outlives the
       // MCP call timeout stays observable via job_status / job_log.
+      try { vm.claimPadChange(agent.name); } catch (e) { throw new McpError(ErrorCode.InvalidRequest, `${e.message} (code: ${e.code})`); }
       const job = jobLog.getOrCreateJob(`update:${agent.name}`);
       const log = [];
       const onLog = (type, msg) => {
@@ -419,11 +420,13 @@ module.exports = function register(registerToolBound, ctx) {
       // Mission rows, or a mission store that cannot be read, must not stop a
       // settings change — the cost is then simply not reported here, and the
       // rows are dated `gone` by the next liveness pass instead.
-      const ended = await missionSessionsEnded(agent.name, 'recreate');
       let result;
+      let ended;
       try {
-        result = await vm.applyAgentChanges(agent.name, { ...args, force: true, actorRole: currentUser() && currentUser().role }, { onLog, onStep });
+        ended = await missionSessionsEnded(agent.name, 'recreate');
+        result = await vm.applyAgentChanges(agent.name, { ...args, force: true, actorRole: currentUser() && currentUser().role }, { onLog, onStep, claimed: true });
       } catch (e) {
+        vm.releasePadChange(agent.name);
         jobLog.fail(job, e.message);
         throw new McpError(ErrorCode.InvalidRequest, `Recreate failed: ${e.message}`);
       }
@@ -443,15 +446,19 @@ module.exports = function register(registerToolBound, ctx) {
     },
     async ({ name }) => {
       const agent = await requirePad('update', name);
+      try { vm.claimPadChange(agent.name); } catch (e) { throw new McpError(ErrorCode.InvalidRequest, `${e.message} (code: ${e.code})`); }
       const job = jobLog.getOrCreateJob(`update:${agent.name}`);
       const onLog = (type, msg) => jobLog.line(job, type, msg);
       const onStep = (step, state, cmd) => jobLog.setStep(job, step, state, cmd);
-      const ended = await missionSessionsEnded(agent.name, 'recreate');
+      let ended;
       try {
+        ended = await missionSessionsEnded(agent.name, 'recreate');
         await vm.updateAgent(agent.name, { pull: true, onLog, onStep });
       } catch (e) {
         jobLog.fail(job, e.message);
         throw new McpError(ErrorCode.InvalidRequest, `Update failed: ${e.message}`);
+      } finally {
+        vm.releasePadChange(agent.name);
       }
       registry.dockerPsList(true);
       registry.discoverAgents();

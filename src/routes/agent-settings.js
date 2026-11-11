@@ -155,6 +155,8 @@ module.exports = function register(app, ctx) {
 
       // Any change that needs a recreate runs as an SSE job (like Update) so the
       // frontend can stream the live command output in a popup console.
+      // One change per PAD, refused here rather than in the background job.
+      try { vm.claimPadChange(name); } catch (e) { return res.status(e.status || 409).json({ error: e.message, code: e.code }); }
       const jobKey = 'update:' + name;
       const job = jobLog.getOrCreateJob(jobKey);
       const log = (stream, text) => jobLog.line(job, stream, text);
@@ -171,7 +173,7 @@ module.exports = function register(app, ctx) {
           // stop → rebuild (docker-CLI / custom SSH cport / pull) or recreate →
           // door reconcile → web re-exec + verify → restore stopped state, with
           // rollback on failure.
-          await vm.applyAgentChanges(name, body, { onLog: log, onStep: step });
+          await vm.applyAgentChanges(name, body, { onLog: log, onStep: step, claimed: true });
           registry.dockerPsList(true);
           registry.discoverAgents();
           try {
@@ -186,6 +188,7 @@ module.exports = function register(app, ctx) {
           } catch {}
           jobLog.fail(job, e.message);
         } finally {
+          vm.releasePadChange(name);
           registry.setRestarting(name, false);
         }
       });
@@ -322,6 +325,8 @@ module.exports = function register(app, ctx) {
       }
       await vm.prepareAgentChanges(name, body);
 
+      // One change per PAD, refused here rather than in the background job.
+      try { vm.claimPadChange(name); } catch (e) { return res.status(e.status || 409).json({ error: e.message, code: e.code }); }
       const jobKey = 'update:' + name;
       const job = jobLog.getOrCreateJob(jobKey);
       const log = (stream, text) => jobLog.line(job, stream, text);
@@ -333,7 +338,7 @@ module.exports = function register(app, ctx) {
         registry.setRestarting(name, true);
         try {
           await logStore.capture(name);
-          const result = await vm.applyAgentChanges(name, body, { onLog: log, onStep: step });
+          const result = await vm.applyAgentChanges(name, body, { onLog: log, onStep: step, claimed: true });
           registry.dockerPsList(true);
           registry.discoverAgents();
           const published = result.webService ? result.webService.hostPort : hostPort;
@@ -341,7 +346,7 @@ module.exports = function register(app, ctx) {
             registry.recordActivity(name, 'web', turningOn ? 'publish' : 'unpublish', 'ok',
               turningOn ? `Web app published on host port ${published}` : 'Web app unpublished');
           } catch {}
-          log('system', turningOn ? `Done — web app live at http://10.69.1.164:${published}` : 'Done — web app removed');
+          log('system', turningOn ? `Done — web app live on host port ${published}` : 'Done — web app removed');
           jobLog.finish(job, true);
         } catch (e) {
           console.error(`Web change failed for ${name}:`, e.message);
@@ -350,6 +355,7 @@ module.exports = function register(app, ctx) {
           } catch {}
           jobLog.fail(job, e.message);
         } finally {
+          vm.releasePadChange(name);
           registry.setRestarting(name, false);
         }
       });
@@ -379,6 +385,8 @@ module.exports = function register(app, ctx) {
       const ctx = await vm.prepareAgentChanges(name, body);
       if (!ctx.changed) return res.json({ extraPorts: ctx.newPorts });
 
+      // One change per PAD, refused here rather than in the background job.
+      try { vm.claimPadChange(name); } catch (e) { return res.status(e.status || 409).json({ error: e.message, code: e.code }); }
       const jobKey = 'update:' + name;
       const job = jobLog.getOrCreateJob(jobKey);
       const log = (stream, text) => jobLog.line(job, stream, text);
@@ -393,7 +401,7 @@ module.exports = function register(app, ctx) {
           : 'extraPorts=none';
         try {
           await logStore.capture(name);
-          await vm.applyAgentChanges(name, body, { onLog: log, onStep: step });
+          await vm.applyAgentChanges(name, body, { onLog: log, onStep: step, claimed: true });
           registry.dockerPsList(true);
           registry.discoverAgents();
           try {
@@ -408,6 +416,7 @@ module.exports = function register(app, ctx) {
           } catch {}
           jobLog.fail(job, e.message);
         } finally {
+          vm.releasePadChange(name);
           registry.setRestarting(name, false);
         }
       });

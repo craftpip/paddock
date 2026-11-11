@@ -138,6 +138,8 @@ const SURFACE = [
   'isManagedDoorName',
   'prepareAgentChanges',
   'applyAgentChanges',
+  'claimPadChange', // added on purpose: routes take the change lock at the door
+  'releasePadChange',
   'validateAgentCreate',
   'createAgent',
   'hostPortInUse',

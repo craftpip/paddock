@@ -130,6 +130,8 @@ module.exports = function register(app, ctx) {
       const meta = readMeta(name);
       if (!meta.AGENT && !meta.ROOT_PASSWORD) return res.status(404).json({ error: 'Agent not found' });
 
+      // One change per PAD, refused here rather than in the background job.
+      try { vm.claimPadChange(name); } catch (e) { return res.status(e.status || 409).json({ error: e.message, code: e.code }); }
       const jobKey = 'update:' + name;
       const job = jobLog.getOrCreateJob(jobKey);
       const log = (stream, text) => jobLog.line(job, stream, text);
@@ -145,7 +147,7 @@ module.exports = function register(app, ctx) {
           // the owned forwarding door survive a Settings recreate. `force: true`
           // makes a bare recreate (nothing changed) still stop + force-recreate
           // the container and its door — otherwise it would be a no-op.
-          await vm.applyAgentChanges(name, { pull, reset, force: true }, { onLog: log, onStep: step });
+          await vm.applyAgentChanges(name, { pull, reset, force: true }, { onLog: log, onStep: step, claimed: true });
           if (pull) {
             try {
               const v = await drivers.getDriverOr(meta.AGENT).currentVersion(name);
@@ -171,6 +173,7 @@ module.exports = function register(app, ctx) {
           } catch {}
           jobLog.fail(job, e.message);
         } finally {
+          vm.releasePadChange(name);
           registry.setRestarting(name, false);
         }
       });
@@ -185,6 +188,8 @@ module.exports = function register(app, ctx) {
     const meta = readMeta(name);
     if (!meta.AGENT && !meta.ROOT_PASSWORD) return res.status(404).json({ error: 'Agent not found' });
 
+    // One change per PAD, refused here rather than in the background job.
+    try { vm.claimPadChange(name); } catch (e) { return res.status(e.status || 409).json({ error: e.message, code: e.code }); }
     const jobKey = 'update:' + name;
     const job = jobLog.getOrCreateJob(jobKey);
     const log = (stream, text) => jobLog.line(job, stream, text);
@@ -226,6 +231,7 @@ module.exports = function register(app, ctx) {
         } catch {}
         jobLog.fail(job, e.message);
       } finally {
+        vm.releasePadChange(name);
         registry.setRestarting(name, false);
       }
     });
