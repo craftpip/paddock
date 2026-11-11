@@ -784,8 +784,9 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   `uncaughtException` handlers that log and stay up — a control plane must not
   die because one agent's tool call threw.
 - **The 15 `task_*` MCP tools (plan 69's steps + the `task_pipeline_*` driver
-  included) are GATED by `PADDOCK_TASK_QUEUE=1` in `.env`** — 31 registered
-  tools without it, 46 with it, and `mcp.test.js` pins both counts. The env var
+  included) are GATED by `PADDOCK_TASK_QUEUE=1` in `.env`** — 39 registered
+  tools without it, 54 with it; `mcp.test.js` pins the 15-tool difference and
+  `mcp-tools-layout.test.js` pins the full list. The env var
   is read at **boot**, so toggling it needs `docker restart paddock`. Two
   consequences: a suite run in a container that has the flag set reports the
   task tools as *not hidden* and fails its "hidden from the surface" test —

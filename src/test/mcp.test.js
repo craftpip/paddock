@@ -373,7 +373,7 @@ describe('MCP Server - API key grants (plan 35b)', () => {
       'the gate should hide the whole task_* family and nothing else',
     );
 
-    const src = fs.readFileSync(path.join(__dirname, '..', 'mcp.js'), 'utf8');
+    const src = require('./helpers/mcp-source')();
     const rd = src.slice(src.indexOf('const READ_TOOLS'), src.indexOf('const TOOL_GRANT_FOR'));
     const gr = src.slice(src.indexOf('const TOOL_GRANT_FOR'), src.indexOf('function keyGrants'));
     const read = new Set([...rd.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]));
@@ -810,7 +810,7 @@ describe('MCP Server - Mission tools (plan 55)', () => {
     // Two agents share services/mission.js, so a rename or a removed export must
     // fail HERE, loudly, instead of turning into `mission.foo is not a function`
     // at the first live call. Derived from the source, so it cannot rot.
-    const src = fs.readFileSync(path.join(__dirname, '..', 'mcp.js'), 'utf8');
+    const src = require('./helpers/mcp-source')();
     const used = [...new Set([...src.matchAll(/\bmission\.([A-Za-z_][A-Za-z0-9_]*)/g)].map((m) => m[1]))]
       // `mission.js` in a comment or a require path is not a call.
       .filter((k) => k !== 'js');
@@ -1338,7 +1338,7 @@ describe('MCP Server - Mission tools (plan 55)', () => {
     // The fields are three booleans with the same prefix; a caller reading only
     // the JSON cannot infer that `open` excludes a shell pane. So the contract
     // lives in prose, and this is what keeps the prose from rotting.
-    const sources = fs.readFileSync(path.join(__dirname, '..', 'mcp.js'), 'utf8');
+    const sources = require('./helpers/mcp-source')();
     const at = (name) => {
       const start = sources.indexOf(`'${name}'`);
       assert.ok(start > 0, `${name} is registered`);
@@ -1939,7 +1939,7 @@ describe('MCP secret hygiene (plan 60)', () => {
     // cannot rot: every `registry.getAgent(` call site must either be the
     // `requireAgent` helper (whose result is a gate, not a response) or use the
     // object ONLY for `.status` / inside `publicAgent`.
-    const src = fs.readFileSync(path.join(__dirname, '..', 'mcp.js'), 'utf8');
+    const src = require('./helpers/mcp-source')();
     const lines = src.split('\n');
     const offenders = [];
     lines.forEach((line, i) => {
@@ -2107,7 +2107,7 @@ describe('MCP Server - fleet identity (plan 61)', () => {
     // argument — so a `display_name` authorized one pad and acted on a
     // non-existent container. Read the tool source rather than mocking the
     // VM, because the bug is exactly a mismatch between two arguments.
-    const handler = toolBody(fs.readFileSync(path.join(__dirname, '..', 'mcp.js'), 'utf8'), 'update');
+    const handler = toolBody(require('./helpers/mcp-source')(), 'update');
     assert.match(handler, /requirePad\('update', name\)/, 'the gate resolves');
     assert.match(handler, /vm\.updateAgent\(agent\.name,/, 'and the action uses the SAME resolved name');
     assert.doesNotMatch(handler, /vm\.updateAgent\(name,/, 'never the raw spelling');
@@ -2123,7 +2123,7 @@ describe('MCP Server - fleet identity (plan 61)', () => {
     // answer came from `pad-opencode-proj`. `agent_logs` did this, and so did
     // the now-retired `workspace_read` (plan 64 §3e removed the tool rather
     // than leave a known-wrong echo in the surface).
-    const src = fs.readFileSync(path.join(__dirname, '..', 'mcp.js'), 'utf8');
+    const src = require('./helpers/mcp-source')();
     for (const tool of ['agent_logs']) {
       const body = toolBody(src, tool);
       const echo = body.match(/return textResult\(\{ name: ([A-Za-z.]+)/);
@@ -2200,14 +2200,14 @@ describe('MCP Server - project lookup and provenance (plan 67)', () => {
 
   describe('provenance (67.3)', () => {
     it('the session row carries WHO, not just the kind, when it is known', () => {
-      const src = fs.readFileSync(path.join(__dirname, '..', 'mcp.js'), 'utf8');
+      const src = require('./helpers/mcp-source')();
       assert.match(src, /s\.created_by \? \{ createdBy: s\.created_by \} : \{\}/, 'createdBy is emitted only when stamped');
       // A pre-existing row has no actor; it must not claim one.
       const row = { id: 'msn_x', origin: 'human', created_by: null };
       assert.strictEqual('createdBy' in { ...(row.created_by ? { createdBy: row.created_by } : {}) }, false);
     });
     it('an MCP start records the KEY, so a third key is distinguishable', () => {
-      const src = fs.readFileSync(path.join(__dirname, '..', 'mcp.js'), 'utf8');
+      const src = require('./helpers/mcp-source')();
       assert.match(src, /user\.keyId \? `key:\$\{user\.keyId\}` : null/);
     });
     it('the store INSERT and both start paths carry the actor through', () => {
@@ -2243,7 +2243,7 @@ describe('MCP Server - project lookup and provenance (plan 67)', () => {
     it('the counts come before the nested sessions in the row', () => {
       // `sessionCount`/`liveCount`/`openCount` ARE the answer; they used to be
       // serialized after 26 full session objects.
-      const src = fs.readFileSync(path.join(__dirname, '..', 'mcp.js'), 'utf8');
+      const src = require('./helpers/mcp-source')();
       const body = src.slice(src.indexOf('function missionProjectRow'), src.indexOf('function textResult'));
       const countAt = body.indexOf('sessionCount: p.sessionCount');
       const sessionsAt = body.indexOf('sessions: (p.sessions || [])');
@@ -2251,13 +2251,13 @@ describe('MCP Server - project lookup and provenance (plan 67)', () => {
       assert.ok(countAt < sessionsAt, 'counts are serialized first');
     });
     it('sessions are opt-in, so the project list is not a superset of mission_sessions', () => {
-      const src = fs.readFileSync(path.join(__dirname, '..', 'mcp.js'), 'utf8');
+      const src = require('./helpers/mcp-source')();
       const body = src.slice(src.indexOf('function missionProjectRow'), src.indexOf('function textResult'));
       assert.match(body, /includeSessions \? \{ sessions:/, 'nested rows are behind a flag');
       assert.match(src, /include_sessions: z\.boolean\(\)\.optional\(\)/, 'and the tool exposes it');
     });
     it('a project says whether its pad is running, so reachability needs no 2nd tool', () => {
-      const src = fs.readFileSync(path.join(__dirname, '..', 'mcp.js'), 'utf8');
+      const src = require('./helpers/mcp-source')();
       const body = src.slice(src.indexOf('function missionProjectRow'), src.indexOf('function textResult'));
       assert.match(body, /agentStatus: agent\.status/, 'pad status rides along');
     });
@@ -2265,7 +2265,7 @@ describe('MCP Server - project lookup and provenance (plan 67)', () => {
       // The finding: `liveCount` beside a `sessions` array reads as progress, so
       // a caller narrating it as progress is confidently wrong with no second
       // call to catch it.
-      const src = fs.readFileSync(path.join(__dirname, '..', 'mcp.js'), 'utf8');
+      const src = require('./helpers/mcp-source')();
       // Slice from the REGISTRATION: the tool name also appears in the scope
       // map, and `indexOf("'mission_projects'")` finds that one first.
       const at = src.indexOf(`registerToolBound(\n    'mission_projects'`);

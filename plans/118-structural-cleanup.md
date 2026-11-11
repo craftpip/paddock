@@ -522,8 +522,13 @@ and editing a `.jsx` without rebuilding shows the stale-bundle page.
 
 ## Out of scope
 
-- `mcp.js` (2999 lines). Its bulk is one 1880-line function registering 46
-  tools, and 13 tests read its source; it needs its own plan.
+- `mcp.js` was done as a follow-up on 2026-11-11: 2999 → 1165 lines. The
+  1880-line `registerTools` now calls five files in `src/mcp/` (largest 649
+  lines), each `register(registerToolBound, ctx)`. Tool list and order are
+  identical in both task-queue modes (`mcp-tools-layout.test.js`, 3). The 13
+  source-reading tests go through `test/helpers/mcp-source.js`. Live: with a
+  temporary API key, `tools/list`, `list_agents`, `mission_projects`, `help`
+  and a failing `get_agent` all answered over `/mcp`; the key was removed.
 - `vm-manager.js` was done as a follow-up on 2026-11-11: 5002 lines → 12
   modules + index in `services/vm-manager/` (largest 802), by the same script
   as Phase 2. Guard: `vm-manager-exports.test.js` (4). Tests that re-read the

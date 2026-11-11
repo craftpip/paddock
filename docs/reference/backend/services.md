@@ -1024,10 +1024,30 @@ the same owner-scoping as the REST API: admin → all agents, user → owned age
 
 `services/orchestrator.js`: conferring makes an ordinary PAD the user's orchestrator — creates API key `orchestrator` (scopes `default`), wires the paddock MCP server into the running PAD via `docker exec -i ... sh -lc` with the key on stdin (uses `spawn` + 60s kill guard; `execFile {input}` can hang), and writes `orchestrator.json` next to the driver config (`{ role: 'orchestrator', since: ISO, folders: [] }`). One orchestrator per user, target must be running; wiring failure revokes the key. `removeConferral()` revokes the key and removes `orchestrator.json`. `getOrchestrator()` returns `{ conferred, ownedBy, keyId, keyName, prefix, folders }`.
 
-## MCP Tools (mcp.js)
+## MCP Tools (mcp.js + mcp/)
+
+`src/mcp.js` holds the server, authentication, grants, name resolution and the shared
+helpers. The tools themselves are registered from five files, called in this order by
+`registerTools`:
+
+| File | Tools |
+|---|---|
+| `mcp/tools-agents.js` | `list_agents` … `update`: inspect, configure and run a PAD |
+| `mcp/tools-ops.js` | `job_status`, `job_log`, `help`, `agent_commands`, `exec` |
+| `mcp/tools-tasks.js` | the `task_*` family, registered only with `PADDOCK_TASK_QUEUE=1` |
+| `mcp/tools-mission.js` | `mission_*` |
+| `mcp/tools-plans.js` | `plan_*`, `queue_*` |
+
+Each file exports `register(registerToolBound, ctx)`. `registerToolBound` is the wrapper that
+turns a throwing handler into a tool error; `ctx` carries the helpers `mcp.js` owns
+(`requirePad`, `requireTool`, `textResult`, the mission projections). A new tool goes in its
+area's file; a helper it needs from `mcp.js` is added to that file's `ctx` destructure and to
+its registration call. `mcp-tools-layout.test.js` pins the tool list and order in both modes
+(`fixtures/mcp-tools-all.json`) and that each `ctx` matches. Tests that read tool source use
+`test/helpers/mcp-source.js`, which joins `mcp.js` and the tool files.
 
 `src/mcp.js` mounts the paddock's own MCP server at `/mcp` (Streamable HTTP). It
-registers **31 tools by default and 46 with `PADDOCK_TASK_QUEUE=1`** — the
+registers **39 tools by default and 54 with `PADDOCK_TASK_QUEUE=1`** (counted 2026-11-11 by registering against a fake server) — the
 difference is the 15 gated `task_*` tools below. Every tool is a thin adapter
 over the same `src/services/` functions the REST API uses — behavior lives in
 the services, never in the tool handlers (no duplication between REST and MCP).
