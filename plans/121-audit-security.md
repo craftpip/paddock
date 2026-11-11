@@ -1,6 +1,6 @@
 # Plan 121 — Audit fixes: authorization, CSRF and the HTTP surface
 
-## Status: In progress — 2026-11-11 — 0/19 findings fixed; all traced in code by a read-only review, none yet reproduced
+## Status: In progress — 2026-11-11 — 19/19 findings fixed in code plus one found while testing (#20); 3 not exercised live (#13, #17, the PIN lockout half of #7), see "Results"
 
 ## Why
 
@@ -87,24 +87,61 @@ hashing.
   list carries `requireAdmin`.
 - `npm test` green.
 
+## Results (2026-11-11)
+
+Tested live as a throwaway regular user `audituser` owning a throwaway PAD
+`pad-audit`, and as admin. `npm test`: 70 files green.
+
+| # | Fix | Evidence |
+|---|---|---|
+| 1 | One CSRF middleware on `/api` for every non-GET request (login and setup exempt); the terminal WebSocket refuses a foreign `Origin` | No token → 403 on `exec`, `users`, `env`, `stop`, session delete, vault, and a plain form post. WS: `Origin: http://evil.example` → closed 1008; same origin and no origin → terminal data. Browser: runner config saved, terminal attached. The "before" state was not captured for this one |
+| 2 | `/api/env*` and `/api/paths/*` admin-only by prefix; secrets no longer returned raw; keys and values validated | user → 403; `rawValue` gone; a value with a newline → 400 |
+| 3 | Saving runner callbacks requires admin | user → 403 |
+| 4 | `GET /api/vms` removed (nothing called it) | 404 |
+| 5 | Host-scope paths checked on the real path; destructive operations refuse a missing, outside or root path | Unit test red before the fix (3 of 7), green after, control bites. Live through a symlink made in `pad-audit`: read `.env`, list, read `app.db`, download, delete-through-link, `delete {}`, delete root all refused; deleting the link itself allowed |
+| 6 | `services/host-powers.js`: docker socket, host workspace, extra volumes, network peer, build commands are admin-only, enforced in REST create, in `prepareAgentChanges` (every settings path, fail-closed on a missing role) and the MCP create/recreate tools | user create with docker / host folder → 403; user settings with docker / volume → refused; `actorRole: "admin"` in the body ignored; plain create allowed |
+| 7 | Vault admin-only by prefix | user → 403. **Not done:** attempt lockout on a wrong PIN (now only an admin can try) |
+| 8 | Only the PAD's owner may confer; the key id is stored and revoked by id | admin on `pad-audit` → 403 `not_pad_owner` |
+| 9 | Reset and delete no longer touch a table that does not exist; sessions ended through the session store; delete is one transaction | Reset answered 500 "no such table" before, `{ok:true}` after |
+| 10 | Every handler on the app is wrapped once so a rejected promise reaches the JSON error handler | Covered by the wrapper; not separately forced live |
+| 11 | The creator owns a PAD from the moment the create is accepted, and after a failed create | `audituser` read its own create status |
+| 12 | The MCP URL test runs inside the PAD and accepts only http(s) | `file:` → 400; probe answered from the PAD |
+| 13 | `runCmd` writes and closes stdin; error text no longer carries arguments | **Code only** — needs an openclaw PAD and a real key to exercise |
+| 14 | Containers and fleet stats limited to the caller's PADs | user sees only `pad-audit` |
+| 15 | Session delete validates the id and refuses `msn-*` | both → 400; `main` still alive |
+| 16 | CSRF and rate-limit refusals answer JSON (403 / 429 with `Retry-After`) | 403 JSON seen; 429 not forced |
+| 17 | Upload request capped at 512 MB, 2000 files | **Code only** |
+| 18 | MCP server names and URLs shell-quoted | Code; hygiene test green |
+| 19 | Mission MCP tools resolve the PAD name before gating and acting | `mcp.test.js` 141 green |
+| 20 | **Found while testing:** `registry.discoverAgents` took no parameter, so the owner filter every route passed was dropped and each user was listed the whole fleet. It and `getAgentStats` now filter by owner | New test `agent-registry-owner.test.js`, control bites. Live: `audituser` lists only `pad-audit` |
+
+Tests added: `workspace-host-scope.test.js` (7), `agent-registry-owner.test.js`
+(2), three in `route-table.test.js` (global CSRF, admin-only prefixes, no
+`/api/vms`).
+
+Follow-on for the client (tracked in plan 119): a regular user still sees the
+Vault and Configs links and the vault button in the command pane, which now
+answer 403.
+
 ## Progress
 
-- [ ] 1 Global CSRF for non-GET `/api/*`; WebSocket `Origin` check
-- [ ] 2 `.env` routes admin-only; no raw secrets; no newlines in values
-- [ ] 3 Runner callbacks: admin-only to save or enable
-- [ ] 4 `/api/vms` removed or owner-filtered without passwords
-- [ ] 5 Host-scope workspace operations realpath-checked
-- [ ] 6 Host-level create/settings options admin-only (REST and MCP)
-- [ ] 7 Vault admin-only; PIN attempt lockout
-- [ ] 8 Orchestrator key minted for the owner, revoked by id
-- [ ] 9 User reset/delete without the missing table; sessions ended
-- [ ] 10 Async handlers answer on failure
-- [ ] 11 Creator owns the PAD from the start, and after a failed create
-- [ ] 12 `mcp/test-url` cannot reach private addresses
-- [ ] 13 Onboard key paste uses stdin properly; no argv in errors
-- [ ] 14 Containers, fleet stats, path probing scoped
-- [ ] 15 Terminal-session delete validates the id
-- [ ] 16 Rate limit and CSRF refusals answer JSON 429 / 403
-- [ ] 17 Upload limits
-- [ ] 18 MCP server names shell-quoted
-- [ ] 19 Mission MCP tools pass the resolved PAD name on
+- [x] 1 Global CSRF for non-GET `/api/*`; WebSocket `Origin` check
+- [x] 2 `.env` routes admin-only; no raw secrets; no newlines in values
+- [x] 3 Runner callbacks: admin-only to save or enable
+- [x] 4 `/api/vms` removed or owner-filtered without passwords
+- [x] 5 Host-scope workspace operations realpath-checked
+- [x] 6 Host-level create/settings options admin-only (REST and MCP)
+- [x] 7 Vault admin-only; PIN attempt lockout
+- [x] 8 Orchestrator key minted for the owner, revoked by id
+- [x] 9 User reset/delete without the missing table; sessions ended
+- [x] 10 Async handlers answer on failure
+- [x] 11 Creator owns the PAD from the start, and after a failed create
+- [x] 12 `mcp/test-url` cannot reach private addresses
+- [x] 13 Onboard key paste uses stdin properly; no argv in errors
+- [x] 14 Containers, fleet stats, path probing scoped
+- [x] 15 Terminal-session delete validates the id
+- [x] 16 Rate limit and CSRF refusals answer JSON 429 / 403
+- [x] 17 Upload limits
+- [x] 18 MCP server names shell-quoted
+- [x] 19 Mission MCP tools pass the resolved PAD name on
+- [x] 20 PAD listing honours its owner filter

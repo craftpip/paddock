@@ -2,7 +2,7 @@
  * Infinite runners: the runner, its queue, prompts, callbacks and controls.
  */
 const mission = require('../services/mission');
-const { csrfCheck } = require('../middleware/auth');
+const { csrfCheck, requireAdmin } = require('../middleware/auth');
 
 /** Register this area's routes on the app. `ctx` carries the helpers app.js owns. */
 module.exports = function register(app, ctx) {
@@ -231,7 +231,9 @@ module.exports = function register(app, ctx) {
     }
   });
 
-  app.put('/api/mission/runners/:id/callbacks', csrfCheck, async (req, res) => {
+  // Callback scripts run as root in the control plane, beside the docker
+  // socket (plan 92, deliberately), so only an admin may save or enable one.
+  app.put('/api/mission/runners/:id/callbacks', csrfCheck, requireAdmin, async (req, res) => {
     try {
       const found = missionRunner(req, res);
       if (!found) return;

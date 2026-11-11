@@ -59,6 +59,23 @@ function requireAdmin(req, res, next) {
   return res.status(403).json({ error: 'Admin access required' });
 }
 
+/** End every live session of one user (password reset, account deletion).
+ *  Sessions live in this process's memory store; there is no sessions table.
+ *  `exceptSid` keeps the caller's own session when they act on themselves. */
+function endSessionsFor(userId, exceptSid = null) {
+  return new Promise((resolve) => {
+    if (!sessionStore || !userId) return resolve(0);
+    sessionStore.all((err, sessions) => {
+      if (err || !sessions) return resolve(0);
+      let ended = 0;
+      for (const [sid, data] of Object.entries(sessions)) {
+        if (data && data.userId === userId && sid !== exceptSid) { sessionStore.destroy(sid, () => {}); ended += 1; }
+      }
+      resolve(ended);
+    });
+  });
+}
+
 function checkNeedsSetup(req, res, next) {
   const publicPaths = ['/api/setup', '/api/login', '/api/session', '/setup', '/login'];
   if (publicPaths.includes(req.path)) return next();
@@ -99,14 +116,13 @@ function csrfToken(req, res, next) {
 
 function csrfCheck(req, res, next) {
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
-  const token = req.body._csrf || req.headers['x-csrf-token'];
-  if (!token || token !== req.session.csrfToken) {
-    if (req.xhr || req.path.startsWith('/api/')) {
-      return res.status(403).json({ error: 'CSRF token invalid' });
-    }
-    return res.status(403).render('partials/error', { message: 'CSRF token invalid. Please refresh and try again.', code: 403 });
+  const token = (req.body && req.body._csrf) || req.headers['x-csrf-token'];
+  if (!token || !req.session || token !== req.session.csrfToken) {
+    // Always JSON: the app has no view engine, so the old res.render answered
+    // 500 instead of 403. The client retries once on exactly this message.
+    return res.status(403).json({ error: 'CSRF token invalid' });
   }
   next();
 }
 
-module.exports = { setupSession, getSessionFromCookie, requireAuth, requireAdmin, csrfToken, csrfCheck, hashPassword, verifyPassword, checkNeedsSetup };
+module.exports = { endSessionsFor, setupSession, getSessionFromCookie, requireAuth, requireAdmin, csrfToken, csrfCheck, hashPassword, verifyPassword, checkNeedsSetup };

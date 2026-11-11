@@ -1006,7 +1006,7 @@ function registerTools(server) {
   require('./mcp/tools-mission')(registerToolBound, {
     currentUser, requireTool, missionCallSync, missionVisibleAgents, missionWithLive,
     missionSelectProjects, missionProjectRow, textResult, missionRequireSession, missionCall,
-    missionSessionRow, missionRequireProject, missionMaySee, missionActor,
+    missionSessionRow, missionRequireProject, missionMaySee, missionActor, resolveAgentName,
   });
   require('./mcp/tools-plans')(registerToolBound, {
     resolvePlansScope, currentUser, plansCall, textResult, requirePad, missionActor,

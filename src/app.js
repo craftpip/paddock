@@ -63,6 +63,29 @@ function safeVmName(name) {
 }
 
 const app = express();
+
+// Express 4 ignores the promise an async handler returns: when it rejects, the
+// request never gets an answer and the client waits until it times out. Every
+// handler registered on the app is wrapped once, here, so a rejection (or a
+// throw) reaches the JSON error handler at the bottom instead. Error handlers
+// (four arguments) are left alone.
+function answerOnFailure(fn) {
+  if (typeof fn !== 'function' || fn.length >= 4) return fn;
+  return function guarded(req, res, next) {
+    try {
+      const result = fn.call(this, req, res, next);
+      if (result && typeof result.catch === 'function') result.catch(next);
+      return result;
+    } catch (err) {
+      return next(err);
+    }
+  };
+}
+for (const method of ['get', 'post', 'put', 'patch', 'delete', 'all', 'use']) {
+  const original = app[method].bind(app);
+  app[method] = (...args) => original(...args.map(answerOnFailure));
+}
+
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use(cookieParser());
@@ -142,6 +165,18 @@ function ensureAutoLogin(req) {
 }
 app.use((req, res, next) => { ensureAutoLogin(req); next(); });
 
+// CSRF: every state-changing API request must carry the session's token. It is
+// enforced here, once, not per route: a route that forgot the check used to be
+// writable by any page that could make the browser send a form (and under
+// AUTO_LOGIN no cookie is even needed). Login and first-run setup are exempt
+// because no token exists yet; /mcp is not under /api and authenticates with a
+// bearer key instead of a cookie.
+const CSRF_EXEMPT = new Set(['/login', '/setup']);
+app.use('/api', (req, res, next) => {
+  if (CSRF_EXEMPT.has(req.path)) return next();
+  return csrfCheck(req, res, next);
+});
+
 // ─── Auth: public paths, then enforce on everything else ───
 
 app.use(checkNeedsSetup);
@@ -184,15 +219,19 @@ let dockerCache = { ts: 0, data: {} };
 
 function runCmd(cmd, args, options = {}) {
   const { timeout = 30000, check = false, input } = options;
+  // Error text names the program and its subcommand only. The full argument
+  // list can carry a secret (a bot token, an API key passed as a flag) and
+  // these messages are returned to the browser.
+  const what = [cmd, ...(args || []).filter((a) => typeof a === 'string' && /^[a-z][a-z0-9-]*$/i.test(a)).slice(0, 3)].join(' ');
   return new Promise((resolve, reject) => {
-    const child = execFile(cmd, args || [], { timeout, input }, (err, stdout, stderr) => {
+    const child = execFile(cmd, args || [], { timeout }, (err, stdout, stderr) => {
       if (err) {
         if (err.killed) {
-          reject(new Error(`Command timed out after ${timeout}s: ${cmd} ${(args || []).join(' ')}`));
+          reject(new Error(`Command timed out after ${Math.round(timeout / 1000)}s: ${what}`));
         } else if (err.code === 'ENOENT') {
           reject(new Error(`Command not found: ${cmd}`));
         } else if (check && err.code !== 0) {
-          reject(new Error(`Command failed: ${cmd} ${(args || []).join(' ')}\n${stderr}`));
+          reject(new Error(`Command failed: ${what}\n${stderr}`));
         } else {
           resolve({ stdout: stdout || '', stderr: stderr || '', code: err.code });
         }
@@ -200,6 +239,14 @@ function runCmd(cmd, args, options = {}) {
         resolve({ stdout, stderr, code: 0 });
       }
     });
+    // execFile has no `input` option (only the sync variants do), so stdin is
+    // written and closed here. Leaving it open made a command that reads
+    // stdin wait until the timeout: onboarding's key paste never worked.
+    if (child.stdin) {
+      child.stdin.on('error', () => {});
+      if (input !== undefined && input !== null) child.stdin.write(String(input));
+      child.stdin.end();
+    }
   });
 }
 
@@ -518,6 +565,8 @@ app.param('name', (req, res, next, name) => {
   if (req.session.role === 'admin') return next();
   const db = getDb();
   const row = db.prepare('SELECT owner_id FROM agents WHERE name = ?').get(name);
+  // While a create is running the creator owns it by claim (see agent-registry).
+  if ((!row || !row.owner_id) && registry.pendingOwner(name) === req.session.userId) return next();
   if (!row || row.owner_id !== req.session.userId) {
     return res.status(403).json({ error: 'Access denied' });
   }
@@ -600,8 +649,7 @@ require('./routes/auth')(app, {
   ensureAutoLogin,
 });
 require('./routes/agents')(app, {
-  PREFIX, INSTANCES_DIR, readMeta, dockerPsList, getVmStatus, safeVmName, runCmd,
-  termUserArgs, dockerExec,
+  PREFIX, readMeta, dockerPsList, safeVmName, runCmd, termUserArgs, dockerExec,
 });
 require('./routes/system')(app, {
   PREFIX, ENV_FILE, writeEnvFile, dockerClient, runCmd,
@@ -667,7 +715,10 @@ app.use((req, res) => {
 
 app.use((err, req, res, next) => {
   console.error(err);
-  res.status(500).json({ error: err.message || 'Internal server error' });
+  if (res.headersSent) return next(err);
+  // A service error that names its own status and machine code keeps them.
+  const status = Number.isInteger(err.status) && err.status >= 400 && err.status < 600 ? err.status : 500;
+  res.status(status).json({ error: err.message || 'Internal server error', ...(err.code && typeof err.code === 'string' ? { code: err.code } : {}) });
 });
 
 // ─── Boot ───────────────────────────────────────────────────
@@ -812,6 +863,19 @@ const wss = new WebSocketServer({ server });
 
 wss.on('connection', async (ws, req) => {
   console.log('[wss] connection:', req.url);
+  // A browser sends Origin on a WebSocket handshake and does NOT apply the
+  // same-origin policy to it, so a page on another origin could otherwise open
+  // a shell with the user's cookie. A request with no Origin is not a browser.
+  const origin = req.headers.origin;
+  if (origin) {
+    let originHost = null;
+    try { originHost = new URL(origin).host; } catch { /* malformed → refused below */ }
+    if (!originHost || originHost !== req.headers.host) {
+      console.warn(`[wss] refused cross-origin handshake from ${origin}`);
+      ws.close(1008, 'Cross-origin connection refused');
+      return;
+    }
+  }
   const url = new URL(req.url, 'http://localhost');
   const parts = url.pathname.split('/').filter(Boolean);
 

@@ -78,3 +78,38 @@ it('hands every route file exactly the helpers it destructures from ctx', () => 
     assert.deepEqual(given, taken, `routes/${m[1]}.js`);
   }
 });
+
+// ---- plan 121: who may call what ------------------------------------------
+const read = (rel) => fs.readFileSync(path.join(SRC, rel), 'utf8');
+
+it('checks the CSRF token once, for every state-changing API request', () => {
+  const app = read('app.js');
+  // One middleware on /api, placed before the first route registration.
+  const guard = app.indexOf("app.use('/api', (req, res, next) => {");
+  const firstRoutes = app.indexOf("require('./routes/");
+  assert.ok(guard !== -1, 'the global CSRF middleware exists');
+  assert.ok(firstRoutes !== -1 && guard < firstRoutes, 'and runs before any route is registered');
+  const body = app.slice(guard, app.indexOf('});', guard));
+  assert.match(body, /return csrfCheck\(req, res, next\)/);
+  // Only the two requests that happen before a token can exist are exempt.
+  assert.match(app, /const CSRF_EXEMPT = new Set\(\['\/login', '\/setup'\]\);/);
+});
+
+it('keeps host-level routes admin-only', () => {
+  // A prefix guard, so a route added under these paths later is covered too.
+  assert.match(read('routes/system.js'), /app\.use\(\['\/api\/paths', '\/api\/env'\], requireAdmin\);/);
+  assert.match(read('routes/vault.js'), /app\.use\('\/api\/vault', requireAdmin\);/);
+  assert.match(read('routes/mission-runners.js'), /app\.put\('\/api\/mission\/runners\/:id\/callbacks', csrfCheck, requireAdmin,/);
+  for (const [file, guard, firstRoute] of [
+    ['routes/system.js', "app.use(['/api/paths', '/api/env'], requireAdmin);", "app.get('/api/paths/probe'"],
+    ['routes/vault.js', "app.use('/api/vault', requireAdmin);", "app.get('/api/vault'"],
+  ]) {
+    const src = read(file);
+    assert.ok(src.indexOf(guard) !== -1 && src.indexOf(firstRoute) !== -1, `${file}: guard and route present`);
+    assert.ok(src.indexOf(guard) < src.indexOf(firstRoute), `${file}: the guard is registered before the routes it protects`);
+  }
+});
+
+it('no longer serves the route that listed every PAD with its root password', () => {
+  assert.equal(table.some((r) => r.path === '/api/vms'), false);
+});

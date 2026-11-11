@@ -14,6 +14,11 @@ module.exports = function register(app, ctx) {
     PREFIX, ENV_FILE, writeEnvFile, dockerClient, runCmd,
   } = ctx;
 
+  // Everything in this file reads or changes the HOST (its directories, the
+  // control plane's .env, the webui container itself), so all of it is
+  // admin-only. A regular user manages their own PADs and nothing here.
+  app.use(['/api/paths', '/api/env'], requireAdmin);
+
   app.get('/api/paths/probe', (req, res) => {
     try {
       res.json(pathProbe.probe(String(req.query.path || '')));
@@ -139,8 +144,8 @@ module.exports = function register(app, ctx) {
       const rawValue = trimmed.slice(idx + 1).trim();
       vars.push({
         key,
+        // A secret's value never leaves the process, masked or otherwise.
         value: ENV_SECRET_KEYS.has(key) ? '••••••••' : rawValue,
-        rawValue,
         isSecret: ENV_SECRET_KEYS.has(key),
         isLocked: ENV_LOCKED_KEYS.has(key),
         isReadonly: ENV_READONLY_KEYS.has(key),
@@ -155,6 +160,13 @@ module.exports = function register(app, ctx) {
 
   app.post('/api/env', (req, res) => {
     const { vars = {} } = req.body || {};
+    // One KEY=value per line is the file's whole grammar, so a line break in a
+    // key or value writes a second variable: that is how a locked key could be
+    // set through an unlocked one.
+    for (const [key, value] of Object.entries(vars)) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return res.status(400).json({ error: `Invalid variable name: ${JSON.stringify(key).slice(0, 60)}` });
+      if (/[\r\n\0]/.test(String(value))) return res.status(400).json({ error: `${key}: a value cannot contain a line break` });
+    }
     const locked = Object.keys(vars).filter((k) => ENV_LOCKED_KEYS.has(k));
     if (locked.length) {
       return res.status(400).json({ error: `Cannot modify locked variables: ${locked.join(', ')}` });

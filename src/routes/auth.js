@@ -4,7 +4,7 @@
 const crypto = require('crypto');
 const apiKeys = require('../services/api-keys');
 const { getDb } = require('../services/db');
-const { requireAdmin, csrfCheck, hashPassword, verifyPassword } = require('../middleware/auth');
+const { requireAdmin, csrfCheck, hashPassword, verifyPassword, endSessionsFor } = require('../middleware/auth');
 
 /** Register this area's routes on the app. `ctx` carries the helpers app.js owns. */
 module.exports = function register(app, ctx) {
@@ -123,7 +123,7 @@ module.exports = function register(app, ctx) {
     }
   });
 
-  app.post('/api/users/:id/reset-password', requireAdmin, (req, res) => {
+  app.post('/api/users/:id/reset-password', requireAdmin, async (req, res) => {
     const { password, current_password } = req.body;
     if (!password || password.length < 4) return res.status(400).json({ error: 'Password must be at least 4 characters' });
 
@@ -142,14 +142,16 @@ module.exports = function register(app, ctx) {
 
       const passwordHash = hashPassword(password);
       db.prepare('UPDATE users SET password_hash = ?, updated_at = datetime(\'now\') WHERE id = ?').run(passwordHash, req.params.id);
-      db.prepare('DELETE FROM user_sessions WHERE sid IN (SELECT sid FROM user_sessions WHERE json_extract(data, \'$.userId\') = ?)').run(req.params.id);
-      res.json({ ok: true });
+      // Anyone signed in with the old password is signed out, except the
+      // admin's own session when they reset themselves.
+      const sessionsEnded = await endSessionsFor(req.params.id, req.sessionID);
+      res.json({ ok: true, sessionsEnded });
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
   });
 
-  app.delete('/api/users/:id', requireAdmin, (req, res) => {
+  app.delete('/api/users/:id', requireAdmin, async (req, res) => {
     try {
       const db = getDb();
       const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
@@ -158,10 +160,15 @@ module.exports = function register(app, ctx) {
         const adminCount = db.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'admin'").get().count;
         if (adminCount <= 1) return res.status(400).json({ error: 'Cannot delete the only admin' });
       }
-      db.prepare("UPDATE agents SET owner_id = NULL WHERE owner_id = ?").run(req.params.id);
-      db.prepare('DELETE FROM user_sessions WHERE sid IN (SELECT sid FROM user_sessions WHERE json_extract(data, \'$.userId\') = ?)').run(req.params.id);
-      db.prepare('DELETE FROM users WHERE id = ?').run(req.params.id);
-      res.json({ ok: true });
+      if (user.id === req.session.userId) return res.status(400).json({ error: 'You cannot delete the account you are signed in with' });
+      // One transaction: the user's PADs are released and the user removed
+      // together, or neither happens.
+      db.transaction(() => {
+        db.prepare("UPDATE agents SET owner_id = NULL WHERE owner_id = ?").run(req.params.id);
+        db.prepare('DELETE FROM users WHERE id = ?').run(req.params.id);
+      })();
+      const sessionsEnded = await endSessionsFor(req.params.id);
+      res.json({ ok: true, sessionsEnded });
     } catch (e) {
       res.status(500).json({ error: e.message });
     }

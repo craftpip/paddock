@@ -9,6 +9,10 @@ const { requireAdmin, csrfCheck, verifyPassword } = require('../middleware/auth'
 module.exports = function register(app, ctx) {
 
   // ─── API: Vault (encrypted key-value store) ────────────────
+  // The vault is one shared store with one PIN, so it belongs to the admin:
+  // a regular user could otherwise set the PIN first and lock the admin out,
+  // or overwrite and delete items they cannot read.
+  app.use('/api/vault', requireAdmin);
 
   app.get('/api/vault', (req, res) => {
     try {

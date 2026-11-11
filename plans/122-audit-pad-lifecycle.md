@@ -65,11 +65,11 @@ the drivers beyond their start commands. A second pass is item 22.
 
 ## Progress
 
-- [ ] 1 (done under plan 121 #5)
+- [x] 1 (done under plan 121 #5)
 - [ ] 2 `removeVm` deletes only a workspace it created and nobody shares
 - [ ] 3 Devcontainer plan: env files, capabilities, sysctls and mounts validated
 - [ ] 4 Orphan-door sweep limited to this project's doors
-- [ ] 5 Destructive workspace operations refuse an outside, missing or root path
+- [x] 5 Destructive workspace operations refuse an outside, missing or root path (done with plan 121 #5; live: `delete {}` → 400)
 - [ ] 6 Create validates password and port
 - [ ] 7 Web password shell-quoted in every driver
 - [ ] 8 Reset keeps the web console published and working, or unpublishes it
@@ -80,7 +80,7 @@ the drivers beyond their start commands. A second pass is item 22.
 - [ ] 13 Job cleanup timer only removes its own job
 - [ ] 14 Boot reconciliation leaves claimed tasks alone
 - [ ] 15 Port-conflict scan reads `/tcp` ports
-- [ ] 16 Parent-file save works or the route is removed
+- [x] 16 Parent-file save removed (it called a function that never existed; nothing used it)
 - [ ] 17 One apply per PAD at a time
 - [ ] 18 Failed create cleans up after itself
 - [ ] 19 Container paths validated

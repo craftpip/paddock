@@ -149,6 +149,15 @@ async function confer(name, userId) {
   if (isConferred(name)) {
     throw new OrchestratorError(409, 'already_orchestrator', `${name} is already an orchestrator`);
   }
+  // The key written into the PAD carries the CONFERRING user's reach. Putting
+  // an admin's key into a PAD another user owns would hand that user the
+  // admin's access, so only the PAD's own owner may confer (an ownerless PAD
+  // belongs to whoever administers it).
+  const owner = getDb().prepare('SELECT owner_id FROM agents WHERE name = ?').get(name);
+  if (owner && owner.owner_id && owner.owner_id !== userId) {
+    throw new OrchestratorError(403, 'not_pad_owner',
+      `${name} belongs to another user. Only its owner can make it an orchestrator, because the PAD would hold a key with your access.`);
+  }
   const elsewhere = otherConferredPad(userId, name);
   if (elsewhere) {
     throw new OrchestratorError(409, 'orchestrator_exists',
@@ -177,7 +186,9 @@ async function confer(name, userId) {
     wired = true;
     fs.mkdirSync(path.dirname(configPath), { recursive: true });
     fs.writeFileSync(configPath,
-      JSON.stringify({ role: 'orchestrator', since: new Date().toISOString(), folders: [] }, null, 2) + '\n');
+      // keyId / keyUserId say exactly which key to revoke later, whoever
+      // removes the conferral. Neither is a secret.
+      JSON.stringify({ role: 'orchestrator', since: new Date().toISOString(), folders: [], keyId: row.id, keyUserId: userId }, null, 2) + '\n');
     ensureOwned(configPath);
     vm.setMetaFlag(name, ORCH_META_KEY, '1');
   } catch (e) {
@@ -206,8 +217,19 @@ async function removeConferral(name, userId) {
   if (!isConferred(name)) {
     throw new OrchestratorError(409, 'not_orchestrator', `${name} is not an orchestrator`);
   }
-  const key = orchestratorKey(userId);
-  if (key) apiKeys.remove(key.id, userId);
+  // Revoke the key this conferral minted, by id. Looking it up by the
+  // CALLER and the name "orchestrator" left the real key valid when a
+  // different admin removed the conferral, and could delete a key the caller
+  // had made by hand under that name.
+  const recorded = readConfigOrNull(name) || {};
+  let keyRevoked = false;
+  if (recorded.keyId && recorded.keyUserId) {
+    keyRevoked = apiKeys.remove(recorded.keyId, recorded.keyUserId);
+  } else {
+    // A conferral made before the id was recorded: the old lookup is all there is.
+    const key = orchestratorKey(userId);
+    if (key) keyRevoked = apiKeys.remove(key.id, userId);
+  }
 
   let wiringLeftInContainer = false;
   try {
@@ -230,7 +252,7 @@ async function removeConferral(name, userId) {
   const configPath = orchestratorConfigPath(name);
   try { if (fs.existsSync(configPath)) fs.rmSync(configPath); } catch {}
   try { vm.setMetaFlag(name, ORCH_META_KEY, ''); } catch {}
-  return { ok: true, name, keyRevoked: !!key, wiringLeftInContainer };
+  return { ok: true, name, keyRevoked, wiringLeftInContainer };
 }
 
 /** Read the conferral state for the UI. */

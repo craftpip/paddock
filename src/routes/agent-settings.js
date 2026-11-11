@@ -127,7 +127,7 @@ module.exports = function register(app, ctx) {
   app.post('/api/agents/:name/settings', async (req, res) => {
     const name = safeVmName(req.params.name);
     if (!name) return res.status(400).json({ error: 'Invalid agent name' });
-    const body = req.body || {};
+    const body = { ...(req.body || {}), actorRole: req.session.role };
     try {
       // Shared validation + change detection (plan 30) — the same
       // `prepareAgentChanges` the MCP recreate tool uses. An invalid request
@@ -190,7 +190,7 @@ module.exports = function register(app, ctx) {
         }
       });
     } catch (e) {
-      res.status(400).json({ error: e.message });
+      res.status(e.status || 400).json({ error: e.message, ...(e.code && typeof e.code === "string" ? { code: e.code } : {}) });
     }
   });
 

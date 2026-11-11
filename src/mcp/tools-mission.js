@@ -13,7 +13,7 @@ module.exports = function register(registerToolBound, ctx) {
   const {
     currentUser, requireTool, missionCallSync, missionVisibleAgents, missionWithLive,
     missionSelectProjects, missionProjectRow, textResult, missionRequireSession, missionCall,
-    missionSessionRow, missionRequireProject, missionMaySee, missionActor,
+    missionSessionRow, missionRequireProject, missionMaySee, missionActor, resolveAgentName,
   } = ctx;
 
  // end PADDOCK_TASK_QUEUE gate — service below stays loaded
@@ -37,8 +37,12 @@ module.exports = function register(registerToolBound, ctx) {
         include_sessions: z.boolean().optional().describe('Also inline each session (default false — use mission_sessions)'),
       },
     },
-    async ({ agent, project_id, name, folder, include_sessions }) => {
+    async ({ agent: agentArg, project_id, name, folder, include_sessions }) => {
       const user = currentUser();
+      // Resolve the caller's spelling of the PAD first, then gate and act on
+      // the canonical name: a display-name spelling used to pass the gate and
+      // then match nothing in the store.
+      const agent = agentArg ? (resolveAgentName(agentArg).name || agentArg) : agentArg;
       if (agent) requireTool(user, 'mission_projects', agent);
       const projects = missionCallSync(() =>
         mission.listProjects({ agent: agent || '', agents: missionVisibleAgents(user) })
@@ -116,6 +120,7 @@ module.exports = function register(registerToolBound, ctx) {
 
       // List mode. `agent` gets an explicit gate (a clear refusal beats a
       // silently empty list); the store filter does the per-row owner scoping.
+      if (agent) agent = resolveAgentName(agent).name || agent; // canonical spelling before the gate and the filter
       if (agent) requireTool(user, 'mission_sessions', agent);
       const scoped = missionVisibleAgents(user);
       const byId = new Map();
@@ -173,8 +178,9 @@ module.exports = function register(registerToolBound, ctx) {
         plans_folder: z.string().optional().describe("Relative folder for this project's plans, INSIDE the project folder (default `plans`). No absolute or `..` paths."),
       },
     },
-    async ({ name, agent, folder, plans_folder }) => {
+    async ({ name, agent: agentArg, folder, plans_folder }) => {
       const user = currentUser();
+      const agent = resolveAgentName(agentArg).name || agentArg;
       // Gate BEFORE the probe: the probe is a container command on that PAD.
       requireTool(user, 'mission_project_create', agent);
 

@@ -305,7 +305,11 @@ function dbStamps(vmName) {
   }
 }
 
-function discoverAgents() {
+/** Every PAD on disk, synced to the database. With `ownerId`, only the PADs
+ *  that user owns: the routes always passed an owner for a regular user, but
+ *  this function used to take no parameter at all, so the argument was dropped
+ *  and every signed-in user was handed the whole fleet. */
+function discoverAgents(ownerId = null) {
   const dockerState = dockerPsList(true);
   const agents = [];
 
@@ -334,7 +338,9 @@ function discoverAgents() {
     } catch {}
   }
 
-  return agents;
+  if (!ownerId) return agents;
+  const owned = new Set(getDb().prepare('SELECT name FROM agents WHERE owner_id = ?').all(ownerId).map((row) => row.name));
+  return agents.filter((agent) => owned.has(agent.name));
 }
 
 function getAgent(agentId) {
@@ -381,11 +387,15 @@ function getActivity(agentId, limit = 50) {
   return db.prepare('SELECT * FROM activity_events ORDER BY timestamp DESC LIMIT ?').all(limit);
 }
 
-function getAgentStats() {
+/** Fleet counts; with `ownerId`, only over the PADs that user owns. */
+function getAgentStats(ownerId = null) {
   const db = getDb();
-  const total = db.prepare('SELECT COUNT(*) as count FROM agents').get().count;
-  const running = db.prepare("SELECT COUNT(*) as count FROM agents WHERE status = 'running'").get().count;
-  const stopped = db.prepare("SELECT COUNT(*) as count FROM agents WHERE status = 'exited'").get().count;
+  const where = ownerId ? ' WHERE owner_id = ?' : '';
+  const and = ownerId ? ' AND owner_id = ?' : '';
+  const args = ownerId ? [ownerId] : [];
+  const total = db.prepare(`SELECT COUNT(*) as count FROM agents${where}`).get(...args).count;
+  const running = db.prepare(`SELECT COUNT(*) as count FROM agents WHERE status = 'running'${and}`).get(...args).count;
+  const stopped = db.prepare(`SELECT COUNT(*) as count FROM agents WHERE status = 'exited'${and}`).get(...args).count;
   return { total, running, stopped, unknown: total - running - stopped };
 }
 
@@ -402,6 +412,15 @@ function getOrphanCount() {
 /** Assign (or clear) an agent's owner. The create flow calls this after the
  *  registry sync so the creating user owns the new agent; admins may re-assign
  *  to any existing user. Silently no-ops on a bad userId / missing row. */
+// A PAD being created has no row (or no owner) until the build finishes, so the
+// ownership gate would refuse its own creator the create log, and a create
+// that failed part-way left an ownerless PAD its creator could neither see nor
+// delete. The intended owner is recorded the moment the create is accepted.
+const pendingOwners = new Map();
+function claimPendingOwner(name, userId) { if (name && userId) pendingOwners.set(name, userId); }
+function pendingOwner(name) { return pendingOwners.get(name) || null; }
+function releasePendingOwner(name) { pendingOwners.delete(name); }
+
 function assignOwner(name, userId) {
   if (!userId) return;
   try {
@@ -428,7 +447,7 @@ module.exports = {
   removeAgentFromDb,
   setRestarting,
   setLifecycle,
-  assignOwner,
+  assignOwner, claimPendingOwner, pendingOwner, releasePendingOwner,
   INSTANCES_DIR, PREFIX,
   VM_NAME_RE,
 };

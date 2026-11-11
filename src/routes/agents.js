@@ -5,6 +5,7 @@
 const fs = require('fs');
 const path = require('path');
 const registry = require('../services/agent-registry');
+const hostPowers = require('../services/host-powers');
 const vm = require('../services/vm-manager');
 const drivers = require('../services/drivers');
 const jobLog = require('../services/job-log');
@@ -14,42 +15,11 @@ const { getDb } = require('../services/db');
 /** Register this area's routes on the app. `ctx` carries the helpers app.js owns. */
 module.exports = function register(app, ctx) {
   const {
-    PREFIX, INSTANCES_DIR, readMeta, dockerPsList, getVmStatus, safeVmName, runCmd,
-    termUserArgs, dockerExec,
+    PREFIX, readMeta, dockerPsList, safeVmName, runCmd, termUserArgs, dockerExec,
   } = ctx;
 
-  const PREFIX_DASH = PREFIX + '-';
-
-  async function getAllVms() {
-    const vms = [];
-    if (!fs.existsSync(INSTANCES_DIR)) return vms;
-    const dirs = fs.readdirSync(INSTANCES_DIR).sort();
-    for (const d of dirs) {
-      if (!d.startsWith(PREFIX_DASH)) continue;
-      const stat = fs.statSync(path.join(INSTANCES_DIR, d));
-      if (!stat.isDirectory()) continue;
-      const meta = readMeta(d);
-      const agent = meta.AGENT || 'openclaw';
-      const containers = await dockerPsList();
-      const cinfo = containers[d] || {};
-      vms.push({
-        name: d,
-        agent,
-        password: meta.ROOT_PASSWORD || '',
-        port: meta.PORT || '',
-        status: getVmStatus(d),
-        container_status: cinfo.Status || '',
-        config_exists: fs.existsSync(path.join(INSTANCES_DIR, d, agent, 'openclaw.json')),
-      });
-    }
-    return vms;
-  }
-
-  // ─── Routes: API ────────────────────────────────────────────
-
-  app.get('/api/vms', async (req, res) => {
-    res.json(await getAllVms());
-  });
+  // (GET /api/vms was removed: it listed every PAD with its root password to
+  // any signed-in user, and nothing in the app called it.)
 
   app.get('/api/agents', (req, res) => {
     const ownerId = req.session.role === 'admin' ? null : req.session.userId;
@@ -141,7 +111,11 @@ module.exports = function register(app, ctx) {
           state: (c.State || '').toLowerCase(),
         }))
         .filter((c) => c.name && !vm.isManagedDoorContainer(c.name));
-      res.json({ containers: list });
+      // An admin sees every container on the host (any of them can be a
+      // network peer). A regular user sees only the PADs they own.
+      if (req.session.role === 'admin') return res.json({ containers: list });
+      const mine = new Set(registry.discoverAgents(req.session.userId).map((agent) => agent.name));
+      res.json({ containers: list.filter((c) => mine.has(c.name)) });
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
@@ -291,8 +265,10 @@ module.exports = function register(app, ctx) {
       const lines = r.stdout.trim().split('\n').filter(Boolean);
       const all = lines.map(l => JSON.parse(l));
       const prefix = process.env.CONTAINER_PREFIX || 'pad';
-      const stats = all.filter(s => s.Name && s.Name.startsWith(prefix + '-'));
-      res.json({ stats });
+      const pads = all.filter(s => s.Name && s.Name.startsWith(prefix + '-'));
+      if (req.session.role === 'admin') return res.json({ stats: pads });
+      const mine = new Set(registry.discoverAgents(req.session.userId).map((agent) => agent.name));
+      res.json({ stats: pads.filter((s) => mine.has(s.Name)) });
     } catch { res.json({ stats: [] }); }
   });
 
@@ -352,6 +328,11 @@ module.exports = function register(app, ctx) {
     if (!name) return res.status(400).json({ error: 'Name is required' });
     if (!safeVmName(name)) return res.status(400).json({ error: `Invalid pad name — use ${PREFIX}-<name> (letters, digits, _ or -), e.g. ${PREFIX}-dev`, code: 'invalid_pad_name' });
     if (registry.getAgent(name)) return res.status(409).json({ error: 'Agent already exists' });
+    try {
+      hostPowers.assertAllowed(req.session.role, hostPowers.requestedAtCreate(req.body));
+    } catch (e) {
+      return res.status(e.status || 403).json({ error: e.message, code: e.code });
+    }
 
     // Shared pre-flight (plan 30): the same vm.validateAgentCreate that backs the
     // MCP create_agent tool — network peer exists/running, extra volumes/ports,
@@ -378,6 +359,15 @@ module.exports = function register(app, ctx) {
     const job = jobLog.getOrCreateJob(name);
     const log = (stream, text) => jobLog.line(job, stream, text);
     const step = (stepName, state, cmd) => jobLog.setStep(job, stepName, state, cmd);
+
+    // The owner is decided now, not when the build ends, so the creator can
+    // follow their own create and still owns what a failed create leaves behind.
+    let intendedOwner = req.session.userId;
+    if (assign_to && req.session.role === 'admin') {
+      const assignee = getDb().prepare('SELECT id FROM users WHERE id = ?').get(assign_to);
+      if (assignee) intendedOwner = assign_to;
+    }
+    registry.claimPendingOwner(name, intendedOwner);
 
     // Respond immediately; the create runs in the background and streams its
     // output to the SSE endpoint (GET /api/agents/:name/create-log).
@@ -408,16 +398,8 @@ module.exports = function register(app, ctx) {
         });
         registry.discoverAgents();
 
-        // Set owner_id in DB (admin may re-assign to another user)
-        try {
-          const db = getDb();
-          let ownerId = req.session.userId;
-          if (assign_to && req.session.role === 'admin') {
-            const user = db.prepare('SELECT id FROM users WHERE id = ?').get(assign_to);
-            if (user) ownerId = assign_to;
-          }
-          registry.assignOwner(name, ownerId);
-        } catch {}
+        try { registry.assignOwner(name, intendedOwner); } catch (ownErr) { console.error(`Could not assign owner of ${name}:`, ownErr.message); }
+        registry.releasePendingOwner(name);
 
         registry.recordActivity(name, 'lifecycle', 'create', 'ok', `Agent created (type=${agentType})`);
         jobLog.finish(job, true);
@@ -429,11 +411,14 @@ module.exports = function register(app, ctx) {
         try {
           registry.dockerPsList(true);
           registry.discoverAgents();
+          // Whatever the failed create left on disk belongs to its creator.
+          if (registry.getAgent(name)) { try { registry.assignOwner(name, intendedOwner); } catch { /* row may not exist */ } }
           registry.recordActivity(name, 'lifecycle', 'create', 'error', e.message);
         } catch (auditErr) {
           console.error('Failed to record create error activity:', auditErr.message);
         }
         jobLog.fail(job, e.message);
+        registry.releasePendingOwner(name);
       }
     });
   });

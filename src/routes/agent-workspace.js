@@ -87,18 +87,8 @@ module.exports = function register(app, ctx) {
     }
   });
 
-  app.post('/api/agents/:name/workspace/parent/save', (req, res) => {
-    const agent = registry.getAgent(req.params.name);
-    if (!agent) return res.status(404).json({ error: 'Agent not found' });
-    const { path: filePath, content } = req.body;
-    if (!filePath) return res.status(400).json({ error: 'path required' });
-    try {
-      const result = require('../services/workspace').writeParentFile(agent.name, filePath, content || '');
-      res.json({ ok: true, ...result });
-    } catch (err) {
-      res.status(500).json({ error: err.message });
-    }
-  });
+  // (POST …/workspace/parent/save was removed: it called a function that never
+  // existed, so it always answered 500, and nothing in the app used it.)
 
   app.post('/api/agents/:name/workspace/folder', async (req, res) => {
     const agent = registry.getAgent(req.params.name);
@@ -170,10 +160,18 @@ module.exports = function register(app, ctx) {
   app.post('/api/agents/:name/workspace/upload-multiple', (req, res) => {
     const agent = registry.getAgent(req.params.name);
     if (!agent) return res.status(404).json({ error: 'Agent not found' });
+    // Uploads are held in memory until written, in the process that also holds
+    // every terminal connection, so the WHOLE request is capped, not only each
+    // file: 2000 files of 100 MB each would otherwise be accepted.
+    const MAX_UPLOAD_REQUEST = 512 * 1024 * 1024;
+    const declared = Number(req.headers['content-length'] || 0);
+    if (declared > MAX_UPLOAD_REQUEST) {
+      return res.status(413).json({ error: `Upload too large: ${Math.round(declared / 1048576)} MB in one request, the limit is ${MAX_UPLOAD_REQUEST / 1048576} MB. Upload in smaller batches.` });
+    }
     const multer = require('multer');
     const upload = multer({
       storage: multer.memoryStorage(),
-      limits: { fileSize: require('../services/workspace').MAX_UPLOAD_SIZE },
+      limits: { fileSize: require('../services/workspace').MAX_UPLOAD_SIZE, files: 2000, fieldSize: 1024 * 1024 },
     });
     upload.array('files', 2000)(req, res, async (err) => {
       if (err) return res.status(400).json({ error: err.message });

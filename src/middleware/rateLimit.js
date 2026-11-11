@@ -12,7 +12,10 @@ function rateLimit(req, res, next) {
   }
   entry.count++;
   if (entry.count > MAX_HITS) {
-    return res.status(429).render('partials/error', { message: 'Too many requests. Please wait a moment.', code: 429 });
+    // JSON, not res.render: the app has no view engine, so render threw and
+    // the client saw a 500 it had no reason to back off from.
+    res.setHeader('Retry-After', String(Math.ceil((WINDOW_MS - (now - entry.start)) / 1000)));
+    return res.status(429).json({ error: 'Too many requests. Please wait a moment.' });
   }
   next();
 }

@@ -21,27 +21,78 @@ function humanSize(n) {
 const CONTAINER_DATA_DIR = '/root/.openclaw';
 
 // Resolves a path for HOST scope (browsing the paddock/management container).
-// The user is restricted to this pad's workspace only — any path above
-// workspaceRoot is clamped back to it, so other pads under
-// /workspace/instances/ can never be reached.
-function resolveHostPath(workspaceRoot, relativePath) {
-  const raw = (relativePath || '/').trim();
+// The user is restricted to this pad's folder only, and the check is made on
+// the REAL path: the pad controls what is inside its own folder, including
+// symlinks, and every fs call here runs as root in the control plane, so a
+// lexical check alone let `ln -s /workspace x` reach the control plane's
+// .env, the app database and every other pad.
+//
+// mode says what the caller is about to do:
+//   'list'    — a read-only directory listing. A missing or outside path lands
+//               on the folder itself (the file browser's friendly answer).
+//   'read'    — read one file. Outside is refused.
+//   'write'   — create or replace. Outside is refused; the target may not exist yet.
+//   'destroy' — delete, rename or move away. Outside, missing, and the folder
+//               itself are all refused: clamping here once turned
+//               `delete {}` into "delete the pad's whole data dir".
+function resolveHostPath(workspaceRoot, relativePath, { mode = 'list' } = {}) {
+  const given = typeof relativePath === 'string' ? relativePath.trim() : '';
+  if (given.includes('\0')) throw new Error('Invalid path');
+  if (!given && mode !== 'list') throw new Error('A path is required');
+  const raw = given || '/';
+  let resolved;
   if (raw.startsWith('/')) {
     const normalized = path.normalize(raw);
     if (!normalized.startsWith('/')) throw new Error('Invalid path');
-    if (normalized.includes('\0')) throw new Error('Invalid path');
     if (normalized !== workspaceRoot && !normalized.startsWith(workspaceRoot + path.sep)) {
-      return workspaceRoot;
+      if (mode !== 'list') throw new Error("That path is outside this PAD's folder");
+      resolved = workspaceRoot;
+    } else {
+      resolved = normalized;
     }
-    return normalized;
+  } else {
+    // Legacy relative paths still resolve under the workspace root.
+    const cleaned = path.normalize(raw).replace(/^\/+/, '');
+    resolved = path.resolve(workspaceRoot, cleaned);
+    if (!resolved.startsWith(workspaceRoot + path.sep) && resolved !== workspaceRoot) {
+      throw new Error('Path traversal rejected');
+    }
   }
-  // Legacy relative paths still resolve under the workspace root.
-  const cleaned = path.normalize(raw).replace(/^\/+/, '');
-  const resolved = path.resolve(workspaceRoot, cleaned);
-  if (!resolved.startsWith(workspaceRoot + path.sep) && resolved !== workspaceRoot) {
-    throw new Error('Path traversal rejected');
+  if (mode === 'destroy' && resolved === workspaceRoot) {
+    throw new Error("Refusing to act on the PAD's folder itself");
   }
+  assertRealPathInside(workspaceRoot, resolved, mode);
   return resolved;
+}
+
+function isSymlink(p) {
+  try { return fs.lstatSync(p).isSymbolicLink(); } catch { return false; }
+}
+
+/** The nearest ancestor of p that exists, resolved through every symlink. */
+function realExisting(p) {
+  let cur = p;
+  for (;;) {
+    try { return fs.realpathSync(cur); } catch (e) {
+      if (e.code !== 'ENOENT' && e.code !== 'ENOTDIR') throw e;
+      const up = path.dirname(cur);
+      if (up === cur) return cur;
+      cur = up;
+    }
+  }
+}
+
+function assertRealPathInside(workspaceRoot, resolved, mode) {
+  let realRoot;
+  try { realRoot = fs.realpathSync(workspaceRoot); } catch { return; } // no folder yet: nothing to escape from
+  const inside = (p) => p === realRoot || p.startsWith(realRoot + path.sep);
+  // Removing or renaming a symlink acts on the link, not on what it points at,
+  // so for 'destroy' the entry's PARENT is what must be inside. Everything
+  // else is about to follow the path, so the path itself must be.
+  const subject = mode === 'destroy' ? path.dirname(resolved) : resolved;
+  if (!inside(realExisting(subject))) {
+    throw new Error("That path leads outside this PAD's folder through a symlink");
+  }
 }
 
 function resolveSafePath(workspaceRoot, relativePath) {
@@ -402,7 +453,7 @@ async function readFile(agentId, relativePath, scope) {
     return containerExec(agent.name, { op: 'read', path: relativePath });
   }
   requireHostBrowsable(agent);
-  const absPath = resolveHostPath(hostBrowseRoot(agent), relativePath);
+  const absPath = resolveHostPath(hostBrowseRoot(agent), relativePath, { mode: 'read' });
   if (!fs.existsSync(absPath)) throw new Error('File not found');
   const stat = fs.statSync(absPath);
   if (stat.isDirectory()) throw new Error('Cannot read directory');
@@ -422,7 +473,7 @@ async function writeFile(agentId, relativePath, content, scope) {
   }
   requireHostBrowsable(agent);
   const root = hostBrowseRoot(agent);
-  const absPath = resolveHostPath(root, relativePath);
+  const absPath = resolveHostPath(root, relativePath, { mode: 'write' });
   if (fs.existsSync(absPath)) {
     const stat = fs.statSync(absPath);
     if (stat.isDirectory()) throw new Error('Cannot write to directory');
@@ -441,7 +492,7 @@ async function readFileB64(agentId, relativePath, scope) {
     return containerExec(agent.name, { op: 'readB64', path: relativePath });
   }
   requireHostBrowsable(agent);
-  const absPath = resolveHostPath(hostBrowseRoot(agent), relativePath);
+  const absPath = resolveHostPath(hostBrowseRoot(agent), relativePath, { mode: 'read' });
   if (!fs.existsSync(absPath)) throw new Error('File not found');
   const stat = fs.statSync(absPath);
   if (stat.isDirectory()) throw new Error('Cannot download directory');
@@ -519,8 +570,8 @@ async function renameEntry(agentId, relativePath, newName, scope) {
     return containerExec(agent.name, { op: 'rename', path: relativePath, name: newName });
   }
   requireHostBrowsable(agent);
-  const absPath = resolveHostPath(hostBrowseRoot(agent), relativePath);
-  if (!fs.existsSync(absPath)) throw new Error('Entry not found');
+  const absPath = resolveHostPath(hostBrowseRoot(agent), relativePath, { mode: 'destroy' });
+  if (!fs.existsSync(absPath) && !isSymlink(absPath)) throw new Error('Entry not found');
   const safeName = path.basename(newName);
   if (!safeName || safeName.startsWith('.')) throw new Error('Invalid name');
   const target = path.join(path.dirname(absPath), safeName);
@@ -535,9 +586,10 @@ async function deleteEntry(agentId, relativePath, scope) {
     return containerExec(agent.name, { op: 'delete', path: relativePath });
   }
   requireHostBrowsable(agent);
-  const absPath = resolveHostPath(hostBrowseRoot(agent), relativePath);
-  if (!fs.existsSync(absPath)) throw new Error('Entry not found');
-  const stat = fs.statSync(absPath);
+  const absPath = resolveHostPath(hostBrowseRoot(agent), relativePath, { mode: 'destroy' });
+  // lstat, not stat: a symlink is removed as a link and never followed.
+  let stat;
+  try { stat = fs.lstatSync(absPath); } catch { throw new Error('Entry not found'); }
   if (stat.isDirectory()) {
     fs.rmSync(absPath, { recursive: true, force: true });
   } else {
@@ -551,8 +603,8 @@ async function moveEntry(agentId, fromPath, toPath, scope) {
     return containerExec(agent.name, { op: 'move', path: fromPath, to: toPath });
   }
   requireHostBrowsable(agent);
-  const src = resolveHostPath(hostBrowseRoot(agent), fromPath);
-  const dst = resolveHostPath(hostBrowseRoot(agent), toPath);
+  const src = resolveHostPath(hostBrowseRoot(agent), fromPath, { mode: 'destroy' });
+  const dst = resolveHostPath(hostBrowseRoot(agent), toPath, { mode: 'write' });
   if (src === dst) return { path: toPath };
   if (!fs.existsSync(src)) throw new Error('Source not found');
   if (fs.statSync(src).isDirectory() && dst.startsWith(src + path.sep)) throw new Error('Cannot move a folder into itself');
@@ -671,6 +723,7 @@ function resolveParentSafePath(agentId, relativePath) {
   if (!resolved.startsWith(parentDir + path.sep) && resolved !== parentDir) {
     throw new Error('Path traversal rejected');
   }
+  assertRealPathInside(parentDir, resolved, 'read');
   return resolved;
 }
 

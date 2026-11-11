@@ -57,3 +57,4 @@ failed. These are the defects that were visible anyway.
 - [ ] 4 Plans-folder hint
 - [ ] 5 Agent tab in the URL
 - [ ] 6 Browser checks above recorded here
+- [ ] 7 A regular user is not shown admin-only places (Vault, Configs, the vault button in the command pane, callback editing)

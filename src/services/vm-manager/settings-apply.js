@@ -11,6 +11,7 @@ Object.assign(exports, {
 const fs = require('fs');
 const path = require('path');
 const { runCmdStream } = require('../cmd');
+const hostPowers = require('../host-powers');
 const { imageFor, buildDir, readCustomBuild, writeCustomBuild } = require('../instance-image');
 const { ensureOwned, USER_UID, USER_GID } = require('../ownership');
 const {
@@ -332,6 +333,16 @@ async function prepareAgentChanges(name, opts = {}) {
   else if (postCreateChanged) reason = 'post-create';
   else if (postStartChanged) reason = 'post-start';
   else if (postAttachChanged) reason = 'post-attach';
+
+  // Host-level options are an admin's to turn on (services/host-powers.js).
+  // Checked here, in the one function every settings path goes through, and
+  // fail-closed: a caller that passes no actorRole may change nothing
+  // host-level. Callers set opts.actorRole from the session or the API key,
+  // never from the request body.
+  hostPowers.assertAllowed(opts.actorRole, hostPowers.changedInSettings({
+    dockerChanged, newAllow, workspaceChanged, wsMount, volumesChanged, newVols,
+    networkChanged, newNetwork, buildCommandsChanged, newBuildCommands,
+  }));
 
   return {
     instDir, meta, agentType, driver, wasRunning,

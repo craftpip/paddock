@@ -1,5 +1,6 @@
 import { useEffect, useRef, useImperativeHandle, forwardRef, useState, useCallback } from 'react'
 import { useConfirm } from '../lib/confirm'
+import { getCsrfToken } from '../lib/api'
 import Button from './ui/Button'
 
 /**
@@ -966,7 +967,7 @@ const Terminal = forwardRef(function Terminal(
         return next
       })
       try {
-        await fetch(`/api/agents/${encodeURIComponent(name)}/terminal-sessions/${encodeURIComponent(id)}`, { method: 'DELETE' })
+        await fetch(`/api/agents/${encodeURIComponent(name)}/terminal-sessions/${encodeURIComponent(id)}`, { method: 'DELETE', headers: { 'X-CSRF-Token': getCsrfToken() || '' }, credentials: 'same-origin' })
       } catch {}
       if (currentWasClosed && sessionIdRef.current === id) switchSession(fallback)
       let list = await refreshSessions()

@@ -2,6 +2,7 @@
  * PAD tools: list, inspect, configure, start, stop, create, recreate, update, delete.
  */
 const registry = require('../services/agent-registry');
+const hostPowers = require('../services/host-powers');
 const { getDb } = require('../services/db');
 const { z } = require('zod');
 const logStore = require('../services/log-store');
@@ -280,6 +281,11 @@ module.exports = function register(registerToolBound, ctx) {
         throw new McpError(ErrorCode.InvalidRequest, `Invalid agent name: ${args.name}`);
       }
       requireTool(user, 'create_agent', fullName);
+      try {
+        hostPowers.assertAllowed(user && user.role, hostPowers.requestedAtCreate(args));
+      } catch (e) {
+        throw new McpError(ErrorCode.InvalidRequest, `${e.code}: ${e.message}`);
+      }
       // Register the job up front so a create that outlives the MCP call
       // timeout is still observable via job_status / job_log. The key matches
       // the REST create route's, so both surfaces read the same job.
@@ -416,7 +422,7 @@ module.exports = function register(registerToolBound, ctx) {
       const ended = await missionSessionsEnded(agent.name, 'recreate');
       let result;
       try {
-        result = await vm.applyAgentChanges(agent.name, { ...args, force: true }, { onLog, onStep });
+        result = await vm.applyAgentChanges(agent.name, { ...args, force: true, actorRole: currentUser() && currentUser().role }, { onLog, onStep });
       } catch (e) {
         jobLog.fail(job, e.message);
         throw new McpError(ErrorCode.InvalidRequest, `Recreate failed: ${e.message}`);

@@ -9,6 +9,9 @@ const padTmux = require('../services/pad-tmux');
 const { getDb } = require('../services/db');
 const { csrfCheck } = require('../middleware/auth');
 
+/** Single-quote one value for a shell string run inside a PAD. */
+const sq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+
 /** Register this area's routes on the app. `ctx` carries the helpers app.js owns. */
 module.exports = function register(app, ctx) {
   const {
@@ -65,7 +68,7 @@ module.exports = function register(app, ctx) {
       if (httpServers.length > 0) {
         const results = await Promise.all(
           httpServers.map((s) =>
-            dockerExec(name, `curl -sI --connect-timeout 5 ${s.cfg.url}`, 10000)
+            dockerExec(name, `curl -sI --connect-timeout 5 ${sq(s.cfg.url)}`, 10000)
               .then((r) => ({ name: s.name, ok: r.code === 0 }))
               .catch(() => ({ name: s.name, ok: false }))
           )
@@ -91,7 +94,6 @@ module.exports = function register(app, ctx) {
     const { name: serverName, command, args, url, transport, cwd, env, auth, timeout } = req.body;
     if (!serverName) return res.status(400).json({ error: 'name required' });
 
-    const sq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
     let cmdStr = `openclaw mcp add --no-probe ${sq(serverName)}`;
     if (transport === 'streamable-http' || url) {
       cmdStr += ` --url ${sq(url || '')}`;
@@ -124,7 +126,6 @@ module.exports = function register(app, ctx) {
     if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
     const { name: serverName } = req.body;
     if (!serverName) return res.status(400).json({ error: 'name required' });
-    const sq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
     try {
       const { code, stderr } = await dockerExec(name, `openclaw mcp unset ${sq(serverName)}`);
       if (code !== 0) {
@@ -145,7 +146,7 @@ module.exports = function register(app, ctx) {
     if (!serverName || typeof enabled !== 'boolean') return res.status(400).json({ error: 'name and enabled required' });
     try {
       const flag = enabled ? '--enable' : '--disable';
-      await dockerExec(name, `openclaw mcp configure ${serverName} ${flag}`);
+      await dockerExec(name, `openclaw mcp configure ${sq(serverName)} ${flag}`);
       res.json({ ok: true });
     } catch (e) {
       res.status(500).json({ error: e.message });
@@ -156,9 +157,18 @@ module.exports = function register(app, ctx) {
   app.post('/api/agents/:name/mcp/test-url', async (req, res) => {
     const { url } = req.body;
     if (!url) return res.status(400).json({ error: 'url required' });
+    let parsed;
+    try { parsed = new URL(String(url)); } catch { return res.status(400).json({ error: 'Not a valid URL' }); }
+    if (!['http:', 'https:'].includes(parsed.protocol)) return res.status(400).json({ error: 'Only http and https URLs can be tested' });
+    // The probe runs INSIDE the PAD, where the MCP server will be used from.
+    // It used to be fetched by the control plane, which let a PAD's owner
+    // reach whatever the control plane's network position can reach.
     try {
-      const response = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(5000) });
-      res.json({ ok: true, status: response.status });
+      const { stdout, code, stderr } = await dockerExec(req.params.name,
+        `curl -s -o /dev/null -I -w '%{http_code}' --connect-timeout 5 --max-time 8 ${sq(parsed.href)}`, 12000);
+      const status = Number(String(stdout || '').trim());
+      if (code !== 0 || !status) return res.json({ ok: false, error: (stderr || '').trim().split('\n').pop() || 'No answer from that URL (tested from inside the PAD)' });
+      res.json({ ok: true, status });
     } catch (e) {
       res.json({ ok: false, error: e.message });
     }
@@ -169,7 +179,7 @@ module.exports = function register(app, ctx) {
     if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
     const { name: serverName } = req.body;
     let cmd = 'openclaw mcp probe --json';
-    if (serverName) cmd = `openclaw mcp probe ${serverName} --json`;
+    if (serverName) cmd = `openclaw mcp probe ${sq(serverName)} --json`;
     try {
       const { stdout, code } = await dockerExec(name, cmd, 30000);
       if (code !== 0) return res.status(500).json({ error: 'Probe failed' });
@@ -214,7 +224,6 @@ module.exports = function register(app, ctx) {
     if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
     const slug = req.query.name;
     if (!slug) return res.status(400).json({ error: 'name query param required' });
-    const sq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
     try {
       const { stdout, code } = await dockerExec(name, `openclaw skills info ${sq(slug)} --json`, 15000);
       if (code !== 0) return res.status(500).json({ error: 'Skill not found' });
@@ -227,7 +236,6 @@ module.exports = function register(app, ctx) {
     if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
     const { ref, source, as, force } = req.body;
     if (!ref) return res.status(400).json({ error: 'ref required' });
-    const sq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
     let cmd = `openclaw skills install ${sq(ref)}`;
     if (source === 'git') cmd = `openclaw skills install git:${sq(ref)}`;
     else if (source === 'local') cmd = `openclaw skills install ${sq(ref)}`;
@@ -246,7 +254,6 @@ module.exports = function register(app, ctx) {
     if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
     const { slug } = req.body;
     if (!slug) return res.status(400).json({ error: 'slug required' });
-    const sq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
     try {
       const { code, stderr } = await dockerExec(name, `rm -rf /root/.openclaw/workspace/skills/${sq(slug)}`, 10000);
       if (code !== 0) return res.status(500).json({ error: stderr || 'Remove failed' });
@@ -259,7 +266,6 @@ module.exports = function register(app, ctx) {
     const name = req.params.name;
     if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
     const { slug } = req.body;
-    const sq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
     const cmd = slug ? `openclaw skills update ${sq(slug)}` : 'openclaw skills update --all';
     try {
       const { code, stderr } = await dockerExec(name, cmd, 30000);
@@ -274,7 +280,6 @@ module.exports = function register(app, ctx) {
     if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid VM name' });
     const { slug } = req.body;
     if (!slug) return res.status(400).json({ error: 'slug required' });
-    const sq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
     try {
       const { stdout, code } = await dockerExec(name, `openclaw skills verify ${sq(slug)} --json`, 30000);
       if (code !== 0) return res.status(500).json({ error: 'Verify failed' });
@@ -310,8 +315,14 @@ module.exports = function register(app, ctx) {
 
   app.delete('/api/agents/:name/terminal-sessions/:id', async (req, res) => {
     const name = req.params.name;
-    const id = safeSessionName(req.params.id);
     if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid name' });
+    // The id is validated, never defaulted: an invalid id used to fall back to
+    // `main` and kill a session nobody named.
+    const id = req.params.id;
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(id)) return res.status(400).json({ error: 'Invalid session id' });
+    // Mission sessions are closed through Mission, which also stops a runner
+    // bound to them and records the close.
+    if (id.startsWith('msn-')) return res.status(400).json({ error: 'A Mission session is closed from the Mission page' });
     try {
       await killTmuxSession(name, id);
       res.json({ ok: true });
@@ -425,7 +436,6 @@ module.exports = function register(app, ctx) {
     if (!safeVmName(name)) return res.status(400).json({ error: 'Invalid name' });
     const { channel } = req.body;
     if (!channel) return res.status(400).json({ error: 'channel required' });
-    const sq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
     try {
       const { code, stderr } = await dockerExec(name, `openclaw channels remove --channel ${sq(channel)} --delete`, 30000);
       if (code !== 0) return res.status(500).json({ error: stderr || 'Remove failed' });
