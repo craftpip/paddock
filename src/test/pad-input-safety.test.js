@@ -60,14 +60,34 @@ it('a finished job cannot delete the newer job that took its name', async () => 
 
 it('refuses a second change set for a PAD while one is still being applied', async () => {
   const apply = require('../services/vm-manager/settings-apply');
-  // The PAD in this fixture has no container, so the first apply is slow to
-  // fail (it asks docker); the second must be refused at once, before that.
-  const first = apply.applyAgentChanges(PAD, { force: true }).catch((e) => e);
-  const second = await apply.applyAgentChanges(PAD, { force: true }).catch((e) => e);
-  assert.equal(second.code, 'pad_change_in_progress');
-  assert.equal(second.status, 409);
-  await first;
-  // And the lock is released afterwards, whatever the first one's outcome.
-  const third = await apply.applyAgentChanges(PAD, { force: true }).catch((e) => e);
-  assert.notEqual(third && third.code, 'pad_change_in_progress');
+  // The apply itself is replaced by a stand-in that this test controls. The
+  // real one runs docker compose: an earlier version of this test let it, and
+  // so built an image and created a container and a network called
+  // 'pad-input' on the real host every time the suite ran.
+  const pending = []; // one { resolve, reject } per apply that was let in, in order
+  let calls = 0;
+  apply._setApplyImpl(() => { calls += 1; return new Promise((resolve, reject) => { pending.push({ resolve, reject }); }); });
+  try {
+    const first = apply.applyAgentChanges(PAD, { force: true }).catch((e) => e);
+    const second = await apply.applyAgentChanges(PAD, { force: true }).catch((e) => e);
+    assert.equal(second.code, 'pad_change_in_progress');
+    assert.equal(second.status, 409);
+    assert.equal(calls, 1, 'the refused call must not have started a second apply');
+
+    // Another PAD is not held up by this one.
+    const other = apply.applyAgentChanges('pad-other', { force: true }).catch((e) => e);
+    assert.equal(calls, 2);
+
+    // The lock is released when the first one FAILS, not only when it succeeds.
+    pending[0].reject(new Error('compose up failed'));
+    assert.match((await first).message, /compose up failed/);
+    pending[1].resolve('other done');
+    assert.equal(await other, 'other done');
+    const third = apply.applyAgentChanges(PAD, { force: true }).catch((e) => e);
+    assert.equal(calls, 3, 'a new apply for the same PAD starts once the first is over');
+    pending[2].resolve('ok');
+    assert.equal(await third, 'ok');
+  } finally {
+    apply._setApplyImpl(null);
+  }
 });

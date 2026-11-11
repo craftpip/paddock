@@ -10,7 +10,7 @@
 // functions; `node --test test/` in one go shares none of that safely and used
 // to hang. A file that does not exit inside the timeout is killed and reported
 // as HUNG, which is a failure: a suite that leaks a handle is a broken suite.
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -51,6 +51,26 @@ function runFile(file) {
   });
 }
 
+// What the suite must NOT leave behind on the real host. A test once reached
+// `docker compose` through an unstubbed call and built an image, a container
+// and a network named after its fixture on every run; another wrote its
+// fixture's build files into the real instances directory. Every file was
+// green both times. So: note what exists before, and fail the file after which
+// something new appears.
+function footprint() {
+  const seen = new Set();
+  try {
+    for (const e of readdirSync(join(process.env.WORKSPACE_ROOT || '/workspace', 'instances'))) seen.add(`instances/${e}`);
+  } catch { /* no instances dir here: nothing to watch */ }
+  for (const [kind, args] of [['container', ['ps', '-a', '--format', '{{.Names}}']], ['network', ['network', 'ls', '--format', '{{.Name}}']], ['image', ['images', '--format', '{{.Repository}}:{{.Tag}}']]]) {
+    try {
+      for (const n of execFileSync('docker', args, { timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'] }).toString().split('\n')) if (n.trim()) seen.add(`${kind} ${n.trim()}`);
+    } catch { /* docker not reachable from here: only the directory is watched */ }
+  }
+  return seen;
+}
+let before = footprint();
+
 const results = [];
 for (const file of files) {
   const r = await runFile(file);
@@ -59,6 +79,15 @@ for (const file of files) {
   console.log(`${status} ${file.padEnd(44)} ${String(r.pass).padStart(4)} pass ${String(r.fail).padStart(3)} fail ${r.seconds.toFixed(1).padStart(6)}s`);
   for (const name of r.failed) console.log(`       ✗ ${name}`);
   if (r.hung) console.log(`       did not exit within ${timeoutMs / 1000}s (a leaked timer, socket or database handle)`);
+  const after = footprint();
+  const left = [...after].filter((x) => !before.has(x));
+  if (left.length) {
+    r.code = r.code || 1;
+    r.leftovers = left;
+    console.log(`       LEFT BEHIND on the real host: ${left.join(', ')}`);
+    console.log('       a test reached the real docker daemon or the real instances directory; stub that call');
+  }
+  before = after;
 }
 
 const bad = results.filter((r) => r.hung || r.code !== 0);

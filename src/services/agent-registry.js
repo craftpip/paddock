@@ -30,6 +30,14 @@ function setRestarting(name, val) {
   setLifecycle(name, val ? 'restarting' : null);
 }
 
+// A listing that FAILED is not an empty listing. The map returned for a failed
+// probe carries this (non-enumerable) mark, so the callers that only iterate
+// or index it are unaffected and the two that decide a status can tell
+// "docker says there is no such container" from "docker did not answer".
+const PROBE_FAILED = Symbol('docker-ps-failed');
+const STALE_OK_MS = 30000; // how long a last good answer may stand in for a failed one
+let psRunner = null; // test seam: replaces the docker call
+
 function dockerPsList(force) {
   const now = Date.now();
   if (!force && _dockerCache.data && (now - _dockerCache.ts) < DOCKER_CACHE_TTL) {
@@ -37,7 +45,7 @@ function dockerPsList(force) {
   }
   const { execSync } = require('child_process');
   try {
-    const out = execSync('docker ps -a --format "{{.Names}}\\t{{.State}}"', { timeout: 5000 }).toString().trim();
+    const out = (psRunner ? psRunner() : execSync('docker ps -a --format "{{.Names}}\\t{{.State}}"', { timeout: 5000 })).toString().trim();
     const map = {};
     if (out) {
       for (const line of out.split('\n')) {
@@ -47,8 +55,14 @@ function dockerPsList(force) {
     }
     _dockerCache = { data: map, ts: now };
     return map;
-  } catch {
-    return _dockerCache.data || {};
+  } catch (e) {
+    // A recent good answer is better than none, but only briefly: it used to
+    // be returned forever, and with no cache at all the answer was `{}`, which
+    // turned every running PAD into "missing" and wrote that to the database.
+    if (_dockerCache.data && (now - _dockerCache.ts) < STALE_OK_MS) return _dockerCache.data;
+    const failed = {};
+    Object.defineProperty(failed, PROBE_FAILED, { value: String(e.message || e).split('\n')[0] });
+    return failed;
   }
 }
 
@@ -129,6 +143,10 @@ function syncAgentToDb(agent) {
 
 function removeAgentFromDb(name) {
   const db = getDb();
+  // The PAD's runner MCP token dies with the PAD. Left behind, a copy of it (in
+  // an old config, a workspace, a backup) kept authenticating, and would be
+  // bound to whatever PAD was later created under the same name.
+  try { require('./runner-mcp-token').revoke(name); } catch (e) { console.warn(`[registry] could not revoke the runner token of ${name}: ${e.message}`); }
   db.prepare('DELETE FROM activity_events WHERE agent_id = ?').run(name);
   db.prepare('DELETE FROM sessions WHERE agent_id = ?').run(name);
   db.prepare('DELETE FROM agents WHERE name = ? OR id = ?').run(name, name);
@@ -170,7 +188,9 @@ function buildAgent(vmName, dockerState) {
   if (wsMount) {
     effectiveWsDir = wsMount.container;
   }
-  let status = dockerState[vmName] || 'missing';
+  // `unknown`, not `missing`, when the listing itself failed: "missing" tells a
+  // person (and an LLM over MCP) to recreate a PAD that is very likely running.
+  let status = dockerState[vmName] || (dockerState[PROBE_FAILED] ? 'unknown' : 'missing');
   if (_lifecycle[vmName]) status = _lifecycle[vmName];
 
   let displayName = vmName.replace(new RegExp('^' + PREFIX + '-'), '');
@@ -311,6 +331,7 @@ function dbStamps(vmName) {
  *  and every signed-in user was handed the whole fleet. */
 function discoverAgents(ownerId = null) {
   const dockerState = dockerPsList(true);
+  const probeFailed = !!dockerState[PROBE_FAILED];
   const agents = [];
 
   if (!fs.existsSync(INSTANCES_DIR)) return agents;
@@ -334,7 +355,9 @@ function discoverAgents(ownerId = null) {
       // row (see `dbStamps`), so this block only writes. The old copy-back from
       // the row is gone: two places reading the same fact is how the detail read
       // and the listing came to disagree.
-      syncAgentToDb(agent);
+      // A failed probe knows nothing about status: keep what the database had
+      // rather than overwrite a true `running` with a guess.
+      if (!probeFailed) syncAgentToDb(agent);
     } catch {}
   }
 
@@ -388,7 +411,16 @@ function getActivity(agentId, limit = 50) {
 }
 
 /** Fleet counts; with `ownerId`, only over the PADs that user owns. */
-function getAgentStats(ownerId = null) {
+/** Fleet counts. Pass the list `discoverAgents` just returned and the counts
+ *  are of THAT list — the PADs that exist. Counting database rows (the fallback,
+ *  kept for callers with no list) also counts a row left behind by a PAD whose
+ *  directory is gone, which is how one PAD read "2 agents · 1 running". */
+function getAgentStats(ownerId = null, agents = null) {
+  if (Array.isArray(agents)) {
+    const running = agents.filter((a) => a.status === 'running').length;
+    const stopped = agents.filter((a) => a.status === 'exited').length;
+    return { total: agents.length, running, stopped, unknown: agents.length - running - stopped };
+  }
   const db = getDb();
   const where = ownerId ? ' WHERE owner_id = ?' : '';
   const and = ownerId ? ' AND owner_id = ?' : '';
@@ -399,9 +431,13 @@ function getAgentStats(ownerId = null) {
   return { total, running, stopped, unknown: total - running - stopped };
 }
 
-function getOrphanCount() {
+function getOrphanCount(existing = null) {
   const db = getDb();
   try {
+    if (Array.isArray(existing)) {
+      const names = new Set(existing);
+      return db.prepare("SELECT name FROM agents WHERE owner_id IS NULL OR owner_id = ''").all().filter((r) => names.has(r.name)).length;
+    }
     const row = db.prepare("SELECT COUNT(*) as count FROM agents WHERE owner_id IS NULL OR owner_id = ''").get();
     return row ? row.count : 0;
   } catch {
@@ -439,6 +475,7 @@ module.exports = {
   getAgentStats,
   getOrphanCount,
   dockerPsList,
+  _setPsRunner: (fn) => { psRunner = fn || null; _dockerCache = { data: null, ts: 0 }; },
   readMeta,
   getWorkspaceRoot,
   getConfigRoot,

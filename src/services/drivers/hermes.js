@@ -326,7 +326,9 @@ const HERMES = {
       const script = [
         'import os,yaml',
         "p='/opt/data/config.yaml'",
-        "c=yaml.safe_load(open(p)) if os.path.exists(p) else {}",
+        // `or {}`: safe_load returns None for an empty file, and None has no setdefault.
+        "c=(yaml.safe_load(open(p)) if os.path.exists(p) else {}) or {}",
+        "assert isinstance(c,dict),'config.yaml is not a mapping; nothing was changed'",
         `c.setdefault('mcp_servers',{})['paddock']={'url':${urlLiteral},'headers':{'Authorization':'${headerTmpl}'}};`,
         "yaml.safe_dump(c,open(p,'w'),default_flow_style=False,sort_keys=False)",
         "e='/opt/data/.env'",
@@ -342,8 +344,8 @@ const HERMES = {
       const script = [
         'import os,yaml',
         "p='/opt/data/config.yaml'",
-        "c=yaml.safe_load(open(p)) if os.path.exists(p) else {}",
-        "if c and 'mcp_servers' in c:",
+        "c=(yaml.safe_load(open(p)) if os.path.exists(p) else {}) or {}",
+        "if isinstance(c,dict) and isinstance(c.get('mcp_servers'),dict):",
         "  c['mcp_servers'].pop('paddock',None)",
         "  if not c['mcp_servers']: c.pop('mcp_servers',None)",
         "  yaml.safe_dump(c,open(p,'w'),default_flow_style=False,sort_keys=False)",

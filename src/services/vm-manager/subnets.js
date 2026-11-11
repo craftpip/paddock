@@ -5,7 +5,7 @@
 // sibling module that requires this one mid-cycle already sees every function.
 Object.assign(exports, {
   ensurePadSubnet, releasePadSubnet, pickFreePadSubnet, padPoolOctet, usedPadSubnetOctets,
-  reservedPadSubnetOctets, claimedPadSubnetOctets,
+  reservedPadSubnetOctets, claimedPadSubnetOctets, padPoolOctetsCovered, _setNetworkSubnets,
 });
 
 const fs = require('fs');
@@ -28,25 +28,60 @@ const PAD_SUBNET_PREFIX = 24;
  *  so a fresh pad never collides with another pad or an unrelated project. */
 function usedPadSubnetOctets() {
   const used = new Set();
+  for (const subnet of networkSubnets()) {
+    for (const oct of padPoolOctetsCovered(subnet)) used.add(oct);
+  }
+  return used;
+}
+
+/** Every subnet of every docker network on this host. Throws when the networks
+ *  cannot be LISTED: "could not list" is not "nothing is used", and answering
+ *  with nothing handed out a /24 that was already taken — the PAD only found
+ *  out when compose refused to create its network. One network that vanishes
+ *  between the listing and its inspect is skipped; that is a real race, not a
+ *  failed probe. */
+function dockerNetworkSubnets() {
   let ids = [];
   try {
     const r = execFileSync('docker', ['network', 'ls', '-q'], { stdio: 'pipe', timeout: 15000 });
     ids = r.toString().trim().split('\n').filter(Boolean);
-  } catch {
-    return used;
+  } catch (e) {
+    throw new Error(`Could not list docker networks to pick a free PAD subnet: ${String(e.stderr || e.message).trim().split('\n')[0]}`);
   }
+  const out = [];
   const re = /(\d+)\.(\d+)\.(\d+)\.(\d+)\/(\d+)/g;
   for (const id of ids) {
     try {
       const r = execFileSync('docker', ['network', 'inspect', id, '--format', '{{range .IPAM.Config}}{{.Subnet}} {{end}}'], { stdio: 'pipe', timeout: 10000 });
-      let m;
-      while ((m = re.exec(r.toString())) !== null) {
-        const oct = padPoolOctet(m[0]);
-        if (oct !== null) used.add(oct);
-      }
+      for (const m of r.toString().matchAll(re)) out.push(m[0]);
     } catch {}
   }
-  return used;
+  return out;
+}
+let networkSubnets = dockerNetworkSubnets;
+/** Test seam: replace the docker call with a function returning subnet strings. */
+function _setNetworkSubnets(fn) { networkSubnets = fn || dockerNetworkSubnets; }
+
+/** Every pool octet a network's subnet OVERLAPS. A foreign network is not
+ *  obliged to be a /24: `10.200.0.0/20` covers octets 0–15 and `10.0.0.0/8`
+ *  covers the whole pool. Counting only exact /24s made those invisible, so the
+ *  picker handed out a /24 inside them and docker answered `Pool overlaps`. */
+function padPoolOctetsCovered(subnet) {
+  const m = /^(\d+)\.(\d+)\.(\d+)\.(\d+)\/(\d+)$/.exec(String(subnet || '').trim());
+  if (!m) return [];
+  const prefix = +m[5];
+  if (prefix < 0 || prefix > 32 || [m[1], m[2], m[3], m[4]].some((o) => +o > 255)) return [];
+  const ip = ((+m[1] << 24) | (+m[2] << 16) | (+m[3] << 8) | +m[4]) >>> 0;
+  const size = prefix === 0 ? 2 ** 32 : 2 ** (32 - prefix);
+  const start = prefix === 0 ? 0 : (ip - (ip % size));
+  const end = start + size - 1;
+  const poolStart = ((10 << 24) | (200 << 16)) >>> 0; // 10.200.0.0
+  const poolEnd = poolStart + 65535;
+  const lo = Math.max(start, poolStart);
+  const hi = Math.min(end, poolEnd);
+  const out = [];
+  for (let oct = (lo - poolStart) >>> 8; lo <= hi && oct <= (hi - poolStart) >>> 8; oct++) out.push(oct);
+  return out;
 }
 
 /** The pool octet a subnet string occupies (`10.200.7.0/24` → 7), or null when

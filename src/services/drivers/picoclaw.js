@@ -18,6 +18,13 @@ function parseVersion(output) {
   return m ? m[1] : '';
 }
 
+/** One line of the in-PAD patch scripts: read config.json, or STOP.
+ *  A missing or empty file is a fresh config. A file that is there but does
+ *  not parse (half-written, or hand-edited with a stray comma) must stop the
+ *  patch: it used to be swallowed, and the write that followed replaced the
+ *  whole config — every provider and model — with just the MCP block. */
+const READ_CONFIG_OR_STOP = 'let c={};if(fs.existsSync(p)){const raw=fs.readFileSync(p,"utf8");if(raw.trim()){try{c=JSON.parse(raw)}catch(e){console.error("config.json is not valid JSON ("+e.message+"); nothing was changed");process.exit(1)}}}if(!c||typeof c!=="object"||Array.isArray(c)){console.error("config.json is not a JSON object; nothing was changed");process.exit(1)}';
+
 const PICOCLAW = {
   type: 'picoclaw',
   label: 'Picoclaw',
@@ -196,7 +203,7 @@ const PICOCLAW = {
     buildConnect({ url }) {
       const script = [
         "const fs=require('fs');const p='/root/.picoclaw/config.json';",
-        'let c={};try{c=JSON.parse(fs.readFileSync(p,"utf8"))}catch(e){}',
+        READ_CONFIG_OR_STOP,
         'c.tools=c.tools||{};c.tools.mcp=c.tools.mcp||{};',
         'c.tools.mcp.enabled=true;c.tools.mcp.servers=c.tools.mcp.servers||{};',
         `c.tools.mcp.servers.paddock={type:"http",url:${JSON.stringify(url)},headers:{Authorization:"Bearer "+process.env.PADDOCK_MCP_TOKEN}};`,
@@ -207,7 +214,7 @@ const PICOCLAW = {
     buildDisconnect() {
       const script = [
         "const fs=require('fs');const p='/root/.picoclaw/config.json';",
-        'let c={};try{c=JSON.parse(fs.readFileSync(p,"utf8"))}catch(e){}',
+        READ_CONFIG_OR_STOP,
         'if(c.tools&&c.tools.mcp&&c.tools.mcp.servers){',
         '  delete c.tools.mcp.servers.paddock;',
         '  if(Object.keys(c.tools.mcp.servers).length===0){delete c.tools.mcp.servers;c.tools.mcp.enabled=false;}',

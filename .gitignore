@@ -12,6 +12,7 @@
 src/data/app.db
 src/data/app.db-wal
 src/data/app.db-shm
+src/data/vault.key
 src/data/bot-prefixes.json
 src/data/credentials.json
 src/data/runner-callbacks/

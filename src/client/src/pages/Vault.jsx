@@ -1,3 +1,4 @@
+import { flushSync } from 'react-dom'
 import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { useState, useEffect } from 'react'
 import { useNavigation, useDirtyNavigation, popupIdentity } from '../lib/navigation'
@@ -212,7 +213,7 @@ export default function Vault() {
     if (!PIN_RE.test(pin)) return setPinErr('PIN must be 4 or 6 digits')
     if (pin !== pinForm.confirm) return setPinErr('PINs do not match')
     if (pinModal === 'reset' && !PIN_RE.test(pinForm.oldPin)) return setPinErr('Current PIN must be 4 or 6 digits')
-    if (pinModal === 'reset' && !pinForm.password) return setPinErr('Your password is required to reset')
+    if (pinModal !== 'set' && !pinForm.password) return setPinErr('Your password is required')
     setPinBusy(true)
     setPinErr('')
     try {
@@ -221,11 +222,12 @@ export default function Vault() {
         body: {
           pin,
           reset: pinModal === 'reset',
+          wipe: pinModal === 'forgot',
           oldPin: pinModal === 'reset' ? pinForm.oldPin : undefined,
-          password: pinModal === 'reset' ? pinForm.password : undefined,
+          password: pinModal !== 'set' ? pinForm.password : undefined,
         },
       })
-      toast.success(pinModal === 'reset' ? 'PIN reset — vault items erased' : 'PIN set')
+      toast.success(pinModal === 'forgot' ? 'Vault erased and a new PIN set' : pinModal === 'reset' ? 'PIN changed. Your items are kept.' : 'PIN set')
       setPinForm({ pin: '', confirm: '', oldPin: '', password: '' })
       closePopup({ saved: true, expected: popup?.value })
       load()
@@ -366,6 +368,13 @@ export default function Vault() {
           busy={pinBusy}
           digitsOnly={digitsOnly}
           onCancel={closePinModal}
+          onForgot={() => {
+            // Empty the half-typed change form first, synchronously: with it
+            // still filled the unsaved-changes guard asks "Discard changes?"
+            // about a form the user has just said they cannot complete.
+            flushSync(() => { setPinForm({ pin: '', confirm: '', oldPin: '', password: '' }); setPinErr('') })
+            openPinModal('forgot')
+          }}
           onSubmit={handlePinSubmit}
         />
       )}
@@ -405,8 +414,13 @@ function EditorRow({ form, setForm, isNew, saving, onSave, onCancel }) {
   )
 }
 
-function PinModal({ mode, form, setForm, error, busy, digitsOnly, onCancel, onSubmit }) {
+/** Three modes. `set`: the first PIN. `reset`: change it with the current PIN,
+ *  which keeps every item (the server re-wraps the same key). `forgot`: no
+ *  current PIN to give, so the only way forward erases the vault — the one
+ *  destructive path, and the only one styled as danger. */
+function PinModal({ mode, form, setForm, error, busy, digitsOnly, onCancel, onSubmit, onForgot }) {
   const isReset = mode === 'reset'
+  const isForgot = mode === 'forgot'
   function set(k, v) {
     setForm((f) => ({ ...f, [k]: v }))
   }
@@ -414,14 +428,18 @@ function PinModal({ mode, form, setForm, error, busy, digitsOnly, onCancel, onSu
     <Modal
       open
       onClose={onCancel}
-      title={isReset ? 'Reset vault PIN' : 'Set vault PIN'}
-      tone={isReset ? 'danger' : undefined}
+      title={isForgot ? 'Erase the vault and set a new PIN' : isReset ? 'Change vault PIN' : 'Set vault PIN'}
+      tone={isForgot ? 'danger' : undefined}
     >
       {/* The submit button stays INSIDE the form, so Enter-to-submit works. */}
       <form onSubmit={(e) => { e.preventDefault(); onSubmit() }}>
-        {isReset ? (
-          <p className="mb-4 text-sm text-danger/90 leading-relaxed whitespace-pre-wrap">
-            This will <b>permanently erase ALL vault items</b>. Enter your password and current PIN to confirm.
+        {isForgot ? (
+          <p className="msn-vault-forgot-warning mb-4 text-sm text-danger/90 leading-relaxed">
+            Without the current PIN the stored values cannot be read by anyone, including Paddock. This will <b>permanently erase every vault item</b> and start again with a new PIN. Enter your password to confirm.
+          </p>
+        ) : isReset ? (
+          <p className="mb-4 text-sm text-ink-faint leading-relaxed">
+            Enter your current PIN and password, then the new PIN. Your stored items are kept.
           </p>
         ) : (
           <p className="mb-4 text-sm text-ink-faint leading-relaxed">
@@ -429,9 +447,9 @@ function PinModal({ mode, form, setForm, error, busy, digitsOnly, onCancel, onSu
           </p>
         )}
         <div className="space-y-4">
-          {isReset && (
+          {(isReset || isForgot) && (
             <>
-              <Field label="Current PIN" labelVariant="compact">
+              {isReset && <Field label="Current PIN" labelVariant="compact">
                 <Input
                   type="password"
                   inputMode="numeric"
@@ -442,7 +460,10 @@ function PinModal({ mode, form, setForm, error, busy, digitsOnly, onCancel, onSu
                   mono
                   className={pinFieldCls}
                 />
-              </Field>
+                <button type="button" onClick={onForgot} className="msn-vault-forgot-link mt-1.5 text-xs text-ink-dim underline hover:text-danger">
+                  Forgot the PIN?
+                </button>
+              </Field>}
               <Field label="Your password" labelVariant="compact">
                 <Input
                   type="password"
@@ -485,8 +506,8 @@ function PinModal({ mode, form, setForm, error, busy, digitsOnly, onCancel, onSu
           <Button variant="ghost" size="lg" onClick={onCancel} disabled={busy}>
             Cancel
           </Button>
-          <Button type="submit" variant={isReset ? 'danger' : 'primary'} size="lg" disabled={busy}>
-            {busy ? (isReset ? 'Resetting…' : 'Setting…') : (isReset ? 'Erase & reset' : 'Set PIN')}
+          <Button type="submit" variant={isForgot ? 'danger' : 'primary'} size="lg" disabled={busy}>
+            {busy ? 'Working…' : (isForgot ? 'Erase vault & set PIN' : isReset ? 'Change PIN' : 'Set PIN')}
           </Button>
         </div>
       </form>

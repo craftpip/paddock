@@ -229,14 +229,13 @@ const CODEX = {
     serverName: 'paddock',
     capabilities: { list: true, add: 'command', remove: 'command', test: true },
     buildConnect({ url }) {
+      // The patch is a real function (below), shipped as source: it can be
+      // unit-tested here and runs unchanged inside the PAD.
       const patch = [
         "const fs=require('fs');",
         "const p='/root/.codex/config.toml';",
-        'let t=fs.readFileSync(p,"utf8");',
-        'const tok=process.env.PADDOCK_MCP_TOKEN;',
-        'const line="http_headers = { Authorization = \\"Bearer "+tok+"\\" }";',
-        't=t.replace(/bearer_token_env_var\\s*=\\s*"[^"]*"/g,line);',
-        'fs.writeFileSync(p,t);',
+        `const patchPaddockAuth=${patchPaddockAuth.toString()};`,
+        `fs.writeFileSync(p,patchPaddockAuth(fs.readFileSync(p,"utf8"),process.env.PADDOCK_MCP_TOKEN,${JSON.stringify(this.serverName)}));`,
       ].join('\n');
       const inner = [
         `codex mcp add ${this.serverName} --url ${sq(url)} --bearer-token-env-var PADDOCK_MCP_TOKEN`,
@@ -275,4 +274,38 @@ const CODEX = {
   },
 };
 
+/**
+ * Swap the Paddock server's `bearer_token_env_var` for a static header, and
+ * touch NOTHING else in the file.
+ *
+ * This used to be one global replace over the whole config, so every other MCP
+ * server that used `bearer_token_env_var` (a GitHub server, say) had its own
+ * auth replaced by the Paddock key: codex then sent a full-reach Paddock key to
+ * a third party, and that server's real credential was gone.
+ *
+ * Self-contained on purpose (no outer names): its source is pasted into a
+ * `node -e` script that runs inside the PAD. Throws when there is nothing to
+ * patch, so the caller sees a failure instead of a config that silently kept
+ * the env-var form (which codex does not send on the SSE stream).
+ */
+function patchPaddockAuth(text, token, serverName) {
+  if (!/^[A-Za-z0-9._~+\/=-]+$/.test(String(token || ''))) throw new Error('The Paddock API key is empty or has characters a TOML string cannot carry');
+  const lines = String(text).split('\n');
+  const header = '[mcp_servers.' + serverName + ']';
+  const quoted = '[mcp_servers."' + serverName + '"]';
+  const start = lines.findIndex(function (l) { const t = l.trim(); return t === header || t === quoted; });
+  if (start === -1) throw new Error('No ' + header + ' table in config.toml');
+  let done = false;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^\s*\[/.test(lines[i])) break; // the next table: not ours
+    if (/^\s*bearer_token_env_var\s*=/.test(lines[i])) {
+      lines[i] = 'http_headers = { Authorization = "Bearer ' + token + '" }';
+      done = true;
+    }
+  }
+  if (!done) throw new Error('No bearer_token_env_var line in ' + header);
+  return lines.join('\n');
+}
+
 module.exports = CODEX;
+module.exports.patchPaddockAuth = patchPaddockAuth;

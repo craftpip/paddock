@@ -20,7 +20,11 @@ const WORKSPACE = process.env.WORKSPACE_ROOT || '/workspace';
 const HOST_WORKSPACE = process.env.HOST_WORKSPACE_ROOT || WORKSPACE;
 const INSTANCES_DIR = path.join(WORKSPACE, 'instances');
 
-function runCmd(cmd, args, options = {}) {
+/** Test seam: the docker call. */
+let runCmd = defaultRunCmd;
+function _setRunner(fn) { runCmd = fn || defaultRunCmd; }
+
+function defaultRunCmd(cmd, args, options = {}) {
   const { timeout = 20000 } = options;
   return new Promise((resolve, reject) => {
     execFile(cmd, args, { timeout }, (err, stdout, stderr) => {
@@ -43,18 +47,37 @@ function webuiPath(hostPath) {
   return hostPath;
 }
 
-async function inspectContainer(name) {
+/** First line of whatever a failed command said. */
+function whyFailed(e) {
+  return String((e && (e.stderr || e.message)) || e || 'unknown error').trim().split('\n')[0].slice(0, 300);
+}
+
+/** Look a container up. Three answers, never two:
+ *    { ctr }            it exists, here it is
+ *    { ctr: null }      docker says there is no such container
+ *    { ctr: null, unknown: '<why>' }   docker could not be asked
+ *  The last one used to be folded into the second, so a daemon that was briefly
+ *  unreachable (or a 15 s timeout) produced "Container exists: not found —
+ *  start or recreate it" for a healthy PAD, on the Health tab and to any LLM
+ *  calling the health tool. */
+async function lookupContainer(name) {
   try {
     const r = await runCmd('docker', ['inspect', name], { timeout: 15000 });
     const arr = JSON.parse(r.stdout);
-    return Array.isArray(arr) ? arr[0] || null : null;
-  } catch {
-    return null;
+    return { ctr: Array.isArray(arr) ? arr[0] || null : null };
+  } catch (e) {
+    if (/no such (object|container)/i.test(String((e && (e.stderr || e.message)) || ''))) return { ctr: null };
+    return { ctr: null, unknown: whyFailed(e) };
   }
 }
 
 /** Resolved compose service definitions (from `docker compose config`). */
+/** `{ services }` when the declaration was read; `{ services: null, missing: true }`
+ *  when there is no compose file; `{ services: null, error }` when there IS one
+ *  and it could not be resolved (a bad build.env, a compose error, a daemon
+ *  that did not answer). Only the middle one means "recreate to regenerate". */
 async function resolveCompose(name) {
+  if (!fs.existsSync(composePath(name))) return { services: null, missing: true };
   try {
     const args = ['compose'];
     // Resolve the generated build.args interpolation from the instance build.env
@@ -63,9 +86,9 @@ async function resolveCompose(name) {
     args.push('-f', composePath(name), 'config', '--format', 'json');
     const r = await runCmd('docker', args, { timeout: 20000 });
     const data = JSON.parse(r.stdout);
-    return data.services || null;
-  } catch {
-    return null;
+    return { services: data.services || {} };
+  } catch (e) {
+    return { services: null, error: whyFailed(e) };
   }
 }
 
@@ -116,9 +139,11 @@ async function checkContainerHealth(name, onCheck) {
     if (onCheck) onCheck(check);
   };
 
-  const services = await resolveCompose(name);
+  const declared = await resolveCompose(name);
+  const services = declared.services;
   const compose = services && services[name];
-  const ctr = await inspectContainer(name);
+  const looked = await lookupContainer(name);
+  const ctr = looked.ctr;
 
   // A compose file we could not read is not a fact about the container. Every
   // check after the container block derives its EXPECTATION from it, so with no
@@ -127,13 +152,27 @@ async function checkContainerHealth(name, onCheck) {
   // instead of the container facts it had just established. Record it, and
   // resume once the compose-independent checks are in.
   const composeMissing = !compose;
-  if (composeMissing) {
+  if (composeMissing && declared.error) {
+    // The file is there; reading it failed. Saying "no compose file, recreate"
+    // here would send someone to rebuild a PAD over a typo in build.env.
+    add({
+      key: 'compose', label: 'Compose file', status: 'warn', checked: false, expected: 'docker-compose.yml', actual: 'could not be read',
+      hint: `The compose file at ${composePath(name)} exists but could not be resolved: ${declared.error}. Nothing was compared against it; this is not a reason to recreate the agent.`,
+    });
+  } else if (composeMissing) {
     add({
       key: 'compose', label: 'Compose file', status: 'error', expected: 'docker-compose.yml', actual: null,
       hint: `No compose file at ${composePath(name)} — recreate the agent to regenerate it. The container facts below are real; every check that compares the declaration against the container was skipped.`,
     });
   }
 
+  if (!ctr && looked.unknown) {
+    add({
+      key: 'container', label: 'Container exists', status: 'warn', checked: false, expected: 'created', actual: 'could not check',
+      hint: `Docker did not answer (${looked.unknown}), so nothing is known about this container right now. Run the check again; do not recreate on this result.`,
+    });
+    return summarize(name, checks);
+  }
   if (!ctr) {
     add({
       key: 'container', label: 'Container exists', status: 'error', expected: 'created', actual: 'not found',
@@ -200,7 +239,10 @@ async function checkContainerHealth(name, onCheck) {
   const expNet = compose.network_mode || '';
   const actNet = (ctr.HostConfig && ctr.HostConfig.NetworkMode) || '';
 
-  if (expNet && expNet.startsWith('container:')) {
+  const drift = networkModeDrift(expNet, actNet);
+  if (drift) {
+    add({ key: 'network', label: 'Network mode', status: 'error', expected: expNet || 'default', actual: actNet || 'default', hint: drift });
+  } else if (expNet && expNet.startsWith('container:')) {
     // The SAME classification settings_get uses, on the same inputs — so the
     // two cannot drift into disagreeing about one pad (plan 66). The compose
     // file names the peer; the live container records the id it was bound to.
@@ -242,9 +284,16 @@ async function checkContainerHealth(name, onCheck) {
   // ── Peer-network forwarding door ───────────────────────────
   const door = services && services[`${name}-door`];
   const doorContainer = door ? (door.container_name || `${name}-door`) : null;
-  const doorCtr = doorContainer ? await inspectContainer(doorContainer) : null;
+  const doorLooked = doorContainer ? await lookupContainer(doorContainer) : { ctr: null };
+  const doorCtr = doorLooked.ctr;
   if (door) {
-    if (!doorCtr) {
+    if (!doorCtr && doorLooked.unknown) {
+      add({
+        key: 'door', label: 'Forwarding door', status: 'warn', checked: false,
+        expected: `${doorContainer} (running)`, actual: 'could not check',
+        hint: `Docker did not answer for the forwarding door (${doorLooked.unknown}). Run the check again.`,
+      });
+    } else if (!doorCtr) {
       add({
         key: 'door', label: 'Forwarding door', status: 'error',
         expected: `${doorContainer} (running)`, actual: 'not found',
@@ -342,6 +391,27 @@ async function checkContainerHealth(name, onCheck) {
   return summarize(name, checks);
 }
 
+/** The KIND of networking the compose file declares against the kind the
+ *  container actually has. Returns a sentence when they differ, else ''.
+ *
+ *  Comparing the kinds comes first because the peer classification below only
+ *  rules on a container that IS peer-bound: handed a container on its own
+ *  bridge it answered `ok`, so "settings switched to peer networking, recreate
+ *  never happened" showed a green row reading `expected container:pad-x,
+ *  actual pad-y_default`. The reverse (declared default, still bound to a
+ *  peer) was unconditionally ok as well. */
+function networkModeDrift(expected, actual) {
+  const wantsPeer = String(expected || '').startsWith('container:');
+  const hasPeer = String(actual || '').startsWith('container:');
+  if (wantsPeer && !hasPeer) {
+    return `The compose file shares ${expected.slice('container:'.length)}'s network, but the container is running on its own (${actual || 'default'}). Recreate to apply the declared networking.`;
+  }
+  if (!wantsPeer && hasPeer) {
+    return `The compose file gives this agent its own network, but the container is still bound to another container's (${actual}). Recreate to apply the declared networking.`;
+  }
+  return '';
+}
+
 function summarize(name, checks) {
   const counts = { ok: 0, warn: 0, error: 0 };
   for (const c of checks) {
@@ -351,4 +421,4 @@ function summarize(name, checks) {
   return { name, status, checks, counts };
 }
 
-module.exports = { checkContainerHealth, checkPublishedPorts, summarize };
+module.exports = { checkContainerHealth, checkPublishedPorts, summarize, networkModeDrift, _setRunner };

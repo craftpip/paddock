@@ -75,7 +75,11 @@ function runCmd(cmd, args, options = {}) {
 // D6: sources that must never be inherited into an agent container.
 function isDangerousSource(src) {
   const s = path.normalize(String(src));
-  if (s === '/var/run/docker.sock' || s.startsWith('/var/run/docker.sock/')) return true;
+  // The docker socket under ANY of its names. `/var/run` is a symlink to `/run`
+  // on current distros, so a compose file that binds `/run/docker.sock` named
+  // the same socket and used to pass a check that only knew the old spelling.
+  if (/(^|\/)(docker|containerd)\.sock(\/|$)/.test(s)) return true;
+  if (s === '/run/docker' || s.startsWith('/run/docker/') || s === '/run/containerd' || s.startsWith('/run/containerd/')) return true;
   // A subdirectory of a home/scratch dir is inheritable (plan 72): refusing
   // `/root/proj/node_modules` protects nothing, and the compose file that named
   // it is the operator's own. The BARE root is still dropped.
@@ -300,4 +304,5 @@ function autocomplete(q) {
   return { base: hostPathOf(base), dirs };
 }
 
-module.exports = { probe, autocomplete, discoverVolumes, containerPathOf, hostPathOf, isForbidden, isDangerousSource, findComposeFile };
+module.exports = {
+  probe, autocomplete, discoverVolumes, containerPathOf, hostPathOf, isForbidden, isDangerousSource, findComposeFile };

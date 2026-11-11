@@ -126,6 +126,10 @@ function park(rec, code, detail) {
 }
 
 function finish(rec, state, code, detail) {
+  // A run that was stopped (or parked) while its last await was in flight keeps
+  // that ending. The commit step awaits git; a stop that landed meanwhile used
+  // to be overwritten with `done`.
+  if (!ACTIVE.has(rec.state)) return;
   rec.state = state;
   rec.reason = code;
   rec.detail = detail;
@@ -375,8 +379,13 @@ function assertIdle(taskId) {
   }
   const cur = taskRunner.getCurrentTaskStep(taskId);
   if (cur && cur.state === 'running') {
+    // No driver in this process is driving that step (the check above would
+    // have caught one), so it was left behind — by a webui restart, or by a
+    // step started by hand. The refusal stands; what it must do is say which
+    // call clears it, because `task_pipeline_status` sends the caller here.
     throw new PipelineError('task_pipeline_busy',
-      `task ${taskId} already has a running step ('${cur.step}' attempt ${cur.attempt}) — one active pipeline step per task`);
+      `task ${taskId} already has a running step ('${cur.step}' attempt ${cur.attempt}) — one active pipeline step per task.`
+      + (cur.reported_by ? '' : ' No driver is running it in this webui process, so it will not finish on its own: call task_pipeline_stop to mark it aborted, then task_pipeline_start.'));
   }
 }
 
@@ -490,7 +499,12 @@ function status(taskId) {
     steps,
     task_status: task.status,
   };
-  if (!active) {
+  const leftover = !active && current && current.state === 'running' && !current.reported_by;
+  if (leftover) {
+    // Said first and separately: the generic notes below end in "start it",
+    // and start REFUSES while this row is running.
+    out.note = `Step '${current.step}' is still marked running, but no driver is running it in this webui process (drivers live in memory and do not survive a restart). task_pipeline_start will refuse until it is cleared: call task_pipeline_stop first, then task_pipeline_start.`;
+  } else if (!active) {
     out.note = rec
       ? `Last run ended ${rec.state}${rec.reason ? ` (${rec.reason})` : ''}. A driver lives in memory, so it does not survive a webui restart — restart it with task_pipeline_start if the loop should continue.`
       : 'No pipeline has been started for this task in this webui process (drivers live in memory). task_submit still recorded the binding step, so the loop can start with task_pipeline_start.';

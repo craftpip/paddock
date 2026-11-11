@@ -24,8 +24,9 @@ module.exports = function register(app, ctx) {
   app.get('/api/agents', (req, res) => {
     const ownerId = req.session.role === 'admin' ? null : req.session.userId;
     const agents = registry.discoverAgents(ownerId);
-    const stats = registry.getAgentStats(ownerId);
-    const orphans = req.session.role === 'admin' ? registry.getOrphanCount() : 0;
+    const stats = registry.getAgentStats(ownerId, agents);
+    // Orphans are PADs that EXIST and have no owner; a leftover row is neither.
+    const orphans = req.session.role === 'admin' ? registry.getOrphanCount(agents.map((a) => a.name)) : 0;
     res.json({ agents, stats, orphans });
   });
 

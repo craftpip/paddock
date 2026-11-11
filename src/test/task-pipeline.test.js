@@ -587,6 +587,28 @@ describe('MCP task pipeline driver (plan 69 P3 / D7)', () => {
 
   // ── status: the read half ──────────────────────────────────────────────
   describe('task_pipeline_status', () => {
+    // Plan 124 #12: after a webui restart the driver is gone and its step row is
+    // still 'running'. status used to answer "restart it with
+    // task_pipeline_start" while start refused for exactly that row — the two
+    // tools sent the caller in a circle.
+    it('a step left running with no driver: status, start and stop agree on the way out', async () => {
+      const { taskId } = await seed();
+      taskRunner.insertTaskStep({ task_id: taskId, step: 'review', state: 'running' });
+
+      const st = await call('task_pipeline_status', { task_id: taskId });
+      assert.match(st.data.note, /task_pipeline_stop first/, 'status must name the call that actually unblocks');
+
+      const refused = await call('task_pipeline_start', { task_id: taskId });
+      assert.ok(refused.isError);
+      assert.match(refused.text, /task_pipeline_stop/, 'and the refusal must say the same thing');
+
+      const stopped = await call('task_pipeline_stop', { task_id: taskId });
+      assert.ok(!stopped.isError, stopped.text);
+      const after = await call('task_pipeline_status', { task_id: taskId });
+      assert.doesNotMatch(after.data.note || '', /still marked running/);
+      assert.notStrictEqual(after.data.current_step.state, 'running');
+    });
+
     it('reads a task that was never started, and says so in words', async () => {
       const { taskId } = await seed('just checking');
       const st = await call('task_pipeline_status', { task_id: taskId });

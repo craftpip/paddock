@@ -7,6 +7,8 @@
  *   starting, stopping, restarting
  * Fallback when docker has no record for the agent:
  *   missing
+ * When docker could not be asked (daemon down, listing timed out):
+ *   unknown
  *
  * `pulse` states (starting/stopping/restarting) animate their dot so an
  * in-flight action is visually distinct from a settled state.
@@ -66,6 +68,14 @@ export const STATUS_META = {
     pill: 'bg-warning-soft text-warning border border-warning-line',
     dot: 'bg-warning',
     pulse: true,
+  },
+ // The server could not ask docker at all. Not `missing`: the PAD is probably
+  // fine, and the page says so instead of inviting a recreate.
+  unknown: {
+    label: 'unknown',
+    pill: 'bg-warning-soft text-warning border border-warning-line',
+    dot: 'bg-warning',
+    pulse: false,
   },
   missing: {
     label: 'missing',

@@ -16,7 +16,7 @@ export const popupRegistry = {
   'health-info': { route: /^\/agents\/(?!create\/)[^/]+\/settings\/?$/, args: [idValue] },
   'vault-edit': { route: /^\/vault\/?$/, args: [idValue] },
   'vault-add': { route: /^\/vault\/?$/, args: [] },
-  'vault-pin': { route: /^\/vault\/?$/, args: [(v) => ['set', 'reset'].includes(v) ? v : ''] },
+  'vault-pin': { route: /^\/vault\/?$/, args: [(v) => ['set', 'reset', 'forgot'].includes(v) ? v : ''] },
   'user-new': { route: /^\/profile(?:\/users)?\/?$/, args: [] },
   'user-password': { route: /^\/profile(?:\/users)?\/?$/, args: [idValue] },
 }

@@ -4,7 +4,7 @@
 // Exported before anything is required: function declarations are hoisted, so a
 // sibling module that requires this one mid-cycle already sees every function.
 Object.assign(exports, {
-  readAgentConfig, redactSecrets,
+  readAgentConfig, redactSecrets, redactConfigText,
 });
 
 const fs = require('fs');
@@ -26,7 +26,16 @@ const REDACTED = '[REDACTED]';
  *  those is a fact the LLM needs to read the config. A suffix still catches
  *  every real credential name, because they are named after the thing:
  *  `rootPassword`, `dbPassword`, `sshPassword`, `refreshToken`, `xMcpKey`. */
-const SECRET_KEY_RE = /(^|_)(api_?key|auth|authorization|credential|credentials|key|pass|passwd|password|secret|token)$/;
+const SECRET_KEY_RE = /(^|_)(api_?keys?|auth|authorization|credential|credentials|key|pass|passwd|passwords?|secrets?|tokens?)$/;
+
+/** `tokens` is also a unit. `max_tokens: 4096` is a number the reader needs,
+ *  and it is told apart from a list of credentials by its VALUE: a count is a
+ *  bare number, a credential never is. */
+const COUNT_KEY_RE = /(^|_)tokens?$/;
+function isCount(key, value) {
+  if (!COUNT_KEY_RE.test(normalizeKey(key))) return false;
+  return typeof value === 'number' || /^\s*["']?\d+(\.\d+)?["']?\s*(#.*)?$/.test(String(value));
+}
 
 /** The suffix rule's one systematic false positive: a `*_key` that is a *noun*,
  *  not a credential. `sortKey`, `cacheKey`, `primaryKey` and `keyboardLayout`
@@ -67,19 +76,96 @@ function isSecretKey(k) {
   return SECRET_KEY_RE.test(n) || HEADERS_KEY_RE.test(n);
 }
 
-/** Line-level scrub for the non-JSON config formats (yaml / toml), which have
- *  no parser on this path. Matches `key: value` and `key = value` (and quoted
- *  keys) whose key is a secret per `isSecretKey`, and blanks the value. Comments
- *  and blank lines pass through untouched. */
+/** Scrub for the non-JSON config formats (yaml / toml) and for free text
+ *  that may contain one. There is no parser on this path, so it reads lines —
+ *  but it keeps track of WHERE it is, because in both formats the key that
+ *  makes a value secret is very often not on the value's own line:
+ *
+ *    [mcp_servers.db.env]            toml: the table is the secret map
+ *    DATABASE_URL = "postgres://u:pw@h/db"
+ *
+ *    http_headers:                   yaml: the parent key is
+ *      Cookie: session=abc
+ *    api_keys:                       a list
+ *      - sk-live-1
+ *    password: |                     a block scalar
+ *      hunter2
+ *    token = """                     a toml multi-line string
+ *    abc"""
+ *
+ *  Judging each line alone passed every one of those through. Inside a secret
+ *  section EVERY value is redacted, whatever its own key is called; the section
+ *  ends at the next toml table, or at the first yaml line indented no deeper
+ *  than the key that opened it. Comments and blank lines pass through. */
 function redactConfigText(text) {
-  return String(text).split('\n').map((line) => {
+  const out = [];
+  let tomlSecret = false; // inside a [table] whose path names a secret map
+  let yamlIndent = -1; // indent of the yaml key that opened a secret block, or -1
+  let yamlScalar = false; // that block is a | or > scalar: its lines are raw text
+  let yamlEmitted = false; // one [REDACTED] line already stands in for the scalar
+  let multiline = null; // closing delimiter of an open toml multi-line value
+
+  for (const line of String(text).split('\n')) {
+    if (multiline) { // swallowing the rest of a redacted multi-line value
+      if (line.includes(multiline)) multiline = null;
+      continue;
+    }
+    const trimmed = line.trim();
+    const indent = line.length - line.trimStart().length;
+
+    if (yamlIndent >= 0) {
+      const listItem = /^-(\s|$)/.test(trimmed);
+      const inside = trimmed === '' || indent > yamlIndent || (indent === yamlIndent && listItem && !yamlScalar);
+      if (!inside) { yamlIndent = -1; yamlScalar = false; yamlEmitted = false; }
+      else if (trimmed === '' || trimmed.startsWith('#')) { if (!yamlScalar) out.push(line); continue; }
+      else if (yamlScalar) {
+        if (!yamlEmitted) { out.push(`${' '.repeat(indent)}${REDACTED}`); yamlEmitted = true; }
+        continue;
+      } else {
+        const kv = /^(\s*(?:-\s*)?)(["']?)([A-Za-z0-9_.\-]+)\2(\s*:\s*)(.*)$/.exec(line);
+        if (kv && kv[5].trim() === '') out.push(line); // a nested map key: keep the shape
+        else if (kv) out.push(`${kv[1]}${kv[2]}${kv[3]}${kv[2]}${kv[4]}${REDACTED}`);
+        else if (listItem) out.push(`${' '.repeat(indent)}- ${REDACTED}`);
+        else out.push(`${' '.repeat(indent)}${REDACTED}`);
+        continue;
+      }
+    }
+
+    // A toml table header: [a.b] or [[a.b]]. (A yaml flow list is a VALUE and
+    // never starts a line on its own with nothing after the bracket.)
+    const table = /^\[\[?\s*([A-Za-z0-9_."'\-\s]+?)\s*\]\]?\s*(#.*)?$/.exec(trimmed);
+    if (table) {
+      tomlSecret = table[1].split('.').some((seg) => isSecretKey(seg.trim().replace(/^["']|["']$/g, '')));
+      out.push(line);
+      continue;
+    }
+
     const m = /^(\s*(?:-\s*)?)(["']?)([A-Za-z0-9_.\-]+)\2(\s*[:=]\s*)(.*)$/.exec(line);
-    if (!m) return line;
-    const [, indent, , key, sep, rest] = m;
-    if (!isSecretKey(key)) return line;
-    if (/^(#|\/\/)/.test(rest.trim()) || rest.trim() === '') return line;
-    return `${indent}${m[2]}${key}${m[2]}${sep}${REDACTED}`;
-  }).join('\n');
+    if (!m) { out.push(line); continue; }
+    const [, lead, quote, key, sep, rest] = m;
+    const value = rest.trim();
+    const secret = tomlSecret || (isSecretKey(key) && !isCount(key, value));
+    if (!secret || /^(#|\/\/)/.test(value)) { out.push(line); continue; }
+
+    if (value === '' || /^[|>][+-]?\d*\s*(#.*)?$/.test(value)) {
+      // yaml: the value is on the lines below. An empty value on a toml line
+      // (`key =`) is not valid toml, so only a colon opens a block.
+      if (sep.includes(':')) {
+        yamlIndent = line.length - line.trimStart().length;
+        yamlScalar = value !== '';
+        yamlEmitted = false;
+      }
+      out.push(yamlScalar ? `${lead}${quote}${key}${quote}${sep.replace(/\s+$/, '')} |` : line);
+      continue;
+    }
+    // toml: a multi-line string or array that does not close on this line.
+    for (const [open, close] of [['"""', '"""'], ["'''", "'''"]]) {
+      if (value.startsWith(open) && !value.slice(open.length).includes(close)) multiline = close;
+    }
+    if (!multiline && sep.includes('=') && value.startsWith('[') && !/\]\s*(#.*)?$/.test(value)) multiline = ']';
+    out.push(`${lead}${quote}${key}${quote}${sep}${REDACTED}`);
+  }
+  return out.join('\n');
 }
 
 /** Recursively replace secret-looking values with '[REDACTED]' in a config
@@ -102,7 +188,7 @@ function redactSecrets(obj, depth = 0) {
   if (obj && typeof obj === 'object') {
     const out = {};
     for (const [k, v] of Object.entries(obj)) {
-      if (isSecretKey(k)) {
+      if (isSecretKey(k) && !isCount(k, v)) {
         // An empty/absent value stays absent — "[REDACTED]" on a key that had
         // no value reads as "a secret was here", which is its own lie.
         if (v === undefined || v === null || v === '' || (Array.isArray(v) && !v.length)) out[k] = v;
@@ -144,11 +230,8 @@ function readAgentConfig(agent, { redact = false } = {}) {
   if (!fs.existsSync(configPath)) return { ...base, config: null, configRaw: null };
   if (base.configFormat !== 'json') {
     const text = fs.readFileSync(configPath, 'utf8');
-    // yaml/toml have no parser here, so redaction is a line-level scrub of
-    // `key: value` / `key = value` under a secret key name. It is not as
-    // thorough as the JSON walk (a secret under a header-style map nested in
-    // yaml still slips), but it is strictly better than serving the file
-    // verbatim to an LLM — and the REST route below still gets the original.
+    // yaml/toml have no parser here, so redaction is the section-aware line
+    // scrub above. The REST route below still gets the original.
     return { ...base, config: null, configRaw: redact ? redactConfigText(text) : text, ...(redact ? { redacted: true } : {}) };
   }
   const raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));

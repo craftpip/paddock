@@ -40,7 +40,11 @@ function ensureOwned(p) {
     const st = fs.lstatSync(p);
     if (st.isSymbolicLink()) return false;
     if (st.uid === USER_UID && st.gid === USER_GID) return false;
-    fs.chownSync(p, USER_UID, USER_GID);
+    // lchown, not chown: between the lstat above and this call the path can be
+    // swapped for a symlink by anything that can write the directory (an agent
+    // owns its data dir and workspace). chown would follow it and hand the
+    // TARGET to uid 1000; lchown can only ever touch the path itself.
+    fs.lchownSync(p, USER_UID, USER_GID);
     return true;
   } catch { return false; }
 }
@@ -120,7 +124,7 @@ function ensureOwnedStrict(p, { contentWritten = false } = {}) {
     );
   }
   try {
-    fs.chownSync(p, USER_UID, USER_GID);
+    fs.lchownSync(p, USER_UID, USER_GID); // never follows a link swapped in after the lstat
   } catch (e) {
     throw new OwnershipError(
       'ownership_chown_failed',
@@ -200,11 +204,26 @@ function writeFileOwned(p, content, { boundary, exclusive = false, mode } = {}) 
   }
   assertWithinBoundary(target, boundary);
   mkdirOwned(path.dirname(target), { boundary });
-  const opts = { encoding: typeof content === 'string' ? 'utf8' : undefined };
-  if (exclusive) opts.flag = 'wx';
-  if (mode !== undefined) opts.mode = mode;
-  else if (existingMode !== undefined) opts.mode = existingMode;
-  fs.writeFileSync(target, content, opts);
+  // Opened with O_NOFOLLOW: the lstat above is a check, this is the guarantee.
+  // A symlink swapped in between the two makes the open fail (ELOOP) instead
+  // of writing root's content through it.
+  const C = fs.constants;
+  const flags = C.O_WRONLY | C.O_CREAT | C.O_NOFOLLOW | (exclusive ? C.O_EXCL : C.O_TRUNC);
+  let fd;
+  try {
+    fd = fs.openSync(target, flags, mode !== undefined ? mode : (existingMode !== undefined ? existingMode : 0o666));
+  } catch (e) {
+    if (e.code === 'ELOOP') {
+      throw new OwnershipError('ownership_symlink_refused', `Refusing to write ${target}: it is a symlink to another file.`, { path: target });
+    }
+    throw e;
+  }
+  try {
+    fs.writeFileSync(fd, content, typeof content === 'string' ? 'utf8' : undefined);
+    if (mode !== undefined) fs.fchmodSync(fd, mode);
+  } finally {
+    fs.closeSync(fd);
+  }
   return ensureOwnedStrict(target, { contentWritten: true });
 }
 
@@ -248,7 +267,7 @@ function atomicWriteOwned(p, content, { boundary, mode } = {}) {
  *  followed, never rewritten). `skipDir` (optional predicate, called on each
  *  dir) prunes a whole subtree — used to skip self-managing agent data dirs.
  *  Best-effort: a race (file vanished) is ignored. */
-function normalizeTree(root, skipDir = null) {
+function normalizeTree(root, skipDir = null, skipFile = null) {
   if (!canChown()) return;
   try { if (!fs.existsSync(root)) return; } catch { return; }
   const walk = (dir) => {
@@ -262,7 +281,7 @@ function normalizeTree(root, skipDir = null) {
       try { st = fs.lstatSync(p); } catch { continue; }
       if (st.isSymbolicLink()) continue;
       if (st.isDirectory()) walk(p);
-      else ensureOwned(p);
+      else if (!(skipFile && skipFile(p))) ensureOwned(p);
     }
   };
   walk(root);
@@ -270,7 +289,9 @@ function normalizeTree(root, skipDir = null) {
 
 /** Normalize the whole src/data dir (sqlite db + usage csvs). */
 function ensureDataOwned() {
-  normalizeTree(DATA_DIR);
+  // The vault key stays root-only: handing it to uid 1000 would let any
+  // user-mode PAD that can see this directory read it.
+  normalizeTree(DATA_DIR, null, (p) => path.basename(p) === 'vault.key');
 }
 
 /** chown the sqlite db files — call again AFTER the db is opened, because a

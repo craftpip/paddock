@@ -414,7 +414,8 @@ function VaultDropdown({ termRef, connected }) {
   async function doPaste(item, pin) {
     setPastingId(item.id)
     try {
-      const d = await api(`/api/vault/${item.id}/decrypt?pin=${encodeURIComponent(pin || '')}`)
+      // The PIN travels in a header, never in the URL: a URL ends up in logs and history.
+      const d = await api(`/api/vault/${item.id}/decrypt`, { headers: { 'X-Vault-Pin': pin || '' } })
       if (!d?.value) throw new Error('Empty vault value')
       termRef.current?.write(d.value)
       toast.success(`"${item.name}" pasted to terminal`)

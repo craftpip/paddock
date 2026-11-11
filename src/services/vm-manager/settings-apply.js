@@ -5,7 +5,7 @@
 // Exported before anything is required: function declarations are hoisted, so a
 // sibling module that requires this one mid-cycle already sees every function.
 Object.assign(exports, {
-  prepareAgentChanges, applyAgentChanges,
+  prepareAgentChanges, applyAgentChanges, _setApplyImpl,
 });
 
 const fs = require('fs');
@@ -375,6 +375,11 @@ async function prepareAgentChanges(name, opts = {}) {
 // page and an MCP caller) each rewrote meta.env and the compose file and ran
 // `compose up`, interleaved; the second is refused instead.
 const applyingNow = new Set();
+// Test seam for the lock alone. The real apply runs `docker compose`, so a test
+// that reached it CREATED A REAL CONTAINER (and an image and a network) named
+// after its fixture on every run. The lock is tested against a stand-in.
+let applyImpl = null;
+function _setApplyImpl(fn) { applyImpl = fn || null; }
 async function applyAgentChanges(name, opts = {}, hooks = {}) {
   if (applyingNow.has(name)) {
     const err = new Error(`Another change is being applied to ${name}. Wait for it to finish, then try again.`);
@@ -384,7 +389,7 @@ async function applyAgentChanges(name, opts = {}, hooks = {}) {
   }
   applyingNow.add(name);
   try {
-    return await applyAgentChangesLocked(name, opts, hooks);
+    return await (applyImpl || applyAgentChangesLocked)(name, opts, hooks);
   } finally {
     applyingNow.delete(name);
   }

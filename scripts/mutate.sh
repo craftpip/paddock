@@ -53,9 +53,13 @@ for t in $TESTS; do
   [ -f "$t" ] || { echo "mutate: $t does not exist"; exit 2; }
   out=$(node --test "$t" 2>&1 || true)
   pass=$(printf '%s\n' "$out" | sed -n 's/^# pass \([0-9]*\)/\1/p'); fail=$(printf '%s\n' "$out" | sed -n 's/^# fail \([0-9]*\)/\1/p')
-  echo "$t: ${pass:-0} pass, ${fail:-?} fail"
+  # A test that never settles is reported by node as CANCELLED, not failed. It
+  # is just as red: counting only `# fail` called such a mutant "green".
+  cancelled=$(printf '%s\n' "$out" | sed -n 's/^# cancelled \([0-9]*\)/\1/p')
+  echo "$t: ${pass:-0} pass, ${fail:-?} fail, ${cancelled:-0} cancelled"
   printf '%s\n' "$out" | sed -n 's/^not ok [0-9]* - /    red: /p'
   [ "${fail:-0}" = "0" ] || red=1
+  [ "${cancelled:-0}" = "0" ] || red=1
   [ "${pass:-0}" != "0" ] || echo "    (no test passed: check that the mutant still LOADS, or this is not evidence)"
 done
 after=$(sha256sum "/app/$FILE" | cut -d' ' -f1)

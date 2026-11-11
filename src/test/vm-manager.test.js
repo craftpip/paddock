@@ -427,6 +427,17 @@ describe('vm-manager - applySettings keeps a published web app alive', () => {
   require('./helpers/evict')('../services/vm-manager');
   const vm = require('../services/vm-manager');
 
+  // The env above is set while the file is being READ; by the time a test RUNS,
+  // a later describe has put WORKSPACE_ROOT back to '/workspace'. Modules that
+  // read the env per call (the per-instance build files) then wrote
+  // `pad-x/build/` into the real instances directory. Set it around each test.
+  let prevWs; let prevHost;
+  beforeEach(() => {
+    prevWs = process.env.WORKSPACE_ROOT; prevHost = process.env.HOST_WORKSPACE_ROOT;
+    process.env.WORKSPACE_ROOT = TMP; process.env.HOST_WORKSPACE_ROOT = TMP;
+  });
+  afterEach(() => { process.env.WORKSPACE_ROOT = prevWs; process.env.HOST_WORKSPACE_ROOT = prevHost; });
+
   it('re-applies the web binding for the new network on a network switch', async () => {
     const instDir = path.join(TMP, 'instances', 'pad-x');
     fs.mkdirSync(instDir, { recursive: true });
