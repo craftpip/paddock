@@ -16,6 +16,12 @@ git -C "$ROOT" checkout-index -a --prefix="$STAGE/"
 [ -f "$STAGE/src/app.js" ] || { echo "test-staged: the index has no src/app.js"; exit 2; }
 docker exec "$CONTAINER" rm -rf /tmp/staged
 docker cp "$STAGE/src" "$CONTAINER:/tmp/staged" >/dev/null
+# The client bundle is build output and is not tracked, so the staged tree has
+# none. Give it the worktree's: the freshness test then answers the question
+# that matters before a commit, "was this bundle built from the STAGED source?".
+if docker exec "$CONTAINER" test -d /app/public; then
+  docker exec "$CONTAINER" sh -c 'cp -r /app/public /tmp/staged/public'
+fi
 # The staged tree has no node_modules; a missing module reads as a test
 # failure, not a setup failure, so link the container's.
 docker exec "$CONTAINER" sh -c 'rm -rf /tmp/staged/node_modules /tmp/staged/client/node_modules; ln -s /app/node_modules /tmp/staged/node_modules; ln -s /app/client/node_modules /tmp/staged/client/node_modules'

@@ -1,6 +1,6 @@
 # Plan 118 — Structural cleanup: one runner view, split files, instant dispatch
 
-## Status: In progress — 2026-11-11 — 6/7 phases done, Phase 7 half done. Open: untracking `src/public` (Phase 7 steps 2–3, needs the user's go-ahead), the SVG check (Phase 6, deliberately not done)
+## Status: Complete — 2026-11-11 — 7/7 phases done; the two follow-ups (vm-manager and mcp splits) done; one item deliberately not built (the SVG path check, see Phase 6)
 
 ## Why
 
@@ -48,7 +48,7 @@ disagree, then makes the files small enough to read.
 - [x] Phase 4 — One test command that finishes (2026-11-11, see "Phase 4 — as built")
 - [x] Phase 5 — Split `app.js` routes (2026-11-11, see "Phase 5 — as built")
 - [x] Phase 6 — Turn `AGENTS.md` lessons into tools (2026-11-11; the `AGENTS.md` trim and the SVG check were NOT done, see "Phase 6 — as built")
-- [ ] Phase 7 — Stop tracking `src/public` (the stale-bundle guard is built, as a test; untracking waits for the user)
+- [x] Phase 7 — Stop tracking `src/public` (2026-11-11, after the owner said yes)
 
 ---
 
@@ -519,9 +519,18 @@ and editing a `.jsx` without rebuilding shows the stale-bundle page.
 - With that test, the reason to untrack `src/public` is weaker: a bundle that
   does not match its source can no longer be committed unnoticed, as long as
   `npm test` or `scripts/test-staged.sh` is run.
-- **Not done, waiting for the user:** `git rm --cached src/public`, building
-  the client in the image, and the fresh-clone check. It changes how a
-  checkout is brought up.
+- **Untracked 2026-11-11** after the owner said yes: `src/public/` is in
+  `.gitignore` and removed from the index.
+- The client is not built in the image, because `./src` is bind-mounted over
+  `/app` and would hide it. Instead the webui builds a MISSING bundle at boot
+  when `src/client/node_modules` is there, serving a self-reloading 503 page
+  meanwhile; otherwise the page shows the command to run.
+- Checked by moving the bundle aside and restarting: 503 "building" at 2 s and
+  4 s, the app at 6 s, files owned by the host user, the API answering 200
+  throughout.
+- `scripts/test-staged.sh` copies the worktree's bundle beside the staged
+  source, so the freshness test still answers "was this bundle built from
+  what I am committing?".
 
 ## Out of scope
 

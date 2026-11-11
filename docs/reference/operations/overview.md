@@ -171,14 +171,21 @@ docker exec -d paddock sh -c 'cd /app/client && npm run dev'
 cd src/client && npm run build
 ```
 
-Output to `src/public/`, served by Express on port 6789. The bundle is tracked in git, so
-commit `src/public` together with the client change that produced it.
+Output to `src/public/`, served by Express on port 6789. The bundle is build output and is
+**not** tracked in git (`.gitignore`).
+
+On a checkout with no bundle, the webui builds it itself at boot when the client's
+dependencies are installed (`src/client/node_modules`), and answers page requests with a
+self-reloading 503 "building" page until it lands (about six seconds). Without the
+dependencies it shows the command to run: `cd src/client && npm ci && npm run build`. The API
+serves throughout. A bundle that exists is never rebuilt at boot.
 
 The build also writes `src/public/build-stamp.json`: a SHA-256 over the client's inputs
 (`src/`, `index.html`, `vite.config.js`, `build-stamp.js`, `package-lock.json`), computed by
 `src/client/build-stamp.js`. `client-bundle-fresh.test.js` recomputes it, so `npm test` fails
-when the client source was edited without a rebuild, and `scripts/test-staged.sh` fails when
-the staged bundle does not match the staged source. It is a content hash because a git
+when the client source was edited without a rebuild, and `scripts/test-staged.sh` (which
+copies the worktree's bundle beside the staged source) fails when the bundle was not built
+from what is staged. It is a content hash because a git
 checkout rewrites file times in no useful order.
 
 ### Testing

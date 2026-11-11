@@ -702,7 +702,18 @@ app.get('*', (req, res, next) => {
     res.setHeader('Expires', '0');
     return res.sendFile(indexPath);
   }
-  res.status(200).send('<!DOCTYPE html><html><body><h1>React app not built yet. Run: cd client && npm run build</h1></body></html>');
+  // The bundle is build output and is not kept in git, so a fresh checkout has
+  // none until it is built. Say what is happening and how to fix it; the page
+  // reloads itself so it turns into the app once the build lands.
+  const building = clientBuild.state === 'building';
+  res.status(503).setHeader('Retry-After', '5');
+  res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Paddock</title><meta http-equiv="refresh" content="5"></head>
+<body style="font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem;line-height:1.5">
+<h1>Paddock is ${building ? 'building its web page' : 'not built yet'}</h1>
+${building ? '<p>This takes a few seconds. The page reloads on its own.</p>'
+    : `<p>The web page has not been built in this checkout.${clientBuild.error ? ` The automatic build failed: <code>${String(clientBuild.error).replace(/[<>&]/g, '')}</code>` : ''}</p>
+<p>On the host, run:</p><pre>cd src/client &amp;&amp; npm ci &amp;&amp; npm run build</pre><p>The API is running; only the page is missing.</p>`}
+</body></html>`);
 });
 
 // ─── Error Handlers ─────────────────────────────────────────
@@ -725,6 +736,42 @@ app.use((err, req, res, next) => {
 // be normalized at boot — BEFORE the db is opened (a fresh db created by a
 // root process would be root-owned; db.js also re-chowns after open).
 ownership.ensureDataOwned();
+
+// The client bundle (src/public) is build output, not source, so it is not in
+// git. When it is missing and the client's dependencies are installed, build
+// it now instead of leaving a fresh checkout on a "not built" page. A bundle
+// that EXISTS is never rebuilt here: whether it matches the source is a test's
+// job (client-bundle-fresh.test.js), not something to decide at boot.
+const clientBuild = { state: 'idle', error: '' };
+(function ensureClientBundle() {
+  const publicDir = path.join(__dirname, 'public');
+  const clientDir = path.join(__dirname, 'client');
+  if (fs.existsSync(path.join(publicDir, 'index.html'))) { clientBuild.state = 'present'; return; }
+  if (!fs.existsSync(path.join(clientDir, 'node_modules', '.bin', 'vite'))) {
+    clientBuild.state = 'missing';
+    console.warn('[client] no bundle and no client dependencies: run `cd src/client && npm ci && npm run build` on the host');
+    return;
+  }
+  clientBuild.state = 'building';
+  console.log('[client] no bundle found; building it (npm run build in client/)');
+  const child = spawn('npm', ['run', 'build'], { cwd: clientDir, stdio: ['ignore', 'pipe', 'pipe'] });
+  let tail = '';
+  const keep = (d) => { tail = (tail + d.toString()).slice(-600); };
+  child.stdout.on('data', keep);
+  child.stderr.on('data', keep);
+  child.on('error', (e) => { clientBuild.state = 'failed'; clientBuild.error = e.message; console.error('[client] build could not start:', e.message); });
+  child.on('close', (code) => {
+    if (code === 0 && fs.existsSync(path.join(publicDir, 'index.html'))) {
+      clientBuild.state = 'present';
+      try { ownership.normalizeTree(publicDir); } catch { /* ownership is best effort */ }
+      console.log('[client] bundle built');
+    } else {
+      clientBuild.state = 'failed';
+      clientBuild.error = tail.trim().split('\n').slice(-2).join(' ') || `exit ${code}`;
+      console.error('[client] build failed:', clientBuild.error);
+    }
+  });
+})();
 getDb();
 // Idempotent background sweep over instances/ — heals any historical
 // root-owned pad data without blocking startup (replaces the manual

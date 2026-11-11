@@ -472,7 +472,7 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   `docker exec -d paddock sh -c 'cd /app/client && npm run dev'` → access
   http://10.69.1.164:5173; stop:
   `docker exec paddock sh -c "kill \$(lsof -ti:5173)"`
-- SPA build: `cd src/client && npm run build` (output → `src/public/`)
+- SPA build: `cd src/client && npm run build` (output → `src/public/`, which is build output and NOT in git; the webui builds a missing bundle itself at boot)
 - Webui recreate gotcha: the host docker CLI has no compose plugin — recreate
   with host-absolute paths (see `docs/operations/overview.md`).
 
