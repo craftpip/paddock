@@ -146,7 +146,7 @@ function LiveRow({ session, runner, selected, onSelect, onClose, onLock, onMakeR
             metadata line, not a separate card or status panel. */}
         {runner && (
           <span
-            className="msn-row-infinite shrink-0 rounded bg-accent/15 px-1 text-[9px] font-medium text-accent"
+            className="msn-row-infinite shrink-0 rounded-full bg-accent-soft px-1.5 text-[10.5px] font-medium text-accent-text"
             title={`∞ — infinite runner "${runner.name}". Queue state is in the terminal panel.`}
           >
             ∞
@@ -159,7 +159,7 @@ function LiveRow({ session, runner, selected, onSelect, onClose, onLock, onMakeR
             different folders are indistinguishable in one list. */}
         {session.project && (
           <span
-            className="msn-row-project shrink-0 truncate rounded bg-accent/15 px-1 text-[9px] font-medium text-accent"
+            className="msn-row-project shrink-0 truncate rounded-full bg-accent-soft px-1.5 text-[10.5px] font-medium text-accent-text"
             title={`${session.project.name} — ${session.project.folder}`}
           >
             {session.project.name}
@@ -172,7 +172,7 @@ function LiveRow({ session, runner, selected, onSelect, onClose, onLock, onMakeR
             (plan 62 1b). */}
         {shell && (
           <span
-            className="msn-row-shell shrink-0 truncate rounded bg-warning/15 px-1 text-[9px] font-medium text-warning"
+            className="msn-row-shell shrink-0 truncate rounded-full bg-warning-soft px-1.5 text-[10.5px] font-medium text-warning"
             title={`Only a shell is running (${session.command || 'sh'}) — relaunch the TUI before typing`}
           >
             shell
@@ -183,7 +183,7 @@ function LiveRow({ session, runner, selected, onSelect, onClose, onLock, onMakeR
             same one — a row type that quietly restyles its second line reads as
             a different kind of thing rather than the same thing, closed. */}
         <span
-          className={`msn-session-id ml-auto min-w-0 shrink truncate text-right font-mono text-[10px] text-ink-faint ${
+          className={`msn-session-id ml-auto min-w-0 shrink truncate text-right font-mono text-[11px] text-ink-faint ${
             open ? 'transition-opacity group-hover:opacity-0 group-focus:opacity-0' : ''
           }`}
           title={session.tmux_id}
@@ -395,7 +395,7 @@ function HistoryRow({ item, projectFolder, onResume, busy, selected }) {
         )}
         {own && (
           <span
-            className="msn-row-project shrink-0 truncate rounded bg-accent/15 px-1 text-[9px] font-medium text-accent"
+            className="msn-row-project shrink-0 truncate rounded-full bg-accent-soft px-1.5 text-[10.5px] font-medium text-accent-text"
             title={`${own.name} — ${own.folder}`}
           >
             {own.name}
@@ -407,9 +407,9 @@ function HistoryRow({ item, projectFolder, onResume, busy, selected }) {
             as long as this specific row's click is in flight — without it the row
             just dims and looks broken. */}
         {busy && (
-          <span className="msn-history-hint shrink-0 text-[10px] text-ink-faint/70">opening…</span>
+          <span className="msn-history-hint shrink-0 text-[11px] text-ink-faint/70">opening…</span>
         )}
-        <span className="msn-history-meta ml-auto min-w-0 shrink truncate text-right font-mono text-[10px] text-ink-faint">
+        <span className="msn-history-meta ml-auto min-w-0 shrink truncate text-right font-mono text-[11px] text-ink-faint">
           {when(item.updatedAt)}
           {where ? ` · ${where}` : ''}
         </span>
@@ -638,7 +638,7 @@ export default function SessionList() {
           onNewInfinite={() => openPopup('runner-new', project.id)}
         />
         <span
-          className="msn-project-folder ml-auto truncate font-mono text-[10px] text-ink-faint"
+          className="msn-project-folder ml-auto truncate font-mono text-[11px] text-ink-faint"
           title={isAll ? `${projects.length} projects` : project?.folder}
         >
           {isAll ? `${projects.length} projects` : project?.folder}
@@ -663,7 +663,7 @@ export default function SessionList() {
           The raw reason stays one `title` hover away — the machine string a
           caller can act on, exactly the phrase the backend sent. */}
       {historyErrors.length > 0 && (
-        <div className="msn-history-errors border-b border-line-faint px-3 py-1.5 text-[10px] text-ink-faint">
+        <div className="msn-history-errors border-b border-line-faint px-3 py-1.5 text-[11px] text-ink-faint">
           {historyErrors.map((e) => (
             <div key={e.project?.id || e.project?.name || e.error} className="msn-history-error truncate" title={e.error}>
               <span className="msn-history-error-project text-ink-dim">{e.project?.name || 'a project'}</span>
@@ -690,7 +690,7 @@ export default function SessionList() {
             is the column's ONE band padding (error band, expander, cap note all
             use it too): four different gaps around four kinds of non-row was
             four decisions where there is one. */}
-        <div className="msn-group msn-group-sessions sticky top-0 z-10 flex items-center bg-panel px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-ink-faint">
+        <div className="msn-group msn-group-sessions sticky top-0 z-10 flex items-center bg-panel px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-ink-faint">
           Sessions
           {rows.length > 0 && <span className="msn-group-count ml-1 text-ink-faint/70">({rows.length})</span>}
           {openCount > 0 && (
@@ -699,7 +699,7 @@ export default function SessionList() {
               text="green dot = open — a live agent session is on it"
               position="bottom"
             >
-              <span className="msn-dot-legend flex items-center gap-1 font-normal normal-case tracking-normal text-[10px] text-ink-faint/70">
+              <span className="msn-dot-legend flex items-center gap-1 font-normal normal-case tracking-normal text-[11px] text-ink-faint/70">
                 <span className="h-1.5 w-1.5 rounded-full bg-success" aria-hidden="true" />
                 open
               </span>
@@ -785,7 +785,7 @@ export default function SessionList() {
               {/* The list is capped server-side, so say what is actually on
                   screen instead of implying all 693 are loaded. */}
               {(hist?.subfolders?.length || 0) < subCount && (
-                <div className="msn-cap-note px-3 py-1.5 text-[10px] text-ink-faint">
+                <div className="msn-cap-note px-3 py-1.5 text-[11px] text-ink-faint">
                   showing the {hist?.subfolders?.length || 0} most recent of {subCount}
                 </div>
               )}
@@ -826,21 +826,21 @@ function UnboundRunnerRow({ runner, selected, onSelect, onConfigure, onRemove })
       </span>
       <div className="relative flex items-center gap-1.5">
         <span
-          className="msn-row-infinite shrink-0 rounded bg-accent/15 px-1 text-[9px] font-medium text-accent"
+          className="msn-row-infinite shrink-0 rounded-full bg-accent-soft px-1.5 text-[10.5px] font-medium text-accent-text"
           title="∞ — infinite runner with no session yet. Click to open its terminal."
         >
           ∞
         </span>
         {runner.project && (
           <span
-            className="msn-row-project shrink-0 truncate rounded bg-accent/15 px-1 text-[9px] font-medium text-accent"
+            className="msn-row-project shrink-0 truncate rounded-full bg-accent-soft px-1.5 text-[10.5px] font-medium text-accent-text"
             title={`${runner.project.name} — ${runner.project.folder}`}
           >
             {runner.project.name}
           </span>
         )}
         <span
-          className="msn-session-id ml-auto min-w-0 shrink truncate text-right font-mono text-[10px] text-ink-faint transition-opacity group-hover:opacity-0 group-focus:opacity-0"
+          className="msn-session-id ml-auto min-w-0 shrink truncate text-right font-mono text-[11px] text-ink-faint transition-opacity group-hover:opacity-0 group-focus:opacity-0"
           title={runner.id}
         >
           no session yet

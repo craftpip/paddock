@@ -18,15 +18,15 @@ export default function MissionSessionView({ session, project, agentRunning, que
   if (!session?.agentName) return <Empty title="Session unavailable">This session no longer has an available agent.</Empty>
   const title = session.runner?.name || session.title || session.label || session.tmux_id
   return <div className="msn-session-view flex h-full min-h-0 flex-col bg-sunken">
-    <header className="msn-agent-header flex h-9 shrink-0 items-center gap-2 border-b border-line-faint px-3">
-      <span className={`msn-agent-dot h-1.5 w-1.5 shrink-0 rounded-full ${sessionState?.live ? 'bg-success' : 'bg-ink-faint'}`} />
-      {project && <span className="msn-agent-project shrink-0 truncate rounded bg-accent/15 px-1 text-[9px] font-medium text-accent" title={session.folder}>{project.name}</span>}
-      <span className="msn-agent-label truncate text-[11px] font-medium text-ink-dim" title={title}>{title}</span>
-      <span className="msn-agent-cwd truncate font-mono text-[10px] text-ink-faint" title={sessionState?.cwd || session.folder}>{sessionState?.cwd || session.folder}</span>
-      {session.locked && <span className="msn-badge-solo shrink-0 rounded bg-warning/15 px-1.5 py-0.5 text-[10px] text-warning">solo</span>}
+    <header className="msn-agent-header flex h-11 shrink-0 items-center gap-2.5 border-b border-line-faint bg-panel px-3">
+      <span className={`msn-agent-dot h-2 w-2 shrink-0 rounded-full ${sessionState?.live ? 'bg-success' : 'bg-ink-faint'}`} />
+      {project && <span className="msn-agent-project shrink-0 truncate rounded-full bg-accent-soft px-2 py-0.5 text-[11px] font-medium text-accent-text" title={session.folder}>{project.name}</span>}
+      <span className="msn-agent-label truncate text-[13px] font-semibold text-ink" title={title}>{title}</span>
+      <span className="msn-agent-cwd hidden truncate font-mono text-[11px] text-ink-faint md:inline" title={sessionState?.cwd || session.folder}>{sessionState?.cwd || session.folder}</span>
+      {session.locked && <span className="msn-badge-solo shrink-0 rounded-full bg-warning-soft px-2 py-0.5 text-[11px] text-warning">solo</span>}
       <span className="msn-agent-actions ml-auto flex shrink-0 items-center gap-1.5">
         {session.runner && <RunnerControls runner={session.runner} onConfigure={onConfigure} />}
-        {session.live !== false && !sessionState?.tuiAlive && <Button variant="secondary" size="bare" onClick={() => action(() => relaunch(session.id))} className="msn-btn-relaunch py-0.5 text-[10px] text-ink-dim hover:border-accent">{sessionState ? 'Relaunch TUI' : '...'}</Button>}
+        {session.live !== false && !sessionState?.tuiAlive && <Button variant="secondary" size="bare" onClick={() => action(() => relaunch(session.id))} className="msn-btn-relaunch px-2.5 py-1 text-xs text-ink-dim hover:border-accent">{sessionState ? 'Relaunch TUI' : '...'}</Button>}
       </span>
     </header>
     {error && <div className="msn-error-bar border-b border-danger/30 bg-danger/10 px-3 py-1.5 text-[11px] text-danger">{error}</div>}

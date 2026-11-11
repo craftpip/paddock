@@ -34,7 +34,7 @@ export default function RunnerSchedulerStatus({ execution, scheduler }) {
     reason = seconds > 0 ? `${label}: ${clock} remaining` : `${label} elapsed — waiting for next check`
   }
   return (
-    <p className="msn-runner-scheduler mb-1 break-words text-[10px] text-ink-faint">
+    <p className="msn-runner-scheduler min-w-0 truncate text-[11px] text-ink-faint" title={`${word} · ${reason}`}>
       <span className="msn-runner-worker-state" title="Worker state at the last observation">{word}</span>
       {' · '}<span className="msn-runner-scheduler-reason">{reason}</span>
     </p>

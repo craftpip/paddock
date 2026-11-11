@@ -111,7 +111,7 @@ export default function RunnerControls({ runner, onConfigure }) {
   return (
     <span className="msn-runner-controls flex shrink-0 items-center gap-1.5">
       <span
-        className="msn-runner-state shrink-0 rounded bg-accent/15 px-1 text-[9px] font-medium text-accent"
+        className="msn-runner-state sr-only"
         title={execution?.reason || `Queue ${stateWord}`}
       >
         ∞ {stateWord}
@@ -128,7 +128,7 @@ export default function RunnerControls({ runner, onConfigure }) {
               e.stopPropagation()
               setMenuOpen((o) => !o)
             }}
-            className="msn-btn-runner-toggle py-0.5 text-[10px]"
+            className="msn-btn-runner-toggle px-3 py-1 text-xs font-medium"
             title="Pause the queue — choose when it stops"
           >
             {busy ? '…' : 'Pause queue ▾'}
@@ -166,17 +166,17 @@ export default function RunnerControls({ runner, onConfigure }) {
         </span>
       ) : (
         <Button
-          variant="secondary"
+          variant="primary"
           size="bare"
           disabled={runDisabled}
           onClick={(e) => {
             e.stopPropagation()
             act(() => startRunner(runner.id))
           }}
-          className="msn-btn-runner-toggle py-0.5 text-[10px]"
+          className="msn-btn-runner-toggle px-3 py-1 text-xs font-medium"
           title={runTitle}
         >
-          {busy ? '…' : execution?.setupRequired ? 'Set up first' : 'Run queue'}
+          {busy ? 'Starting…' : execution?.setupRequired ? 'Set up first' : 'Run queue'}
         </Button>
       )}
       <Button
@@ -186,7 +186,7 @@ export default function RunnerControls({ runner, onConfigure }) {
           e.stopPropagation()
           onConfigure?.()
         }}
-        className="msn-btn-runner-config py-0.5 text-[10px] text-ink-faint hover:text-ink"
+        className="msn-btn-runner-config rounded-control px-2 py-1 text-xs text-ink-dim hover:bg-raised hover:text-ink"
         title="Configure this infinite runner"
       >
         Configure

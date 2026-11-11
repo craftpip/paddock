@@ -160,7 +160,7 @@ function Column({ title, count, children, className = '', toolbar = null, toolba
           {title}
         </span>
         {count !== undefined && (
-          <span className="msn-col-count rounded-full bg-raised px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-ink-faint">
+          <span className="msn-col-count rounded-full bg-raised px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-ink-faint">
             {count}
           </span>
         )}
@@ -289,7 +289,7 @@ function ProjectRow({ project, selected, onSelect, onEdit, onDelete }) {
               e.stopPropagation()
               onEdit(project)
             }}
-            className="msn-btn-edit px-1 text-[10px]"
+            className="msn-btn-edit px-1 text-[11px]"
           >
             edit
           </Button>
@@ -301,17 +301,17 @@ function ProjectRow({ project, selected, onSelect, onEdit, onDelete }) {
               e.stopPropagation()
               onDelete(project)
             }}
-            className="msn-btn-delete px-1 text-[10px]"
+            className="msn-btn-delete px-1 text-[11px]"
           >
             del
           </Button>
         </span>
       </div>
-      <span className="msn-project-meta truncate font-mono text-[10px] text-ink-faint" title={project.folder}>
+      <span className="msn-project-meta truncate font-mono text-[11px] text-ink-faint" title={project.folder}>
         {project.agent_name} · {project.folder}
       </span>
       {project.sessionCount !== undefined && (
-        <span className="msn-project-counts flex items-center gap-1 text-[10px]">
+        <span className="msn-project-counts flex items-center gap-1 text-[11px]">
           <span className={`msn-live-dot h-1 w-1 rounded-full ${(project.liveCount || 0) > 0 ? 'bg-success' : 'bg-ink-faint'}`} />
           <span className={project.liveCount ? 'text-ink-dim' : 'text-ink-faint'}>
             {project.liveCount || 0} live · {project.sessionCount} session{project.sessionCount === 1 ? '' : 's'}

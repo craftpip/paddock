@@ -115,7 +115,7 @@ export default function SessionCreateSplit({ project, newBusy = false, onNewSess
             className="msn-new-menu-infinite block w-full px-3 py-1.5 text-left text-[11px] text-ink hover:bg-raised"
           >
             <span className="font-medium">∞ New infinite session</span>
-            <span className="mt-0.5 block text-[10px] text-ink-faint">Runs QUEUE.md until done</span>
+            <span className="mt-0.5 block text-[11px] text-ink-faint">Runs QUEUE.md until done</span>
           </button>
         </div>
       )}

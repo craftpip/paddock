@@ -51,35 +51,48 @@ function titleOf(items, id) {
   return it ? it.title || it.plan : null
 }
 
+// 14px stroked icons for the row actions (a text glyph renders ~5px wide and is
+// hard to hit; sized by eye next to 13px row text).
+function RowIcon({ d }) {
+  return (
+    <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d={d} />
+    </svg>
+  )
+}
+
 function ItemRow({ item, current, index, total, busy, locked, canReviewStatus, onMove, onRemove, onEditStatus }) {
   const tone = ITEM_TONE[item.status] || 'bg-raised text-ink-faint'
   return (
     <li
       className={cx(
-        'msn-queue-item flex items-center gap-2 px-3 py-1 text-[11px]',
-        current && 'bg-warning/10'
+        'msn-queue-item flex items-center gap-3 px-3 py-2 text-[13px]',
+        current && 'bg-warning-soft/60'
       )}
     >
+      <span className="msn-queue-item-index w-4 shrink-0 text-right font-mono text-[11px] tabular-nums text-ink-faint">{index + 1}</span>
       <button type="button" disabled={!canReviewStatus || busy} onClick={() => onEditStatus(item)}
         title={canReviewStatus ? `Review status for ${item.title || item.plan}` : 'Pause the runner before reviewing queue statuses'}
-        className={cx('msn-queue-item-status w-[4.5rem] shrink-0 rounded px-1 py-0.5 text-center text-[9px] font-medium disabled:cursor-not-allowed', tone)}>
+        className={cx('msn-queue-item-status w-[5.25rem] shrink-0 rounded-full px-2 py-0.5 text-center text-[11px] font-medium disabled:cursor-not-allowed', tone)}>
         {ITEM_WORD[item.status] || item.status}
       </button>
-      <span className="msn-queue-item-title min-w-0 flex-1 truncate" title={item.plan}>
-        {item.title || item.plan}
-      </span>
-      <span className="msn-queue-item-path hidden shrink-0 font-mono text-[9px] text-ink-faint lg:inline" title={item.plan}>
-        {item.plan}
+      <span className="min-w-0 flex-1">
+        <span className={cx('msn-queue-item-title block truncate', item.status === 'done' ? 'text-ink-dim' : 'text-ink')} title={item.plan}>
+          {item.title || item.plan}
+        </span>
+        <span className="msn-queue-item-path block truncate font-mono text-[10.5px] text-ink-faint" title={item.plan}>
+          {item.plan}
+        </span>
       </span>
       <span className="msn-queue-item-actions flex shrink-0 items-center gap-0.5">
-        <Button variant="ghost" size="bare" disabled={busy || locked || index === 0} onClick={() => onMove(index, -1)} className="msn-btn-queue-up px-1 py-0.5 text-[9px]" title={`Move ${item.title || item.plan} up`}>
-          Up
+        <Button variant="link" size="bare" disabled={busy || locked || index === 0} onClick={() => onMove(index, -1)} className="msn-btn-queue-up rounded p-1 hover:bg-raised disabled:opacity-30" title={`Move ${item.title || item.plan} up`} aria-label={`Move ${item.title || item.plan} up`}>
+          <RowIcon d="M6 15l6-6 6 6" />
         </Button>
-        <Button variant="ghost" size="bare" disabled={busy || locked || index === total - 1} onClick={() => onMove(index, 1)} className="msn-btn-queue-down px-1 py-0.5 text-[9px]" title={`Move ${item.title || item.plan} down`}>
-          Down
+        <Button variant="link" size="bare" disabled={busy || locked || index === total - 1} onClick={() => onMove(index, 1)} className="msn-btn-queue-down rounded p-1 hover:bg-raised disabled:opacity-30" title={`Move ${item.title || item.plan} down`} aria-label={`Move ${item.title || item.plan} down`}>
+          <RowIcon d="M6 9l6 6 6-6" />
         </Button>
-        <Button variant="dangerLink" size="bare" disabled={busy || locked || item.status === 'in progress'} onClick={() => onRemove(item)} className="msn-btn-queue-remove px-1 py-0.5 text-[9px]" title={item.status === 'in progress' ? `Cannot remove ${item.title || item.plan} while it is working` : `Remove ${item.title || item.plan} from the queue`}>
-          Remove
+        <Button variant="dangerLink" size="bare" disabled={busy || locked || item.status === 'in progress'} onClick={() => onRemove(item)} className="msn-btn-queue-remove rounded p-1 hover:bg-danger-soft disabled:opacity-30" title={item.status === 'in progress' ? `Cannot remove ${item.title || item.plan} while it is working` : `Remove ${item.title || item.plan} from the queue`} aria-label={`Remove ${item.title || item.plan} from the queue`}>
+          <RowIcon d="M6 6l12 12M18 6L6 18" />
         </Button>
       </span>
     </li>
@@ -262,26 +275,47 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
   return (
     <section className={cx('msn-queue-panel border-b border-line-faint bg-panel/50', historyOpen && 'msn-history-overlay', panelExpanded ? 'flex min-h-0 flex-1 flex-col' : 'shrink-0')}>
       {/* Header row: state + counts + collapse. Always visible, even collapsed. */}
-      <div className="msn-queue-header flex items-center gap-2 px-3 py-1.5">
+      <div className={cx('msn-queue-header flex items-center gap-3 px-3 py-2', (!collapsed || historyOpen) && 'border-b border-line-faint')}>
         <button
           type="button"
           onClick={() => setCollapsed((c) => !c)}
           aria-expanded={!collapsed}
           title={repairRequired ? 'Runner recovery details stay visible until repaired' : undefined}
-          className="msn-queue-toggle flex min-w-0 items-center gap-1.5 text-[10px] font-medium text-ink-dim hover:text-ink"
+          className="msn-queue-toggle flex shrink-0 items-center gap-2 text-xs font-medium text-ink-dim hover:text-ink"
         >
-          <span className="text-ink-faint">{collapsed ? '▸' : '▾'}</span>
-          <span className="msn-queue-title">Infinite queue</span>
-          <span className={cx('msn-queue-state rounded px-1 py-0.5 text-[9px] font-medium', running ? 'bg-accent/15 text-accent' : 'bg-raised text-ink-muted')}>
+          <svg className={cx('h-3 w-3 text-ink-faint transition-transform', !collapsed && 'rotate-90')} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+          <span className="msn-queue-title text-ink">Queue</span>
+          <span className={cx('msn-queue-state rounded-full px-2 py-0.5 text-[11px] font-medium',
+            running ? 'bg-accent-soft text-accent-text'
+              : execution?.state === 'complete' ? 'bg-success-soft text-success'
+                : ['waiting_input', 'held', 'projection_error'].includes(execution?.state) ? 'bg-danger-soft text-danger'
+                  : 'bg-raised text-ink-muted')}>
             {headerWord}
           </span>
           {counts && items.length > 0 && (
-            <span className="msn-queue-counts text-ink-faint">
+            <span className="msn-queue-counts tabular-nums text-ink-faint">
               {counts.done}/{counts.total} done
             </span>
           )}
         </button>
-        <span className="msn-queue-actions ml-auto flex shrink-0 items-center gap-1">
+        {/* Live worker/scheduler line, in the header so it costs no row of its own. */}
+        <div className="msn-runner-status-strip flex min-w-0 flex-1 items-center gap-2" aria-live="polite">
+          <RunnerSchedulerStatus execution={execution} scheduler={landed ? queue.scheduler : null} />
+          {current && <p className="hidden min-w-0 truncate text-[11px] text-ink-dim xl:block" title={current.plan}>Current: {titleOf(items, current.id) || current.plan}</p>}
+        </div>
+        {(!collapsed || historyOpen) && (
+          <div className="msn-runner-tabs flex shrink-0 gap-0.5 rounded-control border border-line-faint p-0.5" role="tablist" aria-label="Infinite runner views" onKeyDown={(event) => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+            event.preventDefault()
+            const tabs = Array.from(event.currentTarget.querySelectorAll('[role="tab"]'))
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (tabs.indexOf(event.target) + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length
+            tabs[next].focus(); tabs[next].click()
+          }}>
+            <Button id="msn-queue-tab" role="tab" tabIndex={!historyOpen ? 0 : -1} aria-selected={!historyOpen} aria-controls="msn-runner-queue" variant="none" size="bare" className={cx('msn-runner-tab rounded px-2.5 py-0.5 text-[11px] font-medium', !historyOpen ? 'bg-accent-soft text-accent-text' : 'text-ink-faint hover:text-ink')} onClick={() => patch({ runnerTab: null, queue: 'open' })}>Plans</Button>
+            <Button id="msn-history-tab" role="tab" tabIndex={historyOpen ? 0 : -1} aria-selected={historyOpen} aria-controls="msn-runner-history" variant="none" size="bare" className={cx('msn-runner-tab rounded px-2.5 py-0.5 text-[11px] font-medium', historyOpen ? 'bg-accent-soft text-accent-text' : 'text-ink-faint hover:text-ink')} onClick={() => patch({ runnerTab: 'history', queue: 'open' })}>History</Button>
+          </div>
+        )}
+        <span className="msn-queue-actions flex shrink-0 items-center gap-1">
           {landed && condition === 'ok' && (
             <Button
               variant="secondary"
@@ -291,7 +325,7 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
                 e.stopPropagation()
                 setPickerOpen(true)
               }}
-              className="msn-btn-queue-add py-0.5 text-[10px]"
+              className="msn-btn-queue-add px-2 py-1 text-[11px]"
               title="Add plans from this project's plans directory to the queue"
             >
               Add plans
@@ -299,7 +333,7 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
           )}
           {execution?.setupRequired && (
             <Button variant="primary" size="bare" disabled={busy} onClick={doSetup}
-              className="msn-btn-runner-runtime-setup py-0.5 text-[10px]" title="Explicitly initialize this runner's canonical execution state">
+              className="msn-btn-runner-runtime-setup px-2 py-1 text-[11px]" title="Explicitly initialize this runner's canonical execution state">
               {queueAction === 'setup' ? 'Setting up…' : 'Set up runner'}
             </Button>
           )}
@@ -308,7 +342,7 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
               variant="secondary"
               size="bare"
               onClick={reloadRunnerQueue}
-              className="msn-btn-queue-reload py-0.5 text-[10px]"
+              className="msn-btn-queue-reload px-2 py-1 text-[11px]"
               title="Reload the queue from the file"
             >
               Reload queue
@@ -317,36 +351,22 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
         </span>
       </div>
 
-      <div className="msn-runner-status-strip shrink-0 border-t border-line-faint px-3 py-1.5" aria-live="polite">
-        <RunnerSchedulerStatus execution={execution} scheduler={landed ? queue.scheduler : null} />
-        {current && <p className="truncate text-[10px] text-ink-dim" title={current.plan}>Current: {titleOf(items, current.id) || current.plan}</p>}
-      </div>
-      <div className="msn-runner-tabs flex shrink-0 gap-1 px-1 pb-1" role="tablist" aria-label="Infinite runner views" onKeyDown={(event) => {
-        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
-        event.preventDefault()
-        const tabs = Array.from(event.currentTarget.querySelectorAll('[role="tab"]'))
-        const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (tabs.indexOf(event.target) + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length
-        tabs[next].focus(); tabs[next].click()
-      }}>
-        <Button id="msn-queue-tab" role="tab" tabIndex={!historyOpen ? 0 : -1} aria-selected={!historyOpen} aria-controls="msn-runner-queue" variant={!historyOpen ? 'primary' : 'ghost'} size="bare" className="msn-runner-tab min-w-0 flex-1 px-1 py-1 text-[10px]" onClick={() => patch({ runnerTab: null, queue: 'open' })}>Queue</Button>
-        <Button id="msn-history-tab" role="tab" tabIndex={historyOpen ? 0 : -1} aria-selected={historyOpen} aria-controls="msn-runner-history" variant={historyOpen ? 'primary' : 'ghost'} size="bare" className="msn-runner-tab min-w-0 flex-1 px-1 py-1 text-[10px]" onClick={() => patch({ runnerTab: 'history', queue: 'open' })}>History</Button>
-      </div>
       {(!collapsed || historyOpen) && <RunnerHistory key={runner.id} runnerId={runner.id} active={historyOpen} expanded={expanded} />}
 
       {collapsed || historyOpen ? null : (
-        <div id="msn-runner-queue" role="tabpanel" aria-labelledby="msn-queue-tab" className={cx('msn-queue-body border-t border-line/50 px-3 pb-2 pt-1.5', panelExpanded && 'flex min-h-0 flex-1 flex-col')}>
+        <div id="msn-runner-queue" role="tabpanel" aria-labelledby="msn-queue-tab" className={cx('msn-queue-body mx-auto w-full max-w-3xl px-4 pb-3 pt-3', panelExpanded && 'flex min-h-0 flex-1 flex-col')}>
           {/* Centralized operation feedback (plan 98 §Phase 1) */}
           {operationFeedback && (
-            <div className={cx('msn-queue-feedback mt-1.5 p-2 rounded-control text-[10px] flex gap-2',
+            <div className={cx('msn-queue-feedback mb-3 flex items-center gap-2 rounded-control px-3 py-2 text-xs',
               operationFeedback.severity === 'error' ? 'bg-danger/10 text-danger' :
               operationFeedback.severity === 'warning' ? 'bg-warning/10 text-warning' :
-              'bg-accent/10 text-accent')}>
+              'bg-success-soft text-success')}>
               <span className="flex-1 whitespace-pre-wrap break-words">{operationFeedback.message}</span>
               <Button
                 variant="ghost"
                 size="bare"
                 onClick={() => { useMission.getState().clearOperationFeedback(runner.id) }}
-                className="msn-queue-feedback-dismiss text-[9px] shrink-0"
+                className="msn-queue-feedback-dismiss shrink-0 text-[11px]"
               >
                 Dismiss
               </Button>
@@ -354,7 +374,7 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
           )}
           {/* Queue warnings (e.g. multiple in-progress items) */}
           {summary?.warnings?.length > 0 && (
-            <div className="msn-queue-warning mt-1.5 p-2 rounded-control text-[10px] bg-warning/10 text-warning flex gap-2" data-testid="queue-warning">
+            <div className="msn-queue-warning mb-3 flex gap-2 rounded-control bg-warning-soft px-3 py-2 text-xs text-warning" data-testid="queue-warning">
               {summary.warnings.map((w, i) => (
                 <span key={i} className="flex-1 whitespace-pre-wrap break-words">
                   {w.message}
@@ -365,7 +385,7 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
           {/* Canonical execution state and server-provided reason */}
           {execution?.state === 'paused' && (
             <>
-              <p className={cx('msn-queue-paused mt-1.5 text-[10px]', (sessions.find((s) => s.id === sessionId)?.busy ? 'text-warning' : 'text-ink-dim'))}>
+              <p className={cx('msn-queue-paused mb-2 text-xs', (sessions.find((s) => s.id === sessionId)?.busy ? 'text-warning' : 'text-ink-dim'))}>
                 {sessions.find((s) => s.id === sessionId)?.busy
                   ? 'Queue paused — current task is finishing; no next task will start.'
                   : execution.reason || 'Queue paused.'}
@@ -436,7 +456,7 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
             </div>
           ) : condition === 'ok' && !items.length ? (
             <div className="msn-queue-empty py-1">
-              <p className="msn-queue-empty-text text-[11px] text-ink-dim">
+              <p className="msn-queue-empty-text py-6 text-center text-[13px] text-ink-dim">
                 No plans queued. Add plans, then Run queue.
               </p>
             </div>
@@ -444,30 +464,39 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
             <>
               {/* Always-visible summary (plan §Running,3): current/next/completed
                   verified against the queue's own summary, not re-derived. */}
-              <dl className="msn-queue-summary grid grid-cols-[8.5rem_1fr] gap-x-2 gap-y-0.5 text-[11px]">
-                <dt className="text-ink-faint">Current</dt>
-                <dd className="msn-queue-current min-w-0 truncate text-ink" title={current?.plan}>
-                  {current
-                    ? titleOf(items, current.id) || current.plan
-                    : next
-                      ? `Waiting to start ${titleOf(items, next.id) || next.plan}`
-                      : '—'}
-                </dd>
-                <dt className="text-ink-faint">Next</dt>
-                <dd className={cx('msn-queue-next min-w-0 truncate', blocked ? 'text-danger' : 'text-ink-dim')} title={next?.plan}>
-                  {blocked
-                    ? `Next (blocked) — ${titleOf(items, blocked.id) || blocked.plan}`
-                    : next
-                      ? titleOf(items, next.id) || next.plan
-                      : '—'}
-                </dd>
-                <dt className="text-ink-faint">Completed</dt>
-                <dd className="msn-queue-counts-line text-ink-dim">
-                  {doneCount} / {counts.total} plans done
-                  {counts.new ? ` · ${counts.new} queued` : ''}
-                  {counts.needInput ? ` · ${counts.needInput} needs input` : ''}
-                </dd>
-              </dl>
+              <div className="msn-queue-summary">
+                <div className="flex items-baseline justify-between gap-3 text-[13px]">
+                  <span className="msn-queue-counts-line text-ink">
+                    {doneCount} / {counts.total} plans done
+                    {counts.new ? ` · ${counts.new} queued` : ''}
+                    {counts.needInput ? ` · ${counts.needInput} needs input` : ''}
+                  </span>
+                  <span className="tabular-nums text-xs text-ink-faint">{counts.total ? Math.round((doneCount / counts.total) * 100) : 0}%</span>
+                </div>
+                <div className="msn-queue-progress mt-1.5 h-1.5 overflow-hidden rounded-full bg-sunken" role="progressbar" aria-valuemin={0} aria-valuemax={counts.total} aria-valuenow={doneCount} aria-label="Plans done">
+                  <div className={cx('h-full rounded-full', blocked ? 'bg-danger' : doneCount === counts.total ? 'bg-success' : 'bg-accent')} style={{ width: `${counts.total ? (doneCount / counts.total) * 100 : 0}%` }} />
+                </div>
+                {(current || next || blocked) && (
+                  <dl className="mt-2.5 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs">
+                    <dt className="text-ink-faint">Current</dt>
+                    <dd className="msn-queue-current min-w-0 truncate text-ink" title={current?.plan}>
+                      {current
+                        ? titleOf(items, current.id) || current.plan
+                        : next
+                          ? `Waiting to start ${titleOf(items, next.id) || next.plan}`
+                          : '—'}
+                    </dd>
+                    <dt className="text-ink-faint">Next</dt>
+                    <dd className={cx('msn-queue-next min-w-0 truncate', blocked ? 'text-danger' : 'text-ink-dim')} title={next?.plan}>
+                      {blocked
+                        ? `Next (blocked) — ${titleOf(items, blocked.id) || blocked.plan}`
+                        : next
+                          ? titleOf(items, next.id) || next.plan
+                          : '—'}
+                    </dd>
+                  </dl>
+                )}
+              </div>
 
               {/* Blocked plan + exact question. A blocker takes precedence over
                   Current/Next both above and in what Run/RunnerControls allow. */}
@@ -509,7 +538,7 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
               {/* Ordered item list; completed items stay visible (archive has no
                   hide-by-default in the panel — the counts already summarize). */}
               {items.length > 0 && (
-                <ul className={cx('msn-queue-items mt-1.5 space-y-px overflow-y-auto', panelExpanded && 'min-h-0 flex-1')}>
+                <ul className={cx('msn-queue-items mt-3 divide-y divide-line-faint overflow-y-auto rounded-card border border-line-faint bg-panel', panelExpanded && 'min-h-0 flex-initial')}>
                   {items.map((it, index) => (
                     <ItemRow key={it.id} item={it} current={current?.id === it.id} index={index} total={items.length} busy={busy} locked={condition !== 'ok'} canReviewStatus={execution?.canReviewStatuses === true} onEditStatus={editItemStatus} onMove={moveItem} onRemove={removeItem} />
                   ))}
@@ -517,7 +546,7 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
               )}
 
               {/* Worker-visible location, readable and copyable */}
-              <p className="msn-queue-path mt-1.5 flex items-center gap-1.5 font-mono text-[9px] text-ink-faint">
+              <p className="msn-queue-path mt-3 flex items-center gap-2 font-mono text-[10.5px] text-ink-faint">
                 <span className="truncate" title={queue.workerPath || queue.path}>
                   {queue.workerPath || queue.path}
                 </span>

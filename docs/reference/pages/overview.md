@@ -454,8 +454,17 @@ function) for a human sentence and carries the raw reason in the row's `title`
 — the raw string stays reachable on hover. The same translation can be reused
 anywhere a backend error string needs to become UI prose.
 
-**Infinite runner Queue and History share the terminal column.** The runner panel
-keeps status/current-plan context above Queue and History tabs. The URL's
+**Infinite runner Plans and History share the terminal column.** The runner panel is one
+header row (`msn-queue-header`): collapse toggle, state chip, done count, the live
+worker/scheduler line (`msn-runner-status-strip`), then the Plans / History segmented tabs
+(`msn-runner-tabs`, rendered only while the panel is open) and the queue actions. Collapsed, it
+is that single row above the terminal. Expanded, the Plans view is a width-capped column: a
+progress bar (`msn-queue-progress`), Current/Next (only while there is one), and the item list
+(`msn-queue-item` with `msn-queue-item-index`, status chip, title over path, icon actions).
+**Run queue** in the session header (`msn-btn-runner-toggle`) is the primary action; the
+header's own state chip is screen-reader-only because the queue row shows the same word. The
+terminal never pushes a size below 40x8 to the pad, so an expanded queue cannot shrink the
+worker's pane. The URL's
 `runnerTab=history` selects a durable newest-first event journal without changing
 the open Mission session or remounting its terminal. Recovery/callback steps group
 by attempt id; filters and cursor paging do not rebuild older activity from current
