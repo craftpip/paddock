@@ -160,9 +160,7 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
     }
   }, [popup?.value, runner?.id, queue, queueForRunner, queueStale, queueError])
 
-  if (!runner) return null
-
-  const id = runner.id
+  const id = runner?.id
   const landed = queue && queueForRunner === id
   const condition = landed ? queue.condition : null
   const items = landed ? queue.items || [] : []
@@ -191,6 +189,11 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
   const updateRunnerQueueItem = useMission((s) => s.updateRunnerQueueItem)
   const draftIdentity = location.pathname + ':' + (new URLSearchParams(location.search).get('session') || '')
   useDirtyNavigation(!!resolveText && (!!resolve || !!blocked), () => draftIdentity, () => setResolveText(''))
+
+  // After the last hook, never before one: an early return above the hooks
+  // makes them conditional, and a runner that became null while this panel
+  // was mounted would crash it ("rendered fewer hooks than expected").
+  if (!runner) return null
 
   const doSetup = async () => {
     try {

@@ -88,7 +88,7 @@ export default function PlanPicker({ runner, project, existing, onClose, onAdd }
       footer={
         <>
           <span className="mr-auto text-[11px] text-ink-faint">
-            {selected.length} selected{existing.size ? ` · ${existing.size} already queued` : ''}
+            {selected.length} selected{existing.length ? ` · ${existing.length} already queued` : ''}
           </span>
           <Button variant="ghost" size="bare" onClick={onClose} className="px-2 py-1 text-xs">
             Cancel
@@ -115,7 +115,7 @@ export default function PlanPicker({ runner, project, existing, onClose, onAdd }
               className="msn-queue-picker-filter placeholder:ink-dim w-full rounded bg-sunken px-2 py-1 text-[11px] text-ink outline-none focus:ring-1 focus:ring-accent"
             />
             <label className="flex shrink-0 items-center gap-1 text-[10px] text-ink-faint">
-              <input type="checkbox" checked={showAll} onChange={(e) => setShowAll(!e.target.checked)} className="accent-accent" />
+              <input type="checkbox" checked={showAll} onChange={(e) => setShowAll(e.target.checked)} className="accent-accent" />
               <span>Completed/archived</span>
             </label>
           </div>
@@ -154,7 +154,7 @@ export default function PlanPicker({ runner, project, existing, onClose, onAdd }
               )
             })}
           </ul>
-          {chain.trim() && visible.length === 0 && existing.size ? (
+          {chain.trim() && visible.length === 0 && existing.length ? (
             <p className="mt-1 text-[10px] text-ink-faint">All plans already in the queue.</p>
           ) : null}
         </>

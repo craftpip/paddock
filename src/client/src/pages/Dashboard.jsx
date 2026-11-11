@@ -1,3 +1,4 @@
+import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { useQueryInput } from '../lib/navigation'
 import { useAgents } from '../stores/agents'
@@ -6,9 +7,11 @@ import { api } from '../lib/api'
 import { Input } from '../components/ui/Input'
 
 export default function Dashboard() {
+  useDocumentTitle('Agents')
   const agents = useAgents((s) => s.agents)
   const stats = useAgents((s) => s.stats)
   const loading = useAgents((s) => s.loading)
+  const loadError = useAgents((s) => s.loadError)
   const fetchAgents = useAgents((s) => s.fetchAgents)
   const [query, setQuery] = useQueryInput('q')
   const [fleetStats, setFleetStats] = useState([])
@@ -149,7 +152,13 @@ export default function Dashboard() {
         ))}
       </div>
 
-      {agents.length === 0 && (
+      {agents.length === 0 && loadError && (
+        <div className="msn-agents-load-error text-center py-20 text-ink-dim" role="alert">
+          <p className="text-lg mb-2 text-danger">Could not load your agents</p>
+          <p className="text-sm">{loadError}. This page retries on its own.</p>
+        </div>
+      )}
+      {agents.length === 0 && !loadError && (
         <div className="text-center py-20 text-ink-dim">
           <svg className="w-12 h-12 mx-auto mb-4 text-ink-dim" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5">
             <path strokeLinecap="round" strokeLinejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a 2 2 0 0 0 2 -2V5a 2 2 0 0 0 -2 -2H5a 2 2 0 0 0 -2 2v10a 2 2 0 0 0 2 2z" />

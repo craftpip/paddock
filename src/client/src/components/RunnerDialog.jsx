@@ -13,6 +13,7 @@ import SettingsDialog from './SettingsDialog'
 import PromptTemplateEditor from './PromptTemplateEditor'
 import CallbackScriptEditor, { CallbackKindTabs } from './CallbackScriptEditor'
 import { useToast } from '../lib/toast'
+import { useConfirm } from '../lib/confirm'
 
 function useCodingAgents() {
   const agents = useAgents((s) => s.agents)
@@ -102,6 +103,7 @@ export default function RunnerDialog({ runner, project, session, onClose }) {
   const [error, setError] = useState('')
   const [actionBusy, setActionBusy] = useState(null)
   const toast = useToast()
+  const confirm = useConfirm()
 
   useEffect(() => {
     if (!editing || !current?.id || loadedQueueFile === queueFile || memory.has(draftPrefix + 'customInstructions')) return
@@ -195,7 +197,7 @@ export default function RunnerDialog({ runner, project, session, onClose }) {
       } catch (e) {
         setPreviews((p) => ({ ...p, [kind]: { pending: false } }))
         setPreviewedValues((p) => ({ ...p, [kind]: value }))
-        setKindErrors((e) => ({ ...e, [kind]: [{ message: e?.error || e?.message || 'Preview failed' }] }))
+        setKindErrors((prev) => ({ ...prev, [kind]: [{ message: e?.error || e?.message || 'Preview failed' }] }))
       }
     }, 400)
     return () => clearTimeout(previewTimer.current)
@@ -403,6 +405,16 @@ export default function RunnerDialog({ runner, project, session, onClose }) {
   // place is a config surface — and it resolves the id fresh, never from a
   // captured row.
   const handleRemove = async () => {
+    // Removing is immediate and cannot be undone, like closing a session or
+    // removing a plan, so it asks first like they do.
+    const ok = await confirm({
+      title: `Remove the runner ${current.name || ''}?`.replace(' ?', '?'),
+      message: 'The queue stops being run and its Run/Pause controls go away. The session, its conversation and the queue file stay.',
+      danger: true,
+      confirmText: 'Remove runner',
+      cancelText: 'Keep',
+    })
+    if (!ok) return
     setActionBusy(current.id)
     try {
       await removeRunner(current.id)

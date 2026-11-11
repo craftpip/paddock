@@ -1,3 +1,4 @@
+import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { api } from '../lib/api'
@@ -11,6 +12,7 @@ import { TONES } from '../components/ui/tone'
 import { cx } from '../lib/cx'
 
 export default function Onboard() {
+  useDocumentTitle('Set up agent')
   const { agentId } = useParams()
   const [agent, setAgent] = useState(null)
   const [botToken, setBotToken] = useState('')
@@ -20,11 +22,12 @@ export default function Onboard() {
   const [output, setOutput] = useState('Output will appear here...')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [loadFailed, setLoadFailed] = useState('')
 
   useEffect(() => {
     api(`/api/agents/${agentId}`).then((d) => {
       if (d) setAgent(d)
-    }).catch(() => {})
+    }).catch((e) => setLoadFailed(e?.error || e?.message || 'Could not load this agent'))
   }, [agentId])
 
   async function handleSubmit(e) {
@@ -53,6 +56,14 @@ export default function Onboard() {
     }
   }
 
+  if (loadFailed) {
+    return (
+      <div className="py-8 text-sm">
+        <p className="text-danger">{loadFailed}</p>
+        <Link to="/agents" className="mt-2 inline-block text-accent-text hover:underline">Back to the fleet</Link>
+      </div>
+    )
+  }
   if (!agent) return <div className="text-ink-dim text-sm py-8">Loading...</div>
 
   const st = statusMeta(agent.status)

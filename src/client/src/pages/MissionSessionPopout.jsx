@@ -42,6 +42,6 @@ export default function MissionSessionPopout() {
     return () => { window.clearInterval(interval); window.removeEventListener('resize', save); window.removeEventListener('pagehide', save); save() }
   }, [userId])
   if (!session) return <main className="flex h-screen items-center justify-center bg-sunken"><p className="text-sm text-ink-faint">{viewError || 'Loading session…'}</p></main>
-  const agentRunning = agents.find((a) => a.name === session.agentName)?.status !== 'stopped'
+  const agentRunning = (agents.find((a) => a.name === session.agentName)?.status ?? 'running') === 'running'
   return <main className="h-screen min-h-0"><MissionSessionView session={session} project={project} agentRunning={agentRunning} queueExpanded={queueExpanded} onQueueCollapsedChange={(closed) => setSearch((p) => { p.set('queue', closed ? 'closed' : 'open'); return p })} /><MissionPopups /></main>
 }

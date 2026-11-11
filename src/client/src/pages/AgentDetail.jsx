@@ -1,3 +1,4 @@
+import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { useEffect, useState, useRef, useCallback, useLayoutEffect } from 'react'
 import { useNavigation, useDirtyNavigation } from '../lib/navigation'
 import { parsePopups } from '../lib/url-state'
@@ -173,6 +174,8 @@ function AgentHeader({ agent }) {
 }
 
 export default function AgentDetail() {
+  useDocumentTitle(useParams().agentId)
+  const loadError = useAgents((s) => s.loadError)
   const { agentId, tab } = useParams()
   const navigate = useNavigate()
   const agents = useAgents((s) => s.agents)
@@ -278,7 +281,7 @@ export default function AgentDetail() {
     }
     return (
       <div className="flex flex-col items-center justify-center h-64 text-ink-dim gap-4">
-        <p>Agent not found — it may have been deleted.</p>
+        <p>{loadError ? `Could not load this agent: ${loadError}` : 'Agent not found — it may have been deleted.'}</p>
         <Link to="/agents" className="px-4 py-2 bg-accent hover:bg-accent-hover text-accent-ink rounded-control text-sm font-medium transition-colors">
           ← Back to fleet
         </Link>
@@ -816,7 +819,9 @@ function WorkspaceTab({ agent }) {
               </thead>
               <tbody>
                 {!isNavRoot && (
-                  <tr className="border-b border-line-faint/50 hover:bg-panel/30 cursor-pointer" onClick={goUp}>
+                  <tr className="border-b border-line-faint/50 hover:bg-panel/30 cursor-pointer" onClick={goUp}
+                      tabIndex={0} role="button" aria-label="Up one folder"
+                      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); goUp() } }}>
                     <td className="px-4 py-2 text-accent-text" colSpan={4}>&larr; Up</td>
                   </tr>
                 )}
@@ -824,7 +829,17 @@ function WorkspaceTab({ agent }) {
                   const entryPath = path === '/' ? '/' + entry.name : path + '/' + entry.name
                   return (
                     <tr key={entry.name} className="border-b border-line-faint/50 hover:bg-panel/30 group">
+                      {/* Reachable and operable from the keyboard: opening a file
+                          or folder used to be a mouse-only click on a table cell. */}
                       <td className="px-4 py-3 cursor-pointer"
+                          tabIndex={0} role="button"
+                          aria-label={`${entry.type === 'directory' ? 'Open folder' : 'Open file'} ${entry.name}`}
+                          onKeyDown={(e) => {
+                            if (e.key !== 'Enter' && e.key !== ' ') return
+                            e.preventDefault()
+                            if (entry.type !== 'directory') openFile(entry, entryPath)
+                            else goToDir(entryPath)
+                          }}
                           onClick={() => {
                             if (entry.type !== 'directory') openFile(entry, entryPath)
                             else goToDir(entryPath)
@@ -1154,7 +1169,9 @@ function ConfigTab({ agent }) {
       setSaved(true)
       setMsg('Configuration saved. Restart the agent to apply.')
     } catch (err) {
-      setMsg(err.message || 'Invalid JSON')
+      // A failed api() call rejects with { status, error }, not an Error: reading
+      // only .message turned every server refusal into "Invalid JSON".
+      setMsg(err?.error || err?.message || 'Could not save the configuration')
     }
   }
 

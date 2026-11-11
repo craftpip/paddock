@@ -50,6 +50,10 @@ export default function WebTab({ agent, run, connected, expandTerminal }) {
       .then((d) => {
         setData(d)
         setLoadError('')
+        // The password box is a write-only draft: once the page has re-read
+        // the saved state there is nothing unsaved in it, and leaving it filled
+        // made every navigation ask "Discard changes?".
+        setPassword('')
         if (d && d.webApp) {
           setContainerPort(
             d.draft?.webContainerPort && d.webApp.containerPortEditable !== false

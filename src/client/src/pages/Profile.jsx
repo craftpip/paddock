@@ -1,3 +1,4 @@
+import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { useState, useEffect } from 'react'
 import { usePopup, useDirtyNavigation, useNavigation, useDraftState, popupIdentity } from '../lib/navigation'
 import { useParams, useNavigate } from 'react-router-dom'
@@ -66,6 +67,7 @@ function Snippet({ label, code }) {
 }
 
 export default function Profile() {
+  useDocumentTitle('Settings')
   const username = useAuth((s) => s.username)
   const role = useAuth((s) => s.role)
   const userId = useAuth((s) => s.userId)

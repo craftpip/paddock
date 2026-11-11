@@ -1,3 +1,4 @@
+import { useAuth } from '../../stores/auth'
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { api } from '../../lib/api'
 import { usePrompt } from '../../lib/prompt'
@@ -406,7 +407,8 @@ function VaultDropdown({ termRef, connected }) {
       setPinErr('')
       return
     }
-    await doPaste(item)
+    // doPaste rethrows; with no catch here a failed decrypt did nothing and said nothing.
+    try { await doPaste(item) } catch (err) { toast.error(err?.error || err?.message || 'Could not paste that secret') }
   }
 
   async function doPaste(item, pin) {
@@ -432,7 +434,7 @@ function VaultDropdown({ termRef, connected }) {
       setPinErr('')
       return
     }
-    await doAdd(name.trim(), value.trim())
+    try { await doAdd(name.trim(), value.trim()) } catch (err) { toast.error(err?.error || err?.message || 'Could not save that secret') }
   }
 
   async function doAdd(addName, addValue, pin) {
@@ -647,6 +649,7 @@ function VaultDropdown({ termRef, connected }) {
 const SHOW_COMMANDS_KEY = 'paddock.commands.showCommands'
 
 export default function CommandsPane({ agent, termRef, run, connected }) {
+  const isAdmin = useAuth((s) => s.role) === 'admin'
   const [query, setQuery] = useState('')
   const [showCommands, setShowCommands] = useState(() => localStorage.getItem(SHOW_COMMANDS_KEY) !== '0')
   const [driverGroups, setDriverGroups] = useState([])
@@ -720,7 +723,8 @@ export default function CommandsPane({ agent, termRef, run, connected }) {
           </svg>
           {showCommands ? 'Hide' : 'Show'}
         </Button>
-        <VaultDropdown termRef={termRef} connected={connected} />
+        {/* The vault is admin-only on the server. */}
+        {isAdmin && <VaultDropdown termRef={termRef} connected={connected} />}
       </div>
 
       {/* Everything flows in one wrapped line, float-left, no cards */}

@@ -1,3 +1,4 @@
+import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { useState, useEffect, useCallback } from 'react'
 import { useDirtyNavigation } from '../lib/navigation'
 import { api } from '../lib/api'
@@ -235,7 +236,11 @@ function GroupSection({ group, vars, originalVars, onChange, saving }) {
       } else {
         toast.success('Config saved')
       }
-      onChange()
+      // Tell the page exactly which keys were saved. It used to reload every
+      // group from the server here, which threw away unsaved edits in the
+      // OTHER groups without a word (and, after a restart or recreate, fired
+      // the reload at a server that was on its way down).
+      onChange(undefined, changes)
     } catch (err) {
       toast.error(err.error || err.message || 'Failed to save config')
     } finally {
@@ -290,6 +295,7 @@ function GroupSection({ group, vars, originalVars, onChange, saving }) {
 }
 
 export default function Configs() {
+  useDocumentTitle('Configs')
   const toast = useToast()
   const [vars, setVars] = useState([])
   const [originalVars, setOriginalVars] = useState([])
@@ -311,7 +317,14 @@ export default function Configs() {
   useEffect(() => { loadVars() }, [loadVars])
 
   function handleChange(key, value) {
-    if (key === undefined) { loadVars(); return }
+    if (key === undefined) {
+      // A group was saved: `value` is the { key: newValue } it wrote. Those keys
+      // are now the saved state; every other group's edits stay as they are.
+      const saved = value && typeof value === 'object' ? value : null
+      if (!saved) { loadVars(); return }
+      setOriginalVars((prev) => prev.map((v) => (v.key in saved ? { ...v, value: saved[v.key] } : v)))
+      return
+    }
     setVars((prev) => prev.map((v) => v.key === key ? { ...v, value } : v))
   }
 

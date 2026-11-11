@@ -280,7 +280,7 @@ export default function ProjectDialog({ project, onClose }) {
               )}
             >
               {plansFolderOk
-                ? `Relative to the project folder — ${folderPath.replace(/\/+$/, '') || '/'}/${plansFolderNorm}/`
+                ? `Relative to the project folder — ${folderPath.trim() ? `${folderPath.replace(/\/+$/, '')}/` : ''}${plansFolderNorm}/`
                 : 'A relative folder name only — no absolute paths or "..".'}
             </span>
           </label>

@@ -3,6 +3,7 @@ import RunnerControls from './RunnerControls'
 import Terminal from './Terminal'
 import Button from './ui/Button'
 import { useMission } from '../stores/mission'
+import { useToast } from '../lib/toast'
 
 function Empty({ title, children, action }) {
   return <div className="msn-empty flex h-full flex-col items-center justify-center gap-1.5 px-6 py-10 text-center"><p className="text-sm font-medium text-ink-dim">{title}</p>{children && <div className="max-w-[34ch] text-xs leading-relaxed text-ink-faint">{children}</div>}{action}</div>
@@ -14,7 +15,10 @@ export default function MissionSessionView({ session, project, agentRunning, que
   const reopenError = useMission((s) => s.reopenError)
   const relaunch = useMission((s) => s.relaunch)
   const restart = useMission((s) => s.restart)
-  const action = async (fn) => { try { await fn() } catch {} }
+  const toast = useToast()
+  // A refused relaunch or reopen (the folder is gone, the PAD is stopped) used
+  // to be swallowed here, so the button looked dead.
+  const action = async (fn) => { try { await fn() } catch (e) { toast.error(e?.error || e?.message || 'That did not work. Try again.', { duration: 10000 }) } }
   if (!session?.agentName) return <Empty title="Session unavailable">This session no longer has an available agent.</Empty>
   const title = session.runner?.name || session.title || session.label || session.tmux_id
   return <div className="msn-session-view flex h-full min-h-0 flex-col bg-sunken">

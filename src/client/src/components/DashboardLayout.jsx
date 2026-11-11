@@ -1,9 +1,25 @@
-import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../stores/auth'
 import { useKeyboardShortcuts } from '../lib/shortcuts'
 import { toggleTheme, getTheme } from '../lib/theme'
 import Button from './ui/Button'
+import { useAgents } from '../stores/agents'
+import { useToast } from '../lib/toast'
+
+/** One link in the top bar. The current page is marked for the eye (accent
+ *  colour) and for a screen reader (aria-current). */
+function TopLink({ to, active, children }) {
+  return (
+    <Link
+      to={to}
+      aria-current={active ? 'page' : undefined}
+      className={`shrink-0 px-3 py-1.5 rounded-control text-sm transition-colors hover:bg-panel ${active ? 'text-accent-text font-medium' : 'text-ink-muted hover:text-ink'}`}
+    >
+      {children}
+    </Link>
+  )
+}
 
 export default function DashboardLayout({ children, fullHeight, fullWidth }) {
   const navigate = useNavigate()
@@ -11,6 +27,19 @@ export default function DashboardLayout({ children, fullHeight, fullWidth }) {
   const username = useAuth((s) => s.username)
   const role = useAuth((s) => s.role)
   const [theme, setTheme] = useState(getTheme())
+  const path = useLocation().pathname
+  const isAdmin = role === 'admin'
+  const toast = useToast()
+
+  // A failed start / stop / restart is reported wherever the user is: the
+  // store records it, this shows it once.
+  const actionError = useAgents((s) => s.actionError)
+  const clearActionError = useAgents((s) => s.clearActionError)
+  useEffect(() => {
+    if (!actionError) return
+    toast.error(actionError.text, { duration: 10000 })
+    clearActionError()
+  }, [actionError, clearActionError, toast])
 
   useKeyboardShortcuts()
 
@@ -19,8 +48,13 @@ export default function DashboardLayout({ children, fullHeight, fullWidth }) {
   }
 
   async function handleLogout() {
-    await logout()
-    navigate('/login')
+    try {
+      await logout()
+      navigate('/login')
+    } catch (e) {
+      // A network blip used to make Sign out do nothing and say nothing.
+      toast.error(e?.error || e?.message || 'Could not sign out. Check the connection and try again.', { duration: 10000 })
+    }
   }
 
   const mainClass = fullHeight
@@ -33,18 +67,23 @@ export default function DashboardLayout({ children, fullHeight, fullWidth }) {
     <div className={`bg-canvas text-ink font-sans antialiased ${fullHeight ? 'h-screen flex flex-col overflow-hidden' : 'min-h-screen flex flex-col'}`}>
       <nav className="border-b border-line-faint bg-canvas/80 sticky top-0 z-50 backdrop-blur-lg">
         <div className="max-w-full mx-auto px-4 sm:px-6">
-          <div className="flex items-center justify-between h-14">
-            <Link to="/agents" className="flex items-center gap-2.5 text-base font-bold tracking-tight text-accent-text hover:text-accent-text transition-colors">
+          <div className="flex items-center justify-between gap-3 h-14">
+            <Link to="/agents" className="flex shrink-0 items-center gap-2.5 text-base font-bold tracking-tight text-accent-text hover:text-accent-text transition-colors">
               <img src="/paddock-logo.svg" alt="Paddock" className="w-6 h-6" />
               Paddock
             </Link>
-            <div className="flex items-center gap-0.5">
-              <Link to="/agents" className="px-3 py-1.5 rounded-control text-sm text-ink-muted hover:text-ink hover:bg-panel transition-colors">Agents</Link>
-              <Link to="/mission" className="px-3 py-1.5 rounded-control text-sm text-ink-muted hover:text-ink hover:bg-panel transition-colors">Mission</Link>
-              <Link to="/agents/create" className="px-3 py-1.5 rounded-control text-sm text-ink-muted hover:text-ink hover:bg-panel transition-colors">+ Agent</Link>
-              <Link to="/vault" className="px-3 py-1.5 rounded-control text-sm text-ink-muted hover:text-ink hover:bg-panel transition-colors">Vault</Link>
-              <Link to="/backups" className="px-3 py-1.5 rounded-control text-sm text-ink-muted hover:text-ink hover:bg-panel transition-colors">Backups</Link>
-              <Link to="/configs" className="px-3 py-1.5 rounded-control text-sm text-ink-muted hover:text-ink hover:bg-panel transition-colors">Configs</Link>
+            {/* The links scroll inside the bar on a narrow screen. Without
+                min-w-0 + overflow-x-auto the bar was wider than a phone and the
+                whole page scrolled sideways. */}
+            <div className="msn-topnav flex min-w-0 items-center gap-0.5 overflow-x-auto [scrollbar-width:none] [&>*]:shrink-0">
+              <TopLink to="/agents" active={path === '/agents' || (path.startsWith('/agents/') && !path.startsWith('/agents/create'))}>Agents</TopLink>
+              <TopLink to="/mission" active={path.startsWith('/mission')}>Mission</TopLink>
+              <TopLink to="/agents/create" active={path.startsWith('/agents/create')}>+ Agent</TopLink>
+              {/* Vault and Configs are admin-only on the server; a regular user
+                  is not shown a link that can only answer "Admin access required". */}
+              {isAdmin && <TopLink to="/vault" active={path.startsWith('/vault')}>Vault</TopLink>}
+              <TopLink to="/backups" active={path.startsWith('/backups')}>Backups</TopLink>
+              {isAdmin && <TopLink to="/configs" active={path.startsWith('/configs')}>Configs</TopLink>}
               <span className="w-px h-5 bg-raised mx-1.5" />
               <Button
                 variant="ghost"
@@ -61,7 +100,8 @@ export default function DashboardLayout({ children, fullHeight, fullWidth }) {
                 )}
               </Button>
               {username && (
-                <Link to="/profile" className="px-3 py-1.5 rounded-control text-sm text-ink-faint hover:text-ink hover:bg-panel transition-colors" title="Settings">
+                <Link to="/profile" aria-current={path.startsWith('/profile') ? 'page' : undefined}
+                  className={`shrink-0 px-3 py-1.5 rounded-control text-sm transition-colors hover:bg-panel ${path.startsWith('/profile') ? 'text-accent-text font-medium' : 'text-ink-faint hover:text-ink'}`} title="Settings">
                   {username}
                 </Link>
               )}

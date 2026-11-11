@@ -746,7 +746,16 @@ export default function SessionList() {
                 selected={row.conversationId === selectedConversationId}
                 onSelect={() => openRunnerSession(row.runner).catch(() => {})}
                 onConfigure={() => openPopup('runner-settings', row.runner.id)}
-                onRemove={(id) => run(() => removeRunner(id), 'Could not remove the runner')}
+                onRemove={async (id) => {
+                  const ok = await confirm({
+                    title: `Remove the runner ${row.runner.name || ''}?`.replace(' ?', '?'),
+                    message: 'The queue stops being run and its Run/Pause controls go away. The session, its conversation and the queue file stay.',
+                    danger: true,
+                    confirmText: 'Remove runner',
+                    cancelText: 'Keep',
+                  })
+                  if (ok) run(() => removeRunner(id), 'Could not remove the runner')
+                }}
               />
             ) : (
               <HistoryRow

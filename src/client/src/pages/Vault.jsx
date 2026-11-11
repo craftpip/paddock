@@ -1,3 +1,4 @@
+import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { useState, useEffect } from 'react'
 import { useNavigation, useDirtyNavigation, popupIdentity } from '../lib/navigation'
 import { parsePopups } from '../lib/url-state'
@@ -27,6 +28,7 @@ const LockIcon = ({ className = 'w-4 h-4' }) => (
 )
 
 export default function Vault() {
+  useDocumentTitle('Vault')
   const { location, openPopup, closePopup, drafts } = useNavigation()
   const popup = parsePopups(location.search, location.pathname).at(-1)
   const toast = useToast()

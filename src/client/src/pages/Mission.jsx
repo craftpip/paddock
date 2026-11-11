@@ -9,6 +9,7 @@ import MissionSessionView from '../components/MissionSessionView'
 import Button from '../components/ui/Button'
 import { useConfirm } from '../lib/confirm'
 import { useMission } from '../stores/mission'
+import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { useAgents } from '../stores/agents'
 import { useToast } from '../lib/toast'
 
@@ -415,12 +416,13 @@ export default function Mission() {
   const queueExpanded = !!session?.runner && new URLSearchParams(location.search).get('queue') !== 'closed'
   const setQueueCollapsed = (collapsed) => patch({ queue: collapsed ? 'closed' : 'open' })
   const agentRunning = sessionAgent
-    ? agents.find((a) => a.name === sessionAgent)?.status !== 'stopped'
+    // No docker status is ever 'stopped' (they are running / exited / created /
+    // paused…), so the old test was always true. Unknown (list not loaded yet)
+    // still counts as running, so the terminal is not held back at load.
+    ? (agents.find((a) => a.name === sessionAgent)?.status ?? 'running') === 'running'
     : false
 
-  useEffect(() => {
-    document.title = 'Mission — Paddock'
-  }, [])
+  useDocumentTitle('Mission')
 
   useEffect(() => {
     fetchProjects()

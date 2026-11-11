@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { usePopup, useDirtyNavigation } from '../../lib/navigation'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../../lib/api'
@@ -116,6 +116,7 @@ export default function SettingsTab({ agent }) {
   const [wsDir, setWsDir] = useState('')
   const [volDraft, setVolDraft] = useState([])
   const [volDirty, setVolDirty] = useState(false)
+  const lastSynced = useRef({}) // per card: the server value its draft was last synced from
   // Plan 41: build commands + post-create commands
   const [buildDraft, setBuildDraft] = useState('')
   const [postCreateDraft, setPostCreateDraft] = useState('')
@@ -137,7 +138,7 @@ export default function SettingsTab({ agent }) {
 
   function refresh() {
     api(`/api/agents/${agent.name}/settings`)
-      .then(setSettings)
+      .then((d) => { setSettings(d); setLoadError('') })
       .catch((err) => setLoadError(err.error || err.message || 'Failed to load settings'))
   }
 
@@ -194,18 +195,27 @@ export default function SettingsTab({ agent }) {
     setWsEnabled(!!m)
     setWsHost(m ? m.host : '')
     setWsDir(m ? m.container : (driverInfo?.workspaceDir || agent.workspace_dir || ''))
-    // Sync the additional volumes draft once (do not clobber while editing).
-    setVolDraft((settings.extraVolumes || []).map((v) => ({ ...v })))
-    setVolDirty(false)
-    // Sync the build/post-create/post-start/post-attach drafts once (do not clobber while editing).
-    setBuildDraft(settings.buildCommands || '')
-    setPostCreateDraft(settings.postCreate || '')
-    setPostStartDraft(settings.postStart || '')
-    setPostAttachDraft(settings.postAttach || '')
-    setBuildDirty(false)
-    setPostCreateDirty(false)
-    setPostStartDirty(false)
-    setPostAttachDirty(false)
+    // Each draft follows the server unless the user has unsaved edits in it.
+    // This effect runs after EVERY settings load (any card's Apply ends in
+    // one), and it used to reset all the drafts each time: text typed into
+    // Build commands vanished when Network was applied. A card is re-synced
+    // when it has no unsaved edits, or when its saved value just changed
+    // (which is what its own successful save looks like).
+    const seen = lastSynced.current
+    const follow = (key, serverValue, dirty, apply) => {
+      const serialised = JSON.stringify(serverValue)
+      const changedOnServer = seen[key] !== undefined && seen[key] !== serialised
+      if (!dirty || changedOnServer || seen[key] === undefined) apply()
+      seen[key] = serialised
+    }
+    follow('volumes', settings.extraVolumes || [], volDirty, () => {
+      setVolDraft((settings.extraVolumes || []).map((v) => ({ ...v })))
+      setVolDirty(false)
+    })
+    follow('build', settings.buildCommands || '', buildDirty, () => { setBuildDraft(settings.buildCommands || ''); setBuildDirty(false) })
+    follow('postCreate', settings.postCreate || '', postCreateDirty, () => { setPostCreateDraft(settings.postCreate || ''); setPostCreateDirty(false) })
+    follow('postStart', settings.postStart || '', postStartDirty, () => { setPostStartDraft(settings.postStart || ''); setPostStartDirty(false) })
+    follow('postAttach', settings.postAttach || '', postAttachDirty, () => { setPostAttachDraft(settings.postAttach || ''); setPostAttachDirty(false) })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings, driverInfo, agent.name])
 

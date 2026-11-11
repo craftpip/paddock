@@ -29,14 +29,19 @@ export const useAgents = create((set, get) => ({
   loading: true,
   pollTimers: {},
   transitions: {},
+  actionError: null,   // { name, text, at } — the last failed start/stop/restart
+  loadError: '',       // why the last /api/agents read failed, '' when it worked
+  clearActionError: () => set({ actionError: null }),
 
   fetchAgents: async () => {
     try {
       const data = await api('/api/agents')
       const agents = mergeTransitions(data.agents, get().transitions)
-      set({ agents, stats: calcStats(agents), loading: false })
-    } catch {
-      set({ loading: false })
+      set({ agents, stats: calcStats(agents), loading: false, loadError: '' })
+    } catch (e) {
+      // Unreadable is not empty: the pages must not say "no agents" or "agent
+      // not found" when the list simply could not be fetched.
+      set({ loading: false, loadError: e?.error || e?.message || 'Could not reach the server' })
     }
   },
 
@@ -81,8 +86,10 @@ export const useAgents = create((set, get) => ({
       const d = await api(`/api/agents/${name}/start`, { method: 'POST' })
       get().clearTransition(name)
       get().updateAgentStatus(name, d.status || 'running')
-    } catch {
+    } catch (e) {
       get().clearTransition(name)
+      // Say why: the pill used to flip back with no explanation.
+      set({ actionError: { name, text: e?.error || e?.message || `Could not start ${name}`, at: Date.now() } })
       get().fetchAgents()
     }
   },
@@ -93,8 +100,10 @@ export const useAgents = create((set, get) => ({
       const d = await api(`/api/agents/${name}/stop`, { method: 'POST' })
       get().clearTransition(name)
       get().updateAgentStatus(name, d.status || 'exited')
-    } catch {
+    } catch (e) {
       get().clearTransition(name)
+      // Say why: the pill used to flip back with no explanation.
+      set({ actionError: { name, text: e?.error || e?.message || `Could not stop ${name}`, at: Date.now() } })
       get().fetchAgents()
     }
   },
@@ -105,8 +114,10 @@ export const useAgents = create((set, get) => ({
       const d = await api(`/api/agents/${name}/restart`, { method: 'POST' })
       get().clearTransition(name)
       get().updateAgentStatus(name, d.status || 'running')
-    } catch {
+    } catch (e) {
       get().clearTransition(name)
+      // Say why: the pill used to flip back with no explanation.
+      set({ actionError: { name, text: e?.error || e?.message || `Could not restart ${name}`, at: Date.now() } })
       get().fetchAgents()
     }
   },

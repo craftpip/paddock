@@ -1,6 +1,6 @@
 # Plan 120 — Audit fixes: the web client
 
-## Status: In progress — 2026-11-11 — 0/19 findings fixed; all found by a read-only review, none yet reproduced in the browser
+## Status: In progress — 2026-11-11 — 19/19 findings fixed; 9 exercised in the browser, the rest by build + static checks; remaining: #20, the second review pass
 
 ## Why
 
@@ -58,25 +58,53 @@ is item 20.
   server is not broken to make it fail.
 - `npm test` green after the rebuild, including the bundle-freshness test.
 
+## Results (2026-11-11)
+
+`npm test`: 74 files, 1235 tests, including the unbound-name scan over every
+client file (which caught one mistake in these very edits: a value declared in
+the wrong component) and the bundle-freshness check.
+
+| # | Fix | How it was checked |
+|---|---|---|
+| 1 | Checkbox no longer inverted; `existing.length` | Browser: ticking it checks the box and sets `planAll=1`; "18 already queued" now shows |
+| 2 | Both remove-runner controls ask first | Browser: "Remove the runner devrunner?" appeared, no DELETE was sent, Keep left the runner |
+| 3 | Saving one Configs group marks only those keys saved | Browser, with the POST stubbed: the other group's unsaved edit survived |
+| 4 | Each settings draft follows the server only when it has no unsaved edit or its own saved value changed | Build + static checks; not exercised (needs a recreate) |
+| 5 | Relaunch / Reopen refusals are toasted | Build + static checks |
+| 6 | start / stop / restart failures are recorded in the store and toasted from the layout | Browser, restart stubbed to 500: toast "Could not restart: the daemon is not answering" |
+| 7 | Config save shows the server's reason | Build + static checks |
+| 8 | Vault paste / add failures are toasted | Build + static checks |
+| 9 | Create has an in-flight flag | Build + static checks |
+| 10 | Probe replies carry a sequence number and are dropped when stale | Build + static checks |
+| 11 | The updater no longer shadows the caught error | Build + static checks |
+| 12 | The web password draft is cleared when the page re-reads the saved state | Build + static checks |
+| 13 | A failed agents read sets `loadError`; the dashboard and detail page say "could not load" instead of "no agents" / "not found" | Build + static checks |
+| 14 | `agentRunning` is `status === 'running'` (unknown still counts as running) | Build + static checks |
+| 15 | Onboard shows the load failure and a way back | Build + static checks |
+| 16 | Workspace rows and "Up" are focusable and open on Enter / Space | Build + static checks |
+| 17 | `loadError` cleared on a successful read | Build + static checks |
+| 18 | The early return is below the last hook | Build; the panel renders and works (browser) |
+| 19 | Sign out failure is toasted | Browser, logout stubbed to fail: toast shown, still signed in |
+
 ## Progress
 
-- [ ] 1 PlanPicker checkbox and `existing.length`
-- [ ] 2 Confirm before removing a runner (both places)
-- [ ] 3 Configs: applying one group keeps other groups' edits
-- [ ] 4 SettingsTab: drafts survive another card's Apply
-- [ ] 5 Relaunch / Reopen refusals are shown
-- [ ] 6 Start / stop / restart failures are shown
-- [ ] 7 Config save shows the server's reason
-- [ ] 8 Vault paste / add failures are shown
-- [ ] 9 Create cannot be submitted twice
-- [ ] 10 Create: late probe responses ignored
-- [ ] 11 Auto-preview shows the real reason
-- [ ] 12 WebTab password cleared after publish
-- [ ] 13 Unreachable server is not shown as "no agents"
-- [ ] 14 `agentRunning` uses `status === 'running'`
-- [ ] 15 Onboard shows a load failure
-- [ ] 16 Workspace browser usable from the keyboard
-- [ ] 17 SettingsTab clears `loadError`
-- [ ] 18 QueuePanel hooks above the early return
-- [ ] 19 Sign out failure handled
+- [x] 1 PlanPicker checkbox and `existing.length`
+- [x] 2 Confirm before removing a runner (both places)
+- [x] 3 Configs: applying one group keeps other groups' edits
+- [x] 4 SettingsTab: drafts survive another card's Apply
+- [x] 5 Relaunch / Reopen refusals are shown
+- [x] 6 Start / stop / restart failures are shown
+- [x] 7 Config save shows the server's reason
+- [x] 8 Vault paste / add failures are shown
+- [x] 9 Create cannot be submitted twice
+- [x] 10 Create: late probe responses ignored
+- [x] 11 Auto-preview shows the real reason
+- [x] 12 WebTab password cleared after publish
+- [x] 13 Unreachable server is not shown as "no agents"
+- [x] 14 `agentRunning` uses `status === 'running'`
+- [x] 15 Onboard shows a load failure
+- [x] 16 Workspace browser usable from the keyboard
+- [x] 17 SettingsTab clears `loadError`
+- [x] 18 QueuePanel hooks above the early return
+- [x] 19 Sign out failure handled
 - [ ] 20 Second review pass over the files listed under "Not reviewed"

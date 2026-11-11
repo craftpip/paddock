@@ -1,3 +1,4 @@
+import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { useState, useEffect, useRef } from 'react'
 import { useNavigate, useParams, Link } from 'react-router-dom'
 import { api } from '../lib/api'
@@ -32,6 +33,7 @@ function fmtTime(ts) {
 }
 
 export default function CreateAgent() {
+  useDocumentTitle('New agent')
   const navigate = useNavigate()
   const { name: urlName } = useParams()
 
@@ -116,6 +118,7 @@ export default function CreateAgent() {
   })
 
   const [phase, setPhase] = useState(() => (urlName ? 'creating' : 'idle')) // idle | creating | done | failed
+  const [submitting, setSubmitting] = useState(false)
   const [lines, setLines] = useState([])
   const [runningCmd, setRunningCmd] = useState('')
   const [error, setError] = useState('')
@@ -221,10 +224,13 @@ export default function CreateAgent() {
     setSuggestOpen(false)
     setSuggestions([])
     setDiscovered(null)
+    clearTimeout(acTimer.current)
+    clearTimeout(discTimer.current)
     probeAndDiscover(s)
   }
 
   function onWsHostChange(v) {
+    probeSeq.current += 1 // anything still in flight is for a path that is no longer shown
     setWsHost(v)
     setSuggestOpen(false)
     setDiscovered(null)
@@ -244,24 +250,32 @@ export default function CreateAgent() {
     discTimer.current = setTimeout(() => probeAndDiscover(q), 550)
   }
 
+  // Each probe belongs to the path that was current when it started. A reply
+  // that comes back after the user has typed something else is dropped: it
+  // used to fill the volumes and the "discovered" badge from the OLD path.
+  const probeSeq = useRef(0)
   async function probeAndDiscover(q) {
+    const mine = ++probeSeq.current
+    const stale = () => mine !== probeSeq.current
     if (!q.startsWith('/')) { setWsProbe(null); return }
     let p = null
     try {
       const r = await api(`/api/paths/probe?path=${encodeURIComponent(q)}`)
       if (String(r.path) === q.trim()) p = r
     } catch {}
+    if (stale()) return
     setWsProbe(p)
     if (!p || !p.exists || !p.compose) {
       // No compose project: still look for a devcontainer.json (plan 41) so the
       // post-create box can pre-fill from the workspace's own spec file.
       const foundDc = await probeDevContainer(q)
+      if (stale()) return
       if (!foundDc) autoFillWsDirFromHost(q)
       return
     }
     try {
       const d = await api(`/api/paths/volumes?path=${encodeURIComponent(q)}`)
-      if (String(d.path) !== q.trim()) return
+      if (String(d.path) !== q.trim() || stale()) return
       if (d.volumes && d.volumes.length) {
         setExtraVolumes(d.volumes.map((v) => ({
           type: v.type === 'volume' ? 'volume' : 'bind',
@@ -278,7 +292,9 @@ export default function CreateAgent() {
         })
       }
     } catch {}
+    if (stale()) return
     const foundDc = await probeDevContainer(q)
+    if (stale()) return
     if (!foundDc) autoFillWsDirFromHost(q)
   }
 
@@ -578,6 +594,9 @@ export default function CreateAgent() {
 
   async function handleSubmit(e) {
     e.preventDefault()
+    // One create at a time: a double click (or Enter twice) used to send two
+    // requests, and the second one's refusal overwrote the first one's progress.
+    if (submitting) return
     setError('')
 
     // Client-side validation for the new plan 28 options before POSTing.
@@ -599,6 +618,7 @@ export default function CreateAgent() {
       .filter((p) => p.host && p.host.trim())
       .map((p) => ({ host: p.host.trim(), container: p.container.trim() }))
 
+    setSubmitting(true)
     try {
       const result = await api('/api/agents/create', {
         method: 'POST',
@@ -631,6 +651,8 @@ export default function CreateAgent() {
     } catch (err) {
       setError(err.error || err.message || 'Failed to create agent')
       setPhase('failed')
+    } finally {
+      setSubmitting(false)
     }
   }
 
@@ -1144,7 +1166,7 @@ export default function CreateAgent() {
           )}
           </Card>
 
-          <Button type="submit" variant="primary" size="lg" block disabled={!name || !!nameIssue}>
+          <Button type="submit" variant="primary" size="lg" block disabled={!name || !!nameIssue || submitting}>
             {name && !nameIssue ? `Create ${fullName}` : 'Create my agent'}
           </Button>
           <p className="text-xs text-ink-dim text-center -mt-2">

@@ -1,4 +1,6 @@
+import { useDocumentTitle } from '../lib/useDocumentTitle'
 export default function GlobalBackups() {
+  useDocumentTitle('Backups')
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-8">
       <div className="flex items-center justify-between mb-6">
