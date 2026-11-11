@@ -352,9 +352,19 @@ module.exports = function register(registerToolBound, ctx) {
       if (confirm !== true) {
         throw new McpError(ErrorCode.InvalidRequest, 'Refusing to delete without confirm: true (destructive, no undo).');
       }
-      await vm.removeVm(agent.name);
-      registry.removeAgentFromDb(agent.name);
-      registry.dockerPsList(true);
+      // The same steps, in the same order, as the web UI's delete: an MCP delete
+      // used to skip the log capture and leave the PAD's job logs behind.
+      try { vm.claimPadChange(agent.name); } catch (e) { throw new McpError(ErrorCode.InvalidRequest, `${e.message} (code: ${e.code})`); }
+      try {
+        await logStore.capture(agent.name);
+        await vm.removeVm(agent.name);
+        registry.removeAgentFromDb(agent.name);
+        jobLog.clearJob(agent.name);
+        jobLog.clearJob('update:' + agent.name);
+        registry.dockerPsList(true);
+      } finally {
+        vm.releasePadChange(agent.name);
+      }
       return textResult({ ok: true, name: agent.name, deleted: true });
     }
   );

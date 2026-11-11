@@ -21,6 +21,11 @@ fs.writeFileSync(path.join(WS, 'instances', PAD, 'meta.env'), 'AGENT=opencode\n'
 
 const { getDb, close } = require('../services/db');
 const mission = require('../services/mission');
+// This file asserts how many events ONE explicit observation pass records. The
+// fast watch is a background timer that can run a pass of its own in between
+// (it did, once, under a loaded suite run), so it is off here; it has its own
+// tests in runner-dispatch-invariants.
+mission._setFastWatch({ enabled: false });
 const callbacks = require('../services/runner-callbacks');
 const runnerTransition = require('../services/runner-transition');
 

@@ -105,7 +105,7 @@ The update path (`updateAgent`: rebuild the image, then recreate) takes the same
 update and a settings change cannot interleave either. `applyAgentChanges` called with
 `claimed: true` uses the caller's claim; called without it, it claims the lock itself.
 
-Delete does not take the lock.
+Delete takes the same lock (see [Deleting a PAD](#deleting-a-pad)).
 
 ### What Is Validated First
 
@@ -283,6 +283,10 @@ When the source is kept, the webui log says why:
 `[delete <name>] workspace source <path> kept: <reason>`. The rule is a pure function so that
 it is tested without touching a disk; a PAD that mounted the repository, `docs/` or a folder a
 second PAD still uses must not take it along.
+
+Both the web UI's delete and the MCP `delete_agent` tool run these steps in this order and hold
+the PAD's change lock while they do, so a delete is refused with `pad_change_in_progress` while a
+change is still being applied.
 
 ## See Also
 

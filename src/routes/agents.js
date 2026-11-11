@@ -86,6 +86,8 @@ module.exports = function register(app, ctx) {
 
   app.post('/api/agents/:name/delete', async (req, res) => {
     if (!safeVmName(req.params.name)) return res.status(400).json({ error: 'Invalid name' });
+    // A delete does not run under a change that is still being applied.
+    try { vm.claimPadChange(req.params.name); } catch (e) { return res.status(e.status || 409).json({ error: e.message, code: e.code }); }
     try {
       await logStore.capture(req.params.name);
       await vm.removeVm(req.params.name);
@@ -96,6 +98,8 @@ module.exports = function register(app, ctx) {
       res.json({ ok: true });
     } catch (e) {
       res.status(500).json({ error: e.message });
+    } finally {
+      vm.releasePadChange(req.params.name);
     }
   });
 
