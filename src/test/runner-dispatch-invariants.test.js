@@ -83,7 +83,7 @@ beforeEach(async () => {
   screenCalls = 0;
   tmux.hasSession = async () => true;
   tmux.paneState = async () => ({ live: true, tuiAlive: true, command: 'opencode', cwd: FOLDER });
-  tmux.captureScreen = async () => ({ live: true, text: `screen ${screenCalls++}` });
+  tmux.captureScreen = async () => ({ live: true, text: `screen ${screenCalls++} ctrl+p commands` });
   store.readActivity = () => ({ store: { available: false }, lastActivityAt: null });
   store.readTurn = () => turn;
   tmux.sendText = async (_pad, _tmux, text) => {

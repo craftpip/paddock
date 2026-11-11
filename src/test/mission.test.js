@@ -1194,12 +1194,12 @@ describe('Mission - send refuses what it cannot type into (plan 62 1b/1c/1h)', (
   const real = { ...padTmux };
   let typed = 0;
   let keys = [];
-  let screenText = 'the prompt\nwaiting';
+  let screenText = 'the prompt\nwaiting\nctrl+p commands';
 
   beforeEach(() => {
     typed = 0;
     keys = [];
-    screenText = 'the prompt\nwaiting';
+    screenText = 'the prompt\nwaiting\nctrl+p commands';
     padTmux.hasSession = async () => true;
     padTmux.paneState = async () => ({ live: true, tuiAlive: true, command: 'node', cwd: '/www1/a' });
     padTmux.captureScreen = async () => ({ text: screenText, live: true });
@@ -1209,7 +1209,7 @@ describe('Mission - send refuses what it cannot type into (plan 62 1b/1c/1h)', (
       // returns a frozen string is not a TUI, it is a black hole — and with the
       // 1h confirmation in place a black hole is now correctly refused, which is
       // the whole reason the confirmation exists.
-      screenText = `the prompt\n> ${body}\nwaiting`;
+      screenText = `the prompt\n> ${body}\nwaiting\nctrl+p commands`;
       return { lines: 1 };
     };
     padTmux.sendKeys = async (vm, tid, ks) => { keys.push(ks); return { keys: ks.length }; };
@@ -1284,7 +1284,7 @@ describe('Mission - send refuses what it cannot type into (plan 62 1b/1c/1h)', (
     let reads = 0;
     const p = mission.createProject({ name: 'quiet-store-receipt', agent: 'pad-msn-oc', folder: '/www1/a' });
     const s = mission.createSession(p.id, { tmuxId: 'msn-7777ffff', agentSessionId: 'ses_quiet_store' });
-    screenText = 'stable TUI screen';
+    screenText = 'stable TUI screen\nctrl+p commands';
     padTmux.sendText = async () => { typed++; return { lines: 1 }; };
     agentStore.readActivity = async () => ({
       store: { path: '/fixture/opencode.db', available: true },
@@ -2014,7 +2014,7 @@ describe('Mission - plan 65: closing a session (1e)', () => {
 describe('Mission - activity_events audit (E1)', () => {
   const padTmux = require('../services/pad-tmux');
   const real = { ...padTmux };
-  let screenText = 'the prompt\nwaiting';
+  let screenText = 'the prompt\nwaiting\nctrl+p commands';
   const acts = () =>
     getDb()
       .prepare("SELECT * FROM activity_events WHERE category = 'mission' ORDER BY id")
@@ -2024,7 +2024,7 @@ describe('Mission - activity_events audit (E1)', () => {
     // NOT cleared by the suite's global beforeEach: activity_events is shared
     // with settings/web/lifecycle, so only the mission rows are this test's.
     getDb().prepare("DELETE FROM activity_events WHERE category = 'mission'").run();
-    screenText = 'the prompt\nwaiting';
+    screenText = 'the prompt\nwaiting\nctrl+p commands';
     padTmux.folderExists = async () => true;
     padTmux.createSession = async () => {};
     padTmux.killSession = async () => {};
@@ -2033,7 +2033,7 @@ describe('Mission - activity_events audit (E1)', () => {
     padTmux.paneState = async () => ({ live: true, tuiAlive: true, command: 'node', cwd: '/www1/a' });
     padTmux.captureScreen = async () => ({ text: screenText, live: true });
     padTmux.sendText = async (vm, tid, body) => {
-      screenText = `the prompt\n> ${body}\nwaiting`;
+      screenText = `the prompt\n> ${body}\nwaiting\nctrl+p commands`;
       return { lines: 1 };
     };
   });

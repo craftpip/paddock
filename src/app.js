@@ -3609,6 +3609,11 @@ app.use((req, res, next) => {
 // SPA catch-all — serve index.html for client-side routing
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api/') || req.path.startsWith('/ws/') || req.path === '/website' || req.path.startsWith('/website/')) return next();
+  // Machine endpoints must never get the SPA. An MCP client that receives a
+  // 401 from /mcp runs OAuth discovery (`/.well-known/oauth-*`, also under
+  // `/mcp/`); a 200 index.html there surfaced in the agent as
+  // "JSON Parse error: Unrecognized token '<'" instead of "bad key".
+  if (req.path.startsWith('/.well-known/') || req.path.startsWith('/mcp/')) return next();
   // File-like paths (e.g. stale /assets/*.js, .css, .map, .svg) must 404 —
   // otherwise a deleted hashed chunk returns index.html (text/html) and the
   // browser throws "Failed to load module script: MIME type text/html".

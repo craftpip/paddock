@@ -938,6 +938,30 @@ function sendVerdict(session, perm) {
  * would false-negative a message whose store write lagged the repaint.
  */
 const STORE_CONFIRM_BUDGET_MS = 15000;
+
+/** Plan 114 §1: the EXACT input receipt (a new user message whose text hashes to
+ *  what we sent) can land in the store a moment after `sendText` returns —
+ *  `sendText` confirms on "some new activity", which the TUI writes before the
+ *  user message's parts are readable. A single read there reported a delivered
+ *  instruction as `mission_send_unconfirmed` on every live dispatch, and only a
+ *  later reconcile matched the same hash. Poll briefly instead. `stillOwned`
+ *  stops the wait the moment Pause/Close or a newer operation takes over.
+ *  Returns the matching turn, or null when the budget ran out. */
+let RECEIPT_POLL_BUDGET_MS = 5000;
+let TUI_READY_BUDGET_MS = 15000;
+function _setTuiReadyBudget(ms) { TUI_READY_BUDGET_MS = ms; }
+const RECEIPT_POLL_INTERVAL_MS = 250;
+async function awaitExactReceipt(agent, conversationId, baselineUserId, expectedHash, { stillOwned = () => true } = {}) {
+  const deadline = Date.now() + RECEIPT_POLL_BUDGET_MS;
+  for (;;) {
+    const turn = agentStore.readTurn(agent, conversationId);
+    if (turn.userId && turn.userId !== baselineUserId && turn.inputHash === expectedHash) return turn;
+    if (Date.now() >= deadline || !stillOwned()) return null;
+    await new Promise((r) => setTimeout(r, RECEIPT_POLL_INTERVAL_MS));
+  }
+}
+function _setReceiptPollBudget(ms) { RECEIPT_POLL_BUDGET_MS = ms; }
+
 async function confirmDeliveryViaStore(agentName, agentSessionId, baselineActivityAt, deadline) {
   if (!agentSessionId) return false;
   while (Date.now() < deadline) {
@@ -976,7 +1000,7 @@ async function confirmDeliveryViaStore(agentName, agentSessionId, baselineActivi
  *  booting TUI repaints for itself). The single exception is a store layout
  *  the webui cannot see at all, where repaint is the only signal available. */
 async function sendText(sessionId, text, { actor = null, beforeWrite = null, paste = false } = {}) {
-  const { session, project, vmName } = sessionTarget(sessionId);
+  const { session, project, driver, vmName } = sessionTarget(sessionId);
   const where = ` [project:${project.name} (${project.id}) session:${session.id}]`;
   const body = String(text || '');
   if (!body.trim()) throw new MissionError('mission_empty_message', `Nothing to send${where}`);
@@ -990,12 +1014,30 @@ async function sendText(sessionId, text, { actor = null, beforeWrite = null, pas
   // ONE verdict, both surfaces. `pre` carries the live pane facts this gate has
   // already paid for, so folding them in costs no extra tmux call, and the
   // screen read below feeds the permission arm of the same check.
-  const before = await padTmux.captureScreen(vmName, session.tmux_id, 20);
+  let before = await padTmux.captureScreen(vmName, session.tmux_id, 20);
   const perm = detectPermission(before.text);
   const verdict = sendVerdict({ ...session, live: pre.live, tuiAlive: pre.tuiAlive, command: pre.command }, perm);
   if (!verdict.canSend) {
     const cut = verdict.refusal.indexOf(': ');
     throw new MissionError(verdict.refusal.slice(0, cut), `${verdict.refusal.slice(cut + 2)}${where}`, 409);
+  }
+  // Plan 116: a freshly launched TUI drops input until it has painted (opencode:
+  // ~5s after launch). The startup instruction of EVERY new runner worker was
+  // typed into that window and silently lost — the boot repaint then read as
+  // "the pane changed". Wait for the driver's ready marker BEFORE writing; if it
+  // never shows, refuse with nothing written, so a retry is always safe.
+  const readyRe = driver?.tuiReadyPattern;
+  // Only a READABLE screen can say "still booting"; an unreadable capture keeps
+  // the old write-then-verify path (it reports the dead pane after the write).
+  if (readyRe && before.live && !readyRe.test(before.text)) {
+    const readyBy = Date.now() + TUI_READY_BUDGET_MS;
+    while (!readyRe.test(before.text) && Date.now() < readyBy) {
+      await new Promise((r) => setTimeout(r, 250));
+      before = await padTmux.captureScreen(vmName, session.tmux_id, 20);
+    }
+    if (!readyRe.test(before.text)) {
+      throw new MissionError('mission_tui_not_ready', `The agent TUI has not finished starting — nothing was sent; retry in a few seconds${where}`, 409, { attempted: false });
+    }
   }
   // Capture baseline store activity for store-correlated acceptance (Plan 88 §Phase 2).
   // We record the store's lastActivityAt BEFORE the write, then poll for new
@@ -2497,6 +2539,21 @@ function publicRunner(runner) {
   if (!runner) return runner;
   const out = { ...runner };
   for (const field of TRANSITION_PAYLOAD_FIELDS) delete out[field];
+  // Plan 114 §2: the legacy observation columns outlive the transition that made
+  // them false — a closed session still read `worker_state: working`, a paused
+  // runner still read "Worker idle — grace 118s remaining" weeks later. The
+  // canonical runtime is the authority, so the outward view must not contradict
+  // it. (Internals keep the raw columns: grace timing reads idle_since.)
+  if (!out.session_id) {
+    out.worker_state = 'unknown';
+    out.worker_turn_id = null;
+    out.idle_since = null;
+  }
+  const state = out.execution?.state;
+  if (state && !['dispatching', 'awaiting_receipt', 'running'].includes(state)) {
+    out.scheduler_decision = ({ paused: 'paused', complete: 'finished', waiting_input: 'need_input', held: 'need_input' })[state] || 'blocked';
+    out.scheduler_reason = out.execution.reason || null;
+  }
   return out;
 }
 
@@ -3194,9 +3251,9 @@ async function resolveRunnerQueue(id, itemId, answer, revision, idempotencyKey, 
       }
       throw error;
     }
-    const receipt = agentStore.readTurn(agent, session.agent_session_id);
     const expectedHash = crypto.createHash('sha256').update(answerText.trimEnd()).digest('hex');
-    if (!receipt.userId || receipt.userId === baseline.userId || receipt.inputHash !== expectedHash) {
+    const receipt = await awaitExactReceipt(agent, session.agent_session_id, baseline.userId, expectedHash);
+    if (!receipt) {
       runnerTransition.applyDeliveryUnknown(id, { actor: actor || 'user', details: { operationId, reason: 'resolution exact receipt not observed' } });
       getDb().prepare('UPDATE runner_resolutions SET status = ?, error = ? WHERE id = ?')
         .run('awaiting_receipt', 'Answer delivery is unconfirmed; no resend made.', resolutionId);
@@ -3321,6 +3378,18 @@ async function startRunner(id, { actor = null } = {}) {
     setRunnerReason(id, queue.aggregate.reason || 'Queue is done.');
     return { started: false, reason: 'empty_queue', runner: getRunner(id) };
   }
+  // Plan 116: the worker can only read/update the queue through Paddock's MCP
+  // tools. Without them it (correctly) stops and reports, which the supervisor
+  // cannot see — Run then idled out the grace and nudged a toolless worker.
+  // Refuse up front, naming the fix. UNKNOWN (probe failed) does not block.
+  const workerDriver = assertMissionAgent(project.agent_type);
+  if (typeof workerDriver.paddockMcpStatus === 'function') {
+    const mcpStatus = await workerDriver.paddockMcpStatus(project.agent_name, project.folder);
+    if (mcpStatus.state === 'absent' || mcpStatus.state === 'failed') {
+      await refuse('runner_worker_tools_missing',
+        `The worker cannot reach the queue: ${mcpStatus.detail}. Connect Paddock's MCP server in ${project.agent_name} (agent page → MCP tab) with a key that can read and write this project's queue, then press Run again.`);
+    }
+  }
   if (runtime.state === 'projection_error') {
     await refuse('runner_invalid_queue', 'Regenerate the queue projection before Run.');
   }
@@ -3398,7 +3467,7 @@ async function startRunner(id, { actor = null } = {}) {
     }
   }
   const can = await canDispatch(id, { session, project, agent, queue, kind: 'start', gen: runner.run_generation });
-  if (!can.allowed) await refuse('runner_worker_not_idle', can.reason);
+  if (!can.allowed) await refuse(can.code || 'runner_worker_not_idle', can.reason);
   // Send the startup message FIRST, enable dispatch only after it lands. It is
   // ONE logical submission: Mission types line by line with an Enter each, so
   // a multiline banner would land as a dozen separate user messages. Paths are
@@ -4168,7 +4237,11 @@ async function canDispatch(runnerId, { session, project, agent, queue, kind, gen
   if (promptEff.error) {
     return { allowed: false, reason: `prompt templates misconfigured: ${promptEff.error.message} Repair them in Configure → Prompts, then retry.`, freshRunner: fresh };
   }
-  if (!session?.agent_session_id || fresh.session_id !== session.id || getSession(session.id)?.locked) return { allowed: false, reason: 'Worker identity unavailable or solo locked', freshRunner: fresh };
+  // Three different refusals that used to share one string (and, via
+  // startRunner, the code `runner_worker_not_idle` — wrong for all three).
+  if (!session?.agent_session_id) return { allowed: false, code: 'runner_worker_identity_unavailable', reason: 'The worker session has no conversation id, so its turns cannot be observed. Close the worker session and press Run to start a fresh one.', freshRunner: fresh };
+  if (fresh.session_id !== session.id) return { allowed: false, code: 'runner_worker_identity_unavailable', reason: 'The runner is bound to a different worker session than this one.', freshRunner: fresh };
+  if (getSession(session.id)?.locked) return { allowed: false, code: 'runner_worker_locked', reason: 'The worker session is solo-locked by a human; unlock it to let the runner send.', freshRunner: fresh };
   const turn = agentStore.readTurn(agent, session.agent_session_id);
   fresh = observeRunnerTurn(fresh, session, turn);
   const currentQueue = canonicalQueueProjection(fresh, project, agent, runnerQueue.snapshot(fresh.id));
@@ -4268,9 +4341,10 @@ async function deliverRunnerInstruction(id, session, project, agent, queue, mess
   try {
     const result = await sendText(session.id, message, { actor, beforeWrite });
     if (!owns()) return null;
-    const observed = agentStore.readTurn(agent, session.agent_session_id);
     const expectedHash = crypto.createHash('sha256').update(message.trimEnd()).digest('hex');
-    if (!observed.userId || observed.userId === baselineTurn.userId || observed.inputHash !== expectedHash) {
+    const observed = await awaitExactReceipt(agent, session.agent_session_id, baselineTurn.userId, expectedHash, { stillOwned: owns });
+    if (!owns()) return null;
+    if (!observed) {
       throw new MissionError('mission_send_unconfirmed', 'Instruction written, but its exact input receipt has not been observed; no resend made.', 409, { attempted: true, acceptance: 'unknown' });
     }
     // Confirm the exact owned row once. A state helper that sets confirmed
@@ -4482,6 +4556,8 @@ module.exports = {
   stampTruth,
   // Test-only exports
   canDispatch,
+  _setReceiptPollBudget,
+  _setTuiReadyBudget,
   computeSchedulerState,
   observeRunnerTurn,
   withLive,

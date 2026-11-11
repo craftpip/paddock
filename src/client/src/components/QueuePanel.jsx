@@ -353,7 +353,7 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
             </div>
           )}
           {/* Queue warnings (e.g. multiple in-progress items) */}
-          {summary?.warnings?.length && (
+          {summary?.warnings?.length > 0 && (
             <div className="msn-queue-warning mt-1.5 p-2 rounded-control text-[10px] bg-warning/10 text-warning flex gap-2" data-testid="queue-warning">
               {summary.warnings.map((w, i) => (
                 <span key={i} className="flex-1 whitespace-pre-wrap break-words">

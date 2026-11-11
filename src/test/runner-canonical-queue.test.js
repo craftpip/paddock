@@ -453,7 +453,7 @@ it('Run confirms only an exact receipt; repaint without receipt remains observab
   try {
     tmux.hasSession = async () => true;
     tmux.paneState = async () => ({ live: true, tuiAlive: true, command: 'opencode', cwd: FOLDER });
-    tmux.captureScreen = async () => ({ live: true, text: `repaint ${captures++}` });
+    tmux.captureScreen = async () => ({ live: true, text: `repaint ${captures++} ctrl+p commands` });
     store.readActivity = () => ({ store: { available: false }, lastActivityAt: null });
     store.readTurn = () => turn;
     tmux.sendText = async (_pad, _session, text) => {
@@ -506,7 +506,7 @@ it('resolves a blocker through one owned answer operation and resumes only on ex
   try {
     tmux.hasSession = async () => true;
     tmux.paneState = async () => ({ live: true, tuiAlive: true, command: 'opencode', cwd: FOLDER });
-    tmux.captureScreen = async () => ({ live: true, text: `screen ${capture++}` });
+    tmux.captureScreen = async () => ({ live: true, text: `screen ${capture++} ctrl+p commands` });
     store.readActivity = () => ({ store: { available: false }, lastActivityAt: null });
     store.readTurn = () => turn;
     tmux.sendText = async (_pad, _tmux, text) => {
@@ -555,7 +555,7 @@ it('reconciles an unconfirmed blocker answer without resending it', async () => 
   try {
     tmux.hasSession = async () => true;
     tmux.paneState = async () => ({ live: true, tuiAlive: true, command: 'opencode', cwd: FOLDER });
-    tmux.captureScreen = async () => ({ live: true, text: `screen ${capture++}` });
+    tmux.captureScreen = async () => ({ live: true, text: `screen ${capture++} ctrl+p commands` });
     store.readActivity = () => ({ store: { available: false }, lastActivityAt: null });
     store.readTurn = () => turn;
     tmux.sendText = async (_pad, _tmux, text) => { sent++; sentText = text; return { lines: 1 }; };
@@ -768,7 +768,7 @@ it('keeps current-task Pause requested while the worker is busy and confirms it 
   try {
     tmux.hasSession = async () => true;
     tmux.paneState = async () => ({ live: true, tuiAlive: true, command: 'opencode', cwd: FOLDER });
-    tmux.captureScreen = async () => ({ live: true, text: `screen ${captureCount++}` });
+    tmux.captureScreen = async () => ({ live: true, text: `screen ${captureCount++} ctrl+p commands` });
     store.readActivity = () => ({ store: { available: false }, lastActivityAt: null });
     store.readTurn = () => turn;
     tmux.sendText = async (_pad, _session, text) => { sends++; sentText = text; return { lines: 1 }; };
@@ -821,7 +821,7 @@ it('runs multiple assigned items to canonical completion without poll-driven dup
   try {
     tmux.hasSession = async () => true;
     tmux.paneState = async () => ({ live: true, tuiAlive: true, command: 'opencode', cwd: FOLDER });
-    tmux.captureScreen = async () => ({ live: true, text: `screen ${screenCount++}` });
+    tmux.captureScreen = async () => ({ live: true, text: `screen ${screenCount++} ctrl+p commands` });
     store.readActivity = () => ({ store: { available: false }, lastActivityAt: null });
     store.readTurn = () => turn;
     tmux.sendText = async (_pad, _tmux, text) => {

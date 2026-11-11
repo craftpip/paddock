@@ -44,6 +44,13 @@ const OPENCODE = {
     continueLatest: () => `${OPENCODE.tuiCommand} -c`,
   },
 
+  /** Plan 116: the TUI accepts input only once it has painted its footer —
+   *  input typed during the ~5s boot is silently dropped. The footer reads
+   *  `ctrl+p commands` both idle and mid-turn (measured on 1.19.5), so it marks
+   *  readiness without blocking a deliberate mid-turn send. `sendText` waits for
+   *  it before writing. */
+  tuiReadyPattern: /ctrl\+p commands/,
+
   /** No gateway/onboard flow — opencode config is created on first run. */
   setupSteps: [],
 
@@ -302,7 +309,12 @@ const OPENCODE = {
    *  a host command line. */
   async createConversation(name, folder, containerPort) {
     const port = parseInt(containerPort, 10);
-    if (!name || !folder || !port) return '';
+    if (!name || !folder) return '';
+    // Plan 116: an UNPUBLISHED pad (the default) has no web server to ask, so
+    // this used to return '' — the session row then carried no conversation id
+    // and an infinite runner on that pad could never start ("Worker identity
+    // unavailable"). Mint through a short-lived headless server instead.
+    if (!port) return this.createConversationHeadless(name, folder);
     // Percent-encoded in JS, and single-quoted here, so a folder with a space
     // or an `&` cannot smuggle itself into the query string.
     const dir = encodeURIComponent(folder);
@@ -324,6 +336,73 @@ const OPENCODE = {
           'esac',
         ].join('\n'),
       ], { timeout: 15000, check: false });
+      const id = String(r.stdout || '').match(/"id"\s*:\s*"(ses_[^"]+)"/);
+      return id ? id[1] : '';
+    } catch {
+      return '';
+    }
+  },
+
+  /** Plan 116: is Paddock's own MCP server connected in this pad? An infinite
+   *  runner's worker can only touch the queue through it, and a worker without
+   *  it correctly "stops and reports" — which the supervisor cannot see, so Run
+   *  used to nudge a toolless worker forever. Returns
+   *  `{ state: 'connected' | 'failed' | 'absent', detail }`, or
+   *  `{ state: 'unknown', detail }` when the probe itself could not run —
+   *  UNKNOWN is never reported as absent. Runs as the pad user, logs to stderr
+   *  (the TUI holds the log file). */
+  async paddockMcpStatus(name, folder) {
+    const server = this.mcp.serverName;
+    try {
+      const { termUserArgs } = require('../pad-tmux');
+      const r = await runCmd('docker', ['exec', ...termUserArgs(name), ...(folder ? ['-w', folder] : []), name,
+        'sh', '-lc', 'opencode mcp list --print-logs 2>/dev/null'], { timeout: 30000 });
+      return this.parseMcpList(r.stdout, server);
+    } catch (e) {
+      return { state: 'unknown', detail: `could not run opencode mcp list: ${e.message}` };
+    }
+  },
+
+  /** Pure parser for `opencode mcp list` (1.19.5 layout: `●  ✓ paddock connected`
+   *  / `●  ✗ paddock failed` followed by an indented reason line). */
+  parseMcpList(stdout, server) {
+    // eslint-disable-next-line no-control-regex
+    const lines = String(stdout || '').replace(/\x1b\[[0-9;]*m/g, '').split('\n');
+    const i = lines.findIndex((l) => new RegExp(`[✓✗]\\s+${server}\\b`).test(l));
+    if (i === -1) return { state: 'absent', detail: `no "${server}" MCP server is configured in this pad` };
+    if (/✓/.test(lines[i]) && /connected/.test(lines[i])) return { state: 'connected', detail: '' };
+    const why = (lines[i + 1] || '').replace(/^[│\s]+/, '').trim();
+    return { state: 'failed', detail: `the "${server}" MCP server is configured but not connected${why ? `: ${why}` : ''}` };
+  },
+
+  /** Mint a conversation on a pad with no published server (plan 116): start
+   *  `opencode serve` on a random loopback port, POST /session for the folder,
+   *  stop it. Measured ~4s. Three details are load-bearing:
+   *  - it runs as the PAD user (`termUserArgs`), so a user-mode pad never gets
+   *    root-owned opencode state (the zero-MCP-tools trap);
+   *  - `--print-logs` sends logs to stderr: the running TUI holds the log file,
+   *    and a second process opening it dies with `PermissionDenied`;
+   *  - the server shares the store with the TUI, so `opencode -s <id>` resumes it.
+   *  Best effort like the published path: any failure returns ''. */
+  async createConversationHeadless(name, folder) {
+    const dir = encodeURIComponent(folder);
+    const script = [
+      'p=$(( 40000 + $(od -An -N2 -tu2 /dev/urandom | tr -d " ") % 20000 ))',
+      'opencode serve --print-logs --port "$p" --hostname 127.0.0.1 >/dev/null 2>&1 & pid=$!',
+      'i=0; out=""',
+      'while [ $i -lt 60 ]; do',
+      `  out=$(curl -s -m 3 -X POST "http://127.0.0.1:$p/session?directory=${dir}" -H 'Content-Type: application/json' -d '{}' 2>/dev/null)`,
+      `  case "$out" in '{'*) break ;; esac`,
+      '  kill -0 $pid 2>/dev/null || break',
+      '  i=$((i+1)); sleep 0.25',
+      'done',
+      'kill $pid 2>/dev/null; wait $pid 2>/dev/null',
+      `printf '%s' "$out"`,
+    ].join('\n');
+    try {
+      const { termUserArgs } = require('../pad-tmux');
+      const r = await runCmd('docker', ['exec', ...termUserArgs(name), '-w', folder, name, 'sh', '-lc', script],
+        { timeout: 30000, check: false });
       const id = String(r.stdout || '').match(/"id"\s*:\s*"(ses_[^"]+)"/);
       return id ? id[1] : '';
     } catch {

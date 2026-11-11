@@ -113,6 +113,8 @@ carries all host ports and forwards to the peer by name. See `tabs/web.md`.
 |----------|-----|
 | React SPA at root `/` | All pages migrated from EJS+HTMX |
 | Express serves built SPA from public/ | Simple prod deployment |
+| SPA fallback skips `/api/`, `/ws/`, `/.well-known/`, `/mcp/` and dotted paths (JSON/plain 404) | An MCP client's OAuth discovery after a 401 must not get a 200 `index.html` — it surfaced as "JSON Parse error: Unrecognized token '<'" instead of a bad key |
+| `/login` and `/setup` redirect a signed-in user (`GuestOnly`) | With `AUTO_LOGIN`, a sign-in form there reads as "you were signed out" |
 | Driver framework (`services/drivers/`) | Per-type behavior (openclaw/opencode/picoclaw/hermes/codex/claude) via one adapter |
 | No EJS rendering for modern pages | API-only for React |
 | Session-based auth with CSRF | Replaced Basic Auth; `AUTO_LOGIN=true` auto-logs in |

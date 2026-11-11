@@ -774,7 +774,7 @@ describe('MCP Server - Mission tools (plan 55)', () => {
     // returning one frozen string is not a neutral fake, it is a black hole
     // that every send test would (correctly) be refused by. Modelling the echo
     // here fixes that once for the whole suite instead of per-test.
-    screenText = 'a prompt\nthe answer';
+    screenText = 'a prompt\nthe answer\nctrl+p commands';
     padTmux.captureScreen = async () => ({ text: screenText, live: true });
     padTmux.sendText = async (vm, tid, text) => {
       screenText = `${screenText}\n> ${text}`;
@@ -1085,7 +1085,7 @@ describe('MCP Server - Mission tools (plan 55)', () => {
     const typed = [];
     padTmux.sendText = async (vm, tid, text) => {
       typed.push([vm, tid, text]);
-      screenText = `a prompt\n> ${text}`; // the TUI echoes what it received
+      screenText = `a prompt\n> ${text}\nctrl+p commands`; // the TUI echoes what it received
       return { lines: 1 };
     };
     const r = await call('mission_send', { session_id: s.id, text: 'do the thing' }, OWNER);

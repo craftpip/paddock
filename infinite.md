@@ -90,6 +90,7 @@ conversation's own store (`busyForSessions`) instead of the web-server probe.
 
 ## Queue
 
+- [ ] plans/114-planning-gets-stuck.md — 3/4 done; remaining: dispatch-refusal back-off
 - [ ] plans/85-infinite-sessions-correction.md — paused 2026-10-16 (started 2026-10-11; resume after 89 — corrections: one session list, click opens terminal, Run/Pause in terminal header)
 - [ ] plans/83-infinite-runner.md — superseded by 85; re-audit status/claims after 85
 - [x] plans/82-mission-project-plans-folder.md — absorbed 2026-10-10
