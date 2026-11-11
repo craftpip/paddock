@@ -235,6 +235,31 @@ wherever the scroller sits in the window.
   `return`. `components/QueuePanel.jsx` returns `null` without a runner only below its last hook,
   so a runner that disappears while the panel is mounted does not change the hook order.
 
+## File Layout
+
+A page or store that grows past one job is split by moving code, never by rewriting it.
+
+| What | Where |
+|------|-------|
+| Agent detail page: header, tab bar, routing | `pages/AgentDetail.jsx` |
+| One file per Agent detail tab | `pages/agent/<Name>Tab.jsx` |
+| Settings tab: loaded settings, handlers, confirm modals | `pages/agent/SettingsTab.jsx` |
+| One file per Settings card | `pages/agent/settings/<Name>Card.jsx` |
+| Create Agent page: form state, validation, submit | `pages/CreateAgent.jsx` |
+| One file per Create Agent form section, and the progress view | `pages/create-agent/` |
+| Terminal: socket, xterm and session lifecycle | `components/Terminal.jsx` |
+| Terminal header bar | `components/TerminalHeader.jsx` |
+| Mission store: state, view restore, listings, the open session | `stores/mission.js` |
+| Mission store slices: runner and queue actions, project actions | `stores/mission/` |
+
+A card or section component owns no state. Its parent passes it every value it reads and every
+handler it calls as props, so the parent stays the one place where a setting is loaded, changed
+and applied. A store slice exports `(set, get) => ({ ...actions })` and `stores/mission.js`
+spreads it, so every caller keeps importing `useMission` from the same file.
+
+The terminal's socket and xterm lifecycle stay in one file on purpose: they share refs and one
+generation counter, and separating them changes behaviour rather than moving it.
+
 ## See Also
 
 - [URL Navigation](navigation.md)
