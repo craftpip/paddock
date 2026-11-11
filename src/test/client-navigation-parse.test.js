@@ -11,15 +11,25 @@ it('navigation client bundle parses and resolves every import without touching t
     write: false, platform: 'browser', loader: { '.css': 'empty' }, logLevel: 'silent' });
 });
 
-it('navigation components have no unbound references that would crash only when rendered or clicked', () => {
+it('no client source file has an unbound reference that would crash only when rendered or clicked', () => {
   const parser = requireClient('@babel/parser');
   const traverse = requireClient('@babel/traverse').default;
   const globals = new Set([...Object.getOwnPropertyNames(globalThis), 'window', 'document', 'localStorage', 'sessionStorage',
-    'navigator', 'EventSource', 'XMLHttpRequest', 'FormData', 'HTMLElement', 'ResizeObserver', 'requestAnimationFrame', 'cancelAnimationFrame']);
-  const files = ['App.jsx', 'lib/url-state.js', 'lib/navigation.jsx', 'lib/mission-navigation.jsx', 'stores/mission.js',
-    'pages/Mission.jsx', 'pages/AgentDetail.jsx', 'pages/Dashboard.jsx', 'pages/Profile.jsx', 'pages/Vault.jsx', 'pages/Login.jsx',
-    'pages/agent/SettingsTab.jsx', 'pages/agent/WebTab.jsx', 'pages/Configs.jsx', 'components/MissionPopups.jsx', 'components/RunnerDialog.jsx', 'components/ProjectDialog.jsx',
-    'components/SessionList.jsx', 'components/SessionCreateSplit.jsx', 'components/PlanPicker.jsx', 'components/QueuePanel.jsx', 'components/ui/Modal.jsx'];
+    'navigator', 'EventSource', 'XMLHttpRequest', 'FormData', 'HTMLElement', 'ResizeObserver', 'requestAnimationFrame', 'cancelAnimationFrame',
+    'MutationObserver', 'IntersectionObserver', 'WebSocket', 'getComputedStyle', 'location', 'history']);
+  // Every source file, not a hand-kept list: a list only covers the files
+  // someone remembered to add, and the control that was dead for a whole
+  // build+test cycle (AGENTS.md) lived in a file nobody had listed.
+  const files = [];
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(path.join(client, 'src', dir), { withFileTypes: true })) {
+      const rel = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(rel);
+      else if (/\.(jsx|js)$/.test(entry.name)) files.push(rel);
+    }
+  };
+  walk('');
+  assert.ok(files.length > 60, 'the walk found the client sources');
   const unbound = [];
   for (const file of files) {
     const ast = parser.parse(fs.readFileSync(path.join(client, 'src', file), 'utf8'), { sourceType: 'module', plugins: ['jsx'] });

@@ -742,9 +742,12 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
 - **CommandsPane action buttons paste `openclaw ...` commands into the docked
   terminal** (`run(cmd)`) — never a backend action API. Read-only GETs are
   fine. The Vault is the exception on purpose (server-side secrets).
-- **Run tests individually, never the combined `node --test test/` suite**
-  (hangs). `timeout 60 docker exec paddock node --test test/<file>.test.js`.
-  `vm-manager.test.js` needs the `GUARD_*` envs unset (see docs).
+- **Run the whole suite with `docker exec paddock npm test`** (`test/run-all.mjs`:
+  one process per file, ~90 s, a hung file is a failure). One file:
+  `timeout 120 docker exec paddock node --test test/<file>.test.js`. **Never
+  `node --test test/`** in one go (shared process state, hangs). The runner
+  clears `PADDOCK_TASK_QUEUE` for `mcp.test.js` and `GUARD_*` for
+  `vm-manager.test.js`; do the same when running those two by hand.
 
 ## Critical Operational Gotchas
 

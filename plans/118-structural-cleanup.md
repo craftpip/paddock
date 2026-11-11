@@ -1,6 +1,6 @@
 # Plan 118 — Structural cleanup: one runner view, split files, instant dispatch
 
-## Status: In progress — 2026-11-11 — 3/7 phases done (Phases 1–3); next: Phase 4
+## Status: In progress — 2026-11-11 — 4/7 phases done (Phases 1–4); next: Phase 5
 
 ## Why
 
@@ -14,7 +14,7 @@ on 2026-11-11:
 | `src/services/vm-manager.js` | 5002 lines |
 | `src/app.js` | 4161 lines, 158 routes (49 under `/api/mission`) |
 | `src/mcp.js` | 2999 lines |
-| Test files that read source text instead of running code | 22 of 63 |
+| Test files that read source text instead of running code | 4 of 63 (24 reads). First written here as "22 of 63": that count came from a loose grep and was wrong |
 | Wait between two queue plans by default | up to 120 s + 20 s tick |
 | `src/public` (build output) tracked in git | 7 files, rebuilt by hand |
 
@@ -45,7 +45,7 @@ disagree, then makes the files small enough to read.
 - [x] Phase 1 — One server-computed runner view (2026-11-11, see "Phase 1 — as built")
 - [x] Phase 2 — Split `mission.js` (2026-11-11, see "Phase 2 — as built")
 - [x] Phase 3 — Dispatch the next plan when the worker reports done (2026-11-11, see "Phase 3 — as built")
-- [ ] Phase 4 — One test command that finishes
+- [x] Phase 4 — One test command that finishes (2026-11-11, see "Phase 4 — as built")
 - [ ] Phase 5 — Split `app.js` routes
 - [ ] Phase 6 — Turn `AGENTS.md` lessons into tools
 - [ ] Phase 7 — Stop tracking `src/public`
@@ -357,6 +357,25 @@ the last row turning Done.
 twice in a row.
 
 ---
+
+### Phase 4 — as built
+
+- The hang was never a leaked handle in one suite. Every file exits on its own
+  when it has a process to itself: 63 files, 1170 tests, 89 seconds, none
+  hung. What hangs is `node --test test/` sharing one process between suites
+  that each set `PAD_DB_PATH`/`WORKSPACE_ROOT` and replace module functions.
+  So steps 1–2 (find and fix the leak) had nothing to fix.
+- `src/test/run-all.mjs` + `"test": "node test/run-all.mjs"`:
+  `docker exec paddock npm test`. A file that outlives the timeout is killed,
+  reported `HUNG` and fails the run.
+- The client parse and unbound-reference checks already existed in
+  `client-navigation-parse.test.js` but covered 22 hand-listed files. They now
+  walk all 73. No real unbound reference was found; only browser globals were
+  missing from the allow-list.
+- Source-text tests were **not** rewritten. There are 24 such reads in 4 files
+  (not the 22 files the plan first claimed). Each pins wiring that needs a
+  container to run for real (an argument passed to docker, a resolved name
+  reaching the action), and each is documented as deliberate. Left as they are.
 
 ## Phase 5 — Split `app.js` routes
 

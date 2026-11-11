@@ -175,16 +175,27 @@ Output to `src/public/`, served by Express on port 6789.
 
 ### Testing
 
-Run each suite individually — the combined `node --test test/` run hangs:
+Run everything with one command, inside the container:
 
 ```bash
-timeout 60 docker exec paddock node --test test/vm-manager.test.js
-timeout 60 docker exec paddock node --test test/mcp.test.js
+docker exec paddock npm test                    # every suite, about 90 seconds
+docker exec paddock node test/run-all.mjs runner queue   # only files whose name contains a word
 ```
 
-`vm-manager.test.js` asserts the `GUARD_*` defaults, which `.env` disables —
-run it with the guard envs cleared:
-`docker exec -e GUARD_PROJECT_ROOT= -e GUARD_INSTANCES_PARENT= -e GUARD_AGENT_DATA= paddock node --test test/vm-manager.test.js`
+`test/run-all.mjs` runs each `*.test.js` in its own process and prints one line per file,
+then a total; it exits non-zero if any file fails or does not exit within the timeout
+(`TEST_TIMEOUT_MS`, default 240000). A file that hangs is reported `HUNG` and counts as a
+failure. `TEST_VERBOSE=1` prints the tail of each failing file's output.
+
+One process per file is the point: suites set `PAD_DB_PATH` / `WORKSPACE_ROOT` before they
+load the app and several replace module functions, so `node --test test/` in a single run
+shares state it must not and hangs. Do not use it.
+
+The runner clears the environment flags that would change a suite's subject:
+`PADDOCK_TASK_QUEUE` for `mcp.test.js` (it pins the default tool surface) and `GUARD_*` for
+`vm-manager.test.js` (it asserts the guard defaults, which `.env` disables). Run a single
+file directly with `timeout 120 docker exec paddock node --test test/<file>.test.js`; for
+those two, clear the same variables yourself.
 
 ## Git Workflow
 
