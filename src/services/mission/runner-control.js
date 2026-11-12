@@ -104,9 +104,9 @@ async function ensureRunnerSession(id, { actor = null, origin = 'human', created
  *  the file and pressing Run again must work without creating another
  *  runner/session. */
 async function startRunner(id, { actor = null } = {}) {
-  const runner = getRunner(id);
+  let runner = getRunner(id);
   if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
-  const runtime = runnerTransition.getRuntime(id);
+  let runtime = runnerTransition.getRuntime(id);
   if (!runtime) throw new MissionError('runner_setup_required', 'This runner has no canonical runtime. Explicitly set it up before running.');
   runnerHistory.record(runner, 'run_requested', { actor: actor || 'user' });
   try {
@@ -165,11 +165,32 @@ async function startRunner(id, { actor = null } = {}) {
   if (['dispatching', 'awaiting_receipt'].includes(runtime.state)) {
     return { started: false, reason: runtime.state, runner: getRunner(id), operationId: runtime.operation_id };
   }
-  if (runtime.state === 'waiting_input' && runner.stop_cause === 'usage_exhausted') {
-    const callback = runnerCallbacks.getCallback(id, 'usage_exhausted');
-    if (!callback.enabled || !callback.recreateResume) {
-      throw new MissionError('quota_recovery_not_configured', 'Quota is exhausted. Enable the usage_exhausted callback and resume-after-success option before retrying recovery.');
+  const quotaStop = runtime.state === 'waiting_input'
+    && (runner.stop_cause === 'usage_exhausted' || runtime.reason_code === 'usage_exhausted');
+  const recoveryScript = quotaStop ? runnerCallbacks.getCallback(id, 'usage_exhausted') : null;
+  if (quotaStop && !(recoveryScript.enabled && recoveryScript.recreateResume)) {
+    // No recovery script: an explicit Run after the provider's quota has reset
+    // is a plain resume. The worker's own screen is the evidence — opencode
+    // shows its limit notice for as long as the limit holds, and the same
+    // detector that stopped the runner (provider-limit.js) must now find
+    // nothing. Still limited → refuse and say exactly what to do. Cleared →
+    // leave the quota stop through Pause (allowed from every state) and fall
+    // through to the ordinary Run path, which re-checks the worker's turn and
+    // adopts a turn the worker already started on its own.
+    const screen = session ? await padTmux.captureScreen(project.agent_name, session.tmux_id, 80).catch(() => null) : null;
+    const still = require('../provider-limit').screenUsageEvidence(screen);
+    if (still) {
+      throw new MissionError('runner_quota_still_exhausted',
+        `${still.reason}. The limit notice is still on the worker's screen, so nothing was sent. Press Run again once it resets, or set up a usage_exhausted recovery script in Configure → Callbacks.`, 409);
     }
+    runnerTransition.applyPause(id, { actor: actor || 'user', details: { reason: 'Usage limit cleared; resuming on explicit Run.' } });
+    runnerHistory.record(getRunner(id), 'usage_recovered', { actor: actor || 'user', reason: 'The usage limit notice is gone from the worker\'s screen; Run resumes the queue.' });
+    // The Pause moved the generation on: everything below must read the
+    // runner as it is NOW, or the dispatch gate rejects a stale generation.
+    runtime = runnerTransition.getRuntime(id);
+    runner = getRunner(id);
+  }
+  if (quotaStop && runtime.state === 'waiting_input') {
     const event = getDb().transaction(() => {
       const active = getDb().prepare(`SELECT id FROM runner_callback_outbox WHERE runner_id = ? AND event = 'usage_exhausted' AND status IN ('pending', 'running')
         UNION SELECT event_id AS id FROM runner_quota_recoveries WHERE runner_id = ? AND status IN ('script_running', 'restoring') LIMIT 1`).get(id, id);

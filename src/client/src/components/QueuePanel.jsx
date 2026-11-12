@@ -45,6 +45,7 @@ const TONE_CLASS = {
   active: 'bg-accent-soft text-accent-text',
   success: 'bg-success-soft text-success',
   danger: 'bg-danger-soft text-danger',
+  warning: 'bg-warning-soft text-warning',
   idle: 'bg-raised text-ink-muted',
 }
 

@@ -231,6 +231,7 @@ function runnerQueueExecution(runner, queue, scheduler, { items = null, workerBu
     outstanding: !!runtime?.operation_id,
     pauseMode: runner.pause_mode || null,
     workerBusy,
+    stopCode: runtime?.reason_code || null,
   });
 }
 

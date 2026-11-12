@@ -202,3 +202,30 @@ it('plan 126 positive twin: the gate adopts the one conversation and the run goe
   const op = getDb().prepare('SELECT conversation_id FROM runner_operations WHERE runner_id = ? ORDER BY rowid DESC LIMIT 1').get(runner.id);
   assert.equal(op.conversation_id, '019d0000-0000-7000-8000-0000000000aa', 'the operation is stamped with the adopted id, not a placeholder');
 });
+
+// A provider quota stop with no recovery script: Run reads the worker's screen.
+function quotaStop() {
+  runnerTransition.applyRun(runner.id, { details: { conversationId: session.agent_session_id } });
+  const active = runnerTransition.getRuntime(runner.id);
+  runnerTransition.applyNeedInput(runner.id, { details: { operationId: active.operation_id, cause: 'usage_exhausted', reason: 'OpenCode free usage limit reached — subscribe to Go or wait for quota reset' } });
+  assert.equal(runnerTransition.getRuntime(runner.id).state, 'waiting_input');
+}
+
+it('quota stop: while the limit notice is still on screen, Run refuses, sends nothing and stays stopped', async () => {
+  quotaStop();
+  tmux.captureScreen = async () => ({ live: true, text: '  ┃  hello\n Free usage exceeded, subscribe to Go [retrying in 8h 58m attempt #1]\n ctrl+p commands' });
+  await assert.rejects(() => mission.startRunner(runner.id),
+    (e) => e.code === 'runner_quota_still_exhausted' && /still on the worker's screen/.test(e.message));
+  assert.equal(sends.length, 0);
+  assert.equal(runnerTransition.getRuntime(runner.id).state, 'waiting_input');
+});
+
+it('quota stop positive twin: once the notice is gone, Run resumes the queue on the same session', async () => {
+  quotaStop();
+  const r = await mission.startRunner(runner.id);
+  assert.equal(r.started, true);
+  assert.equal(sends.length, 1, 'the next instruction was typed into the worker');
+  assert.notEqual(runnerTransition.getRuntime(runner.id).state, 'waiting_input');
+  const kinds = getDb().prepare('SELECT type FROM runner_history WHERE runner_id = ? ORDER BY id').all(runner.id).map((h) => h.type);
+  assert.ok(kinds.includes('usage_recovered'), 'History says why it resumed');
+});

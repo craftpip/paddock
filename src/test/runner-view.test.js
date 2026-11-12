@@ -176,3 +176,21 @@ it('refuses a hand status correction in exactly the states the view withdraws it
 });
 
 after(() => { try { getDb().close(); } catch {} fs.rmSync(root, { recursive: true, force: true }); });
+
+it('a provider quota stop is named "Usage limit", says nothing needs answering, and offers Run', () => {
+  const quota = buildExecution({
+    runtimeState: 'waiting_input', items: ITEMS.queued, stopCode: 'usage_exhausted', outstanding: true,
+    scheduler: { reason: 'OpenCode free usage limit reached — subscribe to Go or wait for quota reset' },
+  });
+  assert.equal(quota.label, 'Usage limit');
+  assert.equal(quota.tone, 'warning');
+  assert.equal(quota.banner?.kind, 'usage_limit');
+  assert.match(quota.banner.text, /Nothing needs answering/);
+  assert.equal(quota.actions.run.allowed, true, 'Run is the way out; the server checks the screen');
+  assert.equal(quota.actions.resolve.allowed, false);
+
+  const asked = buildExecution({ runtimeState: 'waiting_input', items: ITEMS.blocked, stopCode: 'need_input' });
+  assert.equal(asked.label, 'Needs input', 'a real question still reads Needs input');
+  assert.equal(asked.actions.run.allowed, false);
+  assert.equal(asked.actions.resolve.allowed, true);
+});

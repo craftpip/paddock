@@ -292,6 +292,14 @@ Run is an explicit control intent, separate from whether an instruction may be s
 - **Running otherwise:** Run answers `already_running`.
 - **Paused, held or complete:** Run validates the queue and an idle worker, then dispatches the
   `start` or `resume` prompt under a new operation.
+- **Stopped by a provider quota (`waiting_input`, code `usage_exhausted`):** the page labels it
+  **Usage limit** (warning tone, `banner.kind: 'usage_limit'`), not "Needs input" — nobody asked
+  a question, so there is nothing to answer — and offers Run. With a `usage_exhausted` recovery
+  script configured, Run queues that script (quota recovery). Without one, Run reads the
+  worker's screen with the same detector that stopped it (`provider-limit.js`): while the notice
+  is still there it refuses with `runner_quota_still_exhausted` (409) and sends nothing; once it
+  is gone it records `usage_recovered`, leaves the stop through Pause, and continues as a normal
+  Run (idle worker → start prompt; a turn the worker already began → adopted).
 
 A pane that is already gone is never adopted as a working turn.
 

@@ -40,6 +40,7 @@ const nameOf = (items, ref) => {
 function buildExecution({
   runtimeState = null, queueCondition = 'ok', queueError = null, items = [], summary = null,
   scheduler = {}, operation = null, outstanding = false, pauseMode = null, workerBusy = false,
+  stopCode = null,
 } = {}) {
   const projectionError = queueCondition === 'projection_error';
   const state = projectionError ? 'projection_error'
@@ -51,9 +52,15 @@ function buildExecution({
   const blockedItem = summary?.blocked || null;
   const blocked = items.some((item) => item.status === 'need input');
   const recovery = scheduler.recoveryRequired === true;
+  // The provider's quota ran out. It stops the queue in `waiting_input`, but
+  // nobody asked a question, so "Needs input" sent people looking for an
+  // answer box that does not exist. Name it, and offer Run: the server checks
+  // the worker's screen on Run and refuses, with the reason, while the limit
+  // still shows (or runs the usage_exhausted recovery script if one is set).
+  const quotaStop = state === 'waiting_input' && stopCode === 'usage_exhausted' && !blocked;
 
-  const canRun = queueOk && hasWork && !blocked && (!outstanding || recovery)
-    && (EVENTS.run.includes(state) || recovery);
+  const canRun = queueOk && hasWork && !blocked && (!outstanding || recovery || quotaStop)
+    && (EVENTS.run.includes(state) || recovery || quotaStop);
   const runWhyNot = state === 'setup_required' ? 'Set up the queue first'
     : state === 'projection_error' ? 'Regenerate the queue file first'
     : blocked ? 'Resolve the blocked plan first'
@@ -84,6 +91,9 @@ function buildExecution({
     : queueError || (blocked ? blockedItem?.reason : null) || scheduler.reason || null;
 
   let banner = null;
+  if (quotaStop) {
+    banner = { kind: 'usage_limit', tone: 'warning', text: `${scheduler.reason || 'The provider\'s usage limit was reached'}. Nothing needs answering: once the limit resets, press Run queue to continue (it checks the worker's screen first). To recover automatically, set up a usage_exhausted script in Configure → Callbacks.` };
+  }
   if (state === 'paused') {
     const currentName = nameOf(items, summary?.current);
     banner = workerBusy
@@ -96,7 +106,7 @@ function buildExecution({
   }
 
   return {
-    state, label: LABELS[state], tone: TONES[state], active, reason, banner,
+    state, label: quotaStop ? 'Usage limit' : LABELS[state], tone: quotaStop ? 'warning' : TONES[state], active, reason, banner,
     operation: operation || null,
     actions: {
       setup: verdict(state === 'setup_required', 'The runner is already set up'),
