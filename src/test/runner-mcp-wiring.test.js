@@ -229,3 +229,29 @@ it('quota stop positive twin: once the notice is gone, Run resumes the queue on 
   const kinds = getDb().prepare('SELECT type FROM runner_history WHERE runner_id = ? ORDER BY id').all(runner.id).map((h) => h.type);
   assert.ok(kinds.includes('usage_recovered'), 'History says why it resumed');
 });
+
+// A store turn that says "working" but nothing runs it (a quota error ended
+// opencode's step without completing it): an explicit Run must not stay stuck.
+const stuckTurn = (minutesAgo) => ({ state: 'working', userId: 'stuck-input', inputHash: 'stuck', progressAt: new Date(Date.now() - minutesAgo * 60000).toISOString(), completedAt: null });
+
+it('stalled turn: working in the store, idle pane, quiet for minutes — Run goes ahead and says why', async () => {
+  quotaStop();
+  turn = stuckTurn(10);
+  const r = await mission.startRunner(runner.id);
+  assert.equal(r.started, true);
+  assert.equal(sends.length, 1);
+  const kinds = getDb().prepare('SELECT type FROM runner_history WHERE runner_id = ? ORDER BY id').all(runner.id).map((h) => h.type);
+  assert.ok(kinds.includes('worker_stalled'));
+});
+
+it('stalled-turn twins: a pane showing a running turn, or a turn that moved recently, still refuses', async () => {
+  quotaStop();
+  turn = stuckTurn(10);
+  tmux.captureScreen = async () => ({ live: true, text: '■■■⬝⬝ esc interrupt 8.2K (4%) ctrl+p commands' });
+  await assert.rejects(() => mission.startRunner(runner.id), (e) => e.code === 'runner_worker_not_idle');
+  assert.equal(sends.length, 0, 'a turn the pane shows running is never talked over');
+  tmux.captureScreen = async () => ({ live: true, text: 'idle ctrl+p commands' });
+  turn = stuckTurn(0.5);
+  await assert.rejects(() => mission.startRunner(runner.id), (e) => e.code === 'runner_worker_not_idle');
+  assert.equal(sends.length, 0, 'a turn that moved 30s ago is not called stalled');
+});

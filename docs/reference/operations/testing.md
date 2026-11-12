@@ -207,6 +207,41 @@ Three helpers in `src/test/helpers/` keep these tests off the running app:
 | `mcp-source.js` | returns `mcp.js` and every `mcp/*.js` as one string for tests that pin wiring by source |
 | `client-store-resolve.mjs` | lets `node --test` import client store code written for the bundler |
 
+## Live Agent Suite
+
+`npm test` never reaches docker, so it cannot prove the thing Paddock exists to do: open an
+agent TUI in a PAD's tmux, type into it, press Enter, prove the text arrived and read the reply.
+`live/opencode.live.test.js` does that against a real opencode PAD, through the webui's HTTP API
+exactly as the page does, and checks every answer with read-only reads of opencode's own store
+(the same `readTurn` / `readActivity` the runner trusts; it never opens the app database).
+
+```
+docker exec -e LIVE_PAD=pad-dev paddock npm run test:live
+docker exec -e LIVE_PAD=pad-dev -e LIVE_SAVE_SCREENS=1 paddock npm run test:live   # also keep screens
+```
+
+| Step | Proves |
+|---|---|
+| 1–2 | A project and session start a real TUI in tmux; the conversation id is known from the first read; the ready footer paints; the app says it can send |
+| 3 | The usage-limit detector reads a healthy screen as healthy (a real limit stops the run with that verdict) |
+| 4 | A message is confirmed from the store, its stored text hashes to exactly what was sent, the turn finishes, and the reply is read back |
+| 5 | Quotes, `$(…)`, backticks, `; && \| >`, unicode and emoji arrive verbatim, and nothing executes in a shell |
+| 6 | A ~1500-character line arrives whole |
+| 7 | A message sent while the agent is busy is not lost: the second input becomes newest and is answered |
+| 8 | When the TUI exits the app sees a shell, refuses to type into it (`mission_not_an_agent`), and Relaunch resumes the SAME conversation |
+| 9 | Close removes the tmux session and a later send is refused |
+
+It costs a few short turns on the PAD's model. It creates one throwaway project and folder,
+removes both, and fails if any tmux session that existed before it is gone afterwards. Steps
+depend on each other; after a failure the rest skip and name it. `LIVE_TURN_MS` raises the
+per-turn wait for a slow model.
+
+Screens saved with `LIVE_SAVE_SCREENS=1` land in `live/captures/<time>/` (gitignored). The ones
+that pin the detectors live in `test/fixtures/opencode-screens/`, and `opencode-screens.test.js`
+(part of `npm test`) asserts what `tuiReadyPattern`, `tuiBusyPattern`, `screenUsageEvidence` and
+`detectPermission` must say about each. After an opencode upgrade, re-run the live suite with
+screen saving and copy the new captures in; a red offline test names the detector to fix.
+
 ## Rebuild the Client After Client Edits
 
 The page serves the built bundle in `src/public/`, so a page that renders can be running code

@@ -42,6 +42,7 @@ const TYPES = {
   quota_remains: ['recovery', 'Provider quota is still exhausted'],
   worker_exited: ['recovery', 'Worker process exited'],
   worker_restored: ['recovery', 'Worker session restored'],
+  worker_stalled: ['recovery', 'Worker turn abandoned — not running in the pane'],
   delivery_unconfirmed: ['control', 'Instruction delivery unconfirmed'],
   dispatch_failed: ['control', 'Worker instruction could not be sent'],
 };

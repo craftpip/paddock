@@ -37,3 +37,4 @@ docs/.vitepress/cache
 src/public/
 src/public/website
 docker-compose.override.yml
+src/live/captures/

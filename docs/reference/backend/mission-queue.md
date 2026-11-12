@@ -300,6 +300,14 @@ Run is an explicit control intent, separate from whether an instruction may be s
   is still there it refuses with `runner_quota_still_exhausted` (409) and sends nothing; once it
   is gone it records `usage_recovered`, leaves the stop through Pause, and continues as a normal
   Run (idle worker → start prompt; a turn the worker already began → adopted).
+- **Store says the worker is still working, but nothing runs the turn:** on an explicit Run, a
+  turn that reads `working` in the store, has not moved for 2 minutes (`WORKER_STALL_MS`), and
+  whose live pane does not show the driver's busy marker (`tuiBusyPattern`; opencode's
+  `esc interrupt`, present for exactly as long as a turn runs) is treated like a dead pane: not
+  adopted, not blocking, recorded as `worker_stalled`. The write boundary (`beforeWrite`) accepts
+  that same abandoned turn only while it is unchanged (same input, same `progressAt`); any
+  progress or new input withholds the send. This is the turn a provider quota error leaves
+  behind: opencode never marks the step complete. The watcher never applies this on its own.
 
 A pane that is already gone is never adopted as a working turn.
 

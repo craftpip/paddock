@@ -103,6 +103,7 @@ async function ensureRunnerSession(id, { actor = null, origin = 'human', created
  *  an actionable reason and leave the runner paused, never `finished`. Fixing
  *  the file and pressing Run again must work without creating another
  *  runner/session. */
+const WORKER_STALL_MS = 2 * 60 * 1000;
 async function startRunner(id, { actor = null } = {}) {
   let runner = getRunner(id);
   if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
@@ -228,6 +229,25 @@ async function startRunner(id, { actor = null } = {}) {
       const paneAtStart = await padTmux.paneState(project.agent_name, session.tmux_id);
       workerWasGone = !paneAtStart.live || paneAtStart.tuiAlive === false;
     } catch { /* unreadable: assume it is there, the gates below still apply */ }
+  }
+  // A turn the store calls "working" that nothing is running: the pane is live
+  // and idle (the driver's busy marker is absent) and the store has not moved
+  // for STALL_MS. The case that produced it: a provider quota error ended
+  // opencode's step without the store ever marking it complete, so the turn
+  // reads "working" for ever and every Run refused "worker not idle". On an
+  // EXPLICIT Run it is treated like a dead pane — not adopted, not blocking.
+  // The watcher never does this on its own.
+  if (!workerWasGone && session?.agent_session_id) {
+    const busyRe = require('../drivers').getDriver(agent.agent_type).tuiBusyPattern;
+    const turnNow = busyRe ? agentStore.readTurn(agent, session.agent_session_id) : null;
+    const quietFor = turnNow?.progressAt ? Date.now() - Date.parse(turnNow.progressAt) : 0;
+    if (turnNow?.state === 'working' && quietFor > WORKER_STALL_MS) {
+      const shot = await padTmux.captureScreen(project.agent_name, session.tmux_id, 20).catch(() => null);
+      if (shot?.live && !busyRe.test(shot.text)) {
+        workerWasGone = true;
+        runnerHistory.record(getRunner(id), 'worker_stalled', { actor: actor || 'user', reason: `The store says the last turn is still working, but it has not moved for ${Math.round(quietFor / 60000)} min and the pane shows no running turn.` });
+      }
+    }
   }
   if (runtime.state === 'paused' && queue.aggregate.state === 'in progress' && session?.agent_session_id && !workerWasGone) {
     const activeTurn = agentStore.readTurn(agent, session.agent_session_id);

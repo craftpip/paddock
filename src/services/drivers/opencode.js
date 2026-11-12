@@ -61,6 +61,12 @@ const OPENCODE = {
   // itself matches; a line-ending-only pattern refused every send there.
   tuiReadyPattern: /ctrl\+p\s+commands|commands\s*$/m,
 
+  /** The TUI is mid-turn: opencode draws `esc interrupt` in its status line
+   *  for exactly as long as a turn runs (and shows it during a quota retry).
+   *  Used only to judge a store turn that claims "working" but has not moved:
+   *  if the pane is live and this is absent, nothing is running it. */
+  tuiBusyPattern: /esc\s+interrupt/,
+
   /** No gateway/onboard flow — opencode config is created on first run. */
   setupSteps: [],
 

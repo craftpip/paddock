@@ -458,6 +458,9 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
 ## Workflow Commands
 
 - **Whole test suite:** `docker exec paddock npm test` (~90 s, one process per file).
+- **Live agent suite (real opencode in a PAD's tmux, spends a few turns):**
+  `docker exec -e LIVE_PAD=pad-dev paddock npm run test:live`. Run it after any change to the
+  send/receipt/turn/relaunch path; see `docs/reference/operations/testing.md` § Live Agent Suite.
 - **Mutation control** (prove a test bites): `scripts/mutate.sh <file under src/>
   '<sed expr>' <test> [more tests]`. It mutates a COPY in the container, checks
   the mutation landed and still parses, runs the tests, and confirms the original

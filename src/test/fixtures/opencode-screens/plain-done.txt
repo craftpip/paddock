@@ -1,0 +1,21 @@
+
+  ┃
+  ┃  Reply with exactly PONG-B1BFFF and nothing else. Do not use any tools.
+  ┃
+
+     PONG-B1BFFF
+
+     ▣  Build · Big Pickle · 1.4s
+
+
+
+
+
+
+
+  ┃
+  ┃
+  ┃
+  ┃  Build · Big Pickle OpenCode
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+   /root/.opencode/workspace/paddock-live-f2d520                                  8.5K (4%)  ctrl+p commands

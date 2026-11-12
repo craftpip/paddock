@@ -1,0 +1,21 @@
+  ┃  word136 word137 word138 word139. Reply with exactly LONG-BA94DC and nothing else. Do not use any tools.
+  ┃
+
+     + Thought: 133ms
+
+     LONG-BA94DC
+
+     ▣  Build · Big Pickle · 881ms
+
+  ┃
+  ┃  Count slowly from 1 to 40, one number per line, then write DONE-4861A2. Do not use any tools.
+  ┃
+
+     ▣  Build · Big Pickle
+
+  ┃
+  ┃
+  ┃
+  ┃  Build · Big Pickle OpenCode
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+   ■■■■⬝⬝⬝⬝  esc interrupt                                                        9.0K (4%)  ctrl+p commands

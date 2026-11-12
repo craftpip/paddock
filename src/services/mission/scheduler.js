@@ -555,7 +555,14 @@ async function deliverRunnerInstruction(id, session, project, agent, queue, mess
   const beforeWrite = () => {
     if (!owns() || getSession(session.id)?.locked) throw new MissionError('runner_dispatch_superseded', 'Dispatch cancelled by Pause/Close, lock or newer operation', 409);
     const turn = agentStore.readTurn(agent, session.agent_session_id);
-    if (turn.state !== 'idle' || (turn.outcome === 'error' && kind !== 'start') || turn.userId !== baselineTurn.userId) throw new MissionError('runner_worker_not_idle', 'Worker started another turn — instruction withheld', 409);
+    // The gate accepted an ABANDONED turn (pane gone, or stalled: "working" in
+    // the store with nothing running it) as interrupted. At the write boundary
+    // that same turn still reads "working" — accept it only while it is
+    // exactly the one the gate judged (same input, not moved since). Any
+    // progress or a new input means something is running after all: withhold.
+    const sameAbandoned = !!baselineTurn.interruptedBy && turn.state === 'working'
+      && turn.userId === baselineTurn.userId && turn.progressAt === baselineTurn.progressAt;
+    if (!sameAbandoned && (turn.state !== 'idle' || (turn.outcome === 'error' && kind !== 'start') || turn.userId !== baselineTurn.userId)) throw new MissionError('runner_worker_not_idle', 'Worker started another turn — instruction withheld', 409);
     // Plan 113: the DB is the authority and `QUEUE.md` is a GENERATED projection.
     // The old check compared the file's content hash against the queue revision
     // — two different kinds of value (a sha256 vs a counter), so it was ALWAYS

@@ -1,0 +1,11 @@
+root@cebde2e06fb7:~/.opencode/workspace/paddock-live-f2d520$ opencode -s ses_e2e31cb1effe1OFJfZGHgg1lpa
+                                   ▄
+  █▀▀█ █▀▀█ █▀▀█ █▀▀▄ █▀▀▀ █▀▀█ █▀▀█ █▀▀█
+  █  █ █  █ █▀▀▀ █  █ █    █  █ █  █ █▀▀▀
+  ▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀
+
+  Session   PONG-B1BFFF
+  Continue  opencode -s ses_e2e31cb1effe1OFJfZGHgg1lpa
+
+root@cebde2e06fb7:~/.opencode/workspace/paddock-live-f2d520$ ^C
+root@cebde2e06fb7:~/.opencode/workspace/paddock-live-f2d520$

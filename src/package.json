@@ -6,7 +6,8 @@
     "start": "node app.js",
     "dev": "node --watch app.js",
     "dev:watch": "nodemon --watch . --ext js,ejs,json app.js",
-    "test": "node test/run-all.mjs"
+    "test": "node test/run-all.mjs",
+    "test:live": "node --test --test-concurrency=1 live/opencode.live.test.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
