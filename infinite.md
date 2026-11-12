@@ -28,14 +28,20 @@ one is a single reply away from done.
 Everything from plan 52 was decided and shipped by 2026-10-07 (exec opt-in,
 store-backed `busy`, `pad_help` as the onboarding artifact, docs absorbed, plan
 file deleted). **MCP token rotation: not wanted (user, 2026-11-12) — local setup
-only.** One optional item remains:
+only.** Two items remain:
 
+- **Live codex/claude runner proof (plan 126 Phase 4, needs your OK).** The
+  codex/claude turn readers are verified against real transcripts on this host,
+  but no runner has driven a codex or claude PAD end to end yet; that needs a PAD
+  with a working login and spends usage. This also covers the next item.
 - **Plan 52 C2 model-independence proof (optional, deferred).** The orchestration
   loop was proven twice on opencode pads; the "works on a second model" half needs
   a codex or claude pad created and costs a subscription spend. Say "run C2 on
   codex/claude" to do it.
 
 ## Queue
+
+- [ ] plans/126-codex-fresh-conversation-adoption.md — Phases 1–3 buildable now; Phase 4 live proof needs a codex/claude PAD login (spend) — ask first
 
 ## Done
 

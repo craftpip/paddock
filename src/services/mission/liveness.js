@@ -16,6 +16,7 @@ Object.assign(exports, {
   withLiveSessions,
   withAgentBusy,
   withAgentBusyProjects,
+  withFolderState,
 });
 
 const { getDb } = require('../db');
@@ -172,6 +173,44 @@ function syncEnded(sessions) {
       }
     }
   } catch {}
+}
+
+// Folder answers per PAD, cached briefly: the Mission list polls, and a
+// folder vanishing is rare enough that a 15s-old answer is still the truth.
+const FOLDER_TTL_MS = 15000;
+const folderCache = new Map(); // vmName -> { at, key, map }
+
+/** Stamp `folderExists` on every project: `true`/`false` when the PAD answered,
+ *  and LEFT OFF when it could not be asked (stopped PAD, exec error). Absent
+ *  means unknown, so the page must not draw a "missing" badge for it — a
+ *  stopped PAD is not a deleted folder. One exec per PAD, not per project. */
+async function withFolderState(projects) {
+  const byPad = new Map();
+  for (const p of projects) {
+    if (!p.folder) continue;
+    if (!byPad.has(p.agent_name)) byPad.set(p.agent_name, new Set());
+    byPad.get(p.agent_name).add(p.folder);
+  }
+  const answers = new Map();
+  await Promise.all([...byPad].map(async ([vmName, folders]) => {
+    const key = [...folders].sort().join('\0');
+    const hit = folderCache.get(vmName);
+    if (hit && hit.key === key && Date.now() - hit.at < FOLDER_TTL_MS) { answers.set(vmName, hit.map); return; }
+    try {
+      if (typeof padTmux.foldersExist !== 'function') return;
+      const map = await padTmux.foldersExist(vmName, [...folders]);
+      folderCache.set(vmName, { at: Date.now(), key, map });
+      answers.set(vmName, map);
+    } catch {
+      folderCache.delete(vmName);
+    }
+  }));
+  for (const p of projects) {
+    const map = answers.get(p.agent_name);
+    if (map && map.has(p.folder)) p.folderExists = map.get(p.folder);
+    else delete p.folderExists;
+  }
+  return projects;
 }
 
 /** Stamp `live` (+ kind/cwd, plan 62 1b/1e) on every session of every project,

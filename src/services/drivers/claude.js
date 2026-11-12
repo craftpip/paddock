@@ -37,11 +37,19 @@ const CLAUDE = {
   /** Mission (plan 53): coding model — gets projects and sessions. */
   mission: { supported: true },
 
+  /** Mission mints the conversation id itself (see `tuiLaunch.freshWithId`). */
+  mintConversationId: () => require('crypto').randomUUID(),
+
   /** TUI launch for a Mission session. Note claude's `-c` is directory-scoped:
    *  a project at a new folder legitimately has no "last conversation", so
    *  `continueLatest` is only meaningful for a folder claude has worked in. */
   tuiLaunch: {
     fresh: () => CLAUDE.tuiCommand,
+    /** A fresh conversation under an id Mission chose (`--session-id`, must be
+     *  a UUID). claude names the transcript after it, so the runner can find
+     *  the exact file from the first read instead of guessing which new
+     *  conversation in the folder is this pane's. */
+    freshWithId: ({ sessionId }) => `${CLAUDE.tuiCommand} --session-id ${safeSessionId(sessionId)}`,
     resume: ({ sessionId }) => `${CLAUDE.tuiCommand} -r ${safeSessionId(sessionId)}`,
     continueLatest: () => `${CLAUDE.tuiCommand} -c`,
   },

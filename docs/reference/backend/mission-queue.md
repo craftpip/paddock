@@ -297,11 +297,32 @@ A pane that is already gone is never adopted as a working turn.
 
 ### Worker Observation by Driver
 
-Only opencode exposes an exact turn signal: `agentStore.readTurn` reads the conversation's own
-SQLite store by primary key (about 2 ms). For codex and claude, turn, usage and receipt reads
-return `unknown`, which withholds every automatic send; their JSONL stores give only a filename
-match and cost a full parse per read. No driver exposes compaction or provider errors in its
-store, so neither is inferred.
+`agentStore.readTurn` answers the same shape for all three coding drivers: `state`
+(`idle` / `working` / `unknown`), `userId` (an id that changes with every new input), `inputHash`
+(sha256 of the input text, trailing whitespace trimmed: the exact-receipt match) and
+`progressAt` / `completedAt`. `unknown` withholds every automatic send.
+
+| Driver | Store | Turn open → closed | Input id |
+|---|---|---|---|
+| opencode | `opencode.db`, by primary key (~2 ms) | newest assistant step `finish: stop` with `time.completed`; an `error` is an interrupted turn | message id |
+| codex | `rollout-*-<id>.jsonl` | `event_msg/task_started {turn_id}` → `task_complete` (idle) or `turn_aborted` (interrupted) for the same `turn_id` | `codex:<line>` of the `event_msg/user_message` |
+| claude | `<id>.jsonl` | a human `user` row → `system/turn_duration` (idle) or `[Request interrupted by user…]` (interrupted) | `claude:<uuid>` of that row |
+
+The codex and claude readers live in `services/jsonl-turn.js`. They find the transcript by the
+id in the FILE NAME only (never "the newest file"), and read incrementally: each file keeps its
+folded state and byte offset, so a 300 ms receipt poll parses only the appended bytes, and a
+half-written last line waits for the next read. A codex input comes from `event_msg/user_message`,
+never from `response_item` user messages, which carry injected context. A claude human input is a
+`type: user` row that is not `isMeta`, not `isSidechain` and carries no `tool_result`; slash
+command wrappers are skipped. claude writes `turn_duration` only from CLI 2.1.318, so on an older
+CLI an open claude turn is `unknown`, not `working`. An interrupted turn on any driver is `idle`
+with `outcome: 'error'`, which requires explicit recovery.
+
+Two limits remain. A fresh codex session has no conversation id until its first message creates
+the rollout file, so the runner cannot watch it yet (plan 126). And usage-exhaustion evidence from
+the store (`readUsageEvidence`) is still measured for opencode only; on codex and claude the
+screen notice (`provider-limit.js`) is the only exhaustion signal. No driver exposes compaction
+in its store, so it is not inferred.
 
 ## Projection Publication
 

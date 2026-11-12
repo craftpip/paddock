@@ -665,6 +665,11 @@ function readTurn(agent, sessionId) {
   try {
     if (typeof agent === 'string') agent = registry.getAgent(agent);
     if (!agent || !sessionId) return unknown('Worker conversation identity unavailable');
+    if (agent.agent_type === 'codex' || agent.agent_type === 'claude') {
+      // JSONL transcripts: see jsonl-turn.js for what each store records.
+      const spec = STORES[agent.agent_type];
+      return require('./jsonl-turn').readJsonlTurn(path.join(agent.workspace_root, spec.rel), agent.agent_type, sessionId);
+    }
     if (agent.agent_type !== 'opencode') return unknown(`Turn-completion observation unavailable for ${agent.agent_type}`);
     const located = locate(agent);
     if (!located.ok) return unknown('Worker store unavailable');
@@ -697,4 +702,14 @@ function readTurn(agent, sessionId) {
   } catch { return unknown('Worker turn state unreadable'); }
 }
 
-module.exports = { StoreError, STORES, locate, readActivity, readTurn, readUsageEvidence };
+/** Whether a JSONL-store conversation has a transcript yet: true / false, or
+ *  null when it cannot be told (other drivers, unreadable store). */
+function hasConversation(agent, sessionId) {
+  try {
+    if (typeof agent === 'string') agent = registry.getAgent(agent);
+    if (!agent || !STORES[agent.agent_type] || STORES[agent.agent_type].kind !== 'jsonl') return null;
+    return require('./jsonl-turn').hasTranscript(path.join(agent.workspace_root, STORES[agent.agent_type].rel), agent.agent_type, sessionId);
+  } catch { return null; }
+}
+
+module.exports = { StoreError, STORES, locate, readActivity, readTurn, readUsageEvidence, hasConversation };

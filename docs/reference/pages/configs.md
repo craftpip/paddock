@@ -50,9 +50,13 @@ A variable in `.env` that no group names is returned by the API but not rendered
   It does not re-read `/api/env`, because after a restart or recreate the server is on its way
   down. See [Client Conventions](../components/client-conventions.md#drafts-and-unsaved-edits).
 - Leaving the page with unsaved edits is guarded (`useDirtyNavigation`).
-- Secrets arrive masked (see below). The eye toggle reveals what is in the field — the mask, or a
-  new value you typed — never the stored secret. A secret row you do not touch is not dirty, so
-  the mask is never written back.
+- Secrets arrive masked (see below) and are never sent to the browser, so there is nothing to
+  reveal until a new value is typed. An untouched secret field is empty with a
+  `•••••••• (set — type to replace)` placeholder, and its eye button is disabled with a tooltip
+  saying so; once you type, the eye shows and hides the NEW value only. Clearing what you typed
+  returns the row to unchanged. (The field used to hold the mask itself, so typing appended to it
+  and saved `••••••••abc` over the real secret.) The server also refuses any secret value that
+  contains the mask, with a 400.
 
 ## API Endpoints
 

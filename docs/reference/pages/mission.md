@@ -59,7 +59,15 @@ The TUI command is always server-side, from the driver's `tuiLaunch`, never from
 |---|---|---|---|
 | opencode | `opencode` | `opencode -s <id>` | `opencode -c` |
 | codex | `codex -C <cwd>` | `codex resume <id>` | `codex resume --last` |
-| claude | `claude` | `claude -r <id>` | `claude -c` |
+| claude | `claude --session-id <id>` | `claude -r <id>` | `claude -c` |
+
+A fresh start must not leave the row without a conversation id, or the runner cannot find its
+transcript. opencode creates its conversation through its server first and launches into it;
+claude has the id **minted** (`mintConversationId`, a UUID) and launched with
+`tuiLaunch.freshWithId`. A claude transcript only exists once its first message is written, so a
+relaunch or restart before that starts fresh under the same id; after it, or when the store
+cannot be read, it resumes (`relaunchCommand`, `agentStore.hasConversation`). codex has no flag to
+choose an id, so a fresh codex row stays id-less until plan 126 adopts it.
 
 A session start creates the `msn-<8 hex>` tmux session with `-c <project folder>`, types the
 command with `send-keys`, and inserts the row. A resume stores the source conversation in
@@ -114,7 +122,7 @@ Every element carries a stable `msn-*` class so a UI instruction can name the ex
 |---|---|
 | Shell | `msn-page` `msn-cols` `msn-col-shell` `msn-splitter` `msn-splitter-1` `msn-splitter-2` |
 | Any column | `msn-col` `msn-col-toolbar` `msn-col-header` `msn-col-title` `msn-col-count` `msn-col-body` `msn-empty` `msn-empty-title` `msn-empty-text` `msn-error-bar` |
-| Col 1 | `msn-col-projects` `msn-project-row` (+`msn-row-selected`) `msn-project-name` `msn-project-meta` `msn-project-counts` `msn-live-dot` `msn-project-actions` `msn-btn-new-project` `msn-btn-edit` `msn-btn-delete` `msn-btn-retry` `msn-btn-collapse` |
+| Col 1 | `msn-col-projects` `msn-project-row` (+`msn-row-selected`) `msn-project-name` `msn-badge-folder-missing` `msn-project-meta` `msn-project-counts` `msn-live-dot` `msn-project-actions` `msn-btn-new-project` `msn-btn-edit` `msn-btn-delete` `msn-btn-retry` `msn-btn-collapse` |
 | Col 1 rail | `msn-col-projects-rail` `msn-col-rail` `msn-rail-head` `msn-rail-body` `msn-rail-btn` `msn-avatar` `msn-avatar-on` `msn-btn-expand` `msn-btn-new-project-mini` |
 | Col 2 | `msn-col-sessions` `msn-sessions` `msn-sessions-body` `msn-new-split` `msn-btn-new-session` `msn-btn-new-caret` `msn-new-menu` `msn-new-menu-infinite` `msn-project-folder` `msn-btn-subfolders` `msn-cap-note` `msn-group-sessions` `msn-group-count` `msn-dot-legend` `msn-history-errors` `msn-history-error` |
 | Col 2 rows | `msn-row-slot` `msn-session-row` (+`msn-row-selected`, `msn-row-shell`, `msn-row-infinite`) `msn-session-dot` `msn-session-label` `msn-session-id` `msn-row-project` `msn-row-actions` `msn-btn-popout` `msn-btn-lock` `msn-btn-runner-config` `msn-btn-runnerify` `msn-btn-close` `msn-history-row` `msn-history-title` `msn-history-meta` `msn-history-hint` |
@@ -129,6 +137,14 @@ the file for the full set.
 
 A project row shows the name, `<PAD> · <folder>`, and `N live · M sessions` with a live dot.
 Projects are re-read on the 15s poll, so one created in another tab appears.
+
+A **folder missing** badge (`msn-badge-folder-missing`, tooltip naming the folder and PAD) marks a
+project whose folder no longer exists inside its PAD. `GET /api/mission/projects` stamps
+`folderExists` through `mission.withFolderState`: one `pad-tmux.foldersExist` exec per PAD (not
+per project), cached for 15 seconds. The field is `true` or `false` only when the PAD answered; a
+stopped PAD or a failed exec leaves it off, and the page draws nothing for an absent field —
+"could not ask" is not "missing". A session start still checks the folder itself and refuses with
+`mission_folder_missing`.
 
 ### Project Dialog
 
@@ -318,8 +334,11 @@ actions).
   an execution state of `projection_error`, `awaiting_receipt` or `held`), so collapse cannot hide
   the only evidence needed to fix it.
 - **Feedback lives in the panel.** Queue actions write one per-runner `operationFeedback` record
-  (severity plus message) in the store, rendered as `msn-queue-feedback` at the top of the
-  expanded body, wrapped in full, with **Dismiss**. `RunnerControls` holds controls only. A
+  (severity plus message) in the store, rendered as `msn-queue-feedback` with **Dismiss**,
+  wrapped in full. The feedback and the queue warnings (`msn-queue-warning`, e.g. more than one
+  plan in progress) are one block: at the top of the body while expanded, and directly under the
+  header row (`msn-queue-notices-collapsed`) while collapsed, so collapsing never hides an
+  unresolved warning. `RunnerControls` holds controls only. A
   revision conflict reads "The queue changed elsewhere — reload and retry" with **Reload queue**.
   An awaiting-receipt delivery offers **Reconcile** ("No resend will be made"), never a blind
   resend.
@@ -357,8 +376,12 @@ reload works without the opener.
 - **Geometry.** The popup saves `outerWidth`, `outerHeight`, `screenX` and `screenY` every second,
   on `resize` and on `pagehide`, to `localStorage['pad-mission-popout-v1:<userId>']`. One record
   is shared by all session popouts. On open, non-finite values fall back to 980x720 at (80, 60);
-  width and height are floored at 480 and 360; offsets are kept as saved, including negative ones
-  for monitors left of or above the primary. The browser may still adjust the requested placement.
+  width and height are floored at 480 and 360. The result is then fitted to the opener's screen
+  (`screen.availLeft/availTop/availWidth/availHeight`): a size larger than the screen shrinks to
+  it, and a position that would leave part of the window off it moves back on. A negative origin
+  is kept when that display really starts there (a monitor left of or above the primary); one
+  saved on a monitor that is no longer attached is pulled onto the current screen. With no
+  readable screen the saved bounds are used as they are.
 
 ## Mission Terminal Contract
 
@@ -417,7 +440,6 @@ check. Runner routes are in
 
 ## Not Built
 
-- A per-project folder-missing badge in col 1; a missing folder is reported when a session starts.
 - Plan 53's `mission_notes` / `mission_checklist` tables: superseded by plan files
   ([Backend Services → Plans](../backend/services.md#plans-servicesplansjs--plan-64)).
 - The original busy probe through opencode's `GET /session/status`: replaced by per-conversation

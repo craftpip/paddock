@@ -73,6 +73,7 @@ module.exports = function register(app, ctx) {
       mission
         .withLive(projects)
         .then((live) => mission.withAgentBusyProjects(live))
+        .then((live) => mission.withFolderState(live))
         .then(
           (live) => res.json({ projects: live }),
           () => res.json({ projects }) // liveness is decoration; never fail the list on it
@@ -148,7 +149,15 @@ module.exports = function register(app, ctx) {
       // Kill the project's tmux sessions before the rows go, so deleting a
       // project can never leave an orphan TUI running in the PAD. A PAD that is
       // already gone makes killSession a no-op by design.
-      Promise.all(
+      //
+      // The project's runners go first, through the same removal a runner's own
+      // Remove uses: deleting a project IS an explicit removal of every runner
+      // configuration in it, so each one's `destroy` callback is recorded (from
+      // the saved script, while the project row still exists to name it) — a
+      // bare cascade dropped the rows and the callback never fired.
+      const actor = missionActorFor(req);
+      mission.removeProjectRunners(project.id, { actor })
+        .then(() => Promise.all(
         mission.listSessions({ projectId: project.id }).map((s) =>
           // No actor passed: this is the PLATFORM tearing a project's sessions
           // down as a side effect of deleting it, not a human closing each one.
@@ -156,7 +165,7 @@ module.exports = function register(app, ctx) {
           // `user:` row here would put a name on a decision the user never made.
           mission.closeSession(s.id).catch(() => {})
         )
-      ).then(() => {
+      )).then(() => {
         mission.deleteProject(project.id);
         res.json({ ok: true });
       }, (e) => missionFail(res, e));

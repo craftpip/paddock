@@ -5,6 +5,7 @@
 // Exported before anything is required: function declarations are hoisted, so a
 // sibling module that requires this one mid-cycle already sees every function.
 Object.assign(exports, {
+  removeProjectRunners,
   reconcileQuotaReceipt,
   resumeQuotaRecovery,
   ensureRunnerSession,
@@ -36,7 +37,7 @@ const { getProject } = require('./projects');
 const { getSession } = require('./sessions');
 const { startSession, restartSession, relaunchTui, ensureRunnerMcp } = require('./session-lifecycle');
 const { sendText } = require('./session-io');
-const { getRunner, getRunnerForSupervision, setRunnerReason, syncQueuePausedMarker, RUNNER_PAUSE_MODES, setRunnerEnabled, recordStopProvenance } = require('./runners');
+const { getRunner, listRunnersForProject, getRunnerForSupervision, setRunnerReason, syncQueuePausedMarker, RUNNER_PAUSE_MODES, setRunnerEnabled, recordStopProvenance } = require('./runners');
 const { effectivePromptTemplates, renderRunnerPrompt } = require('./runner-prompts');
 const { ensureRunnerIndex, canDispatch, acquireDispatchOwnership, deliverRunnerInstruction } = require('./scheduler');
 
@@ -605,6 +606,20 @@ async function removeRunner(id, { actor = null } = {}) {
     runnerCallbacks.pumpCallbackOutbox().catch((e) => console.error(`[callbacks] pump after destroy failed:`, e.message));
   }
   return { removed: true, queuePreserved: !!detachedQueue, queueRevision: detachedQueue?.revision ?? null };
+}
+
+/** Remove every runner of a project, one at a time, through `removeRunner`.
+ *  Deleting a project is an explicit removal of each runner configuration in
+ *  it, so each records its `destroy` callback — a bare foreign-key cascade
+ *  dropped the rows and no destroy ever ran. Called BEFORE the project row is
+ *  deleted, so the snapshot can still name the project and its folder. */
+async function removeProjectRunners(projectId, { actor = null } = {}) {
+  const removed = [];
+  for (const runner of listRunnersForProject(projectId)) {
+    await removeRunner(runner.id, { actor });
+    removed.push(runner.id);
+  }
+  return removed;
 }
 
 /** Reconcile durable desired publications before the watcher starts. A crash

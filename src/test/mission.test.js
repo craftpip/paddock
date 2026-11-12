@@ -612,6 +612,38 @@ describe('Mission - resuming a conversation', () => {
     assert.deepEqual(sent[1], 'claude -r cl-1');
   });
 
+  it('a fresh claude start mints its own conversation id and launches INTO it', async () => {
+    const cl = mission.createProject({ name: 'clf', agent: 'pad-msn-cl', folder: '/root/.claude/workspace' });
+    const { session } = await mission.startSession(cl.id, {});
+    assert.match(session.agent_session_id || '', /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      'the row carries the id from the first read, so the runner can find the exact transcript');
+    assert.deepEqual(sent, [`claude --session-id ${session.agent_session_id}`], 'fresh-with-id, never `-r` on an id with no transcript');
+  });
+
+  it('a claude relaunch before the first message starts fresh under the SAME id; after it, resumes', async () => {
+    const agentStore = require('../services/agent-store');
+    const realHas = agentStore.hasConversation;
+    try {
+      const cl = mission.createProject({ name: 'clr', agent: 'pad-msn-cl', folder: '/root/.claude/workspace' });
+      const { session } = await mission.startSession(cl.id, {});
+      padTmux.paneState = async () => ({ live: true, tuiAlive: false, cwd: '/root/.claude/workspace' });
+      agentStore.hasConversation = () => false;
+      sent = [];
+      await mission.relaunchTui(session.id);
+      assert.deepEqual(sent, [`claude --session-id ${session.agent_session_id}`]);
+      agentStore.hasConversation = () => true;
+      sent = [];
+      await mission.relaunchTui(session.id);
+      assert.deepEqual(sent, [`claude -r ${session.agent_session_id}`]);
+      agentStore.hasConversation = () => null;
+      sent = [];
+      await mission.relaunchTui(session.id);
+      assert.deepEqual(sent, [`claude -r ${session.agent_session_id}`], 'an unreadable store keeps resume');
+    } finally {
+      agentStore.hasConversation = realHas;
+    }
+  });
+
   it('comes back to the same conversation when the TUI has to be relaunched', async () => {
     const p = mission.createProject({ name: 'cp', agent: 'pad-msn-oc', folder: '/www1/craftpip.com' });
     const { session } = await mission.startSession(p.id, { agentSessionId: 'ses_abc' });

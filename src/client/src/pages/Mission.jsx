@@ -275,6 +275,16 @@ function ProjectRow({ project, selected, onSelect, onEdit, onDelete }) {
     >
       <div className="flex items-center gap-1.5">
         <span className={`msn-project-name truncate text-xs font-medium ${selected ? 'text-ink' : 'text-ink-dim'}`}>{project.name}</span>
+        {/* `false` only when the PAD answered and the folder is gone; an absent
+            field is "could not ask" (stopped PAD) and draws nothing. */}
+        {project.folderExists === false && (
+          <span
+            className="msn-badge-folder-missing shrink-0 rounded-full bg-warning-soft px-1.5 py-px text-[10px] font-medium text-warning"
+            title={`Folder ${project.folder} does not exist inside ${project.agent_name}. A session cannot start here until it is recreated or the project is edited.`}
+          >
+            folder missing
+          </span>
+        )}
         {/* The actions are revealed by `opacity-0` + `group-hover` /
             `focus-within` on the wrapper above, NOT by `hidden`. That matters:
             `display: none` children cannot take focus, so a keyboard user

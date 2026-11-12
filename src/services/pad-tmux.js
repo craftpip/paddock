@@ -166,6 +166,25 @@ async function folderExists(vmName, folder) {
   return r.code === 0;
 }
 
+/** Which of `folders` exist inside the PAD, in ONE exec (the Mission list's
+ *  missing-folder badge — a per-folder `folderExists` would be one exec per
+ *  project per poll). Prints one marked line per folder, in order. Throws when
+ *  the exec itself fails (PAD stopped, docker error): that is "could not
+ *  look", which the caller must report as unknown, never as missing. */
+async function foldersExist(vmName, folders) {
+  const list = [...new Set((folders || []).filter(Boolean).map(String))];
+  const out = new Map();
+  if (!list.length) return out;
+  const q = (f) => `'${f.replace(/'/g, `'\\''`)}'`;
+  const cmd = `for d in ${list.map(q).join(' ')}; do if [ -d "$d" ]; then echo PADDOCK_DIR=1; else echo PADDOCK_DIR=0; fi; done`;
+  const r = await padExec(vmName, cmd, { timeout: 15000, check: true });
+  // Only the marked lines count: a login shell's profile may print its own.
+  const lines = String(r.stdout || '').split(/\r?\n/).filter((l) => l.startsWith('PADDOCK_DIR=')).map((l) => l.slice(12));
+  if (lines.length !== list.length) throw new Error('foldersExist: unexpected probe output');
+  list.forEach((f, i) => out.set(f, lines[i].trim() === '1'));
+  return out;
+}
+
 async function hasSession(vmName, session) {
   const r = await tmuxExec(vmName, ['has-session', '-t', assertSessionName(session)], { timeout: 15000, check: false });
   return r.code === 0;
@@ -399,6 +418,7 @@ module.exports = {
   applyHooks,
   hasSession,
   folderExists,
+  foldersExist,
   createSession,
   sendText,
   sendKeys,

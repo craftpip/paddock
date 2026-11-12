@@ -167,6 +167,11 @@ module.exports = function register(app, ctx) {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return res.status(400).json({ error: `Invalid variable name: ${JSON.stringify(key).slice(0, 60)}` });
       if (/[\r\n\0]/.test(String(value))) return res.status(400).json({ error: `${key}: a value cannot contain a line break` });
     }
+    // The mask is what GET sends in place of a secret; it is never a value. A
+    // client that echoes it back (or types after it) would write the mask into
+    // .env and silently replace the real secret.
+    const echoed = Object.entries(vars).filter(([k, v]) => ENV_SECRET_KEYS.has(k) && String(v).includes('••••••••')).map(([k]) => k);
+    if (echoed.length) return res.status(400).json({ error: `${echoed.join(', ')}: that is the masked placeholder, not a value — type the new secret` });
     const locked = Object.keys(vars).filter((k) => ENV_LOCKED_KEYS.has(k));
     if (locked.length) {
       return res.status(400).json({ error: `Cannot modify locked variables: ${locked.join(', ')}` });

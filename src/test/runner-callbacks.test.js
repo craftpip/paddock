@@ -308,6 +308,28 @@ describe('plan 92 — init baseline and destroy recording (mission wiring)', () 
     assert.equal(fs.readFileSync(path.join(CBDIR, r.id, 'destroy.sh'), 'utf8'), 'echo destroy-snap\n', 'script file survives removal');
   });
 
+  it('deleting a project records destroy for its runner before the rows go', async () => {
+    const p = makeProject('doomed');
+    const a = await makeRunner(p.id, 'ra');
+    await mission.saveRunnerCallbacks(a.id, { destroy: { script: 'echo a-gone\n', enabled: true } });
+    // The route's order: runners, then the project.
+    const removed = await mission.removeProjectRunners(p.id);
+    mission.deleteProject(p.id);
+    assert.deepEqual(removed, [a.id]);
+    assert.equal(mission.getRunner(a.id), undefined);
+    const rows = getDb().prepare("SELECT runner_id, project_name, script_body FROM runner_callback_outbox WHERE event = 'destroy' AND project_id = ?").all(p.id);
+    assert.equal(rows.length, 1, 'a deleted project fires its runner destroy exactly once');
+    assert.equal(rows[0].script_body, 'echo a-gone\n');
+    assert.equal(rows[0].project_name, 'doomed', 'the snapshot still names the deleted project');
+    // removeRunner pumped the outbox in the background; let that run finish so
+    // the executor suite below starts with every fleet slot free.
+    for (const start = Date.now(); Date.now() - start < 5000;) {
+      const left = getDb().prepare("SELECT COUNT(*) AS n FROM runner_callback_outbox WHERE status IN ('pending', 'running') AND project_id = ?").get(p.id).n;
+      if (!left) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  });
+
   it('removeRunner without a destroy script records nothing and stays quiet', async () => {
     const p = makeProject();
     const r = await makeRunner(p.id);

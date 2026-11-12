@@ -15,11 +15,14 @@ is `src/services/mission/runner-prompts.js`.
 | `plan_started` | A queue item is observed entering `in progress` | runner, item, attempt |
 | `plan_completed` | A queue item is observed reaching `done` | runner, item, attempt |
 | `usage_exhausted` | Provider usage exhaustion is confirmed for the bound conversation | runner, episode |
-| `destroy` | The runner is removed (`DELETE /api/mission/runners/:id`) | `runner:destroy` |
+| `destroy` | The runner is removed (`DELETE /api/mission/runners/:id`), or its project is deleted | `runner:destroy` |
 
 The dedup key is a `UNIQUE` column on `runner_callback_outbox`, so concurrent ticks or a restart
 cannot record an event twice. Pause, worker exit, session Close and webui shutdown fire nothing.
-Deleting a whole project removes its runners without recording `destroy`.
+Deleting a whole project removes each of its runners first, through the same `removeRunner` as
+a single Remove (`removeProjectRunners`), so each records its `destroy` while the project row
+still exists to name it in the snapshot; only then are the sessions closed and the project row
+deleted.
 
 `init` runs at most once per runner. Saving never executes, and the create dialog saves callbacks
 after the runner exists, so in practice `init` runs on the first tick after the script is enabled,

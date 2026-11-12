@@ -70,6 +70,8 @@ const LABELS = {
 }
 
 const SECRET_REVEAL_MAP = {}
+// What GET /api/env sends in place of every stored secret.
+const SECRET_MASK = '••••••••'
 
 function VarInput({ varDef, value, onChange, disabled }) {
   const meta = LABELS[varDef.key] || {}
@@ -136,24 +138,32 @@ function VarInput({ varDef, value, onChange, disabled }) {
   }
 
   if (inputType === 'secret') {
-    const revealed = SECRET_REVEAL_MAP[varDef.key]
+    // The server never sends a stored secret (GET /api/env returns SECRET_MASK
+    // in its place), so there is nothing to reveal until a new value is typed.
+    // The field shows empty with a "set" placeholder rather than the mask
+    // itself: typing into the mask appended to it and saved "••••••••abc".
+    // Clearing what was typed returns the field to "unchanged".
+    const unchanged = value === SECRET_MASK
+    const revealed = !unchanged && SECRET_REVEAL_MAP[varDef.key]
     return (
       <div className="relative">
         <Input
           type={revealed ? 'text' : 'password'}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
+          value={unchanged ? '' : value}
+          placeholder={unchanged ? '•••••••• (set — type to replace)' : undefined}
+          onChange={(e) => onChange(e.target.value === '' ? SECRET_MASK : e.target.value)}
           disabled={disabled}
           mono
-          className="pr-10"
+          className="cfg-secret-input pr-10"
         />
         <Button
           variant="ghost"
           size="sm"
           icon
           className="absolute right-1.5 top-1/2 -translate-y-1/2"
+          disabled={unchanged}
           onClick={() => { SECRET_REVEAL_MAP[varDef.key] = !SECRET_REVEAL_MAP[varDef.key]; onChange(value) }}
-          title={revealed ? 'Hide value' : 'Reveal value'}
+          title={unchanged ? 'A stored secret is never sent to the browser. Type a new value to replace it.' : revealed ? 'Hide the new value' : 'Show the new value'}
         >
           {revealed ? (
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M13.875 18.825A 10.05 10.05 0 0 1 12 19c-4.478 0-8.268-2.943-9.543-7a 9.97 9.97 0 0 1 1.563 -3.029m5.858.908a 3 3 0 1 1 4.243 4.243M9.878 9.878l4.242 4.242M9.878 9.878L3 3m6.878 6.878L21 21" /></svg>

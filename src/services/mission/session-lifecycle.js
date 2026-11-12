@@ -210,9 +210,20 @@ async function startSession(projectId, { label = '', origin = 'human', cols = 0,
     }
     startId = (await driver.createConversation(project.agent_name, project.folder, port)) || '';
   }
-  const launch = startId
-    ? driver.tuiLaunch.resume({ sessionId: startId, cwd: project.folder })
-    : driver.tuiLaunch.fresh({ cwd: project.folder });
+  // A driver that can be TOLD its conversation id (claude `--session-id`) gets
+  // one minted here, for the same reason: a fresh start must not be id-less.
+  // The id names a conversation that does not exist yet, so it is launched
+  // fresh-with-id, never `resume` (which would fail on an unknown id).
+  let minted = false;
+  if (!startId && typeof driver.mintConversationId === 'function' && typeof driver.tuiLaunch.freshWithId === 'function') {
+    startId = driver.mintConversationId();
+    minted = true;
+  }
+  const launch = minted
+    ? driver.tuiLaunch.freshWithId({ sessionId: startId, cwd: project.folder })
+    : startId
+      ? driver.tuiLaunch.resume({ sessionId: startId, cwd: project.folder })
+      : driver.tuiLaunch.fresh({ cwd: project.folder });
   const { session, deduped } = insertSession(project.id, { label, origin, agentSessionId: startId, createdBy, idempotencyKey: key });
   // The sibling committed between the check above and this insert. Its pane is
   // already being brought up, so this call must not bring up a second one in the
@@ -234,6 +245,20 @@ async function startSession(projectId, { label = '', origin = 'human', cols = 0,
   return { session: getSession(session.id), state };
 }
 
+/** The command that brings a row's conversation back. A minted claude id
+ *  names a conversation that only exists once its first message is written,
+ *  so a relaunch before that must start it fresh under the SAME id —
+ *  `claude -r <id>` on an id with no transcript fails. "Absent" is acted on
+ *  only when the store positively says so; an unreadable store keeps resume. */
+function relaunchCommand(driver, project, conversationId) {
+  if (!conversationId) return driver.tuiLaunch.fresh({ cwd: project.folder });
+  if (typeof driver.tuiLaunch.freshWithId === 'function'
+    && require('../agent-store').hasConversation(project.agent_name, conversationId) === false) {
+    return driver.tuiLaunch.freshWithId({ sessionId: conversationId, cwd: project.folder });
+  }
+  return driver.tuiLaunch.resume({ sessionId: conversationId, cwd: project.folder });
+}
+
 /** Re-launch the TUI in a session whose TUI exited (the pane dropped back to
  *  the shell). Refuses when a TUI is already running — retyping the command
  *  would start a second conversation in the same pane. */
@@ -248,9 +273,7 @@ async function relaunchTui(sessionId, { actor = null, beforeLaunch = null } = {}
   }
   // Back to the SAME conversation when the row remembers one — relaunching a
   // resumed session into a fresh TUI would quietly orphan the history.
-  const launch = session.agent_session_id
-    ? driver.tuiLaunch.resume({ sessionId: session.agent_session_id, cwd: project.folder })
-    : driver.tuiLaunch.fresh({ cwd: project.folder });
+  const launch = relaunchCommand(driver, project, session.agent_session_id);
   // The pane is not always rooted at the project folder: a tmux session that
   // was killed and then recreated (a terminal attaching to it re-creates it)
   // comes up in the PAD's default directory, and the agent would quietly work
@@ -292,9 +315,7 @@ async function restartSession(sessionId, { actor = null, beforeLaunch = null } =
   if (beforeLaunch) beforeLaunch();
   if (state.live) await padTmux.killSession(vmName, session.tmux_id);
   await padTmux.createSession(vmName, session.tmux_id, { cwd: project.folder });
-  const launch = session.agent_session_id
-    ? driver.tuiLaunch.resume({ sessionId: session.agent_session_id, cwd: project.folder })
-    : driver.tuiLaunch.fresh({ cwd: project.folder });
+  const launch = relaunchCommand(driver, project, session.agent_session_id);
   if (beforeLaunch) beforeLaunch();
   await padTmux.sendCommand(vmName, session.tmux_id, launch);
   touchSession(session.id);

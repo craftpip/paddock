@@ -295,6 +295,41 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
     }
   }
 
+  // Operation feedback and queue warnings: shown in the body when the queue is
+  // open, and under the header when it is collapsed, so collapsing never hides
+  // an unresolved warning.
+  const notices = (operationFeedback || summary?.warnings?.length > 0) ? (
+    <>
+      {/* Centralized operation feedback (plan 98 §Phase 1) */}
+      {operationFeedback && (
+        <div className={cx('msn-queue-feedback mb-3 flex items-center gap-2 rounded-control px-3 py-2 text-xs',
+          operationFeedback.severity === 'error' ? 'bg-danger/10 text-danger' :
+          operationFeedback.severity === 'warning' ? 'bg-warning/10 text-warning' :
+          'bg-success-soft text-success')}>
+          <span className="flex-1 whitespace-pre-wrap break-words">{operationFeedback.message}</span>
+          <Button
+            variant="ghost"
+            size="bare"
+            onClick={() => { useMission.getState().clearOperationFeedback(runner.id) }}
+            className="msn-queue-feedback-dismiss shrink-0 text-[11px]"
+          >
+            Dismiss
+          </Button>
+        </div>
+      )}
+      {/* Queue warnings (e.g. multiple in-progress items) */}
+      {summary?.warnings?.length > 0 && (
+        <div className="msn-queue-warning mb-3 flex gap-2 rounded-control bg-warning-soft px-3 py-2 text-xs text-warning" data-testid="queue-warning">
+          {summary.warnings.map((w, i) => (
+            <span key={i} className="flex-1 whitespace-pre-wrap break-words">
+              {w.message}
+            </span>
+          ))}
+        </div>
+      )}
+    </>
+  ) : null
+
   const headerWord = execution?.label || 'Loading runner state'
 
   return (
@@ -374,35 +409,13 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
 
       {(!collapsed || historyOpen) && <RunnerHistory key={runner.id} runnerId={runner.id} active={historyOpen} expanded={expanded} />}
 
+      {collapsed && !historyOpen && notices && (
+        <div className="msn-queue-notices-collapsed mx-auto w-full max-w-3xl px-4 pt-2">{notices}</div>
+      )}
+
       {collapsed || historyOpen ? null : (
         <div id="msn-runner-queue" role="tabpanel" aria-labelledby="msn-queue-tab" className={cx('msn-queue-body mx-auto w-full max-w-3xl px-4 pb-3 pt-3', panelExpanded && 'flex min-h-0 flex-1 flex-col')}>
-          {/* Centralized operation feedback (plan 98 §Phase 1) */}
-          {operationFeedback && (
-            <div className={cx('msn-queue-feedback mb-3 flex items-center gap-2 rounded-control px-3 py-2 text-xs',
-              operationFeedback.severity === 'error' ? 'bg-danger/10 text-danger' :
-              operationFeedback.severity === 'warning' ? 'bg-warning/10 text-warning' :
-              'bg-success-soft text-success')}>
-              <span className="flex-1 whitespace-pre-wrap break-words">{operationFeedback.message}</span>
-              <Button
-                variant="ghost"
-                size="bare"
-                onClick={() => { useMission.getState().clearOperationFeedback(runner.id) }}
-                className="msn-queue-feedback-dismiss shrink-0 text-[11px]"
-              >
-                Dismiss
-              </Button>
-            </div>
-          )}
-          {/* Queue warnings (e.g. multiple in-progress items) */}
-          {summary?.warnings?.length > 0 && (
-            <div className="msn-queue-warning mb-3 flex gap-2 rounded-control bg-warning-soft px-3 py-2 text-xs text-warning" data-testid="queue-warning">
-              {summary.warnings.map((w, i) => (
-                <span key={i} className="flex-1 whitespace-pre-wrap break-words">
-                  {w.message}
-                </span>
-              ))}
-            </div>
-          )}
+          {notices}
           {/* Canonical execution state and server-provided reason */}
           {execution?.banner && (
             <p className={cx('msn-queue-paused mb-2 text-xs', execution.banner.tone === 'warning' ? 'text-warning' : 'text-ink-dim')}>
