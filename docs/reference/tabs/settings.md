@@ -16,11 +16,20 @@ once per change set.
 
 ### 0. Stale network peer warning (conditional)
 
-Amber banner at the top when the compose routes through a `container:` peer
-that was recreated (docker still points at the old deleted container) or is
-stopped. Shows a **Recreate to fix** button (`POST /api/agents/:name/recreate`)
-to rebind to the current peer. Only visible when network health is `stale` or
-`peer-stopped`.
+Amber banner at the top when `networkHealth` (see
+[Network peer truth](../backend/services.md#network-peer-truth))
+reports a problem. Each state has its own title and advice, because they need different actions:
+
+| `networkHealth` | Banner says | Button |
+|-----------------|-------------|--------|
+| `staleBinding` | the named peer is running and needs nothing; this pad is bound to an older, deleted peer container | **Recreate to fix** |
+| `stale` | the peer was recreated since this container was made; starting fails with "No such container" | **Recreate to fix** |
+| `peer-stopped` | the peer exists but is stopped; start it first, then recreate this agent | none |
+| `checked: false` | "Network health could not be checked", with the backend's `reason` | none — nothing is known, so nothing is advised |
+
+**Recreate to fix** calls `POST /api/agents/:name/recreate` to rebind to the current peer. The
+banner keys off an explicit list of states, so a new backend state must be added here too or the
+pad silently stops warning.
 
 ### 1. Container Info (read-only + popup)
 

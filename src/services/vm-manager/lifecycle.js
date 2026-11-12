@@ -256,8 +256,8 @@ async function createVm(name, options = {}) {
 
   // Project image (plan 41 item 10): build the workspace devcontainer's
   // `build`/`image` as `paddock-proj-<name>:latest` BEFORE the compose build so
-  // the build-commands box can `FROM paddock-proj-... AS project` +
-  // `COPY --from=...`. Best-effort: a workspace without a devcontainer build
+  // the build-commands box can `COPY --from=paddock-proj-<name>:latest ...` by
+  // tag (an `AS` alias does not work — lesson O39). Best-effort: a workspace without a devcontainer build
   // silently skips; a failed build aborts the create job visibly.
   if (wsMount && devcontainer.hasDevContainer(containerViewOf(wsMount.host) || '')) {
     onStep('project-image', 'start', `Build project image for ${name}`);

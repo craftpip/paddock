@@ -3,7 +3,7 @@
 Routes and query parameters identify the view you opened. Browser history restores that view;
 it does not repeat a save, start a worker, send a prompt, approve a permission or run a script.
 
-> Last updated: 2026-10-19
+> Last updated: 2026-11-12
 
 ## State
 
@@ -24,7 +24,8 @@ Selecting an unchanged view creates no entry.
 | Mission terminal | `session`, independent of the listing project |
 | Saved conversation | `conversation` and its owner `terminalProject` |
 | Runner editor | `popup`, `section`, `prompt`, `event` |
-| Queue | `queue=open\|closed`; add/resolve popup descriptors |
+| Queue | `queue=open\|closed` (absent = open; open hides the terminal); add/resolve popup descriptors |
+| Mission pop-out | `/mission/session/:sessionId`, plus `queue`; window geometry is a preference, not URL state |
 | Plan picker | `planQ` search, `planAll=1` |
 | Agent workspace | Existing `scope` and `path`; file and move popups |
 | Container logs | Agent logs route and `tail=50\|100\|500\|1000` |
@@ -103,3 +104,4 @@ cannot become return navigation. Authentication restoration does not replay acti
 
 - [Technical reference map](../../README.md)
 - [UI conventions](ux.md)
+- [Mission Page](../pages/mission.md)

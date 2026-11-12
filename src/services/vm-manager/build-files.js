@@ -155,14 +155,16 @@ function writePostAttachScript(name, text) {
 
 /** Tag of a pad's project image: `paddock-proj-<name>:latest`, built once from
  *  the workspace devcontainer's `build`/`image` so the build-commands box can
- *  `FROM paddock-proj-<name>:latest AS project` / `COPY --from=…`. The agent's
+ *  `COPY --from=paddock-proj-<name>:latest …` / `RUN --mount=from=…` by tag (the
+ *  box cannot open a `FROM … AS <name>` stage — lesson O39). The agent's
  *  runtime base stays the driver's own image — the project image is only the
  *  toolchain/stage source. */
 
 // ─── Project image (plan 41 multi-stage) ────────────────────────
 // The workspace's devcontainer `build`/`image` is NEVER the agent's base. It is
 // built once as `paddock-proj-<name>:latest` so the build-commands box can
-// `FROM paddock-proj-<name>:latest AS project` + `COPY --from=...` to pull the
+// `COPY --from=paddock-proj-<name>:latest ...` (by tag, never an `AS` alias —
+// lesson O39) to pull the
 // project toolchain (code, venvs, node_modules) into the agent's own image.
 
 /** Tag of the per-pad project image (`paddock-proj-<name>:latest`). The name is

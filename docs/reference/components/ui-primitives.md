@@ -178,5 +178,5 @@ Callers:
   rules behind the tokens
 - [Shared UX utilities](ux.md) — confirm, alert, and prompt dialogs, toasts,
   keyboard shortcuts
-- `plans/53-mission-workspace.md` §6 — the canonical `msn-*` hook list that
-  rule 2 protects; that plan is the Mission workspace's own reference
+- [Mission Page → Element Hooks](../pages/mission.md#element-hooks) — the canonical `msn-*`
+  hook list that rule 2 protects

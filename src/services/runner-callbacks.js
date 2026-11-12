@@ -34,7 +34,7 @@ class CallbackError extends Error {
 
 /** The five lifecycle events. Meanings are user-facing copy for setup. */
 const CALLBACK_EVENTS = Object.freeze([
-  { key: 'init', meaning: 'Runs once after a runner is created with its configuration saved. Not on setup open, Run, resume or webui restart.' },
+  { key: 'init', meaning: 'Runs once per runner, on the first callback check (about 20 s) after an init script is enabled. Not on setup open, Run, resume or webui restart.' },
   { key: 'plan_started', meaning: 'Runs when a queued item first transitions into `in progress` — first and next items, not each continuation or resume of the same attempt.' },
   { key: 'plan_completed', meaning: 'Runs when an item is observed reaching valid `done` under the queue completion contract — not assistant turn end or delivery receipt.' },
   { key: 'usage_exhausted', meaning: 'Runs on evidence-backed provider usage exhaustion for the exact conversation — once per exhaustion episode, not every poll or transient rate limit.' },

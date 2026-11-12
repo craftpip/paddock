@@ -36,9 +36,11 @@ exit code, and character count; answer text, transcript content, terminal dumps,
 and callback source are not copied into the journal.
 
 The first observation adds a dated baseline. It explicitly says earlier activity
-is not reconstructed. Plan transitions are emitted from observed queue changes;
-start-plus-complete between polls is represented only by the completion that was
-observed. Recovery groups preserve ordering across callback start/result, verified
+is not reconstructed. Plan transitions are emitted by replaying the canonical
+queue's mutation events in order, so a plan that starts and finishes between two
+ticks still shows both; a `done` with no recorded start is shown as a completion
+only, never with an invented start. Recovery groups preserve ordering across
+callback start/result, verified
 container recreation, session restoration, continuation send/receipt, and final
 queue outcome. An unconfirmed delivery is a distinct state; it is never displayed
 as accepted or automatically resent.
@@ -52,4 +54,5 @@ runner permission resolver.
 
 - [Mission page](../pages/overview.md)
 - [Backend services](../backend/services.md)
+- [Runner Callback Scripts](../backend/runner-callbacks.md)
 - [Paddock command](../operations/paddock-cli.md)

@@ -44,6 +44,12 @@ docs/
 
 ## Adding new docs
 
+The Mission page (projects, sessions, the open session, the pop-out window and the Mission
+terminal rules) is documented in [Mission Page](reference/pages/mission.md).
+
+The admin Configs page (the `.env` editor: groups, what each change needs to take effect,
+secret masking) is documented in [Configs Page](reference/pages/configs.md).
+
 URL views, popup history and read-only Mission restoration are documented in
 [URL navigation](reference/components/navigation.md).
 
@@ -51,7 +57,9 @@ Infinite runner timeline behavior is documented in
 [Runner History](reference/components/runner-history.md).
 
 Canonical queue, execution and publication behavior is documented in
-[Mission Queue and Runner](reference/backend/mission-queue.md).
+[Mission Queue and Runner](reference/backend/mission-queue.md). The editable prompts a runner
+sends are in [Runner Prompt Templates](reference/backend/runner-prompts.md), and its lifecycle
+shell scripts are in [Runner Callback Scripts](reference/backend/runner-callbacks.md).
 
 Who may do what, and what is redacted or refused, is in
 [Security Model](reference/backend/security.md). The secrets store is in

@@ -15,7 +15,7 @@ problem. File paths in older entries may predate the split of `mission.js`, `vm-
 shell, all three columns, rows, buttons, badges, confirms, the project
 dialog). They are pure hooks — no styles — so when the user points at
 something ("the del button in the project row", "the text under Running")
-look the selector up in `plans/53-mission-workspace.md` §6 and edit exactly
+look the selector up in [Mission Page → Element Hooks](../pages/mission.md#element-hooks) and edit exactly
 that element instead of re-guessing the layout.
 
 ## S02

@@ -439,7 +439,8 @@ docker exec &lt;pad&gt; tmux capture-pane -t main -p -e -S -20  # last 20 lines
   status and your session.
 - **`[Terminal taken over by another connection]`** — another tab/session
   attached to the same PAD/session and the single-client policy kicked this
-  one. Click Reconnect to retake.
+  one. Click Reconnect to retake. Mission sessions (`msn-*`) are exempt and allow several
+  clients; their attach rules are in [Mission Page](../pages/mission.md#mission-terminal-contract).
 - **Replayed history renders diagonally / "waterfall"** — a stale backend
   without the LF→CRLF conversion. Recreate the `webui` container with the
   current `src/app.js`.

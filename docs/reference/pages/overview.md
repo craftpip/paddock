@@ -328,107 +328,12 @@ child's stdin and then closes it. Secrets live in the Vault, not a JSON file.
 
 ## Mission (`/mission`)
 
-File: `Mission.jsx` + `stores/mission.js` (zustand) + `components/SessionList.jsx`.
+File: `Mission.jsx` + `stores/mission.js` (zustand) + `components/SessionList.jsx` +
+`components/MissionSessionView.jsx`.
 
-Three-column workspace for the coding agents (opencode/codex/claude): col 1 lists
-the projects (a project is a PAD + folder pair), col 2 lists that project's
-sessions (or, in the all view, every session across projects), col 3 is the open
-session's terminal. Every element carries a stable `msn-*` class for points-at.
-
-**Selection is the scope — there is no toggle (plan 68).** The old
-`scope`/`setScope` ("This project" / "All projects" buttons) is gone. Scope is
-derived from `selectedProjectId`: `''` = all projects (the aggregate read
-`fetchAll`), a project id = that project (`fetchSessions`/`fetchHistory`). The
-list is **never** auto-narrowed to `projects[0]`, and clicking the already
-selected project again **deselects** to the all view. Two store consequences
-worth keeping: `followSessionPatch` and `selectSession` never move
-`selectedProjectId` (col 3 renders from the `openSession` snapshot's own
-`projectId`, so session highlights track their own project, deliberately) and
-every refetch path branches on `!selectedProjectId` — the selected project's
-list refresh must never route into the all-view read, or a poll would drop the
-selected column back to the aggregate (the old `refreshActive` froze
-all-projects after any selected-project mutation).
-
-**The view persists across a refresh (plan 68).** `selectedProjectId`,
-`selectedConversationId` and the whole `openSession` snapshot persist to
-`localStorage['pad-mission-view']` on every state change and hydrate once at
-store creation. On load each field is validated: a project that no longer
-exists → `''`, an `openSession` whose project is gone → `null`. A refresh
-therefore re-attaches the open terminal to the same conversation with **no
-click and no autoReopen** (the opt-in stays the user's open action). Two
-implementation facts: `openSession` round-trips as `null`, never an **absent
-key**, because `JSON.stringify` drops `undefined` and an absent key rehydrates
-to `undefined` again (first-visit store state must be `null`); and a corrupt
-blob is ignored (`''`/`''`/`null`), never thrown.
-
-**A fetch never invents a highlight (plan 73).** The middle-column highlight is
-the conversation the user opened (`selectedConversationId`), carried forward by
-every refetch and poll and kept across a close; it is cleared only when the list
-it belongs to is replaced (project switch, new project, delete project). So a
-fresh page with nothing opened shows **zero** `.msn-row-selected` rows while col
-3 shows "No session selected" — the two always agree.
-
-**A green dot means "open", and the header says so (plan 81).** The dot is
-mounted only when the server says `open` — a live agent TUI is attached, idle or
-mid-turn — so it is not a "working" light. A live pane whose agent exited is a
-different state: the row shows the word `shell` and no dot, because typing there
-runs shell commands. Whenever at least one row carries a dot, the sticky
-`Sessions` header shows a `● open` legend (with tooltip) so the meaning is
-readable without hovering a 6px circle; the per-row dot keeps the precise
-busy/idle `title`. The same `open` gates the row's hover actions
-(`.msn-row-actions`: pop out, solo lock, runner, close): a shell row has none —
-close would kill a pane whose conversation is already closed, lock has no agent
-to lock out, and its timestamp must not fade to reveal buttons that do not
-exist. Dead (history) rows have no actions either. `sessionOpen()` in
-`SessionList.jsx` is the one server-first derivation used by both the row and
-the legend (the `live || busy` fallback exists only for a row too old to carry
-`open`).
-
-**One split button creates a session (plan 96).** Col 2's toolbar carries a
-single joined control, `[ + New session | ▾ ]`: the left half starts an ordinary
-session in the selected project (the old `+ New session` behavior, including the
-`Opening…` busy label), and the chevron opens a dropdown whose only item is
-`∞ New infinite session` ("Runs QUEUE.md until done"), which opens the same
-RunnerDialog create popup the old standalone `∞ Infinite runner` button did
-(`openPopup('runner-new', project.id)` — a create, no runner bound until saved).
-The left click never opens the menu, and the chevron never starts a session.
-Hooks: `.msn-btn-new-session` stays on the left half, `.msn-btn-new-caret` is the
-chevron (stroked 14px SVG, never a `▾` glyph), `.msn-new-menu` is the panel and
-`.msn-new-menu-infinite` its item; `.msn-btn-new-runner` is gone. The menu's
-`open` state is local to `SessionCreateSplit.jsx` on purpose — a 15s listing poll
-re-renders the toolbar and must not close it. It closes on `Esc` (focus returns
-to the chevron), an outside `mousedown`, focus leaving the group, or selecting
-the item; opening moves focus to the item. `newBusy` (from `startingKey ===
-'new:<projectId>'`) disables BOTH halves — one in-flight ordinary start must not
-queue a second start or an infinite create — and with no project selected both
-halves are disabled with the title "Pick a project first". The row-level ∞
-actions and the terminal-header `RunnerControls` are unchanged.
-
-**History probe errors live in the error band, not the list (plan 68).**
-Per-project history reads that fail (e.g. "agent is not running") surface as a
-band above the session scroller so they cannot push rows around. `SessionList`
-runs each `error` through `lib/error-text.translateHistoryError` (a pure
-function) for a human sentence and carries the raw reason in the row's `title`
-— the raw string stays reachable on hover. The same translation can be reused
-anywhere a backend error string needs to become UI prose.
-
-**Infinite runner Plans and History share the terminal column.** The runner panel is one
-header row (`msn-queue-header`): collapse toggle, state chip, done count, the live
-worker/scheduler line (`msn-runner-status-strip`), then the Plans / History segmented tabs
-(`msn-runner-tabs`, rendered only while the panel is open) and the queue actions. Collapsed, it
-is that single row above the terminal. Expanded, the Plans view is a width-capped column: a
-progress bar (`msn-queue-progress`), Current/Next (only while there is one), and the item list
-(`msn-queue-item` with `msn-queue-item-index`, status chip, title over path, icon actions).
-**Run queue** in the session header (`msn-btn-runner-toggle`) is the primary action; the
-header's own state chip is screen-reader-only because the queue row shows the same word. The
-terminal never pushes a size below 40x8 to the pad, so an expanded queue cannot shrink the
-worker's pane. The URL's
-`runnerTab=history` selects a durable newest-first event journal without changing
-the open Mission session or remounting its terminal. Recovery/callback steps group
-by attempt id; filters and cursor paging do not rebuild older activity from current
-state. At narrow widths the History view overlays the Mission columns while keeping
-the underlying terminal mounted. See [Runner History](../components/runner-history.md)
-for the journal/API contract.
+Three-column workspace for the coding agents (opencode, codex, claude): projects, their sessions,
+and the open session's live agent TUI, with a pop-out window at `/mission/session/:sessionId`.
+The full contract is in [Mission Page](mission.md).
 
 ## Frontend Conventions and Gotchas
 

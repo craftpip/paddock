@@ -176,6 +176,30 @@ key that opened it. Comments and blank lines pass through.
 editor sends that text back on save, so redacting it would write `[REDACTED]` into the real config.
 That route is session-authenticated and owner-gated; it is not the surface an LLM reads.
 
+### Write-Only Web Credentials
+
+A published web console's credentials never leave through an MCP read tool, though the dashboard
+still needs them, so the strip happens at the MCP boundary and not in the registry.
+
+| Tool | Field | What the tool returns instead |
+|------|-------|-------------------------------|
+| `get_agent` | `web.token` (the openclaw Control UI bearer) | `web.tokenConfigured: true \| false` — `publicAgent()` in `src/mcp.js` |
+| `settings_get` | `web.authToken` | an empty string, plus `tokenConfigured` |
+| `settings_get` | `web.startCommand` (built from the web password) | `[redacted: web start command for port <n>]` |
+| `settings_get` | the web password | `web.passwordConfigured: true \| false` |
+
+`agent-registry.js` keeps `web.token`, because the Web tab's open-console link (`#token=…`) reads
+it; a sweep of the fleet with `get_agent` would otherwise collect every published PAD's
+credential into one answer. A secret an LLM must *use* goes through `exec` with the secret on
+`stdin`, never through a read tool.
+
+### Known Gaps
+
+- A credential in a bare array (`"args": ["--key=abc"]`) has no key name, so key-shape redaction
+  cannot reach it. There is no general value scanner.
+- The YAML/TOML scrub is line-based. It tracks parent keys and tables, but it is not a parser, so a
+  shape it does not model can still pass through; the JSON walk is the thorough path.
+
 ### Control-Plane Environment
 
 `GET /api/env` never returns the value of `SESSION_SECRET`, `VAULT_KEY` or `AUTH_PASSWORD`; it

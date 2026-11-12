@@ -48,6 +48,60 @@ revision detects a competing canonical mutation; the hash detects generated-file
 write-boundary guard compares the current canonical revision with the revision read for the
 dispatch, then independently checks projection integrity.
 
+### Queue File and Custom Instructions
+
+The queue file is a per-runner setting (`infinite_runners.queue_file`, Settings → Queue file),
+default `QUEUE.md`. `plans.normalizeQueueFile` accepts a relative Markdown path inside the
+project's plans folder, such as `release.md` or `queues/release.md`; blank means `QUEUE.md`.
+Absolute paths, `..` escapes, symlink escapes, NUL bytes and non-`.md` names fail with
+`runner_queue_file_invalid`. Every consumer derives the path from the runner: projection, marker
+(`QUEUE.paused` stays in the plans folder root), prompts and callbacks. Changing the file is
+refused with `runner_queue_file_busy` unless the runtime is `paused` with no owned operation. The
+old file is left as it was, and the new one must also be claimable.
+
+Custom instructions are optional queue-level guidance (`runner_queues.custom_instructions`, at most
+16 KiB, `PUT /api/mission/runners/:id/queue/custom-instructions` under the queue revision). They
+are not template syntax: [Runner Prompt Templates](runner-prompts.md) appends them literally to
+every dispatch in a labelled section. Saving them sends nothing; they apply at the next dispatch.
+An empty string removes them.
+
+### Queue Summary
+
+`plans.queueSummary` is the one projection of `current` (first in-progress item), `next` (first
+`new` item), `blocked` (first need-input item), `counts`, `allDone` and `warnings`. Both the page
+and the scheduler read it. An empty queue is valid and not complete: `allDone` needs at least one
+item. More than one in-progress item is legal: it adds a `queue_multiple_in_progress` warning
+naming the items, the page shows it above a still-visible list (`msn-queue-warning`), and the
+runner resumes the first one in order.
+
+**Add plans** lists the project's plans folder (`GET /api/mission/runners/:id/plans`) with title
+and status; the server leaves out `INDEX.md`, `README.md` and `QUEUE.md`, and the picker hides
+completed or archived plans behind a toggle. Selection order is the order appended. Adding plans
+never starts work.
+
+## Runner Sessions
+
+An infinite runner is an ordinary Mission session with a queue attached. Opening a conversation
+and running its queue are separate actions:
+
+- Creating a runner mints or binds a real session. On a stopped PAD the create fails whole; no
+  runner row is left behind. Converting an existing session keeps its row, conversation id, lock
+  and terminal.
+- The Sessions list renders the bound session with the shared row component, the runner name and
+  an ∞ badge, sorted before ordinary sessions and counted once. A runner with no session yet
+  renders the same-shape row (`no session yet`). Each runner row carries a Configure gear
+  (`msn-btn-runner-config`).
+- Clicking a runner row opens its terminal in column 3, never the settings dialog, and never
+  starts the queue. `POST /api/mission/runners/:id/session` (`ensureRunnerSession`, serialized per
+  runner) creates the session for an unbound runner or recovers a dead one in the same
+  conversation, and enables nothing.
+- Run and Pause live in the terminal header (`RunnerControls`) and change only the queue; the
+  terminal stays mounted.
+- Closing the bound session stops its runner first (`disableRunnerForSession`), so a watcher
+  cannot resurrect a session that was closed on purpose.
+- Remove (Configure → Remove) deletes the runner and keeps the session, its live pane and the
+  queue file; the row returns to the ordinary list.
+
 ## Execution State
 
 `runner_runtime` is the only authorization state. `runner_operations` owns each durable attempt;
@@ -187,6 +241,68 @@ Provider quota exhaustion is read from the worker's live screen and from its con
 by a separate observer. A definitive screen notice moves an active runner to `waiting_input` with
 the cause `usage_exhausted`. [Backend services](services.md) describes what counts as a notice.
 
+### Pause Modes
+
+`POST /api/mission/runners/:id/pause` takes `mode`; the page offers both in the Pause queue
+dropdown. Both stop dispatch at once and leave the terminal and conversation alone; an unknown
+mode fails with `runner_invalid_pause_mode`.
+
+| Mode | What the worker is asked | Confirmed when |
+|---|---|---|
+| `before_next_task` (default) | Nothing; it finishes the plan in flight | The target item is no longer `in progress`, or there was none |
+| `current_task` | The `pause` prompt: checkpoint progress and resume notes into the plan file, keep the item `in progress`, stop | The worker's turn is observed idle |
+
+`infinite_runners.pause_mode`, `pause_state` (`none`, `requested`, `confirmed`) and
+`pause_target_item` record the request. `pauseConfirmation` is a pure predicate, applied on each
+queue read; an unreadable observation stays `requested`, so the page never claims a stop it did
+not see. `current_task` with nothing in progress degrades to `before_next_task`. A stop message
+that cannot be confirmed says so in the reason ("Pause requested — delivery unconfirmed"). The
+next Run after a `current_task` pause sends the `resume` prompt naming the paused plan; any
+successful Run clears the pause record.
+
+### The Stop Marker
+
+`QUEUE.paused`, in the plans folder, is a worker instruction: every prompt tells the worker not to
+start an item while it exists. `runner-state.markerRequired` decides it from the runtime state
+alone:
+
+| Marker present | Marker absent |
+|---|---|
+| `paused`, `waiting_input`, `held`, `complete`, `projection_error` | `dispatching`, `awaiting_receipt`, `running` |
+
+Run lifts the marker before it types the startup prompt; otherwise the worker would read it and
+refuse its own instruction. An unconfirmed delivery (`awaiting_receipt`) keeps the marker absent,
+because restoring it would tell a worker that did receive the prompt to stop, and no receipt
+could ever arrive. Only a definite pre-write refusal, a hold, Pause or Close restores it. A failed
+marker write is stored in `marker_sync_error` and shown, never swallowed. Each stop also records
+its cause and origin (`stop_cause`, `stop_origin`, `stop_at`), so an automatic stop (blocker,
+quota, invalid queue) never reads as the user's Pause. Removing a runner leaves the marker in
+place so a detached worker cannot take another item.
+
+### Explicit Run
+
+Run is an explicit control intent, separate from whether an instruction may be sent:
+
+- **Paused, worker verifiably working, queue in progress:** Run adopts the active turn
+  (`adopt_active_turn` to `running`), lifts the marker and sends nothing. This is the path after
+  a human typed into the session, or after an answer started a turn.
+- **Running, worker turn ended in an error:** `scheduler.recoveryRequired` is set, the page shows
+  Run queue instead of Pause queue, and Run retires the interrupted operation and sends one fresh
+  instruction. The watcher never does this on its own.
+- **Running otherwise:** Run answers `already_running`.
+- **Paused, held or complete:** Run validates the queue and an idle worker, then dispatches the
+  `start` or `resume` prompt under a new operation.
+
+A pane that is already gone is never adopted as a working turn.
+
+### Worker Observation by Driver
+
+Only opencode exposes an exact turn signal: `agentStore.readTurn` reads the conversation's own
+SQLite store by primary key (about 2 ms). For codex and claude, turn, usage and receipt reads
+return `unknown`, which withholds every automatic send; their JSONL stores give only a filename
+match and cost a full parse per read. No driver exposes compaction or provider errors in its
+store, so neither is inferred.
+
 ## Projection Publication
 
 `runner-publication.js` owns filesystem output, marker writes, acknowledgement and publisher
@@ -273,19 +389,84 @@ drift, a new human turn) pauses the runner once and logs one `dispatch_failed`. 
 ticks do not retry it; only an explicit Run resumes. Pre-113 code retried such a refusal every
 nudge interval indefinitely.
 
-Resolve sends the answer as one line (`normalizePromptForSend`) and hashes that same line. The
-pane submits each line with its own Enter, so a multi-line answer would arrive as several
-messages, none of which matches the recorded receipt hash. Resolve also accepts a runner that is
-`paused` while the item is `need_input` (a pause the plan outlived by asking its question): it
-moves the runner to `waiting_input` first. An answer that cannot be delivered leaves the runner
-in `waiting_input` with the reason `resolution_failed`, so the answer can be sent again.
-
 `publicRunner` (served by `/api/mission/runners`) never contradicts the canonical runtime. When no
 session is bound, the worker fields read `unknown`. When the runtime is inactive, the
 `scheduler_*` fields follow `execution.state`, so a stale idle-grace countdown does not outlive
 its run. Internal scheduling still reads the raw columns.
 
+## Blocker Resolution
+
+A worker that needs a person sets its item to `need_input` with the question in `reason`, and the
+runner stops in `waiting_input`. The answer goes through one server operation,
+`POST /api/mission/runners/:id/resolve` with `itemId`, `answer`, `revision` and an optional
+`idempotencyKey`. The client never sends the answer, requeues and starts in separate calls: the
+answer makes the worker busy, so a following Start was refused and the queue stopped.
+
+1. Check: the runner is `waiting_input`, or `paused` with that item still `need_input` (a pause
+   the plan outlived by asking); it then moves to `waiting_input` first. The queue must be
+   readable, blocked on input, and at the submitted revision (`queue_revision_conflict`
+   otherwise; it is never retried blindly).
+2. A repeated `idempotencyKey` returns the earlier outcome without sending. A row in
+   `runner_resolutions` reserves the resolution; a concurrent one fails with
+   `resolution_already_pending`. An omitted key is stored as `NULL`, not `''`: the table's
+   `UNIQUE (runner_id, idempotency_key)` would otherwise allow one keyless resolution per runner
+   for its whole life.
+3. The answer becomes a `resolution` operation (`resolve_begin`) with its own prompt hash,
+   baseline input and deadline. The marker is lifted. Right before writing, the runtime, session
+   lock, conversation and queue revision are checked again; a changed blocked item aborts with
+   nothing sent.
+4. The answer is sent to the bound Mission session as one line, `Resolution for "<plan>":
+   <answer>`, normalized like every prompt and hashed as sent. A multi-line answer would arrive as
+   several messages, none of which matches the receipt hash.
+5. On an exact receipt the runner moves to `running`, the item is requeued to `new` under the
+   current revision, and the resolution is `completed`. The watcher then waits for that turn to
+   end and continues the queue with no second Run.
+
+An attempted write without a receipt returns `awaitingReceipt: true` and leaves the runner in
+`awaiting_receipt` with the marker absent. Nothing is resent. When the watcher, or Reconcile,
+later finds the exact receipt, it requeues the item if it is still `need_input` (refusing if the
+queue moved in between) and completes the resolution. An answer that definitely did not go out
+leaves the runner in `waiting_input` with the reason `resolution_failed`, the marker restored and
+the answer still in the dialog, so it can be sent again. A later Pause wins: a late receipt
+cannot re-enable a paused run.
+
+In the queue panel the inline answer field and the Resolve blocker dialog share one draft, keyed
+by runner and blocked item, so text typed inline is already in the dialog. Enter in the inline
+field opens the dialog and Enter in the dialog sends; both skip IME composition. Closing the
+dialog keeps the draft without a "Discard changes?" prompt; only leaving the session with an
+unsent answer asks. Success and failure show as operation feedback, and a failed send keeps the
+dialog open.
+
 ## Runner REST Surface
+
+All routes resolve the runner, then check access to its project and PAD (`missionRunner`); writes
+need CSRF.
+
+| Route | Purpose |
+|---|---|
+| `GET /api/mission/runners` | Runners for the all-projects view |
+| `GET /api/mission/runners/:id` | One runner with its enriched queue |
+| `PATCH /api/mission/runners/:id` | Name, queue file, timings, budgets, prompt templates; never starts work |
+| `POST /api/mission/runners/:id/session` | Create or recover the worker session; enables nothing |
+| `GET /api/mission/runners/:id/queue` | Canonical rows, revision, summary, `execution`, `scheduler` |
+| `POST /api/mission/runners/:id/queue` | Set the queue up |
+| `POST /api/mission/runners/:id/queue/items` | Append plans (`plans`, `revision`) |
+| `PUT /api/mission/runners/:id/queue/order` | Reorder (`itemIds`, `revision`) |
+| `DELETE /api/mission/runners/:id/queue/items/:itemId` | Remove one item |
+| `PATCH /api/mission/runners/:id/queue/items/:itemId` | Status review of one item |
+| `PUT /api/mission/runners/:id/queue/custom-instructions` | Queue guidance |
+| `GET /api/mission/runners/:id/plans` | Candidates for Add plans |
+| `POST /api/mission/runners/:id/start`, `/resume` | Run (resume requires `paused`) |
+| `POST /api/mission/runners/:id/pause` | Pause, with optional `mode` |
+| `POST /api/mission/runners/:id/resolve` | Answer a blocker |
+| `POST /api/mission/runners/:id/reconcile` | Look for the outstanding operation's receipt |
+| `DELETE /api/mission/runners/:id` | Remove the runner |
+
+Prompt, callback and history routes are listed in
+[Runner Prompt Templates](runner-prompts.md), [Runner Callback Scripts](runner-callbacks.md) and
+[Runner History](../components/runner-history.md).
+Queue writes take the revision they read; there is no whole-array write, so a caller cannot mark
+an item done by replacing the list.
 
 `GET /api/mission/runners/:id/queue` returns canonical rows/revision, `execution` and `scheduler`.
 `POST /api/mission/runners/:id/start`, `/pause`, `/resolve` and `/reconcile` use the transition
@@ -301,15 +482,13 @@ journal and the callback outbox outlive the runner on purpose: the `destroy` cal
 to run after the row is gone, and the record stays readable. The Mission session and the queue
 file are untouched; the session returns to the ordinary listing.
 
-A callback script runs in the control plane, not in the PAD. Its recorded working directory is
-the project folder, a path inside the PAD that usually does not exist in the control plane. When
-the directory is absent or unset, `runner-callbacks.js` runs the script in the operating system's
-temporary directory and writes one `[paddock] working directory … does not exist in the control
-plane; running in … instead` line to the script's stderr output, so the script still runs and the
-record says where.
+A callback script runs in the control plane, not in the PAD; its working directory and fallback
+are described in [Runner Callback Scripts](runner-callbacks.md#execution).
 
 ## See Also
 
 - [Backend services](services.md)
 - [Mission page](../pages/overview.md)
 - [Runner History](../components/runner-history.md)
+- [Runner Prompt Templates](runner-prompts.md)
+- [Runner Callback Scripts](runner-callbacks.md)

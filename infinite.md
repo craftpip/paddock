@@ -25,79 +25,24 @@ Decisions only you can make. Deliberately **not** `- [ ]` lines and **not** in
 its own recognizance — the agent's job is to surface these, not to guess. Each
 one is a single reply away from done.
 
-**Decided 2026-10-07** (from "you called it" 2026-10-07): the stray Mission session
-`msn_aac88d72b8f5b16c` was **closed** (page Close path, row deleted); the four
-`pad-test-*` rows were **removed** (`pad-test-claude`, `pad-test-codex` via
-`pad_delete_agent`, `pad-test-p25`/`-clone` via `removeAgentFromDb`);
-`project_id` on `task_submit` is **deferred** ("later"); the
-`busy`-structurally-false fix (plan 52 C1-F1 / R7) is **already implemented**
-(`startSession` mints the conversation before the pane, `stampTruth` reports
-UNKNOWN for an id-less row) and needed no change; the B2 onboarding artifact
-defaulted to **(a)** — `pad_help`'s `GENERAL_GUIDE` IS the artifact, so B2
-becomes an onboarding-completeness audit of the guide rather than a new file.
-Also decided and **implemented, committed as part of the plan 52 close**:
-`exec` is **opt-in** (`tools:exec` grant, fail-closed, 6 test pins flipped —
-verified live with two throwaway keys, then deleted) and busy is **(a)** — a
-session is busy iff its own newest tool part is `running`, read from the
-conversation's own store (`busyForSessions`) instead of the web-server probe.
+Everything from plan 52 was decided and shipped by 2026-10-07 (exec opt-in,
+store-backed `busy`, `pad_help` as the onboarding artifact, docs absorbed, plan
+file deleted). **MCP token rotation: not wanted (user, 2026-11-12) — local setup
+only.** One optional item remains:
 
-- **Should `exec` be an opt-in grant, or a base one? (plan 52 A2)** — **decided
-  2026-10-06 and implemented**: `exec` is an **opt-in** bucket (`tools:exec` in
-  `TOOL_GRANTS`); a new fine-grained key now gets no session control until
-  granted it. A test pins the matrix either way, and flipping it turns 6 tests
-  red.
-- **What should `busy` mean, now that the busy probe is answering about the
-  wrong process? (plan 52 R8, found 2026-09-29)** — **decided 2026-10-06:
-  (a)**, and implemented. A session is busy iff its own newest tool part is
-  `running` (`state.status: 'running'`), read per conversation from the agent's
-  own store (`busyForSessions`, one `agentStore.readActivity` per id, cached
-  ~5 s). That is decision (a) — precise for tool work, blind to the agent
-  streaming prose — and it moves liveness from one web probe per (PAD, folder)
-  to one store read per session, which ALSO fixes the process mismatch: the web
-  probe only reported the web process's own sessions, while a Mission pane TUI
-  holds no sockets and never appeared there (measured 42s `esc interrupt` with
-  our id absent). The store is the shared sqlite, so it answers for whatever
-  client drives the conversation. A store that cannot be read (or a row with no
-  id) stays `busyKnown: false` — UNKNOWN, never idle.
-- **What form should the LLM onboarding artifact take? (plan 52 B2)** — **decided
-  2026-10-06: (a), defaulted** — `pad_help`'s `GENERAL_GUIDE` IS the artifact, so
-  B2 becomes an onboarding-completeness audit of the guide (no new file, no
-  drift). Stated in full because the reasoning is the record: **no artifact exists
-  to rewrite** (`src/views/onboard.ejs` is a dead EJS view; the only live
-  `onboard` is `POST /api/agents/:name/onboard`, an agent-setup route), and the
-  **form** was still plan 51 §4's *"Open decisions (user calls these)"* — "system
-  prompt snippet? skill file? slash commands?" 51 is not in the queue, so that was
-  never decided. Meanwhile **an onboarding artifact already exists and is the
-  better one**: `pad_help` serves `GENERAL_GUIDE` over MCP, it is the same
-  module plan 52 B1 just rewrote for the session model, it is **versioned with
-  the code so it cannot drift**, and any LLM can fetch it as its first call. A
-  separate hand-written snippet would be a **second copy** of the same
-  instructions with no sync story — the drift the guide's design already avoids.
-  The alternatives were (b) a separate static snippet/skill (needs a home and a
-  sync owner) and (c) generate the snippet *from* the guide. Pick (c) instead if
-  you ever need text you can paste somewhere else.
-- **Rotate the 2 exposed MCP tokens** — plan 60 stopped the leak but cannot
-  un-leak the credentials; operator action, §5. Tracked on its queue line below.
-- **Close out plan 52 (resolved 2026-10-07, remainder is yours):** G2 decided
-  (FREEZE, not remove); 53 §11 Q6 resolved (badge only, no cap); B1's two
-  journal clauses done via the plans facility (plans/64 superseded 53 Phase 9's
-  unbuilt `mission_checklist`/`mission_notes`); G1's docs absorb is underway
-  (into `docs/reference/backend/services.md`). What is left is yours:
-  (1) **G1** — confirm the docs absorb of keys/grants/conferral/playbook +
-  `plans/52-orchestrator.md` deletion (ordered after 53's absorb);
-  (2) **C2's model-independence proof** — needs a codex (or claude) pad created,
-  a spend.
+- **Plan 52 C2 model-independence proof (optional, deferred).** The orchestration
+  loop was proven twice on opencode pads; the "works on a second model" half needs
+  a codex or claude pad created and costs a subscription spend. Say "run C2 on
+  codex/claude" to do it.
 
 ## Queue
 
-- [ ] plans/85-infinite-sessions-correction.md — paused 2026-10-16 (started 2026-10-11; resume after 89 — corrections: one session list, click opens terminal, Run/Pause in terminal header)
-- [ ] plans/83-infinite-runner.md — superseded by 85; re-audit status/claims after 85
-- [x] plans/82-mission-project-plans-folder.md — absorbed 2026-10-10
-- [ ] plans/81-mission-session-list-fixes.md
-- [ ] plans/84-mission-project-rail-tooltip.md
-
 ## Done
 
+- [x] plans/85-infinite-sessions-correction.md — Complete 2026-10-20; absorbed 2026-11-12
+- [x] plans/83-infinite-runner.md — Complete 2026-10-20 (re-audited under 85); absorbed 2026-11-12
+- [x] plans/84-mission-project-rail-tooltip.md — done (archived in plans/archive/)
+- [x] plans/81-mission-session-list-fixes.md — done (archived in plans/archive/)
 - [x] plans/117-runner-mcp-auto-wiring.md — absorbed 2026-11-11. Two MCP surfaces: `paddock` (control, user keys) and `paddock_runner` (`/mcp/runner`, per-pad token, worker queue tools only, own-pad runners only), wired automatically on Run; idle worker TUI restarted into the same conversation to load it. Live on pad-dev with no manual step. Absorbed into `docs/reference/backend/mission-queue.md`.
 - [x] plans/114-planning-gets-stuck.md — absorbed 2026-11-11. False "unconfirmed" receipts (5s exact-receipt poll), stale legacy runner fields in the public view, and refusal back-off (already pause-once under plan 113; now pinned by a test). Lap-only queue-loss finding dropped when work moved to meridian. Absorbed into `docs/reference/backend/mission-queue.md`.
 - [x] plans/89-user-mode-agent-process-ownership.md — absorbed 2026-10-16. Every *managed* agent process runs as the pad user, not root: `buildWebHook` launches the published server through a runtime-gated `pad_run` (`USER_MODE=user` && uid 0), `task-runner`/`orchestrator.execInPad` splice `termUserArgs`, and `ensureWebHookUserDrop` + the `migrateWebHooks` boot sweep rewrite existing on-disk hooks (preserving the web password). `tee` stays root (`/proc/1/fd/1` is not writable by uid 1000). Live-repaired `pad-opencode-proj` (server now uid 1000; `opencode mcp list` exit 0; 0 root-owned state) and proved non-recurrence on a `docker restart` of `pad-opencode-user1`. Measured: the web server is not the lock writer (empty `locks/` after boot+session POST); the recurring writer was a root `opencode` CLI/TUI, now outside the managed surface. Absorbed into `docs/reference/backend/services.md` + `AGENTS.md`.

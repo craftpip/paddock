@@ -96,6 +96,11 @@ Business logic: See `overview/business-logic.md` — PAD Discovery and State.
   tags, created_at, updated_at, last_activity_at }
 ```
 
+The three clocks come from the PAD's `agents` row (`dbStamps`), read inside `buildAgent`, so the
+fleet list and a single `getAgent` (MCP `get_agent`) cannot disagree. A clock with no source is
+**omitted, never `null`**: `last_activity_at` is written only by `recordActivity`, and a PAD that
+never recorded an event has no answer rather than a null that reads as a timestamp.
+
 **Regular expression for valid names:**
 ```
 ^&lt;PREFIX&gt;-[a-zA-Z0-9][a-zA-Z0-9_-]*$
@@ -144,7 +149,9 @@ A **plan** is one markdown file per piece of work, in that PAD's workspace under
 agent, and ends; a plan does not. Finished plans move to `plans/archive/` — that
 is a human decision (move the file), not a field the tools flip.
 
-**Location is per-PAD, so `agent` is REQUIRED on every plan tool.** Three pads
+**Two scopes: a Mission project's plans folder, or the PAD-wide `plans/`.** See
+[Per-project plans folder](#per-project-plans-folder-plan-82) below for the project scope. In
+the legacy PAD-wide scope **`agent` is required**, never inferred. Three pads
 routinely share one workspace (`paddock`, `schlorp` and `craftpip` all ran on
 `pad-opencode-proj`), and `/www2/paddock/plans` on one of them sits *outside*
 that pad's workspace root, where traversal is refused. A tool that inferred the
@@ -172,19 +179,60 @@ not hide the file.
 `writePlan` calls `workspace.createDirectories()` and `workspace.writeFile()`,
 so it inherits the same path clamp and the same host-browsability gate as every
 other write. `plansRoot()` re-checks that gate itself, because the *read* paths
-need it too. `plans/README.md` (harness guidance) is created on the first plan
-and excluded from the listing — a row with no `created` and no `## Status:` reads
-as a plan nobody wrote.
+need it too. In project scope the file is written with `writeFileOwned` bounded to the project's
+plans folder, after `projectPlansRoot` has resolved it. The folder's own entry files —
+`README.md`, `INDEX.md` and `QUEUE.md` — are skipped in listings and refused as a `path` (checked
+against the resolved path, so `x/../INDEX.md` is refused too); a row with no `created` and no
+`## Status:` reads as a plan nobody wrote.
 
 **`withSessionState` stamps the conversation behind each plan** using the Mission
 service, not a second probe. `mission` owns `live`/`open`/`busy`/`busyKnown`;
 re-deriving any of them here would be a second source of truth written before the
-field existed, and the busy probe is scoped to (PAD, folder), so a stamp computed
-from the plan's folder rather than the session's project would answer about the
-wrong conversation. A plan whose session has no Mission row is `sessionTracked:
+field existed. Busy is read per conversation from the agent's own store (plan 52
+R8), keyed by the session's id, never by the plan's folder. A plan whose session has no Mission row is `sessionTracked:
 false` with `sessionLive: null` — **unknown, not dead**: the conversation may
 have been started outside the page. All four fields are always present, because a
 missing field and a null one are different to a caller.
+
+### Per-project plans folder (plan 82)
+
+Every Mission project has a `plans_folder` column (default `plans`): a relative folder inside the
+project folder, so its plans live at `<project.folder>/<plans_folder>/`. Two projects on one PAD
+never share a plans folder.
+
+- **Validated on the server.** `mission/internal.normalizePlansFolder` refuses an absolute path,
+  a `.` or `..` segment, a newline or NUL, or more than 120 characters
+  (`mission_bad_plans_folder`). Empty means `plans`.
+- **Mapped to a host path, never concatenated.** `projectPlansRoot` maps the container folder
+  through the PAD's workspace mount (`containerViewOf`, then the webui's own bind mounts, longest
+  prefix wins) or, for a folder outside that mount, through the folder's own spelling. A folder the
+  webui sees read-only is refused as `plan_workspace_read_only`; one it cannot see as
+  `plan_workspace_not_host_visible`; one outside a default workspace as
+  `plan_project_folder_outside_workspace`. `planPath` adds real-path containment, so a symlink
+  cannot lead out of the folder.
+- **`INDEX.md` is the folder's entry file**, written once and never overwritten: who the project
+  is (name, PAD, folders), what a plan is, the five statuses and the stop rule, and a pointer to
+  `QUEUE.md`. `plans.initProjectPlans` writes it when a project is created; the REST route and
+  `mission_project_create` both call it and return its outcome as `plansInit`, and a failure
+  there does not fail the create. Changing `plans_folder` later does not move existing files.
+- **Five statuses.** `status` is the canonical value when the `## Status:` header (same line)
+  matches one, otherwise the header verbatim; `statusRaw` always keeps the header text:
+
+| Canonical | Header text it folds |
+| --- | --- |
+| `new` | `new`, `Proposed`, `Draft` |
+| `in progress` | `In progress` |
+| `blocked` | `Blocked` |
+| `need clarification` | `need clarification`, `needs clarification` |
+| `done` | `Complete`, `done`, `finished`, `review` |
+
+  `blocked` and `need clarification` are stop states: the worker sets its queue item to
+  `need input` and does not move on. An unrecognized header is never folded onto a status.
+- **MCP scope.** `plan_list`, `plan_write` and the queue tools take `project_id` or `folder`;
+  `mcp.resolvePlansScope` picks one visible project, refuses a match of none or several with
+  candidates, refuses an `agent` that disagrees with the project's PAD
+  (`plan_agent_mismatch`), and never falls back to the PAD-wide folder. With `agent` alone the
+  call is the legacy PAD-wide scope. A project scope may be combined with `path` to read one file.
 
 ## Activity store (services/agent-store.js) — plan 64 §4
 
@@ -357,6 +405,33 @@ and Regenerate are available from the UI — Sync writes 1:1 mapped fields in
 place (project-authored fields survive), Regenerate rewrites the whole file as
 a generated mirror (`x-paddock.generated`).
 
+### From devcontainer.json to the PAD
+
+`vm-manager/devcontainer.js` `resolveDevContainerPlan(name, agent, wsMount)` turns the
+workspace's file into the plan the compose generator consumes. Everything runs **inside the
+PAD's own container**: the project's `image`/`build` never becomes the base (it becomes the
+optional [project image](#build-commands-and-lifecycle-scripts-plan-41)). The file lives in the
+workspace, which the agent can write, so every field that could widen the container is
+validated, and an invalid one throws and aborts the create or settings apply.
+
+| Field | Paddock does |
+|-------|--------------|
+| `onCreateCommand`, `updateContentCommand`, `postCreateCommand` | pre-fill the post-create box, in spec order (string, array and object forms joined) |
+| `postStartCommand` / `postAttachCommand` | the post-start / post-attach hooks |
+| `workspaceFolder` | the mount target, only for drivers with an editable workspace and only while the stored `WORKSPACE_DIR` is still the driver default — a target the user chose wins |
+| `environment` | merged into the compose env; `ROOT_PASSWORD`, `SSH_PORT`, `USER_MODE`, `TZ` are protected and dropped |
+| `mounts` | relative sources resolve against the workspace; a source inside the project root but outside the workspace is refused ("would reach project internals"); each bind then goes through the extra-volume validator |
+| `runArgs` | only `--cap-add`, `--ulimit`, `--sysctl`, `--env-file` (both `--k=v` and `--k v`); anything else is refused |
+| `forwardPorts` / `portsAttributes` | TCP host ports allocated (the container port when free, else the 43817 range), persisted so a later apply keeps them; `label` applied |
+| `remoteUser` / `containerUser` | `containerUser` wins; a non-root user seeds `USER_MODE=user` as the default only — an explicit Container user choice wins, and hermes is exempt |
+| `name` | UI badge |
+| `features`, `customizations`, `hostRequirements`, `shutdownAction` | ignored (headless agents) |
+
+`--cap-add` accepts only `SYS_PTRACE`, `NET_ADMIN`, `NET_RAW`, `NET_BIND_SERVICE`, `IPC_LOCK`,
+`SYS_NICE`, and `--sysctl` only namespaced keys (`net.*`, `kernel.shm*`, `kernel.msg*`,
+`kernel.sem`, `fs.mqueue.*`): a capability named in the file is granted at the operator's next
+apply, so only ones that cannot be used to leave the container are accepted.
+
 ## VM Manager (services/vm-manager/)
 
 Business logic: See `overview/business-logic.md` — Agent Lifecycle, Bind-Mount Split-Brain.
@@ -487,8 +562,80 @@ tags/paths from it). No vm-manager/drivers imports — safe to require anywhere.
 - `argsFromDockerfile(path)` — extract `ARG NAME[=default]` lines (commented
   ARGs skipped) → feeds the generated compose `build.args:` block
 
+- `readCustomBuild(name)` / `writeCustomBuild(name, text)` — the per-PAD **Build commands**
+  block (below)
+
 Image/tag/version lookups no longer live here — they go through
 `getDriver(agent)` from `services/drivers/` (see below).
+
+### Build commands and lifecycle scripts (plan 41)
+
+A PAD has four user-editable hooks, set on Create Agent, in the Settings card
+([Settings tab § 5e](../tabs/settings.md#5e-build--lifecycle-commands-plan-41)) and through MCP
+`create_agent` / `recreate`:
+
+| Field | Runs | Stored in | Mechanism |
+|-------|------|-----------|-----------|
+| `buildCommands` | every image build (create, update, rebuild) | `instances/<name>/build/Dockerfile`, between markers | Dockerfile lines |
+| `postCreate` | once after the container is up on create, and after every recreate | `build/post-create.sh` | `docker exec <pad> /build/post-create.sh`, streamed as the `post-create` job step |
+| `postStart` | every container start | `build/post-start.sh` | a hook in the PAD's `start.sh` |
+| `postAttach` | every terminal attach | `build/post-attach.sh` | `docker exec … bash /build/post-attach.sh` from the terminal WebSocket |
+
+**Why two kinds.** The build context is only `instances/<name>/build/`: during `docker compose
+build` the workspace is not mounted, writes to the data dir are hidden by the runtime bind
+mount, and project services are not up. So `RUN cd /project && npm install` cannot work as a
+build line. Project setup has to run in the running container, which is what the post-create
+script is for. This matches the Development Container Specification, where `postCreateCommand`
+runs inside the container after creation, separate from the image.
+
+**The managed Dockerfile block.** `writeCustomBuild` puts the text between two marker comments,
+`# ── PADDOCK CUSTOM BUILD COMMANDS (managed by the web UI) ──` and
+`# ── END PADDOCK CUSTOM BUILD COMMANDS ──`, inserted before the `# ---- N. ENTRYPOINT ----`
+banner every template shares (any section number). A present block is replaced, an empty text
+removes it, and edits outside the markers survive. Because it sits before the entrypoint, a custom
+`ARG` line is picked up by `argsFromDockerfile` on the next compose regeneration. A marker-shaped
+line is stripped from the text on both read and write, so a save can never nest a marker inside
+the block. A `FROM` in the block fails the build; the build precedes the recreate, so the
+running container stays up (see [O39](../lessons/operations.md#o39) for why `FROM … AS` stages
+cannot work here).
+
+**Scripts.** Each script is written as `#!/usr/bin/env bash` + `set -e` + the text; an empty text
+removes the file. When any script exists, the compose binds the build dir at `/build` so the
+container can run it. In a user-mode PAD the scripts run as the pad user, so files they write are
+born user-owned. Post-create retries for up to 15 s while the container finishes booting; if it
+never runs, the create job fails visibly rather than leaving a half-set-up PAD.
+
+**Settings changes.** `prepareAgentChanges` compares each field with the stored one; a field that
+is `undefined` keeps its current value.
+
+- A `buildCommands` change rebuilds the image.
+- A `postCreate` change recreates the container, and the new script runs.
+- Enabling `postStart` on an image whose baked `start.sh` lacks the hook (`ensurePostStartBlock`,
+  `imageHasPostStartHook`) rebuilds once.
+- `postAttach` needs no image change.
+
+Create and settings apply the same guard: a NUL byte or more than 100000 characters in any of the
+four fields is refused.
+
+**The project image.** When the workspace's devcontainer declares `build` or `image`, the create
+job first builds (or pulls and tags) it as `paddock-proj-<name>:latest` (`buildProjectImage`, job
+step `project-image`; a failure aborts the create). It is never the PAD's base image — the agent
+keeps the driver's own image, guards, mounts and compose contract. It exists so the build block
+can copy a project toolchain in by tag:
+
+```dockerfile
+COPY --from=paddock-proj-myrepo:latest /opt/venv /opt/venv
+RUN --mount=type=bind,from=paddock-proj-myrepo:latest,source=/opt/venv,target=/proj-venv \
+    cp -r /proj-venv /opt/venv
+```
+
+Paddock's agent images are glibc (Debian), so copying from a Debian or Ubuntu project stage
+works; a musl (Alpine) project stage can supply source-level files only, not compiled binaries.
+A workspace the webui cannot see (host-only) is skipped with a log line.
+
+**Clone, reset, delete.** Clone copies the source build dir, so the block and scripts come along
+and the clone's create job runs post-create again. A reset wipes the data dir only; the scripts
+live in the build dir and survive. Delete removes the instance dir with everything in it.
 
 ## Driver Registry (services/drivers/)
 
@@ -559,7 +706,7 @@ matches it — 0 unknown, 0 disagreements — so no live pad's answer changed.
 | `baseImage` | upstream image the Dockerfile starts from |
 | `dataDir` | in-container data directory (`/root/.openclaw`, `/root/.picoclaw`, `/opt/data`, …) |
 | `workspaceDir` | workspace root inside the container (hermes: the data dir itself) |
-| `configFile` / `configFormat` | config filename in `dataDir` + format (`json` for openclaw/picoclaw/opencode, `yaml` for hermes, `toml` for codex). Non-`json` = config served/written verbatim, no secret redaction |
+| `configFile` / `configFormat` | config filename in `dataDir` + format (`json` for openclaw/picoclaw/opencode, `yaml` for hermes, `toml` for codex). Non-`json` = config served/written verbatim to the web editor; MCP `config_get` line-scrubs it ([Security Model](security.md#yaml-and-toml-text)) |
 | `setupSteps` | commands run right after `compose up` during create (empty for codex) |
 | `backupTypeMarker` | filename sniff for backup-type detection (generic backups are removed; kept for plan 26) |
 | `webApp` | built-in web app descriptor (`label`, `docs`, `containerPort`, `auth`, `startCommand`) — only opencode has one today |
@@ -1074,7 +1221,7 @@ the services, never in the tool handlers (no duplication between REST and MCP).
 | `list_agents` | List PADs (owner-scoped); every row is openable; carries `scope` / `agentsTotal` / per-row `owner` | `registry.discoverAgents()` + `registry.getAgent()` |
 | `get_agent` | Details + optional `logs` tail (≤500) | `registry` + `logStore` |
 | `agent_logs` | Container logs tail (≤5000) | `logStore.capture/readLogs` |
-| `config_get` | Driver config file (JSON redacted; yaml/toml verbatim) | `vm.readAgentConfig(agent)` |
+| `config_get` | Driver config file, redacted in `config` and `configRaw` (JSON walked; yaml/toml line-scrubbed — see security.md) | `vm.readAgentConfig(agent)` |
 | `settings_get` | Full read picture before a `recreate` | `vm.readSettings(name)` + `vm.listNetworkPeers()` |
 | `health` | Docker-level health checkup (same as the Settings tab) | `containerHealth.checkContainerHealth(name)` |
 | `workspace_list` | List a workspace dir | `workspace.listDir` |
@@ -1248,6 +1395,22 @@ Rules:
     over a session the human was actively driving.
   - `mission_send` goes through `mission.sendText`, the single writer path the
     page's terminal uses, so the per-session solo lock is honoured in one place.
+  - **`mission_project_create` probes before it writes.** A passed `folder` is
+    checked inside the PAD with `mission.projectFolders` (after the grant gate —
+    the probe is a container command) and refused `mission_folder_missing`, with
+    a few sibling names, before any row exists; an omitted folder lets the store
+    pick the driver's default workspace, as the page dialog does. The handler
+    never resolves the agent's type itself: the store's `agentRow` does, so a
+    mistyped PAD name is `mission_agent_not_found`, never a driver-fallback
+    "openclaw does not support Mission" complaint.
+  - **`mission_session_start` reports where the TUI landed.** The row is stamped
+    `origin='agent'` (the page badges it "started by agent"), and the response
+    carries `startedInFolder` (the pane's `cwd`) and `inExpectedFolder`, so the
+    caller can check the session opened in the project folder.
+  - **No tool edits a session's flags.** There is no rename, relabel or
+    solo-lock tool: the solo lock is the human's switch. Agent-started sessions
+    get no special send rights — "read `mission_sessions` before typing into a
+    session you did not start" is a guide rule in `llm-guide.js`, not a gate.
 
 ### Project progress: the plans facility (plan 64, closing 67 §67.1)
 

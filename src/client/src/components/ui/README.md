@@ -117,7 +117,7 @@ and Web tabs' three handlers do that.
    the winner decided by stylesheet order. That is what makes
    `<Button className="w-full">` legal.
 2. **Never delete an `msn-*` class.** Those are pure browser-test hooks (see
-   `plans/53-mission-workspace.md` §6). They carry no styles; they are how the
+   `docs/reference/pages/mission.md#element-hooks`). They carry no styles; they are how the
    tests find an element. Every primitive forwards `className` so a hook lands
    on the exact element that has it today. Losing one silently kills a check
    that otherwise looks fine.
