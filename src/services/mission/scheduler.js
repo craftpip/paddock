@@ -33,7 +33,7 @@ const runnerTransition = require('../runner-transition');
 const { requireAgent, RUNNER_NO_RESPONSE_TIMEOUT_MS } = require('./internal');
 const { MissionError } = require('./errors');
 const { getProject } = require('./projects');
-const { getSession } = require('./sessions');
+const { getSession, tryAdoptConversation } = require('./sessions');
 const { restartSession } = require('./session-lifecycle');
 const { detectPermission, sendVerdict, sendText, awaitExactReceipt } = require('./session-io');
 const { busyForSessions } = require('./liveness');
@@ -451,7 +451,20 @@ async function canDispatch(runnerId, { session, project, agent, queue, kind, gen
   }
   // Three different refusals that used to share one string (and, via
   // startRunner, the code `runner_worker_not_idle` — wrong for all three).
-  if (!session?.agent_session_id) return { allowed: false, code: 'runner_worker_identity_unavailable', reason: 'The worker session has no conversation id, so its turns cannot be observed. Close the worker session and press Run to start a fresh one.', freshRunner: fresh };
+  // Plan 126: a fresh codex session gets its id only once codex has written
+  // the rollout (on the first message), so adopt it here when exactly one fits.
+  // Adoption updates `session` in place, so the rest of this pass — and the
+  // caller's delivery — uses the id.
+  let adoption = null;
+  if (session && !session.agent_session_id) adoption = tryAdoptConversation(session, project);
+  if (!session?.agent_session_id) {
+    const reason = adoption?.state === 'none'
+      ? 'This codex session has no conversation yet: codex creates one only when the first message is typed. Type anything into the session (or open one from History), then press Run again.'
+      : adoption?.state === 'many'
+        ? 'Several new codex conversations started in this folder at about the same time, so the runner cannot tell which one is this session. Close the extra sessions, then press Run again.'
+        : 'The worker session has no conversation id, so its turns cannot be observed. Close the worker session and press Run to start a fresh one.';
+    return { allowed: false, code: 'runner_worker_identity_unavailable', reason, freshRunner: fresh };
+  }
   if (fresh.session_id !== session.id) return { allowed: false, code: 'runner_worker_identity_unavailable', reason: 'The runner is bound to a different worker session than this one.', freshRunner: fresh };
   if (getSession(session.id)?.locked) return { allowed: false, code: 'runner_worker_locked', reason: 'The worker session is solo-locked by a human; unlock it to let the runner send.', freshRunner: fresh };
   let turn = agentStore.readTurn(agent, session.agent_session_id);

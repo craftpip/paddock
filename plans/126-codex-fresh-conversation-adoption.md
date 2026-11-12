@@ -1,6 +1,8 @@
 # Plan 126 — A fresh codex Mission session learns its own conversation id
 
-## Status: Proposed (2026-11-12) — 0/4 phases. Design complete; Phase 4 (live proof) needs a codex PAD with a working login, which costs subscription usage — ask before running it.
+## Status: Blocked (2026-11-13) — 3/4 phases done (reader, adoption, gate; tested, mutation-controlled, committed). Remaining: Phase 4 live proof, which needs a codex and a claude PAD with a working login and spends subscription usage — waiting for the user's OK.
+
+**Design change made while building (2026-11-13):** the runner does NOT send the first message into an id-less codex session. Every ownership and receipt check in the dispatch path compares conversation ids (`owns()`, `operation_session_id`, the held/reconcile paths), so a send before the id exists could never be matched and would be a blind send. Instead the gate adopts the id once codex has written the rollout, and before that refuses with a reason that says how to unblock it (type anything into the session, press Run again). User journey step 2–3 therefore becomes: press Run → "type anything first" → type → Run → runs normally.
 
 ## Why
 
@@ -69,19 +71,20 @@ and simply start answering once the id is adopted.
 
 ## Phases
 
-- [ ] **Phase 1 — reader.** `readTurnForSession` + candidate discovery in
+- [x] **Phase 1 — reader.** `readTurnForSession` + candidate discovery in
   `services/jsonl-turn.js` (`findFreshCodexConversation(base, folder, sinceIso,
   excludeIds)`, reading only the FIRST line of each candidate file, newest-mtime
   first, capped at 200 files). Tests in `test/jsonl-turn.test.js`: zero / one / two
   candidates, a candidate from another folder, one older than the session, one
   claimed by another row, an unreadable store. Mutation control: drop the `cwd`
   check → a test goes red.
-- [ ] **Phase 2 — adoption.** `adoptConversation` + audit. Tests in
+- [x] **Phase 2 — adoption.** `adoptConversation` + audit. Tests in
   `test/mission.test.js`: write-once (a second adopt is a no-op), never overwrites,
   audit row has actor `system`.
-- [ ] **Phase 3 — callers.** Switch the runner call sites; re-read the session in
-  `awaitExactReceipt`. Run `runner-*.test.js`, `mission.test.js`, `queue.test.js`,
-  then `docker exec paddock npm test`.
+- [x] **Phase 3 — gate.** Adoption runs in the dispatch gate (`canDispatch`), which every
+  dispatch path shares, and updates the session object in place, so the per-call-site rewrite
+  was not needed. Tests in `test/runner-mcp-wiring.test.js` (refusal reasons for none/many;
+  positive twin: adopted, sent once, operation stamped with the real id). Full suite green.
 - [ ] **Phase 4 — live proof (needs the user's OK: subscription spend).** On a
   codex PAD with a working login: new Mission session, make it a runner with a
   one-line plan ("reply OK and mark the item done"), Run queue. Assert in the

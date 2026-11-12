@@ -226,6 +226,65 @@ function hasTranscript(base, driver, sessionId) {
   return !!locateConversation(base, driver, sessionId);
 }
 
+/** The FIRST line of a file, without reading the rest (a rollout can be MBs). */
+function firstLine(file) {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const buf = Buffer.alloc(64 * 1024);
+    const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    const text = buf.subarray(0, n).toString('utf8');
+    const nl = text.indexOf('\n');
+    return nl === -1 ? null : text.slice(0, nl);
+  } finally { fs.closeSync(fd); }
+}
+
+const CLOCK_SLACK_MS = 5000;
+const MAX_CANDIDATE_FILES = 200;
+
+/** A fresh codex Mission session launches with no conversation id (codex has
+ *  no flag to choose one) and codex writes its rollout only when the first
+ *  message arrives. This finds the rollout that conversation became: its
+ *  `session_meta` names the project folder as `cwd`, it started at or after
+ *  the Mission session (with a little clock slack), and no other Mission row
+ *  already owns its id. Answers:
+ *    { state: 'none' }            — nothing yet: nobody has typed into it
+ *    { state: 'one', id }         — exactly one: safe to adopt
+ *    { state: 'many', ids }       — ambiguous: never guess
+ *    { state: 'unreadable' }      — the store could not be read */
+function findFreshCodexConversation(base, folder, sinceIso, excludeIds = []) {
+  const since = Date.parse(sinceIso);
+  if (!folder || !Number.isFinite(since)) return { state: 'unreadable', reason: 'No folder or start time to match' };
+  if (!fs.existsSync(base)) return { state: 'unreadable', reason: 'Worker store unavailable' };
+  const exclude = new Set(excludeIds.filter(Boolean));
+  const want = folder.replace(/\/+$/, '');
+  let files;
+  try {
+    files = walk(base)
+      .map((f) => ({ f, m: fs.statSync(f).mtimeMs }))
+      // A rollout is appended to for its whole life, so one that has not been
+      // touched since before the session started cannot be its conversation.
+      .filter((x) => x.m >= since - CLOCK_SLACK_MS)
+      .sort((a, b) => b.m - a.m)
+      .slice(0, MAX_CANDIDATE_FILES);
+  } catch { return { state: 'unreadable', reason: 'Worker store unreadable' }; }
+  const ids = [];
+  for (const { f } of files) {
+    let meta;
+    try { meta = JSON.parse(firstLine(f) || 'null'); } catch { continue; }
+    if (!meta || meta.type !== 'session_meta' || !meta.payload) continue;
+    const p = meta.payload;
+    const id = p.id;
+    if (!SAFE_ID.test(String(id || '')) || exclude.has(id)) continue;
+    if (String(p.cwd || '').replace(/\/+$/, '') !== want) continue;
+    const started = Date.parse(p.timestamp || meta.timestamp);
+    if (!Number.isFinite(started) || started < since - CLOCK_SLACK_MS) continue;
+    if (!ids.includes(id)) ids.push(id);
+  }
+  if (!ids.length) return { state: 'none' };
+  if (ids.length > 1) return { state: 'many', ids };
+  return { state: 'one', id: ids[0] };
+}
+
 function _resetForTests() { cache.clear(); fileOf.clear(); }
 
-module.exports = { readJsonlTurn, hasTranscript, hashText, versionAtLeast, _resetForTests };
+module.exports = { readJsonlTurn, hasTranscript, findFreshCodexConversation, hashText, versionAtLeast, _resetForTests };

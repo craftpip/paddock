@@ -66,7 +66,7 @@ beforeEach(async () => {
 
   saved = {
     tmux: { hasSession: tmux.hasSession, paneState: tmux.paneState, captureScreen: tmux.captureScreen, sendText: tmux.sendText, killSession: tmux.killSession, createSession: tmux.createSession, sendCommand: tmux.sendCommand, folderExists: tmux.folderExists },
-    store: { readTurn: store.readTurn, readActivity: store.readActivity },
+    store: { readTurn: store.readTurn, readActivity: store.readActivity, findFreshConversation: store.findFreshConversation },
   };
   turn = idle();
   mcpState = { state: 'connected', detail: '' };
@@ -179,4 +179,26 @@ it('a worker with no conversation id is refused as identity-unavailable, not "no
   await assert.rejects(() => mission.startRunner(runner.id),
     (e) => e.code === 'runner_worker_identity_unavailable' && /conversation id/.test(e.message));
   assert.equal(sends.length, 0);
+});
+
+it('plan 126: an id-less worker whose conversation is not written yet is told how to unblock it', async () => {
+  getDb().prepare('UPDATE mission_sessions SET agent_session_id = NULL WHERE id = ?').run(session.id);
+  store.findFreshConversation = () => ({ state: 'none' });
+  await assert.rejects(() => mission.startRunner(runner.id),
+    (e) => e.code === 'runner_worker_identity_unavailable' && /first message is typed/.test(e.message));
+  store.findFreshConversation = () => ({ state: 'many', ids: ['a', 'b'] });
+  await assert.rejects(() => mission.startRunner(runner.id),
+    (e) => e.code === 'runner_worker_identity_unavailable' && /cannot tell which one/.test(e.message));
+  assert.equal(sends.length, 0);
+});
+
+it('plan 126 positive twin: the gate adopts the one conversation and the run goes ahead with it', async () => {
+  getDb().prepare('UPDATE mission_sessions SET agent_session_id = NULL WHERE id = ?').run(session.id);
+  store.findFreshConversation = () => ({ state: 'one', id: '019d0000-0000-7000-8000-0000000000aa' });
+  const r = await mission.startRunner(runner.id);
+  assert.equal(r.started, true);
+  assert.equal(sends.length, 1, 'the instruction went out');
+  assert.equal(mission.getSession(session.id).agent_session_id, '019d0000-0000-7000-8000-0000000000aa');
+  const op = getDb().prepare('SELECT conversation_id FROM runner_operations WHERE runner_id = ? ORDER BY rowid DESC LIMIT 1').get(runner.id);
+  assert.equal(op.conversation_id, '019d0000-0000-7000-8000-0000000000aa', 'the operation is stamped with the adopted id, not a placeholder');
 });

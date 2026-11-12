@@ -66,8 +66,15 @@ transcript. opencode creates its conversation through its server first and launc
 claude has the id **minted** (`mintConversationId`, a UUID) and launched with
 `tuiLaunch.freshWithId`. A claude transcript only exists once its first message is written, so a
 relaunch or restart before that starts fresh under the same id; after it, or when the store
-cannot be read, it resumes (`relaunchCommand`, `agentStore.hasConversation`). codex has no flag to
-choose an id, so a fresh codex row stays id-less until plan 126 adopts it.
+cannot be read, it resumes (`relaunchCommand`, `agentStore.hasConversation`).
+
+codex has no flag to choose an id and writes its rollout only on the first message, so a fresh
+codex row starts id-less and **adopts** its conversation later (`sessions.tryAdoptConversation`,
+write-once, audited as `session_conversation_adopted`). The candidate is a rollout whose
+`session_meta.cwd` is the project folder, that started at or after the row (5 s slack), and whose
+id no other Mission row on the PAD owns. Exactly one candidate is adopted; none or several leave
+the row alone. The runner's dispatch gate runs this before refusing an id-less worker — see
+[Mission Queue and Runner](../backend/mission-queue.md#worker-observation-by-driver).
 
 A session start creates the `msn-<8 hex>` tmux session with `-c <project folder>`, types the
 command with `send-keys`, and inserts the row. A resume stores the source conversation in

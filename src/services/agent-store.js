@@ -712,4 +712,15 @@ function hasConversation(agent, sessionId) {
   } catch { return null; }
 }
 
-module.exports = { StoreError, STORES, locate, readActivity, readTurn, readUsageEvidence, hasConversation };
+/** For a fresh, id-less codex Mission session: which rollout did it become?
+ *  See jsonl-turn.findFreshCodexConversation for the answers. Other drivers
+ *  always know their id at launch, so they answer `unsupported`. */
+function findFreshConversation(agent, folder, sinceIso, excludeIds = []) {
+  try {
+    if (typeof agent === 'string') agent = registry.getAgent(agent);
+    if (!agent || agent.agent_type !== 'codex') return { state: 'unsupported' };
+    return require('./jsonl-turn').findFreshCodexConversation(path.join(agent.workspace_root, STORES.codex.rel), folder, sinceIso, excludeIds);
+  } catch (e) { return { state: 'unreadable', reason: e.message }; }
+}
+
+module.exports = { StoreError, STORES, locate, readActivity, readTurn, readUsageEvidence, hasConversation, findFreshConversation };

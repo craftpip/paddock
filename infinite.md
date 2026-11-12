@@ -41,7 +41,7 @@ only.** Two items remain:
 
 ## Queue
 
-- [ ] plans/126-codex-fresh-conversation-adoption.md — Phases 1–3 buildable now; Phase 4 live proof needs a codex/claude PAD login (spend) — ask first
+- [ ] plans/126-codex-fresh-conversation-adoption.md — blocked: Phases 1–3 done 2026-11-13; Phase 4 live proof needs your OK (codex + claude PAD login, spends usage)
 
 ## Done
 

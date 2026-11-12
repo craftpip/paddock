@@ -131,3 +131,39 @@ it('hasTranscript: true for a file, false for none, null when the store is unrea
   assert.equal(jt.hasTranscript(path.join(ROOT, 'claude'), 'claude', '11111111-1111-1111-1111-111111111111'), false);
   assert.equal(jt.hasTranscript(path.join(ROOT, 'nope'), 'claude', CLAUDE_ID), null);
 });
+
+// Plan 126: which rollout did a fresh, id-less codex Mission session become?
+function rollout(id, { cwd = '/w/proj', at = '2026-11-13T10:00:10.000Z', mtime = null } = {}) {
+  const dir = path.join(ROOT, 'fresh', '2026', '11', '13');
+  fs.mkdirSync(dir, { recursive: true });
+  const f = path.join(dir, `rollout-2026-11-13T10-00-10-${id}.jsonl`);
+  write(f, [{ timestamp: at, type: 'session_meta', payload: { id, timestamp: at, cwd } }, ev({ type: 'task_started', turn_id: 't' })]);
+  if (mtime) fs.utimesSync(f, new Date(mtime), new Date(mtime));
+  return f;
+}
+const A = 'aaaaaaaa-0000-4000-8000-000000000001';
+const B = 'bbbbbbbb-0000-4000-8000-000000000002';
+const C = 'cccccccc-0000-4000-8000-000000000003';
+const FRESH = path.join(ROOT, 'fresh');
+const SINCE = '2026-11-13T10:00:00.000Z';
+const freshOf = (exclude = []) => jt.findFreshCodexConversation(FRESH, '/w/proj', SINCE, exclude);
+
+it('fresh codex: none until a rollout for this folder appears, then exactly one', () => {
+  fs.rmSync(FRESH, { recursive: true, force: true });
+  fs.mkdirSync(FRESH, { recursive: true });
+  assert.equal(freshOf().state, 'none', 'nobody has typed yet');
+  rollout(A, { cwd: '/w/other', mtime: Date.parse('2026-11-13T10:00:20Z') });
+  rollout(B, { at: '2026-11-13T09:00:00.000Z', mtime: Date.parse('2026-11-13T09:30:00Z') });
+  assert.equal(freshOf().state, 'none', 'another folder, and an older conversation, are not this one');
+  rollout(C, { cwd: '/w/proj/', mtime: Date.parse('2026-11-13T10:00:20Z') });
+  assert.deepEqual(freshOf(), { state: 'one', id: C });
+  assert.equal(freshOf([C]).state, 'none', 'an id another row already owns is not a candidate');
+});
+
+it('fresh codex: two candidates are ambiguous, and a missing store is unreadable, never none', () => {
+  rollout(A, { mtime: Date.parse('2026-11-13T10:00:30Z') });
+  const r = freshOf();
+  assert.equal(r.state, 'many');
+  assert.deepEqual(r.ids.sort(), [A, C].sort());
+  assert.equal(jt.findFreshCodexConversation(path.join(ROOT, 'absent'), '/w/proj', SINCE).state, 'unreadable');
+});

@@ -644,6 +644,39 @@ describe('Mission - resuming a conversation', () => {
     }
   });
 
+  it('plan 126: a fresh codex row adopts its conversation once, only on exactly one candidate', async () => {
+    const agentStore = require('../services/agent-store');
+    const sessions = require('../services/mission/sessions');
+    const realFind = agentStore.findFreshConversation;
+    const asked = [];
+    try {
+      const cx = mission.createProject({ name: 'cxa', agent: 'pad-msn-cx', folder: '/root/.codex/workspace' });
+      const { session } = await mission.startSession(cx.id, {});
+      assert.equal(session.agent_session_id, null, 'codex cannot be told an id at launch');
+      const row = mission.getSession(session.id);
+
+      agentStore.findFreshConversation = () => ({ state: 'none' });
+      assert.equal(sessions.tryAdoptConversation(row, cx).state, 'none');
+      agentStore.findFreshConversation = () => ({ state: 'many', ids: ['a', 'b'] });
+      assert.equal(sessions.tryAdoptConversation(row, cx).state, 'many');
+      assert.equal(mission.getSession(session.id).agent_session_id, null, 'none and many never write');
+
+      agentStore.findFreshConversation = (pad, folder, since, exclude) => { asked.push({ pad, folder, since, exclude }); return { state: 'one', id: '019d0000-0000-7000-8000-000000000001' }; };
+      const r = sessions.tryAdoptConversation(row, cx);
+      assert.deepEqual(r, { state: 'adopted', id: '019d0000-0000-7000-8000-000000000001' });
+      assert.equal(row.agent_session_id, r.id, 'the caller\'s row object is updated in place');
+      assert.equal(mission.getSession(session.id).agent_session_id, r.id);
+      assert.equal(asked[0].folder, '/root/.codex/workspace');
+      assert.equal(asked[0].since, row.created_at);
+
+      assert.equal(sessions.adoptConversation(session.id, 'other'), false, 'write-once: a second adopt changes nothing');
+      assert.equal(mission.getSession(session.id).agent_session_id, r.id);
+      assert.equal(sessions.tryAdoptConversation(mission.getSession(session.id), cx).state, 'known');
+    } finally {
+      agentStore.findFreshConversation = realFind;
+    }
+  });
+
   it('comes back to the same conversation when the TUI has to be relaunched', async () => {
     const p = mission.createProject({ name: 'cp', agent: 'pad-msn-oc', folder: '/www1/craftpip.com' });
     const { session } = await mission.startSession(p.id, { agentSessionId: 'ses_abc' });

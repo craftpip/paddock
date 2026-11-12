@@ -318,8 +318,16 @@ command wrappers are skipped. claude writes `turn_duration` only from CLI 2.1.31
 CLI an open claude turn is `unknown`, not `working`. An interrupted turn on any driver is `idle`
 with `outcome: 'error'`, which requires explicit recovery.
 
-Two limits remain. A fresh codex session has no conversation id until its first message creates
-the rollout file, so the runner cannot watch it yet (plan 126). And usage-exhaustion evidence from
+A fresh codex worker has no conversation id until its first message creates the rollout. The
+dispatch gate (`canDispatch`) first tries to adopt it (see
+[Mission Page](../pages/mission.md#launching-the-tui)); adoption updates the session object in
+place, so the same pass dispatches and stamps the operation with the real id. When nothing has
+been typed yet the gate refuses with `runner_worker_identity_unavailable` and says to type
+anything into the session and press Run again; when several new conversations in the folder fit,
+it says so instead of guessing. The runner never sends into an id-less session: every receipt and
+ownership check compares conversation ids, and a send it cannot match would be a blind one.
+
+One limit remains: usage-exhaustion evidence from
 the store (`readUsageEvidence`) is still measured for opencode only; on codex and claude the
 screen notice (`provider-limit.js`) is the only exhaustion signal. No driver exposes compaction
 in its store, so it is not inferred.

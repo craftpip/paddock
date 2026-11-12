@@ -21,6 +21,8 @@ Object.assign(exports, {
   listSessionsForAgent,
   updateSession,
   getSessionByTmux,
+  adoptConversation,
+  tryAdoptConversation,
 });
 
 const crypto = require('crypto');
@@ -172,6 +174,39 @@ function listSessionsForAgent(agentName) {
     db.prepare('SELECT * FROM mission_projects WHERE agent_name = ?').all(String(agentName)).map((p) => [p.id, p])
   );
   return rows.map((s) => ({ ...s, project: projects.get(s.project_id) || null, live: null }));
+}
+
+/** Record the conversation an id-less row turned out to be. WRITE-ONCE: the
+ *  `IS NULL` guard means a second adopt (a race, or a later different answer)
+ *  changes nothing, and an id the row already has is never overwritten. */
+function adoptConversation(sessionId, conversationId) {
+  const r = getDb().prepare('UPDATE mission_sessions SET agent_session_id = ? WHERE id = ? AND agent_session_id IS NULL')
+    .run(String(conversationId), sessionId);
+  if (r.changes) {
+    const project = getDb().prepare('SELECT p.* FROM mission_projects p JOIN mission_sessions s ON s.project_id = p.id WHERE s.id = ?').get(sessionId);
+    if (project) audit(project, 'session_conversation_adopted', { session: { id: sessionId }, details: String(conversationId) });
+  }
+  return r.changes > 0;
+}
+
+/** Plan 126: a fresh codex row has no conversation id until codex writes its
+ *  rollout on the first message. Find that rollout and adopt it — only when
+ *  exactly ONE candidate fits; "none" and "many" leave the row alone and say
+ *  why. On adoption the passed row object is updated IN PLACE, so a caller in
+ *  the middle of a pass uses the id from here on. Rows that already have an
+ *  id, and drivers that always know theirs, answer `known` / `unsupported`. */
+function tryAdoptConversation(session, project) {
+  if (!session || !project) return { state: 'unsupported' };
+  if (session.agent_session_id) return { state: 'known', id: session.agent_session_id };
+  const claimed = getDb().prepare(
+    'SELECT s.agent_session_id AS id FROM mission_sessions s JOIN mission_projects p ON p.id = s.project_id WHERE p.agent_name = ? AND s.agent_session_id IS NOT NULL'
+  ).all(project.agent_name).map((r) => r.id);
+  const found = require('../agent-store').findFreshConversation(project.agent_name, project.folder, session.created_at, claimed);
+  if (found.state !== 'one') return found;
+  adoptConversation(session.id, found.id);
+  const fresh = getSession(session.id);
+  session.agent_session_id = fresh ? fresh.agent_session_id : found.id;
+  return { state: 'adopted', id: session.agent_session_id };
 }
 
 /** Label and/or the solo lock. `locked` is the one privacy control in the
