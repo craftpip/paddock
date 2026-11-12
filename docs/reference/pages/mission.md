@@ -133,7 +133,7 @@ Every element carries a stable `msn-*` class so a UI instruction can name the ex
 | Col 1 rail | `msn-col-projects-rail` `msn-col-rail` `msn-rail-head` `msn-rail-body` `msn-rail-btn` `msn-avatar` `msn-avatar-on` `msn-btn-expand` `msn-btn-new-project-mini` |
 | Col 2 | `msn-col-sessions` `msn-sessions` `msn-sessions-body` `msn-new-split` `msn-btn-new-session` `msn-btn-new-caret` `msn-new-menu` `msn-new-menu-infinite` `msn-project-folder` `msn-btn-subfolders` `msn-cap-note` `msn-group-sessions` `msn-group-count` `msn-dot-legend` `msn-history-errors` `msn-history-error` |
 | Col 2 rows | `msn-row-slot` `msn-session-row` (+`msn-row-selected`, `msn-row-shell`, `msn-row-infinite`) `msn-session-dot` `msn-session-label` `msn-session-id` `msn-row-project` `msn-row-actions` `msn-btn-popout` `msn-btn-lock` `msn-btn-runner-config` `msn-btn-runnerify` `msn-btn-close` `msn-history-row` `msn-history-title` `msn-history-meta` `msn-history-hint` |
-| Col 3 | `msn-col-agent` `msn-session-view` `msn-agent-header` `msn-agent-dot` `msn-agent-project` `msn-agent-label` `msn-agent-cwd` `msn-agent-actions` `msn-badge-solo` `msn-btn-relaunch` `msn-btn-restart` `msn-terminal-view` `msn-terminal-wrap` `msn-terminal` |
+| Col 3 | `msn-col-agent` `msn-session-view` `msn-agent-header` `msn-agent-dot` `msn-agent-project` `msn-agent-label` `msn-agent-cwd` `msn-agent-actions` `msn-badge-solo` `msn-btn-relaunch` `msn-btn-restart` `msn-col3-body` `msn-queue-split` `msn-queue-splitter` `msn-terminal-view` `msn-terminal-wrap` `msn-terminal` |
 | Queue panel | `msn-queue-panel` `msn-queue-header` `msn-queue-toggle` `msn-queue-state` `msn-queue-counts` `msn-runner-status-strip` `msn-runner-tabs` `msn-queue-actions` `msn-queue-body` `msn-queue-feedback` `msn-queue-progress` `msn-queue-items` `msn-queue-item` `msn-btn-queue-up` `msn-btn-queue-down` `msn-btn-queue-remove` `msn-queue-path` |
 | Project dialog | `msn-dialog` `msn-dialog-form` `msn-field-name` `msn-field-agent` `msn-field-folder` `msn-field-plans-folder` `msn-input-name` `msn-input-folder` `msn-input-plans-folder` `msn-agent-option` (+`msn-selected`) `msn-stopped-note` `msn-no-agent` `msn-link-create-agent` `msn-folder-chips` `msn-folder-chip` `msn-suggestions` `msn-suggestion-chip` `msn-folder-status` (+`msn-ok`/`msn-warn`) `msn-plans-folder-status` `msn-dup-warning` `msn-btn-submit` `msn-btn-cancel` |
 
@@ -332,12 +332,18 @@ width-capped column: a progress bar (`msn-queue-progress`), Current/Next while t
 the items in persisted queue order (`msn-queue-item-index`, status chip, title over path, icon
 actions).
 
-- **Expanded, the queue takes the whole column.** `queue=open` or no `queue` parameter means
-  expanded; `queue=closed` means collapsed. While expanded, the terminal wrapper
-  (`msn-terminal-view`) is `hidden` and `aria-hidden` but stays mounted, so the same attachment
-  survives every toggle; check visibility, not DOM presence. The panel is `flex-1 min-h-0` and the
-  item list scrolls inside it. Collapsed, the header row sits above the visible terminal.
-- **A queue that needs repair stays expanded** (`repairRequired`: a non-`ok` queue condition, or
+- **Open, the queue and the terminal split the column.** `queue=open` or no `queue` parameter
+  means open; `queue=closed` means collapsed. Open, the queue (`msn-queue-split`) sits above a
+  draggable divider (`msn-queue-splitter`, the shared `Splitter` with `axis="y"`: drag, ↑/↓ by
+  16px, shift for 64px) and the terminal fills the rest, re-fitting through its ResizeObserver.
+  The queue's height is stored per browser in `localStorage['pad-mission-queue-split-h']`
+  (default 45% of the space below the header); it is at least 120px, and CSS keeps the terminal
+  at least 120px however tall the stored height is. Queue, divider and terminal share one body
+  box (`msn-col3-body`), so the limits are measured against the space they divide. Collapsed,
+  only the queue's header row sits above the terminal. The queue keeps one wrapper in both
+  states, so toggling never remounts it. (The open queue used to REPLACE the terminal, hidden but
+  mounted; that toggle is gone.)
+- **A queue that needs repair stays open** and gets the split even while the URL says closed (`QueuePanel` reports its real state through `onOpenChange`; `repairRequired`: a non-`ok` queue condition, or
   an execution state of `projection_error`, `awaiting_receipt` or `held`), so collapse cannot hide
   the only evidence needed to fix it.
 - **Feedback lives in the panel.** Queue actions write one per-runner `operationFeedback` record

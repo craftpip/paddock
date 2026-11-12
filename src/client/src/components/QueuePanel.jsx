@@ -112,7 +112,7 @@ function ItemRow({ item, current, index, total, busy, actions, onMove, onRemove,
   )
 }
 
-export default function QueuePanel({ runner, project, sessionId, expanded = false, onCollapsedChange }) {
+export default function QueuePanel({ runner, project, sessionId, expanded = false, onCollapsedChange, onOpenChange }) {
   const { location, patch, openPopup, closePopup, drafts } = useNavigation()
   const popup = parsePopups(location.search, location.pathname).at(-1)
   const historyRequested = new URLSearchParams(location.search).get('runnerTab') === 'history'
@@ -141,6 +141,9 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
   const historyOpen = historyRequested && !repairRequired
   const panelExpanded = expanded || repairRequired
   const collapsed = !panelExpanded
+  // The parent sizes the queue/terminal split from this, so a queue that is
+  // forced open for repair gets the split even while the URL says closed.
+  useEffect(() => { onOpenChange?.(panelExpanded) }, [panelExpanded, onOpenChange])
   const setCollapsed = (next) => {
     const value = typeof next === 'function' ? next(collapsed) : next
     if (repairRequired && value) return

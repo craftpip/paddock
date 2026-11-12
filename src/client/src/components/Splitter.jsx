@@ -22,6 +22,11 @@ import { useCallback, useEffect, useRef, useState } from 'react'
  *
  *  `aria-valuenow`/`role="separator"` mean a screen reader announces the
  *  position, and `double-click` resets to the default width.
+ *
+ *  `axis="y"` is the same divider laid horizontally between two STACKED panels:
+ *  it resizes the previous sibling's HEIGHT from `clientY`, `max` is a % of the
+ *  container's height, and the keys are ↑/↓. (The Mission queue over its
+ *  terminal uses it.)
  */
 export default function Splitter({
   onResize,
@@ -31,8 +36,12 @@ export default function Splitter({
   openAt = null,     // width a keyboard nudge jumps to when the panel is on its floor
   label = 'Resize panel',
   storageKey = null,  // persist the width under this localStorage key
+  axis = 'x',         // 'x': resize width (side by side); 'y': resize height (stacked)
   className = '',
 }) {
+  const vertical = axis === 'y'
+  const sizeOf = (el) => (el ? (vertical ? el.getBoundingClientRect().height : el.getBoundingClientRect().width) : 0)
+  const posOf = (e) => (vertical ? e.clientY : e.clientX)
   const [dragging, setDragging] = useState(false)
   // The drag flag is a REF, not just state: pointermove can arrive before the
   // re-render that flips `dragging` commits, and a fast real drag would then
@@ -46,10 +55,11 @@ export default function Splitter({
   const clamp = useCallback(
     (px) => {
       const parent = containerRef.current?.parentElement
-      const cap = parent?.clientWidth ? (parent.clientWidth * max) / 100 : Infinity
+      const room = vertical ? parent?.clientHeight : parent?.clientWidth
+      const cap = room ? (room * max) / 100 : Infinity
       return Math.max(min, Math.min(cap, Math.round(px)))
     },
-    [min, max]
+    [min, max, vertical]
   )
 
   const persist = useCallback(
@@ -71,7 +81,7 @@ export default function Splitter({
     // Measure the panel being resized (the previous sibling) rather than
     // guessing a width: the pointer delta is applied to its real width.
     const panel = e.currentTarget.previousElementSibling
-    startRef.current = { x: e.clientX, width: panel ? panel.getBoundingClientRect().width : 0 }
+    startRef.current = { x: posOf(e), width: sizeOf(panel) }
     draggingRef.current = true
     setDragging(true)
     if (e.pointerId !== undefined) {
@@ -83,7 +93,7 @@ export default function Splitter({
 
   const handleMove = (e) => {
     if (!draggingRef.current) return
-    const next = clamp(startRef.current.width + (e.clientX - startRef.current.x))
+    const next = clamp(startRef.current.width + (posOf(e) - startRef.current.x))
     onResizeRef.current?.(next)
   }
 
@@ -92,7 +102,7 @@ export default function Splitter({
     draggingRef.current = false
     setDragging(false)
     const panel = containerRef.current?.previousElementSibling
-    if (panel) persist(panel.getBoundingClientRect().width)
+    if (panel) persist(Math.round(sizeOf(panel)))
     if (e.pointerId !== undefined) {
       try {
         e.currentTarget.releasePointerCapture?.(e.pointerId)
@@ -104,7 +114,7 @@ export default function Splitter({
   const handleKeyDown = (e) => {
     const step = e.shiftKey ? 64 : 16
     const panel = containerRef.current?.previousElementSibling
-    const current = panel ? panel.getBoundingClientRect().width : min
+    const current = panel ? sizeOf(panel) : min
     // A nudge is a delta from the current width, so a panel sitting on its
     // floor can only ever ask for `min + step` — which the floor clamps back to
     // `min`, and a collapsed column would be unreachable by keyboard for ever.
@@ -112,8 +122,10 @@ export default function Splitter({
     // the first press reopen it and every press after that a normal step.
     const atFloor = openAt ? current <= min + 1 : false
     let next = null
-    if (e.key === 'ArrowLeft') next = atFloor ? current : current - step
-    else if (e.key === 'ArrowRight') next = atFloor ? openAt : current + step
+    const less = vertical ? 'ArrowUp' : 'ArrowLeft'
+    const more = vertical ? 'ArrowDown' : 'ArrowRight'
+    if (e.key === less) next = atFloor ? current : current - step
+    else if (e.key === more) next = atFloor ? openAt : current + step
     else if (e.key === 'Home') next = min
     else if (e.key === 'End') next = clamp(current * 2)
     else if (e.key === 'Enter' && defaultWidth) next = defaultWidth
@@ -137,22 +149,20 @@ export default function Splitter({
     const prevUserSelect = document.body.style.userSelect
     const prevCursor = document.body.style.cursor
     document.body.style.userSelect = 'none'
-    document.body.style.cursor = 'col-resize'
+    document.body.style.cursor = vertical ? 'row-resize' : 'col-resize'
     return () => {
       document.body.style.userSelect = prevUserSelect
       document.body.style.cursor = prevCursor
     }
-  }, [dragging])
+  }, [dragging, vertical])
 
   return (
     <div
       ref={containerRef}
       role="separator"
-      aria-orientation="vertical"
+      aria-orientation={vertical ? 'horizontal' : 'vertical'}
       aria-label={label}
-      aria-valuenow={Math.round(
-        containerRef.current?.previousElementSibling?.getBoundingClientRect().width || 0
-      )}
+      aria-valuenow={Math.round(sizeOf(containerRef.current?.previousElementSibling))}
       tabIndex={0}
       title="Drag to resize · double-click to reset"
       onPointerDown={handleDown}
@@ -161,15 +171,17 @@ export default function Splitter({
       onPointerCancel={endDrag}
       onKeyDown={handleKeyDown}
       onDoubleClick={handleDoubleClick}
-      className={`group relative w-1.5 shrink-0 cursor-col-resize outline-none ${
-        dragging ? 'z-10' : ''
-      } ${className}`}
+      className={`group relative shrink-0 outline-none ${
+        vertical ? 'h-1.5 w-full cursor-row-resize' : 'w-1.5 cursor-col-resize'
+      } ${dragging ? 'z-10' : ''} ${className}`}
     >
       {/* 6px invisible hit area, 1px line that only shows on hover/focus. */}
-      <span className="absolute inset-y-0 -left-1 w-3.5" aria-hidden="true" />
+      <span className={vertical ? 'absolute inset-x-0 -top-1 h-3.5' : 'absolute inset-y-0 -left-1 w-3.5'} aria-hidden="true" />
       <span
         aria-hidden="true"
-        className={`absolute inset-y-0 left-1/2 w-px -translate-x-1/2 transition-colors ${
+        className={`absolute transition-colors ${
+          vertical ? 'inset-x-0 top-1/2 h-px -translate-y-1/2' : 'inset-y-0 left-1/2 w-px -translate-x-1/2'
+        } ${
           dragging
             ? 'bg-accent-text'
             : 'bg-line group-hover:bg-accent-text group-focus-visible:bg-accent-text'
