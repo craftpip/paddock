@@ -38,10 +38,18 @@ function detectPermission(text) {
   if (!/reject/i.test(t)) return null;
   let tool = '';
   let p = '';
-  const arrow = t.match(/→\s*([^\n]+)/);
-  if (arrow) tool = arrow[1].trim().slice(0, 120);
+  // The request line. opencode draws a tool call as `→ <tool …>`, and an
+  // access request (an external directory, a command) as `← <request>`, e.g.
+  // `← Access external directory /proc/self` (measured on 1.19.5).
+  const arrow = t.match(/[→←]\s*([^\n]+)/);
+  if (arrow) tool = arrow[1].replace(/\s*[┃│]\s*$/, '').trim().slice(0, 120);
   const pathM = t.match(/Path:\s*([^\n]+)/i);
   if (pathM) p = pathM[1].trim().slice(0, 200);
+  // Otherwise the first entry of a `Patterns` list (`- /proc/self/*`).
+  if (!p) {
+    const pat = t.match(/Patterns[\s┃│]*\n(?:[\s┃│]*\n)*[\s┃│]*-\s*([^\n]+)/);
+    if (pat) p = pat[1].replace(/\s*[┃│]\s*$/, '').trim().slice(0, 200);
+  }
   return { tool, path: p };
 }
 

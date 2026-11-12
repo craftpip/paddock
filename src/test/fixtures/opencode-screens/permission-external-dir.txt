@@ -1,0 +1,16 @@
+  ┃  Click to expand
+  ┃
+
+     ▣  Build · Big Pickle
+
+  ┃
+  ┃  △ Permission required
+  ┃    ← Access external directory /proc/self
+  ┃
+  ┃  Patterns
+  ┃
+  ┃  - /proc/self/*
+  ┃
+  ┃
+  ┃   Allow once   Allow always   Reject  ctrl+f fullscreen  ⇆ select  enter confirm
+  ┃

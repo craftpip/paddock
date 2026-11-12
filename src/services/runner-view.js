@@ -58,10 +58,16 @@ function buildExecution({
   // the worker's screen on Run and refuses, with the reason, while the limit
   // still shows (or runs the usage_exhausted recovery script if one is set).
   const quotaStop = state === 'waiting_input' && stopCode === 'usage_exhausted' && !blocked;
+  // The worker's turn is parked on a permission dialog (a tool call waiting for
+  // a human). Not a question about the plan, and not a stop: it is answered in
+  // the session, and the queue carries on by itself afterwards.
+  const permissionWait = (active && scheduler.workerState === 'waiting_for_permission')
+    || (state === 'waiting_input' && stopCode === 'permission_dialog' && !blocked);
 
   const canRun = queueOk && hasWork && !blocked && (!outstanding || recovery || quotaStop)
     && (EVENTS.run.includes(state) || recovery || quotaStop);
-  const runWhyNot = state === 'setup_required' ? 'Set up the queue first'
+  const runWhyNot = active && !recovery ? 'The queue is already running'
+    : state === 'setup_required' ? 'Set up the queue first'
     : state === 'projection_error' ? 'Regenerate the queue file first'
     : blocked ? 'Resolve the blocked plan first'
     : !hasWork ? 'Add plans to the queue before running'
@@ -91,6 +97,9 @@ function buildExecution({
     : queueError || (blocked ? blockedItem?.reason : null) || scheduler.reason || null;
 
   let banner = null;
+  if (permissionWait) {
+    banner = { kind: 'permission', tone: 'warning', text: `${scheduler.reason || 'The worker is waiting on a permission dialog'}. Answer it in the session (Allow once or Reject); the queue continues by itself.` };
+  }
   if (quotaStop) {
     banner = { kind: 'usage_limit', tone: 'warning', text: `${scheduler.reason || 'The provider\'s usage limit was reached'}. Nothing needs answering: once the limit resets, press Run queue to continue (it checks the worker's screen first). To recover automatically, set up a usage_exhausted script in Configure → Callbacks.` };
   }
@@ -106,7 +115,10 @@ function buildExecution({
   }
 
   return {
-    state, label: quotaStop ? 'Usage limit' : LABELS[state], tone: quotaStop ? 'warning' : TONES[state], active, reason, banner,
+    state,
+    label: quotaStop ? 'Usage limit' : permissionWait ? 'Waiting for permission' : LABELS[state],
+    tone: quotaStop || permissionWait ? 'warning' : TONES[state],
+    active, reason, banner, permissionWait,
     operation: operation || null,
     actions: {
       setup: verdict(state === 'setup_required', 'The runner is already set up'),

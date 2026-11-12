@@ -285,7 +285,17 @@ Run is an explicit control intent, separate from whether an instruction may be s
 
 - **Paused, worker verifiably working, queue in progress:** Run adopts the active turn
   (`adopt_active_turn` to `running`), lifts the marker and sends nothing. This is the path after
-  a human typed into the session, or after an answer started a turn.
+  a human typed into the session, or after an answer started a turn. Adoption creates its own
+  operation (`operation_kind: adopted`, status `running`, assigned the plan in progress), so the
+  worker may close that item and the turn's completion has an owner — without it the worker's
+  `done` was refused with `operation=none` (plan 127).
+- **A permission dialog in the worker's pane** is a wait, not a stop. The watcher records
+  `worker_state: waiting_for_permission` with the parsed request as `scheduler_reason`, sends
+  nothing and stays `running`; the queue view and the MCP brief label it **Waiting for
+  permission** (`waiting_for: "permission"`, `next` naming `mission_permission_answer` with the
+  session id). The next pass after the answer carries on. A runner stopped on a dialog by an
+  older build (`reason_code: permission_dialog`) is lifted by `observeQuotaStops` once the dialog
+  is gone; Run refuses with `mission_permission_pending` while it still shows.
 - **Running, worker turn ended in an error:** `scheduler.recoveryRequired` is set, the page shows
   Run queue instead of Pause queue, and Run retires the interrupted operation and sends one fresh
   instruction. The watcher never does this on its own.

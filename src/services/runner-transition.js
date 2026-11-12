@@ -107,7 +107,10 @@ function applyEvent(runnerId, event, { actor = null, details = {} } = {}) {
     if (!EVENTS[event].includes(runtime.state)) {
       throw new RunnerTransitionError('runner_transition_invalid', `Cannot ${event} while ${runtime.state}. Allowed actions: ${allowedActions(runtime.state).join(', ') || 'none'}.`);
     }
-    if (['run', 'dispatch_next', 'resolve_begin', 'quota_recovery'].includes(event) && !details.operationId) details = { ...details, operationId: `rop_${crypto.randomUUID()}` };
+    // An adopted turn needs an operation of its own: without one the worker
+    // could not close its item (queue_item_not_assigned, operation=none) and
+    // the turn's completion had no owner — measured on plan 127's run.
+    if (['run', 'dispatch_next', 'resolve_begin', 'quota_recovery', 'adopt_active_turn'].includes(event) && !details.operationId) details = { ...details, operationId: `rop_${crypto.randomUUID()}` };
     if (['receipt', 'delivery_unknown'].includes(event) &&
         (!details.operationId || !runtime.operation_id || details.operationId !== runtime.operation_id)) {
       throw new RunnerTransitionError('runner_operation_superseded', 'The operation no longer owns this runner.');
@@ -126,15 +129,21 @@ function applyEvent(runnerId, event, { actor = null, details = {} } = {}) {
         WHERE id = ? AND runner_id = ? AND generation = ? AND status = 'running'`)
         .run(stamp, runtime.operation_id, runnerId, runtime.generation);
     }
-    if (['run', 'dispatch_next', 'resolve_begin', 'quota_recovery'].includes(event)) {
+    if (['run', 'dispatch_next', 'resolve_begin', 'quota_recovery', 'adopt_active_turn'].includes(event)) {
       db.prepare(`INSERT INTO runner_operations
         (id, runner_id, generation, operation_kind, conversation_id, item_id, queue_revision, prompt_hash, baseline_input_id,
          receipt_input_id, status, deadline_at, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'dispatching', ?, ?, ?)`)
-        .run(details.operationId, runnerId, transitionRecord.generation, details.kind || (event === 'resolve_begin' ? 'resolve' : event === 'quota_recovery' ? 'quota_recovery' : 'queue'),
+        .run(details.operationId, runnerId, transitionRecord.generation, details.kind || (event === 'resolve_begin' ? 'resolve' : event === 'quota_recovery' ? 'quota_recovery' : event === 'adopt_active_turn' ? 'adopted' : 'queue'),
           details.conversationId || runner.session_id, details.itemId || null, details.queueRevision ?? null,
           details.promptHash || null, details.baselineInputId || null,
           details.deadlineAt || null, stamp, stamp);
+      // Adopting a turn already running: nothing was sent, so there is no
+      // receipt to wait for — the operation is running from the start.
+      if (event === 'adopt_active_turn') {
+        db.prepare(`UPDATE runner_operations SET status = 'running', updated_at = ? WHERE id = ? AND runner_id = ?`)
+          .run(stamp, details.operationId, runnerId);
+      }
     } else if (['receipt', 'delivery_unknown', 'hold', 'complete', 'pause', 'close', 'projection_mismatch', 'need_input', 'resolve', 'turn_completed'].includes(event)) {
       const operationStatus = event === 'receipt' ? 'running'
         : event === 'delivery_unknown' ? 'awaiting_receipt'

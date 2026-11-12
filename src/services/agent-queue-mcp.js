@@ -127,7 +127,11 @@ function registerAgentQueueTools(registerAll, { authorize, actor, only = null })
       }
       const key = idempotency_key || require('../mcp/tools-runners').answerKey(runnerId, item_id, answer);
       const result = await mission.resolveRunnerQueue(runnerId, item_id, answer, rev, key, { actor: actor() });
-      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      // Hand back where the runner stands now, so the caller does not have to
+      // ask (the brief's `next` says what to do while the worker continues).
+      let runner = null;
+      try { runner = await require('../mcp/tools-runners').runnerBrief(runnerId); } catch { /* the receipt alone is still the answer */ }
+      return { content: [{ type: 'text', text: JSON.stringify({ answered: true, ...result, ...(runner ? { runner } : {}) }, null, 2) }] };
     }
   );
 }

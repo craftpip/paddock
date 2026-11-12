@@ -279,3 +279,62 @@ it('quota stop stays: notice still on screen, or no answer since the stop, or a 
   assert.equal(sends.length, 0);
   assert.equal(runnerTransition.getRuntime(runner.id).state, 'waiting_input');
 });
+
+// Plan 127 finding: a permission dialog stranded the runner in waiting_input.
+const DIALOG = '  ┃  △ Permission required\n  ┃    ← Access external directory /proc/self\n  ┃\n  ┃  Patterns\n  ┃\n  ┃  - /proc/self/*\n  ┃\n  ┃   Allow once   Allow always   Reject  ctrl+f fullscreen\n';
+
+it('a permission dialog is a wait, not a stop: the runner stays running and the view names it', async () => {
+  const r = await mission.startRunner(runner.id);
+  assert.equal(r.started, true);
+  turn = { ...turn, state: 'working', progressAt: new Date().toISOString() };
+  tmux.captureScreen = async () => ({ live: true, text: DIALOG });
+  await mission.runnerWatchOnce(runner.id);
+  assert.equal(runnerTransition.getRuntime(runner.id).state, 'running', 'never moved to waiting_input');
+  const q = (await mission.readRunnerQueue(runner.id)).queue;
+  assert.equal(q.execution.label, 'Waiting for permission');
+  assert.match(q.scheduler.reason, /Access external directory \/proc\/self/);
+  const { runnerBrief } = require('../mcp/tools-runners');
+  const b = await runnerBrief(runner.id);
+  assert.equal(b.waiting_for, 'permission');
+  assert.match(b.next, new RegExp(`mission_permission_answer \\{session_id: "${session.id}"`));
+  const sentBefore = sends.length;
+  tmux.captureScreen = async () => ({ live: true, text: 'esc interrupt ctrl+p commands' });
+  await mission.runnerWatchOnce(runner.id);
+  assert.notEqual((await mission.readRunnerQueue(runner.id)).queue.execution.label, 'Waiting for permission', 'answered: the wait is gone on the next pass');
+  assert.equal(sends.length, sentBefore, 'nothing was typed over the live turn');
+});
+
+it('a stale permission stop from an older build is lifted once the dialog is gone, and not before', async () => {
+  runnerTransition.applyRun(runner.id, { details: { conversationId: session.agent_session_id } });
+  const active = runnerTransition.getRuntime(runner.id);
+  runnerTransition.applyNeedInput(runner.id, { details: { operationId: active.operation_id, cause: 'permission_dialog', reason: 'Worker is waiting on a permission dialog' } });
+  assert.equal(runnerTransition.getRuntime(runner.id).reason_code, 'permission_dialog');
+  tmux.captureScreen = async () => ({ live: true, text: DIALOG });
+  assert.equal(await mission.observeQuotaStops(), 0, 'the dialog still shows');
+  await assert.rejects(() => mission.startRunner(runner.id), (e) => e.code === 'mission_permission_pending' && e.message.includes(session.id));
+  let n = 0;
+  tmux.captureScreen = async () => ({ live: true, text: `idle ${n++} ctrl+p commands` });
+  assert.equal(await mission.observeQuotaStops(), 1);
+  assert.notEqual(runnerTransition.getRuntime(runner.id).state, 'waiting_input');
+});
+
+it('an adopted turn owns its plan: the worker can close the item it was already working on', async () => {
+  const r = await mission.startRunner(runner.id);
+  assert.equal(r.started, true);
+  const q1 = (await mission.readRunnerQueue(runner.id)).queue;
+  const first = q1.items[0];
+  await mission.updateRunnerQueueItem(runner.id, first.id, { status: 'in_progress', reason: '' }, q1.revision, { actor: 'worker', source: 'worker' });
+  // Supervision is dropped (e.g. a stop that was later lifted) while the worker keeps going.
+  await mission.pauseRunner(runner.id, { actor: 'test' });
+  turn = { state: 'working', userId: 'still-working', inputHash: 'x', progressAt: new Date().toISOString() };
+  const adopted = await mission.startRunner(runner.id);
+  assert.equal(adopted.reason, 'adopted_active_turn');
+  assert.equal(sends.length, 1, 'adopting sends nothing');
+  const rt = runnerTransition.getRuntime(runner.id);
+  assert.ok(rt.operation_id, 'the adopted turn has an operation');
+  const op = getDb().prepare('SELECT item_id, status, operation_kind FROM runner_operations WHERE id = ?').get(rt.operation_id);
+  assert.deepEqual(op, { item_id: first.id, status: 'running', operation_kind: 'adopted' });
+  const rev = (await mission.readRunnerQueue(runner.id)).queue.revision;
+  await mission.updateRunnerQueueItem(runner.id, first.id, { status: 'done', reason: '' }, rev, { actor: 'worker', source: 'worker' });
+  assert.equal((await mission.readRunnerQueue(runner.id)).queue.items[0].status, 'done', 'the worker closed its own plan');
+});

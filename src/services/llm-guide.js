@@ -72,7 +72,12 @@ every item with status \`new\` / \`in_progress\` / \`need_input\` / \`done\`, \`
 the worker's question, \`can.*\` = true or why not, and \`next\` = the call to make). When a
 plan needs a decision the worker marks it \`need_input\` with its question and the runner
 stops; answer with \`agent_queue_resolve_need_input {runner_id, item_id, answer}\` and the
-worker continues by itself. \`runner_pause\`, \`runner_reconcile\` (an instruction sent but
+worker continues by itself. (The runner reads the QUEUE item, so \`need_input\` on the item, with
+the question as its reason, is the stop that surfaces a question — a plan file's own
+\`## Status: blocked\` / \`need clarification\` line is the plan's record, not a signal to the
+runner.) A worker parked on a permission dialog (a tool call waiting for approval) is a
+different wait: \`waiting_for: "permission"\`, answered with \`mission_permission_answer
+{session_id, choice: "once" | "reject"}\`; the queue continues by itself afterwards. \`runner_pause\`, \`runner_reconcile\` (an instruction sent but
 not acknowledged — never re-sends), \`runner_remove\`, \`queue_write\` (add plans) and
 \`agent_queue_remove_item\` complete the set. A provider usage limit stops the runner with
 label "Usage limit" — nothing to answer; it resumes by itself once the provider answers

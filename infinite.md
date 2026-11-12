@@ -44,11 +44,12 @@ only.** Two items remain:
 
 ## Queue
 
-- [~] plans/127-orchestrator-chat-test-self-project.md — started 2026-11-13 (setup done; restart Claude Code to load the paddock MCP tools)
 - [ ] plans/126-codex-fresh-conversation-adoption.md — blocked: Phases 1–3 done 2026-11-13; Phase 4 live proof needs your OK (codex + claude PAD login, spends usage)
 
 ## Done
 
+- [x] plans/127-orchestrator-chat-test-self-project.md — absorbed 2026-11-13 (testing.md § Orchestrator Chat Test; friction log)
+- [x] plans/128-mcp-runner-surface.md — absorbed 2026-11-13 (mission-queue.md § Orchestrating Over MCP)
 - [x] plans/85-infinite-sessions-correction.md — Complete 2026-10-20; absorbed 2026-11-12
 - [x] plans/83-infinite-runner.md — Complete 2026-10-20 (re-audited under 85); absorbed 2026-11-12
 - [x] plans/84-mission-project-rail-tooltip.md — done (archived in plans/archive/)

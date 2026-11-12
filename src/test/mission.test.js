@@ -1118,6 +1118,25 @@ describe('Mission - busy reads each conversation\u2019s own store (plan 52 R8)',
     assert.strictEqual(knownOf.get('idle_1'), true);
   });
 
+  it('a turn that is open and moving is busy between tool calls; an abandoned one is not', async () => {
+    const realTurn = agentStore.readTurn;
+    try {
+      agentStore.readActivity = async () => done; // no tool call in flight
+      agentStore.readTurn = (vm, id) => (id === 'think_1'
+        ? { state: 'working', progressAt: new Date().toISOString() }
+        : { state: 'working', progressAt: new Date(Date.now() - 10 * 60000).toISOString() });
+      const { busyOf, knownOf } = await mission.busyForSessions([
+        { agent_name: 'pad-msn-oc', agent_session_id: 'think_1' },
+        { agent_name: 'pad-msn-oc', agent_session_id: 'stuck_1' },
+      ]);
+      assert.strictEqual(busyOf.get('think_1'), true, 'thinking/streaming between tool calls is still a running turn');
+      assert.strictEqual(busyOf.get('stuck_1'), false, 'a turn that stopped moving 10 min ago is not busy');
+      assert.strictEqual(knownOf.get('stuck_1'), true);
+    } finally {
+      agentStore.readTurn = realTurn;
+    }
+  });
+
   it('an unreadable or throwing store is known:false, never a claim', async () => {
     agentStore.readActivity = async () => {
       throw new Error('boom');

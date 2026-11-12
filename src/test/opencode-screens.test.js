@@ -19,15 +19,18 @@ const EXPECT = {
   busy:               { ready: true,  busy: true },
   'plain-done':       { ready: true,  busy: false },
   'shell-after-exit': { ready: false, busy: false },
+  // Captured from a runner's worker on 2026-11-13 (plan 127): an access
+  // request, drawn with `←` and a Patterns list instead of `→ tool` / `Path:`.
+  'permission-external-dir': { ready: false, busy: false, permission: { tool: 'Access external directory /proc/self', path: '/proc/self/*' } },
 };
 
 for (const [name, want] of Object.entries(EXPECT)) {
-  it(`real screen "${name}": ready=${want.ready} busy=${want.busy}, no usage limit, no permission dialog`, () => {
+  it(`real screen "${name}": ready=${want.ready} busy=${want.busy}, no usage limit, permission=${want.permission ? 'yes' : 'none'}`, () => {
     const text = read(name);
     assert.equal(opencode.tuiReadyPattern.test(text), want.ready, 'tuiReadyPattern (sendText waits for it before typing)');
     assert.equal(opencode.tuiBusyPattern.test(text), want.busy, 'tuiBusyPattern (a stalled turn is one the pane does not show running)');
     assert.equal(screenUsageEvidence({ live: true, text }), null, 'a healthy screen is not a usage limit');
-    assert.equal(detectPermission(text), null, 'no permission dialog on these screens');
+    assert.deepEqual(detectPermission(text), want.permission || null, 'the permission dialog, parsed (what is asked, and for which path)');
   });
 }
 

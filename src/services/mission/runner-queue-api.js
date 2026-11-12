@@ -168,7 +168,13 @@ async function readRunnerQueueFor(runner) {
   const idleSince = turn.state === 'idle'
     ? (current.worker_state === 'idle' && current.worker_turn_id === turn.userId ? current.idle_since : turn.completedAt || new Date(now).toISOString())
     : null;
-  const scheduler = computeSchedulerState({ ...current, idle_since: idleSince }, q, turn, now);
+  let scheduler = computeSchedulerState({ ...current, idle_since: idleSince }, q, turn, now);
+  // The watcher saw a permission dialog in the worker's pane and sent nothing.
+  // That is pane state this read does not capture, so carry the watcher's own
+  // observation (it is replaced by the next pass once the dialog is answered).
+  if (current.worker_state === 'waiting_for_permission' && current.scheduler_decision === 'blocked') {
+    scheduler = { ...scheduler, workerState: 'waiting_for_permission', schedulerDecision: 'blocked', reason: current.scheduler_reason || 'Waiting for permission', nextCheckMs: null };
+  }
   const items = (q.parsed.items || []).map((it) => enrichRunnerQueueItem(it, agent, project));
   const execution = runnerQueueExecution(current, q, scheduler, { items, workerBusy: turn.state === 'working' });
   // Plan 91 §Phase 2: the Configure dialog reads saved prompts from this same

@@ -32,6 +32,7 @@ function nextStep(runnerId, b) {
   const blocked = b.blocked[0];
   if (b.state === 'setup_required') return `The queue is not set up: call queue_ensure {runner_id: "${runnerId}"}.`;
   if (b.state === 'projection_error') return `The QUEUE.md file was edited by hand and no longer matches the server queue. A human must regenerate it from the Mission page (Regenerate).`;
+  if (b.waiting_for === 'permission') return `The worker is waiting on a permission dialog (${b.reason || 'a tool call needs approval'}). Read it with mission_sessions {session_id: "${b.session?.id}"}, then answer with mission_permission_answer {session_id: "${b.session?.id}", choice: "once" | "reject"} — reject anything the plan did not need. The queue continues by itself afterwards.`;
   if (blocked && b.can.resolve === true) return `The worker asked: "${blocked.question}". Answer with agent_queue_resolve_need_input {runner_id: "${runnerId}", item_id: "${blocked.item_id}", answer: "..."} — the worker then continues on its own.`;
   if (blocked) return `Plan ${blocked.plan} is waiting for input ("${blocked.question}"), but answering is not possible right now: ${b.can.resolve}.`;
   if (b.label === 'Usage limit') return `The provider's usage limit stopped the worker. Nothing needs answering. When the limit resets, call runner_start {runner_id: "${runnerId}"}; it checks the worker's screen first and refuses while the limit still shows.`;
@@ -78,6 +79,8 @@ async function runnerBrief(runnerId) {
     blocked: items.filter((it) => it.status === 'need_input').map((it) => ({ item_id: it.item_id, plan: it.plan, question: it.reason || '(no question text)' })),
     items,
     can: can(ex.actions),
+    // What the runner is waiting on, when it is not a question about a plan.
+    waiting_for: ex.permissionWait ? 'permission' : (ex.label === 'Usage limit' ? 'usage_limit' : (items.some((it) => it.status === 'need_input') ? 'answer' : null)),
   };
   b.next = nextStep(runner.id, b);
   return b;

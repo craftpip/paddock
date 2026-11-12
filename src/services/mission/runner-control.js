@@ -191,6 +191,20 @@ async function startRunner(id, { actor = null } = {}) {
     runtime = runnerTransition.getRuntime(id);
     runner = getRunner(id);
   }
+  // A stop on a permission dialog (older builds made one): the dialog is
+  // answered in the pane, not here. While it still shows, say exactly how to
+  // answer it; once it is gone, leave the stop — the worker's turn is usually
+  // still running, and the ordinary path below adopts it without sending.
+  if (runtime.state === 'waiting_input' && runtime.reason_code === 'permission_dialog' && session) {
+    const shot = await padTmux.captureScreen(project.agent_name, session.tmux_id, 20).catch(() => null);
+    if (shot?.live && require('./session-io').detectPermission(shot.text)) {
+      throw new MissionError('mission_permission_pending',
+        `The worker is waiting on a permission dialog. Read it with mission_sessions {session_id: "${session.id}"} and answer with mission_permission_answer {session_id: "${session.id}", choice: "once" | "reject"}; the runner then carries on by itself.`, 409);
+    }
+    runnerTransition.applyPause(id, { actor: actor || 'user', details: { reason: 'Permission dialog answered; resuming.' } });
+    runtime = runnerTransition.getRuntime(id);
+    runner = getRunner(id);
+  }
   if (quotaStop && runtime.state === 'waiting_input') {
     const event = getDb().transaction(() => {
       const active = getDb().prepare(`SELECT id FROM runner_callback_outbox WHERE runner_id = ? AND event = 'usage_exhausted' AND status IN ('pending', 'running')
@@ -252,7 +266,10 @@ async function startRunner(id, { actor = null } = {}) {
   if (runtime.state === 'paused' && queue.aggregate.state === 'in progress' && session?.agent_session_id && !workerWasGone) {
     const activeTurn = agentStore.readTurn(agent, session.agent_session_id);
     if (activeTurn.state === 'working') {
-      runnerTransition.applyAdoptActiveTurn(id, { actor: actor || 'user', details: { conversationId: session.agent_session_id, reason: 'adopting verified active turn' } });
+      // The adopted turn is working on the plan in progress: assign it, so the
+      // worker may close that item and the turn's completion has an owner.
+      const working = ((queue.parsed && queue.parsed.items) || []).find((it) => it.status === 'in progress' || it.status === 'in_progress');
+      runnerTransition.applyAdoptActiveTurn(id, { actor: actor || 'user', details: { conversationId: session.agent_session_id, itemId: working ? working.id : null, queueRevision: queue.hash, reason: 'adopting verified active turn' } });
       syncQueuePausedMarker(id, false);
       runnerHistory.record(runner, 'runner_started', { actor: actor || 'user', key: `started:${runner.run_generation}`, reason: 'Supervision resumed around the active worker' });
       return { started: true, reason: 'adopted_active_turn', runner: getRunner(id), session, queue: queue.aggregate };

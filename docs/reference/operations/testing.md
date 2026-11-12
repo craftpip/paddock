@@ -242,6 +242,28 @@ that pin the detectors live in `test/fixtures/opencode-screens/`, and `opencode-
 `detectPermission` must say about each. After an opencode upgrade, re-run the live suite with
 screen saving and copy the new captures in; a red offline test names the detector to fix.
 
+## Orchestrator Chat Test
+
+The live suite proves the pane mechanics; this proves an LLM can run Paddock with the MCP alone.
+Claude Code (or any MCP client) acts as the orchestrator, with a least-privilege key and no other
+tools while it plays the part:
+
+1. Profile → API keys: a key with `tools:create,tools:exec,target:agent:<pad>`.
+2. `claude mcp add --transport http -s local paddock http://<host>:6789/mcp --header
+   "Authorization: Bearer <key>"`, then restart the client (tools load at startup).
+3. A project to work in. "Paddock develops Paddock": clone this repo into the PAD's workspace
+   (`instances/<pad>/opencode/workspace/paddock-self`) and remove its `origin`, so the worker
+   edits real web code without touching the live source the webui runs from.
+4. As the orchestrator: `help` → `mission_project_create` → `plan_write` plans that each must
+   stop and ask (`need_input` with the question) → `runner_create {project_id, name, plans}` →
+   `runner_start` → poll `runner_get`; answer `blocked` items with
+   `agent_queue_resolve_need_input`, permission dialogs with `mission_permission_answer`.
+5. Log every guess in `friction/YYYY-MM-DD-<slug>.md`, fix, re-run the part that failed.
+
+The first run (2026-11-13, `friction/2026-11-13-orchestrator-self-project.md`) completed three
+plans with three answered questions and two rejected permission dialogs, and found the
+permission-stop strand and the adopted-turn ownership bug.
+
 ## Rebuild the Client After Client Edits
 
 The page serves the built bundle in `src/public/`, so a page that renders can be running code

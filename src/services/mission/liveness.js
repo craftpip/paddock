@@ -323,6 +323,7 @@ const BUSY_CACHE_MAX = 2000;
  *  absence is exactly what stops "the probe worked" from reading as "this row is
  *  idle" (C1-F1). `titleOf` likewise only holds ids whose store was READ, so an
  *  unreadable conversation never gets an invented name. */
+const TURN_BUSY_WINDOW_MS = 2 * 60 * 1000;
 async function busyForSessions(rows) {
   const busyOf = new Map();
   const knownOf = new Map();
@@ -343,8 +344,22 @@ async function busyForSessions(rows) {
     try {
       const row = await agentStore.readActivity(vm, id);
       const ok = !!(row && row.store && row.store.available);
+      // A tool call in flight is only part of a turn: between tool calls the
+      // model thinks and streams, and "newest tool part running" read that as
+      // idle — measured: busy:false beside a visible `esc interrupt`. So the
+      // conversation's own turn counts too, while it is open AND moving (a
+      // turn whose progress stopped minutes ago is an abandoned one, e.g. what
+      // a quota error leaves behind, and must not read busy for ever).
+      let turnOpen = false;
+      if (ok) {
+        try {
+          const t = agentStore.readTurn(vm, id);
+          const quiet = Date.now() - Date.parse(t.progressAt || '');
+          turnOpen = t.state === 'working' && Number.isFinite(quiet) && quiet < TURN_BUSY_WINDOW_MS;
+        } catch { turnOpen = false; }
+      }
       value = {
-        busy: !!(ok && row.lastToolCall && row.lastToolCall.status === 'running'),
+        busy: !!(ok && ((row.lastToolCall && row.lastToolCall.status === 'running') || turnOpen)),
         known: ok,
         title: ok ? (row.title || '') : '',
       };

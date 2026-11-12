@@ -1387,7 +1387,12 @@ Rules:
     so `busy` / `busyKnown` / `open` reach the LLM on the same row as `live`.
     Since plan 52 R8(a) it is read per conversation from that conversation's own
     store (`busyForSessions`, one store read per id, cached ~5 s — a web probe
-    grouped per (PAD, folder) could not see a Mission TUI's turns at all).
+    grouped per (PAD, folder) could not see a Mission TUI's turns at all). A row
+    is busy when its newest tool part is running OR its current turn is still open
+    and moved within the last 2 minutes (`readTurn`): between tool calls the model
+    thinks and streams, and the tool-part rule alone read that as idle beside a
+    visible `esc interrupt`. The 2-minute window keeps an abandoned turn (what a
+    provider error leaves behind) from reading busy for ever.
     `busyKnown: false` is **unknown, not idle** — an unreadable or absent store,
     or a row with no `agent_session_id` — so the tool projects the field only
     when the store stamped it, and the guide tells the LLM never to read it as
@@ -1577,7 +1582,10 @@ an agent you were invited to type into.
 
 - **A permission dialog is a state, not idle capacity** (1c). `detectPermission`
   reads the screen for the `Permission required` / `Allow once` / `Reject` shape
-  and reports `blockedOn: "permission"` with the tool and path, so a session
+  and reports `blockedOn: "permission"` with the tool and path (opencode draws a
+  tool call as `→ <tool>` with `Path:`, and an access request as `← <request>`
+  with a `Patterns` list — both are parsed, e.g. `{tool: "Access external
+  directory /tmp", path: "/tmp/*"}`), so a session
   parked on a dialog no longer looks like free capacity.
   `mission_permission_answer {session_id, choice}` answers it **by key**
   (`Home`+`Enter` / `End`+`Enter`), never by typing text — text sent at a dialog

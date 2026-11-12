@@ -114,11 +114,22 @@ async function observeRunnerUsage() {
  *  of that path applies; a runner with a recovery script already in flight is
  *  left to that script. */
 async function observeQuotaStops() {
-  const rows = getDb().prepare(`SELECT r.id, rt.updated_at AS stopped_at FROM infinite_runners r JOIN runner_runtime rt ON rt.runner_id = r.id
-    WHERE rt.state = 'waiting_input' AND rt.reason_code = 'usage_exhausted'`).all();
+  const rows = getDb().prepare(`SELECT r.id, rt.updated_at AS stopped_at, rt.reason_code FROM infinite_runners r JOIN runner_runtime rt ON rt.runner_id = r.id
+    WHERE rt.state = 'waiting_input' AND rt.reason_code IN ('usage_exhausted', 'permission_dialog')`).all();
   let lifted = 0;
   for (const row of rows) {
     try {
+      if (row.reason_code === 'permission_dialog') {
+        // Older builds stopped the runner on a permission dialog. Once the
+        // dialog is gone (answered in the page or over MCP) that stop is stale.
+        const sup = await getRunnerForSupervision(row.id);
+        if (!sup?.session) continue;
+        const shot = await padTmux.captureScreen(sup.project.agent_name, sup.session.tmux_id, 20).catch(() => null);
+        if (!shot?.live || detectPermission(shot.text)) continue;
+        await require('./runner-control').startRunner(row.id, { actor: 'permission-observer' });
+        lifted++;
+        continue;
+      }
       const busy = getDb().prepare(`SELECT 1 FROM runner_callback_outbox WHERE runner_id = ? AND event = 'usage_exhausted' AND status IN ('pending','running')
         UNION SELECT 1 FROM runner_quota_recoveries WHERE runner_id = ? AND status IN ('script_running','restoring') LIMIT 1`).get(row.id, row.id);
       if (busy) continue;
@@ -134,7 +145,7 @@ async function observeQuotaStops() {
       lifted++;
     } catch (e) {
       // A refused lift leaves the stop as it was; the next pass looks again.
-      console.error(`[quota] could not lift the usage stop of ${row.id}: ${e.message}`);
+      console.error(`[runner] could not lift the ${row.reason_code} stop of ${row.id}: ${e.message}`);
     }
   }
   return lifted;
@@ -332,10 +343,17 @@ async function runnerWatchOnce(runnerId) {
   const perm = detectPermission(screen.text);
   const verdict = sendVerdict({ ...session, live: paneState.live, tuiAlive: paneState.tuiAlive, command: paneState.command }, perm);
   if (!verdict.canSend) {
-    if (verdict.refusal.startsWith('mission_permission_pending')) {
-      await stopWith('need_input', `Worker is waiting on a permission dialog: ${verdict.refusal}`, 'permission_dialog');
-    }
-    recordSchedulerDecision(runnerId, gen, { workerState: 'unknown', schedulerDecision: 'blocked', reason: verdict.refusal });
+    // A permission dialog is NOT a stop: the worker's turn is still open, only
+    // parked on a question to a human. Moving the runner to waiting_input used
+    // to strand it — after the dialog was answered nothing moved it back, and
+    // Run refused with the stale reason. Stay running, send nothing, and say
+    // what is waiting; the next pass after the answer carries on by itself.
+    const waiting = verdict.refusal.startsWith('mission_permission_pending');
+    recordSchedulerDecision(runnerId, gen, {
+      workerState: waiting ? 'waiting_for_permission' : 'unknown',
+      schedulerDecision: 'blocked',
+      reason: waiting ? `Waiting for permission: ${perm?.tool || 'the worker asked for permission'}${perm?.path ? ` (${perm.path})` : ''}` : verdict.refusal,
+    });
     return;
   }
   const turn = agentStore.readTurn(agent, session.agent_session_id);
