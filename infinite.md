@@ -30,6 +30,9 @@ store-backed `busy`, `pad_help` as the onboarding artifact, docs absorbed, plan
 file deleted). **MCP token rotation: not wanted (user, 2026-11-12) — local setup
 only.** Two items remain:
 
+- **Waiting on the user (2026-11-13): "I will setup claude and codex later for testing."** Both
+  items below run once the user has logged a codex PAD and a claude PAD in (`codex login`,
+  `claude auth login` are interactive). Do not create those PADs before then.
 - **Live codex/claude runner proof (plan 126 Phase 4, needs your OK).** The
   codex/claude turn readers are verified against real transcripts on this host,
   but no runner has driven a codex or claude PAD end to end yet; that needs a PAD
