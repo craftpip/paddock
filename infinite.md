@@ -44,6 +44,7 @@ only.** Two items remain:
 
 ## Queue
 
+- [~] plans/127-orchestrator-chat-test-self-project.md — started 2026-11-13 (setup done; restart Claude Code to load the paddock MCP tools)
 - [ ] plans/126-codex-fresh-conversation-adoption.md — blocked: Phases 1–3 done 2026-11-13; Phase 4 live proof needs your OK (codex + claude PAD login, spends usage)
 
 ## Done
