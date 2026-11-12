@@ -63,6 +63,21 @@ may see. One cost to know before \`recreate\`: it kills every live Mission sessi
 that PAD (rows survive as dead; \`mission_session_restart\` brings each back on the same
 conversation).
 
+**Runners (a queue of plans worked unattended in one session):** a runner types one plan
+after another into its worker session and waits for each turn to finish.
+\`runner_create {project_id, name, plans}\` makes one (a new worker session unless you pass
+\`session_id\`) with its queue set up and the plans queued; \`runner_start\` presses Run.
+Poll \`runner_get {runner_id}\`: it returns the whole picture in one shape (state + label,
+every item with status \`new\` / \`in_progress\` / \`need_input\` / \`done\`, \`blocked\` with
+the worker's question, \`can.*\` = true or why not, and \`next\` = the call to make). When a
+plan needs a decision the worker marks it \`need_input\` with its question and the runner
+stops; answer with \`agent_queue_resolve_need_input {runner_id, item_id, answer}\` and the
+worker continues by itself. \`runner_pause\`, \`runner_reconcile\` (an instruction sent but
+not acknowledged — never re-sends), \`runner_remove\`, \`queue_write\` (add plans) and
+\`agent_queue_remove_item\` complete the set. A provider usage limit stops the runner with
+label "Usage limit" — nothing to answer; it resumes by itself once the provider answers
+again, or call \`runner_start\` after the reset.
+
 ## Caller rules — read this before mutating anything
 
 - **Read-tool discipline:** run \`settings_get\` first. It returns everything (settings, ssh,
@@ -206,6 +221,15 @@ done (that bump is what makes \`plan_list\` answer "what is being worked on RIGH
 Read the plan on arrival (\`plan_list {project_id, path}\`) before starting work, and write
 decisions back into it as you make them.
 ## Workflow recipes
+
+0. **Run a queue of plans and answer its questions (MCP only):** \`mission_projects\` (or
+   \`mission_project_create\`) → \`plan_write\` each plan (say in the plan when the worker must
+   stop and ask: "mark this item need_input with your question and stop") →
+   \`runner_create {project_id, name, plans: [...]}\` → \`runner_start\` → poll \`runner_get\`
+   every minute or so. When \`blocked\` is non-empty, decide and call
+   \`agent_queue_resolve_need_input {runner_id, item_id, answer}\`; when every item is
+   \`done\` the runner says so in \`next\`. Read a worker's screen any time with
+   \`mission_sessions {session_id}\`.
 
 1. **Survey the fleet:** \`list_agents\` → \`get_agent\` (or \`agent_logs\`) for detail/logs.
 2. **Inspect before changing anything:** \`settings_get\` → (optional) \`config_get\`, \`health\`.

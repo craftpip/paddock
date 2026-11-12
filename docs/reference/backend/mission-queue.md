@@ -415,6 +415,37 @@ re-probes. MCP servers load when a TUI starts, so if the wiring changed and the 
 is live and idle, Run restarts it into the same conversation (`worker_restarted`). If the worker is
 mid-turn, Run refuses rather than interrupting it.
 
+## Orchestrating Over MCP
+
+An orchestrator (an LLM holding a user API key on `/mcp`) can run the whole loop with MCP alone
+(plan 128). `src/mcp/tools-runners.js` registers the runner tools through the same error-catching
+wrapper and gate as the queue tools (`missionRequireProject`: visibility, target grant, tool
+grant), and each calls the same service function as its REST route.
+
+| Tool | Grant | Does |
+|---|---|---|
+| `runner_list {project_id?}` | read | Every runner the key can see, as a short brief |
+| `runner_get {runner_id}` | read | The full brief |
+| `runner_create {project_id, name, session_id?, plans?}` | create | `createRunner` (a new worker session unless `session_id`), `setupRunnerQueue`, then queues `plans` |
+| `runner_start` | exec | `startRunner` — Run, and the way out of a usage-limit stop |
+| `runner_pause {mode?}` | exec | `pauseRunner` (`before_next_task` / `current_task`) |
+| `runner_reconcile` | exec | `reconcileRunnerOperation` — never re-sends |
+| `runner_remove` | exec | `removeRunner`; the session is kept |
+| `agent_queue_remove_item {item_id, revision?}` | exec | `removeRunnerQueueItem` |
+
+Every result is one shape, the **runner brief**: `state`, `label`, `reason`, `banner`,
+`revision`, `counts`, `current`, `blocked: [{item_id, plan, question}]`, every item (`status`
+`new` / `in_progress` / `need_input` / `done`), `can.*` (true, or the server's reason it is not:
+read from `execution.actions`, never re-derived) and `next`, one sentence naming the call to make
+(answer the blocker, wait and poll, reconcile, Run after a usage limit, add plans).
+
+`agent_queue_resolve_need_input` takes just `{runner_id, item_id, answer}`: `revision` defaults
+to the current one, but only for an item still waiting for input (`queue_item_not_found` /
+`queue_item_not_blocked` otherwise), and `idempotency_key` defaults to a hash of runner, item and
+answer, so two overlapping identical calls are one request. A retry after success is refused
+with `queue_item_not_blocked`; the answer is never typed twice. `help` teaches the loop in a
+"Runners" paragraph and recipe 0.
+
 ## Worker Readiness and Delivery
 
 Run checks the worker before it types anything, and refuses with a code that names the fix:

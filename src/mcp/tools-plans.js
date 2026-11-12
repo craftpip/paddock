@@ -144,7 +144,7 @@ module.exports = function register(registerToolBound, ctx) {
       title: 'Read a canonical Mission runner queue',
       description: "Read the server-owned queue for one Mission runner. QUEUE.md is only its generated worker projection; it is never the source of truth.",
       inputSchema: {
-        runner_id: z.string().describe('Runner id from the Mission runner list'),
+        runner_id: z.string().describe('Runner id, from runner_list or runner_create'),
         project_id: z.string().optional().describe("A Mission project id (from mission_projects); its queue is at <project.folder>/<plans_folder>/QUEUE.md. Refused if it matches nothing, or nothing your key can see."),
         folder: z.string().optional().describe("Select a Mission project by its folder (e.g. \"/www2/paddock\"). A folder matching zero or several projects is refused with the candidates."),
       },
@@ -175,7 +175,7 @@ module.exports = function register(registerToolBound, ctx) {
       title: 'Add plans to a canonical Mission runner queue',
       description: "Add plan paths to the server-owned queue with revision CAS. The server assigns item IDs and regenerates QUEUE.md; callers cannot write the projection directly.",
       inputSchema: {
-        runner_id: z.string().describe('Runner id from the Mission runner list'),
+        runner_id: z.string().describe('Runner id, from runner_list or runner_create'),
         project_id: z.string().optional().describe("A Mission project id; write into its queue. Refused if it matches nothing, or nothing your key can see."),
         folder: z.string().optional().describe("Select a Mission project by its folder. A folder matching zero or several projects is refused with the candidates."),
         plans: z.array(z.string()).min(1).describe('Plan paths relative to the project plans folder'),
@@ -208,7 +208,7 @@ module.exports = function register(registerToolBound, ctx) {
       title: 'Ensure a canonical Mission runner queue exists',
       description: "Create the canonical queue and regenerate its worker projection for one Mission runner.",
       inputSchema: {
-        runner_id: z.string().describe('Runner id from the Mission runner list'),
+        runner_id: z.string().describe('Runner id, from runner_list or runner_create'),
         project_id: z.string().optional().describe("A Mission project id; ensure its queue. Refused if it matches nothing, or nothing your key can see."),
         folder: z.string().optional().describe("Select a Mission project by its folder. A folder matching zero or several projects is refused with the candidates."),
       },

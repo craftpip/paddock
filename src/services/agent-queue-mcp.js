@@ -103,18 +103,30 @@ function registerAgentQueueTools(registerAll, { authorize, actor, only = null })
     'agent_queue_resolve_need_input',
     {
       title: 'Resolve need-input blocker',
-      description: 'Resolve a need_input queue item by providing an answer. This requeues the item (status -> new, reason cleared) and resumes the runner. Requires idempotency key for safe retries.',
+      description: 'Answer the question a worker asked when it stopped a plan with need_input (runner_get lists them under `blocked`, with the item_id and the question). The answer is typed into the worker\'s session, the plan goes back to the queue and the runner continues on its own. `revision` and `idempotency_key` are optional: the current revision is used, and the key defaults to one derived from runner, item and answer, so two overlapping calls with the same answer are one request. Retrying after success is refused with queue_item_not_blocked — the answer is never typed twice.',
       inputSchema: {
         runner_id: z.string(),
-        item_id: z.string(),
-        answer: z.string(),
-        revision: z.number().int(),
-        idempotency_key: z.string(),
+        item_id: z.string().describe('The blocked item (runner_get → blocked[].item_id)'),
+        answer: z.string().min(1).describe('Your decision, in plain words the worker can act on'),
+        revision: z.number().int().optional().describe('Queue revision you read (optional)'),
+        idempotency_key: z.string().optional().describe('Optional; same key = same request'),
       },
     },
     async ({ runner_id, item_id, answer, revision, idempotency_key }) => {
       const runnerId = requireRunner(runner_id, true).id;
-      const result = await mission.resolveRunnerQueue(runnerId, item_id, answer, revision, idempotency_key, { actor: actor() });
+      // Defaults an LLM would otherwise get wrong. The current revision is taken
+      // only for an item that is still waiting for input, so it cannot turn a
+      // stale answer into a write over a changed queue.
+      let rev = revision;
+      if (rev === undefined) {
+        const snap = await mission.readRunnerQueue(runnerId);
+        const item = (snap.queue.items || []).find((it) => it.id === item_id);
+        if (!item) throw new Error(`queue_item_not_found: no item ${item_id} on runner ${runnerId}; runner_get lists the blocked items`);
+        if (item.status !== 'need input') throw new Error(`queue_item_not_blocked: item ${item_id} is "${item.status}", not waiting for input — nothing to answer`);
+        rev = snap.queue.revision;
+      }
+      const key = idempotency_key || require('../mcp/tools-runners').answerKey(runnerId, item_id, answer);
+      const result = await mission.resolveRunnerQueue(runnerId, item_id, answer, rev, key, { actor: actor() });
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
   );

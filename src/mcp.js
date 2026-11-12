@@ -227,6 +227,8 @@ const TOOL_GRANT_FOR = {
   runner_resume: 'exec',
   runner_remove: 'exec',
   runner_update: 'exec',
+  runner_reconcile: 'exec',
+  agent_queue_remove_item: 'exec',
 };
 
 function keyGrants(user) {
@@ -1010,6 +1012,10 @@ function registerTools(server) {
   });
   require('./mcp/tools-plans')(registerToolBound, {
     resolvePlansScope, currentUser, plansCall, textResult, requirePad, missionActor,
+  });
+  require('./mcp/tools-runners')(registerToolBound, {
+    currentUser, missionCall, missionCallSync, missionRequireProject, missionVisibleAgents,
+    missionSelectProjects, missionActor, textResult,
   });
 
   registerAgentQueueTools(registerToolBound, {
