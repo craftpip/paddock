@@ -50,6 +50,9 @@ terminal rules) is documented in [Mission Page](reference/pages/mission.md).
 The admin Configs page (the `.env` editor: groups, what each change needs to take effect,
 secret masking) is documented in [Configs Page](reference/pages/configs.md).
 
+The shared file viewer/editor (Workspace files, Mission plan files) is documented in
+[File Viewer](reference/components/file-viewer.md).
+
 URL views, popup history and read-only Mission restoration are documented in
 [URL navigation](reference/components/navigation.md).
 

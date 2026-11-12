@@ -122,6 +122,8 @@
  "PATCH /api/mission/runners/:id/queue/items/:itemId",
  "PUT /api/mission/runners/:id/queue/custom-instructions",
  "GET /api/mission/runners/:id/plans",
+ "GET /api/mission/runners/:id/plan-file",
+ "PUT /api/mission/runners/:id/plan-file",
  "GET /api/mission/runners/:id/prompts",
  "POST /api/mission/runners/:id/prompts/preview",
  "GET /api/mission/projects/:id/prompts",

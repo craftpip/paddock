@@ -10,6 +10,9 @@ export const popupRegistry = {
   'runner-settings': { route: mission, args: [idValue] },
   'queue-add': { route: mission, args: [idValue] },
   'queue-resolve': { route: mission, args: [idValue, idValue] },
+  // A plan file open in the shared FileViewer: runner id + path relative to
+  // the project's plans folder (the server re-checks containment).
+  'plan-file': { route: mission, args: [idValue, pathValue] },
   'file': { route: /^\/agents\/(?!create\/)[^/]+\/workspace\/?$/, args: [pathValue] },
   'file-move': { route: /^\/agents\/(?!create\/)[^/]+\/workspace\/?$/, args: [pathValue] },
   'container-info': { route: /^\/agents\/(?!create\/)[^/]+\/settings\/?$/, args: [idValue] },

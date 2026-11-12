@@ -107,6 +107,8 @@ const SURFACE = [
   'removeRunnerQueueItem',
   'updateRunnerQueueCustomInstructions',
   'listRunnerPlans',
+  'readRunnerPlanFile',
+  'writeRunnerPlanFile',
   'effectivePromptTemplates',
   'withPromptTemplates',
   'runnerPromptConfig',

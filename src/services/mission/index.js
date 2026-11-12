@@ -111,6 +111,8 @@ module.exports = {
   removeRunnerQueueItem: runnerQueueApi.removeRunnerQueueItem,
   updateRunnerQueueCustomInstructions: runnerQueueApi.updateRunnerQueueCustomInstructions,
   listRunnerPlans: runnerQueueApi.listRunnerPlans,
+  readRunnerPlanFile: runnerQueueApi.readRunnerPlanFile,
+  writeRunnerPlanFile: runnerQueueApi.writeRunnerPlanFile,
   effectivePromptTemplates: runnerPrompts.effectivePromptTemplates,
   withPromptTemplates: runnerPrompts.withPromptTemplates,
   runnerPromptConfig: runnerPrompts.runnerPromptConfig,

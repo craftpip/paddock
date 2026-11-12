@@ -24,10 +24,10 @@ Selecting an unchanged view creates no entry.
 | Mission terminal | `session`, independent of the listing project |
 | Saved conversation | `conversation` and its owner `terminalProject` |
 | Runner editor | `popup`, `section`, `prompt`, `event` |
-| Queue | `queue=open\|closed` (absent = open; open hides the terminal); add/resolve popup descriptors |
+| Queue | `queue=open\|closed` (absent = open; open splits the column with the terminal); add/resolve popup descriptors; `plan-file:<runnerId>:<path>` for a plan open in the [File Viewer](file-viewer.md) |
 | Mission pop-out | `/mission/session/:sessionId`, plus `queue`; window geometry is a preference, not URL state |
 | Plan picker | `planQ` search, `planAll=1` |
-| Agent workspace | Existing `scope` and `path`; file and move popups |
+| Agent workspace | Existing `scope` and `path`; file (the shared [File Viewer](file-viewer.md)) and move popups |
 | Container logs | Agent logs route and `tail=50\|100\|500\|1000` |
 | Profile | Existing general, MCP-key and users routes; user forms |
 | Vault | Add/edit and set/reset-PIN descriptors, never their contents |

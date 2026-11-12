@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useNavigation, useDraftState, useDirtyNavigation, popupIdentity } from '../lib/navigation'
 import { parsePopups } from '../lib/url-state'
 import Button from './ui/Button'
+import FileViewer from './FileViewer'
 import { Input } from './ui/Input'
 import Modal from './ui/Modal'
 import DialogError, { errorText } from './ui/DialogError'
@@ -69,7 +70,7 @@ function RowIcon({ d }) {
   )
 }
 
-function ItemRow({ item, current, index, total, busy, actions, onMove, onRemove, onEditStatus }) {
+function ItemRow({ item, current, index, total, busy, actions, onMove, onRemove, onEditStatus, onOpen }) {
   // Each verdict and its sentence come from the server (execution.actions): a
   // control the server would refuse is disabled and says why.
   const review = actions?.reviewStatus
@@ -89,14 +90,16 @@ function ItemRow({ item, current, index, total, busy, actions, onMove, onRemove,
         className={cx('msn-queue-item-status w-[5.25rem] shrink-0 rounded-full px-2 py-0.5 text-center text-[11px] font-medium disabled:cursor-not-allowed', tone)}>
         {ITEM_WORD[item.status] || item.status}
       </button>
-      <span className="min-w-0 flex-1">
-        <span className={cx('msn-queue-item-title block truncate', item.status === 'done' ? 'text-ink-dim' : 'text-ink')} title={item.plan}>
+      {/* The title/path block opens the plan file in the shared FileViewer. */}
+      <button type="button" onClick={() => onOpen(item)} title={`Open ${item.plan}`}
+        className="msn-queue-item-open min-w-0 flex-1 rounded text-left hover:bg-raised focus-visible:bg-raised">
+        <span className={cx('msn-queue-item-title block truncate', item.status === 'done' ? 'text-ink-dim' : 'text-ink')}>
           {item.title || item.plan}
         </span>
-        <span className="msn-queue-item-path block truncate font-mono text-[10.5px] text-ink-faint" title={item.plan}>
+        <span className="msn-queue-item-path block truncate font-mono text-[10.5px] text-ink-faint">
           {item.plan}
         </span>
-      </span>
+      </button>
       <span className="msn-queue-item-actions flex shrink-0 items-center gap-0.5">
         <Button variant="link" size="bare" disabled={busy || !!reorderWhy || index === 0} onClick={() => onMove(index, -1)} className="msn-btn-queue-up rounded p-1 hover:bg-raised disabled:opacity-30" title={reorderWhy || `Move ${item.title || item.plan} up`} aria-label={`Move ${item.title || item.plan} up`}>
           <RowIcon d="M6 15l6-6 6 6" />
@@ -155,6 +158,18 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
   const resolve = popup?.type === 'queue-resolve' && popup.args[0] === runner?.id
     ? (queue?.items || []).find((it) => it.id === popup.args[1] && it.status === 'need input') || null : null
   const setResolve = (item) => item ? openPopup('queue-resolve', runner.id, item.id) : closePopup()
+  // A plan open in the FileViewer lives in the URL (popup=plan-file:<runner>:<path>).
+  const openPlan = (item) => openPopup('plan-file', runner.id, item.plan)
+  const planPopup = popup?.type === 'plan-file' && popup.args[0] === runner?.id ? popup : null
+  const planPath = planPopup?.args[1] || ''
+  const planSource = planPath ? {
+    key: `plan:${runner.id}:${planPath}`,
+    name: planPath.split('/').pop(),
+    subtitle: `${project?.name ? project.name + ' · ' : ''}${project?.plans_folder || 'plans'}/${planPath}`,
+    load: () => api(`/api/mission/runners/${runner.id}/plan-file?path=${encodeURIComponent(planPath)}`),
+    save: (content, loaded) => api(`/api/mission/runners/${runner.id}/plan-file`, { method: 'PUT', body: { path: planPath, content, revision: loaded.revision } }),
+  } : null
+  const planIdentity = (l) => `${l.pathname}:${parsePopups(l.search, l.pathname).find((p) => p.type === 'plan-file')?.value || ''}`
   useEffect(() => {
     if (popup?.type !== 'queue-resolve' || popup.args[0] !== runner?.id || !queue || queueForRunner !== runner?.id || queueStale || queueError || queue.condition !== 'ok') return
     if (!(queue.items || []).some((it) => it.id === popup.args[1] && it.status === 'need input')) {
@@ -337,6 +352,7 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
 
   return (
     <section className={cx('msn-queue-panel border-b border-line-faint bg-panel/50', historyOpen && 'msn-history-overlay', panelExpanded ? 'flex min-h-0 flex-1 flex-col' : 'shrink-0')}>
+      {planSource && <FileViewer source={planSource} identity={planIdentity} onClose={() => closePopup({ expected: planPopup.value })} />}
       {/* Header row: state + counts + collapse. Always visible, even collapsed. */}
       <div className={cx('msn-queue-header flex items-center gap-3 px-3 py-2', (!collapsed || historyOpen) && 'border-b border-line-faint')}>
         <button
@@ -574,7 +590,7 @@ export default function QueuePanel({ runner, project, sessionId, expanded = fals
               {items.length > 0 && (
                 <ul className={cx('msn-queue-items mt-3 divide-y divide-line-faint overflow-y-auto rounded-card border border-line-faint bg-panel', panelExpanded && 'min-h-0 flex-initial')}>
                   {items.map((it, index) => (
-                    <ItemRow key={it.id} item={it} current={current?.id === it.id} index={index} total={items.length} busy={busy} actions={actions} onEditStatus={editItemStatus} onMove={moveItem} onRemove={removeItem} />
+                    <ItemRow key={it.id} item={it} current={current?.id === it.id} index={index} total={items.length} busy={busy} actions={actions} onEditStatus={editItemStatus} onMove={moveItem} onRemove={removeItem} onOpen={openPlan} />
                   ))}
                 </ul>
               )}

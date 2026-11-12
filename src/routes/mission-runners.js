@@ -197,6 +197,29 @@ module.exports = function register(app, ctx) {
     }
   });
 
+  /** One plan file, raw, for the Mission file viewer: read with its content
+   *  revision, save only against that revision (409 if the agent changed it
+   *  meanwhile). Path is relative to the project's plans folder. */
+  app.get('/api/mission/runners/:id/plan-file', (req, res) => {
+    try {
+      const found = missionRunner(req, res);
+      if (!found) return;
+      res.json(mission.readRunnerPlanFile(found.runner.id, req.query.path));
+    } catch (e) {
+      missionFail(res, e);
+    }
+  });
+
+  app.put('/api/mission/runners/:id/plan-file', csrfCheck, (req, res) => {
+    try {
+      const found = missionRunner(req, res);
+      if (!found) return;
+      res.json(mission.writeRunnerPlanFile(found.runner.id, req.body?.path, req.body?.content, req.body?.revision, { actor: missionActorFor(req) }));
+    } catch (e) {
+      missionFail(res, e);
+    }
+  });
+
   /** Prompt-template configuration surface (plan 91 §Phase 2): catalogue,
    *  shipped defaults and this runner's effective set. Read-only — creates no
    *  session, touches no queue file, enables nothing. Same gate as the rest. */

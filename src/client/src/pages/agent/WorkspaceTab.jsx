@@ -1,5 +1,5 @@
 import { useCallback, useState, useRef, useEffect, useLayoutEffect } from 'react'
-import { useNavigation, useDirtyNavigation } from '../../lib/navigation'
+import { useNavigation } from '../../lib/navigation'
 import { parsePopups } from '../../lib/url-state'
 import { useSearchParams } from 'react-router-dom'
 import { api, getCsrfToken } from '../../lib/api'
@@ -7,12 +7,11 @@ import { useConfirm } from '../../lib/confirm'
 import WorkspaceToolbar from './WorkspaceToolbar'
 import PromptModal from '../../components/PromptModal'
 import Button from '../../components/ui/Button'
-import { Textarea } from '../../components/ui/Input'
 import Badge from '../../components/ui/Badge'
-import Modal from '../../components/ui/Modal'
+import FileViewer from '../../components/FileViewer'
 
 export default function WorkspaceTab({ agent }) {
-  const { location, openPopup, closePopup, patch, drafts } = useNavigation()
+  const { location, openPopup, closePopup, patch } = useNavigation()
   const stack = parsePopups(location.search, location.pathname)
   const filePopup = stack.find((p) => p.type === 'file')
   const movePopup = stack.find((p) => p.type === 'file-move')
@@ -89,7 +88,6 @@ export default function WorkspaceTab({ agent }) {
   const [error, setError] = useState('')
   const [uploading, setUploading] = useState(false)
   const [uploadPct, setUploadPct] = useState(0)
-  const [fileModal, setFileModal] = useState(null)
   const moveTarget = movePopup ? { path: movePopup.args[0] } : null
   const setMoveTarget = (target) => target ? openPopup('file-move', target.path) : closePopup({ saved: true })
   const [loading, setLoading] = useState(false)
@@ -277,89 +275,34 @@ export default function WorkspaceTab({ agent }) {
 
   function openFile(entry, entryPath) { openPopup('file', entryPath) }
 
-  const [fileDirty, setFileDirty] = useState(false)
-  const [fileSaved, setFileSaved] = useState(false)
-  const [jsonError, setJsonError] = useState('')
-  const fileKey = `file:${agent.name}:${scope}:${filePopup?.args[0] || ''}`
-  const activeFile = useRef(null)
-  activeFile.current = { key: fileKey, content: fileModal?.content }
+  // The viewer itself is the shared FileViewer; this tab only says where the
+  // file lives (agent, scope, path) and how to load, save and download it.
+  // The draft key (`file:<agent>:<scope>:<path>`) is unchanged, so an unsaved
+  // edit from before survives.
+  const filePath = filePopup?.args[0] || ''
   const fileIdentity = (l) => `${l.pathname}:${new URLSearchParams(l.search).get('scope') || scope}:${parsePopups(l.search, l.pathname).find((p) => p.type === 'file')?.value || ''}`
-  useDirtyNavigation(fileDirty, fileIdentity, () => { drafts.delete(fileKey); setFileDirty(false) })
-  useEffect(() => {
-    let live = true
-    setFileModal(null)
-    setFileDirty(false)
-    if (!filePopup) return
-    const entryPath = filePopup.args[0]
-    const loadFile = async () => {
-      try {
-        const media = mediaTypeOf(entryPath.split('/').pop())
-        // Revalidate even media links using the authorized listing endpoint.
-        const d = media
-          ? await api(`/api/agents/${agent.name}/workspace?path=${encodeURIComponent(entryPath.split('/').slice(0, -1).join('/') || '/')}&scope=${scope}`)
-          : await api(`/api/agents/${agent.name}/workspace/file?path=${encodeURIComponent(entryPath)}&scope=${scope}`)
-        if (!live) return
-        if (d.error) throw { error: d.error }
-        if (media && !(d.entries || []).some((e) => e.name === entryPath.split('/').pop())) throw { error: 'File not found' }
-        const draft = drafts.get(fileKey)
-        setFileModal(media
-          ? { name: entryPath.split('/').pop(), path: entryPath, media, mediaUrl: `/api/agents/${agent.name}/workspace/media?path=${encodeURIComponent(entryPath)}&scope=${scope}` }
-          : { ...d, path: entryPath, content: draft ?? d.content })
-        setFileDirty(!media && draft !== undefined && draft !== d.content)
-      } catch (e) {
-        if (live) {
-          const message = e?.error || e?.message || 'Failed to load file'
-          setError(message)
-          setFileModal({ name: entryPath.split('/').pop(), path: entryPath, unavailable: true, content: message })
-        }
-      }
-    }
-    loadFile()
-    return () => { live = false }
-  }, [filePopup?.value, agent.name, scope])
-
-  function getJsonLine(content, error) {
-    const match = error.message.match(/position\s+(\d+)/i)
-    if (!match) return error.message
-    const pos = parseInt(match[1])
-    const lines = content.substring(0, pos).split('\n')
-    return 'Line ' + lines.length + ': ' + error.message
-  }
-
-  async function saveFile() {
-    if (!fileModal) return
-    const textarea = document.getElementById('file-editor')
-    if (!textarea) return
-    const content = textarea.value
-    const ext = '.' + (fileModal.name || '').split('.').pop()?.toLowerCase()
-    if (ext === '.json') {
-      try { JSON.parse(content); setJsonError('') }
-      catch (e) { setJsonError(getJsonLine(content, e)); return }
-    }
-    try {
-      await api(`/api/agents/${agent.name}/workspace/save`, { method: 'POST', body: { path: fileModal.path || fileModal.name, content, scope } })
-      // The write was explicit, but its response must not clear a newer edit or
-      // replace a different file selected while it was in flight.
-      if (drafts.get(fileKey) === content) drafts.delete(fileKey)
-      if (activeFile.current?.key !== fileKey || activeFile.current?.content !== content) return
-      setFileModal({ ...fileModal, content })
-      setFileDirty(false)
-      setFileSaved(true)
-      setTimeout(() => setFileSaved(false), 2000)
-    } catch (err) { setError(toMsg(err)) }
-  }
-
-  async function closeFileModal() {
-    closePopup()
-  }
-
-  const ext = fileModal ? '.' + (fileModal.name || '').split('.').pop()?.toLowerCase() : ''
-  const editable = !!fileModal && !fileModal.unavailable && !fileModal.media && !/[\u0000]/.test((fileModal.content || '').slice(0, 4096))
-
-  // No window Escape listener here any more: Modal owns Escape and routes it to
-  // onClose (= closeFileModal). Leaving both in place would call closeFileModal
-  // twice on one keypress, and with unsaved changes that is two stacked
-  // "Discard changes" confirms.
+  const fileSource = filePath ? {
+    key: `${agent.name}:${scope}:${filePath}`,
+    name: filePath.split('/').pop(),
+    downloadUrl: `/api/agents/${agent.name}/workspace/download?path=${encodeURIComponent(filePath)}&scope=${scope}`,
+    load: async () => {
+      const name = filePath.split('/').pop()
+      const media = mediaTypeOf(name)
+      // Revalidate even media links using the authorized listing endpoint.
+      const d = media
+        ? await api(`/api/agents/${agent.name}/workspace?path=${encodeURIComponent(filePath.split('/').slice(0, -1).join('/') || '/')}&scope=${scope}`)
+        : await api(`/api/agents/${agent.name}/workspace/file?path=${encodeURIComponent(filePath)}&scope=${scope}`)
+      if (d.error) throw { error: d.error }
+      if (media && !(d.entries || []).some((e) => e.name === name)) throw { error: 'File not found' }
+      return media
+        ? { name, path: filePath, media, mediaUrl: `/api/agents/${agent.name}/workspace/media?path=${encodeURIComponent(filePath)}&scope=${scope}` }
+        : { ...d, path: filePath }
+    },
+    save: async (content) => {
+      await api(`/api/agents/${agent.name}/workspace/save`, { method: 'POST', body: { path: filePath, content, scope } })
+      return {}
+    },
+  } : null
 
   return (
     <div>
@@ -503,78 +446,8 @@ export default function WorkspaceTab({ agent }) {
         </>
       )}
 
-      {/* File Viewer/Editor Modal.
-          This is a plain backdrop+panel with no msn-* hooks, so it is the shared
-          Modal now. The two header clusters map onto Modal's `title` (icon,
-          name, size·ext, dirty/saved state) and `headerExtra` (Save, Download,
-          Close); the editor itself is Modal's body, so `className` there is the
-          body — it must carry `flex-1 min-h-0` for the panel's flex column. */}
-      {fileModal && (
-        <Modal
-          open
-          onClose={closeFileModal}
-          z="z-[60]"
-          width="w-[80vw] max-w-[900px]"
-          panelClassName="h-[80vh]"
-          divided
-          className="flex-1 min-h-0 overflow-hidden p-4"
-          title={
-            <span className="flex items-center gap-3 min-w-0">
-              <span className="text-ink-faint">📄</span>
-              <span className="text-sm font-medium text-ink truncate">{fileModal.name}</span>
-              <span className="text-xs font-normal text-ink-dim">
-                {fileModal.size_hr || (fileModal.size != null ? fileModal.size + ' bytes' : '')} · {ext.replace('.', '').toUpperCase()}
-              </span>
-              {editable && (
-                <span className={`text-xs font-normal ml-2 ${jsonError ? 'text-danger' : fileSaved ? 'text-success' : fileDirty ? 'text-warning' : 'text-ink-dim'}`}>
-                  {jsonError || (fileSaved ? 'Saved' : fileDirty ? 'Unsaved' : '')}
-                </span>
-              )}
-              {!editable && !fileModal.media && !fileModal.unavailable && (
-                <span className="text-xs font-normal text-ink-dim ml-2">Binary file — read-only</span>
-              )}
-            </span>
-          }
-          headerExtra={
-            <div className="flex items-center gap-2">
-              {editable && (
-                <Button variant="primary" size="md" onClick={saveFile}>
-                  Save
-                </Button>
-              )}
-              {/* An anchor, not a button: the browser owns the download, so it
-                  stays an <a download> — only the radius is tokenised. */}
-              <a href={`/api/agents/${agent.name}/workspace/download?path=${encodeURIComponent(fileModal.path || fileModal.name)}&scope=${scope}`}
-                 className="px-3 py-2 bg-raised hover:bg-raised-hover text-ink rounded-control text-sm transition-colors" download>Download</a>
-              <Button variant="secondary" size="md" onClick={closeFileModal}>
-                Close
-              </Button>
-            </div>
-          }
-        >
-          {fileModal.media === 'image' ? (
-            <div className="w-full h-full flex items-center justify-center">
-              <img src={fileModal.mediaUrl} alt={fileModal.name} className="max-w-full max-h-full object-contain rounded-lg" />
-            </div>
-          ) : fileModal.media === 'video' ? (
-            <div className="w-full h-full flex items-center justify-center">
-              <video src={fileModal.mediaUrl} controls autoPlay className="max-w-full max-h-full rounded-lg" />
-            </div>
-          ) : editable ? (
-            /* id="file-editor" is load-bearing: saveFile() reads the textarea
-               through document.getElementById, not through a ref. */
-            <Textarea
-              id="file-editor"
-              mono
-              value={fileModal.content}
-              onChange={(e) => { drafts.set(fileKey, e.target.value); setFileModal({ ...fileModal, content: e.target.value }); setFileDirty(true); setFileSaved(false); setJsonError('') }}
-              className="h-full resize-none"
-              style={{ minHeight: '100%' }}
-            />
-          ) : (
-            <pre className="text-xs text-ink-muted font-mono whitespace-pre-wrap">{fileModal.content}</pre>
-          )}
-        </Modal>
+      {fileSource && (
+        <FileViewer source={fileSource} identity={fileIdentity} onClose={() => closePopup()} onError={setError} />
       )}
 
       {moveTarget && (

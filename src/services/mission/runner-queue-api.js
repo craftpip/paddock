@@ -5,6 +5,8 @@
 // Exported before anything is required: function declarations are hoisted, so a
 // sibling module that requires this one mid-cycle already sees every function.
 Object.assign(exports, {
+  readRunnerPlanFile,
+  writeRunnerPlanFile,
   updateRunnerQueueItem,
   pauseConfirmation,
   resolveRunnerQueue,
@@ -327,6 +329,71 @@ async function listRunnerPlans(id) {
       unreadable: r.unreadable || null,
     })),
   };
+}
+
+// ─── One plan file, for the Mission file viewer ─────────────────────────────
+// The queue names a plan by its path relative to the project's plans folder;
+// `plans.planPath` resolves it (on the host, through the webui's bind mounts,
+// so it works while the PAD is stopped) and refuses anything that leaves the
+// folder, is not a .md, or is a reserved name (QUEUE.md, INDEX.md, README.md).
+// The viewer edits the RAW file, frontmatter included — it is a file viewer.
+// `revision` is the sha256 of the content read, and a save must present it:
+// the worker agent edits its plan while it runs, and a save over an edit the
+// human never saw would silently throw the agent's work away.
+const PLAN_FILE_MAX_BYTES = 2 * 1024 * 1024;
+const planRevision = (text) => crypto.createHash('sha256').update(text, 'utf8').digest('hex');
+
+function runnerPlanAbs(id, relPath) {
+  const runner = getRunner(id);
+  if (!runner) throw new MissionError('runner_not_found', `Runner ${id} not found`);
+  const project = getProject(runner.project_id);
+  const agent = requireAgent(project.agent_name);
+  const plansProject = { ...project, plans_folder: project.plans_folder || 'plans' };
+  let abs;
+  try {
+    abs = plans.planPath(agent, relPath, { project: plansProject });
+  } catch (e) {
+    throw new MissionError(e.code || 'plan_path_invalid', e.message, 400);
+  }
+  return { abs, base: plans.plansDir(agent, { project: plansProject }), project };
+}
+
+function readRunnerPlanFile(id, relPath) {
+  const { abs, project } = runnerPlanAbs(id, relPath);
+  if (!fs.existsSync(abs)) throw new MissionError('plan_not_found', `Plan file not found: ${relPath}`, 404);
+  const st = fs.statSync(abs);
+  if (!st.isFile()) throw new MissionError('plan_not_found', `Not a file: ${relPath}`, 404);
+  if (st.size > PLAN_FILE_MAX_BYTES) throw new MissionError('plan_too_large', `Plan file is larger than ${PLAN_FILE_MAX_BYTES} bytes`, 413);
+  const content = fs.readFileSync(abs, 'utf8');
+  return {
+    name: String(relPath).split('/').pop(),
+    path: String(relPath),
+    content,
+    size: st.size,
+    modifiedAt: st.mtime.toISOString(),
+    revision: planRevision(content),
+    project: projectTag(project),
+  };
+}
+
+function writeRunnerPlanFile(id, relPath, content, revision, { actor = null } = {}) {
+  if (typeof content !== 'string') throw new MissionError('plan_content_required', 'content must be a string', 400);
+  if (Buffer.byteLength(content, 'utf8') > PLAN_FILE_MAX_BYTES) throw new MissionError('plan_too_large', `Plan file is larger than ${PLAN_FILE_MAX_BYTES} bytes`, 413);
+  const { abs, base, project } = runnerPlanAbs(id, relPath);
+  // Edit only: this viewer opens plans that exist; creating one is the plan
+  // tools' job (they stamp the frontmatter a new plan needs).
+  if (!fs.existsSync(abs)) throw new MissionError('plan_not_found', `Plan file not found: ${relPath}`, 404);
+  if (!revision) throw new MissionError('plan_revision_required', 'Save needs the revision you read, so a newer edit is never overwritten', 400);
+  const current = fs.readFileSync(abs, 'utf8');
+  if (planRevision(current) !== revision) {
+    throw new MissionError('plan_revision_conflict', 'This plan changed since you opened it (the agent may have edited it). Reload to see the new version; your text is kept in the editor.', 409);
+  }
+  const { writeFileOwned } = require('../ownership');
+  writeFileOwned(abs, content, { boundary: base });
+  // Shape only, never the text (an audit row is not a second copy of a plan).
+  audit(project, 'plan_file_saved', { actor, details: `${relPath} (${Buffer.byteLength(content, 'utf8')} bytes)` });
+  const st = fs.statSync(abs);
+  return { ok: true, path: String(relPath), size: st.size, modifiedAt: st.mtime.toISOString(), revision: planRevision(content) };
 }
 
 /** Legacy whole-array writes were the path that accepted browser-generated IDs.

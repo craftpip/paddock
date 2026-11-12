@@ -332,6 +332,24 @@ the store (`readUsageEvidence`) is still measured for opencode only; on codex an
 screen notice (`provider-limit.js`) is the only exhaustion signal. No driver exposes compaction
 in its store, so it is not inferred.
 
+### Plan File
+
+The Mission file viewer reads and edits one plan through `readRunnerPlanFile` /
+`writeRunnerPlanFile` (`runner-queue-api.js`). The path is relative to the project's plans folder
+and resolved by `plans.planPath` on the host (through the webui's bind mounts, so it works while
+the PAD is stopped); a path that leaves the folder, is not `.md`, or is a reserved name
+(`QUEUE.md`, `INDEX.md`, `README.md`) is refused with `plan_path_invalid` / `plan_reserved_name`.
+
+- The file is edited **raw**, frontmatter included, up to 2 MiB.
+- Edit only: a missing file is `plan_not_found`; creating plans stays with the plan tools, which
+  stamp the frontmatter a new plan needs.
+- `revision` is the sha256 of the content read, and a save must present it. A changed file is
+  `plan_revision_conflict` (409) and nothing is written: the worker edits its own plan while it
+  runs, and a save over an edit the human never saw would discard the agent's work. The viewer
+  keeps the human's text and offers Reload.
+- The write goes through `writeFileOwned`, so the file keeps its PAD-side owner.
+- The audit row `plan_file_saved` records the path and byte count, never the text.
+
 ## Projection Publication
 
 `runner-publication.js` owns filesystem output, marker writes, acknowledgement and publisher
@@ -485,6 +503,8 @@ need CSRF.
 | `PATCH /api/mission/runners/:id/queue/items/:itemId` | Status review of one item |
 | `PUT /api/mission/runners/:id/queue/custom-instructions` | Queue guidance |
 | `GET /api/mission/runners/:id/plans` | Candidates for Add plans |
+| `GET /api/mission/runners/:id/plan-file?path=` | One plan file, raw, with its `revision` ([Plan File](#plan-file)) |
+| `PUT /api/mission/runners/:id/plan-file` | Save it (`path`, `content`, `revision`) |
 | `POST /api/mission/runners/:id/start`, `/resume` | Run (resume requires `paused`) |
 | `POST /api/mission/runners/:id/pause` | Pause, with optional `mode` |
 | `POST /api/mission/runners/:id/resolve` | Answer a blocker |
