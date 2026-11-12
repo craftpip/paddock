@@ -125,6 +125,7 @@ const SURFACE = [
   'reconcileCallbackOutbox',
   'observeRunnerQueues',
   'observeRunnerUsage',
+  'observeQuotaStops',
   'RUNNER_CONTROL_STATES',
   'RUNNER_HEALTH_STATES'
 ];

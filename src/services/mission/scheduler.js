@@ -18,6 +18,7 @@ Object.assign(exports, {
   _setFastWatch,
   observeRunnerQueues,
   observeRunnerUsage,
+  observeQuotaStops,
 });
 
 const crypto = require('crypto');
@@ -102,6 +103,43 @@ async function observeRunnerUsage() {
   }
   return recorded;
 }
+/** A provider quota stop must not outlive the quota. The stop is set from a
+ *  definitive screen notice, but nothing re-checked it, so a runner stayed
+ *  "Usage limit" for days after opencode was answering again (a human typing
+ *  into the same session got replies). Lift it when the provider has
+ *  DEMONSTRABLY answered since the stop: the notice is gone from the worker's
+ *  screen AND the worker's store shows a turn that finished after the stop.
+ *  A notice that is merely hidden (a dismissed modal) is not enough on its own.
+ *  The lift is an ordinary explicit-style Run (`startRunner`), so every gate
+ *  of that path applies; a runner with a recovery script already in flight is
+ *  left to that script. */
+async function observeQuotaStops() {
+  const rows = getDb().prepare(`SELECT r.id, rt.updated_at AS stopped_at FROM infinite_runners r JOIN runner_runtime rt ON rt.runner_id = r.id
+    WHERE rt.state = 'waiting_input' AND rt.reason_code = 'usage_exhausted'`).all();
+  let lifted = 0;
+  for (const row of rows) {
+    try {
+      const busy = getDb().prepare(`SELECT 1 FROM runner_callback_outbox WHERE runner_id = ? AND event = 'usage_exhausted' AND status IN ('pending','running')
+        UNION SELECT 1 FROM runner_quota_recoveries WHERE runner_id = ? AND status IN ('script_running','restoring') LIMIT 1`).get(row.id, row.id);
+      if (busy) continue;
+      const sup = await getRunnerForSupervision(row.id);
+      if (!sup?.session?.agent_session_id) continue;
+      const screen = await padTmux.captureScreen(sup.project.agent_name, sup.session.tmux_id, 80).catch(() => null);
+      if (!screen?.live || require('../provider-limit').screenUsageEvidence(screen)) continue;
+      const turn = agentStore.readTurn(sup.agent, sup.session.agent_session_id);
+      const answeredAt = Date.parse(turn.completedAt || '');
+      if (turn.state !== 'idle' || turn.outcome === 'error' || !(answeredAt > Date.parse(row.stopped_at))) continue;
+      // startRunner records `usage_recovered` when it leaves the quota stop.
+      await require('./runner-control').startRunner(row.id, { actor: 'quota-observer' });
+      lifted++;
+    } catch (e) {
+      // A refused lift leaves the stop as it was; the next pass looks again.
+      console.error(`[quota] could not lift the usage stop of ${row.id}: ${e.message}`);
+    }
+  }
+  return lifted;
+}
+
 async function dispatchNext(runnerId, session, project, agent, queue, kind, gen = getRunner(runnerId)?.run_generation) {
   const runner = getRunner(runnerId);
   if (!runner) return;

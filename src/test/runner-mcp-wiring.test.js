@@ -255,3 +255,27 @@ it('stalled-turn twins: a pane showing a running turn, or a turn that moved rece
   await assert.rejects(() => mission.startRunner(runner.id), (e) => e.code === 'runner_worker_not_idle');
   assert.equal(sends.length, 0, 'a turn that moved 30s ago is not called stalled');
 });
+
+// The quota stop is lifted by the watcher once the provider has demonstrably
+// answered since the stop — and not on weaker evidence.
+it('quota stop lifts itself: notice gone and a turn finished after the stop -> the queue resumes', async () => {
+  quotaStop();
+  turn = { state: 'idle', userId: 'human-after', inputHash: 'h', completedAt: new Date(Date.now() + 5000).toISOString(), progressAt: new Date(Date.now() + 5000).toISOString() };
+  assert.equal(await mission.observeQuotaStops(), 1);
+  assert.equal(sends.length, 1, 'the next instruction went out');
+  assert.notEqual(runnerTransition.getRuntime(runner.id).state, 'waiting_input');
+});
+
+it('quota stop stays: notice still on screen, or no answer since the stop, or a turn still running', async () => {
+  quotaStop();
+  turn = { state: 'idle', userId: 'old', inputHash: 'h', completedAt: new Date(Date.now() + 5000).toISOString() };
+  tmux.captureScreen = async () => ({ live: true, text: ' Free usage exceeded, subscribe to Go [retrying in 8h 58m attempt #1]\n ctrl+p commands' });
+  assert.equal(await mission.observeQuotaStops(), 0, 'the limit still shows');
+  tmux.captureScreen = async () => ({ live: true, text: 'idle ctrl+p commands' });
+  turn = { state: 'idle', userId: 'old', inputHash: 'h', completedAt: new Date(Date.now() - 600000).toISOString() };
+  assert.equal(await mission.observeQuotaStops(), 0, 'nothing answered since the stop (a dismissed notice is not proof)');
+  turn = { state: 'working', userId: 'x', inputHash: 'h', progressAt: new Date().toISOString() };
+  assert.equal(await mission.observeQuotaStops(), 0, 'a running turn is not an answer yet');
+  assert.equal(sends.length, 0);
+  assert.equal(runnerTransition.getRuntime(runner.id).state, 'waiting_input');
+});

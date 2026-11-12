@@ -840,6 +840,7 @@ setInterval(() => {
     await mission.baselineRunnerCallbacks();
     await mission.observeRunnerQueues();
     await mission.observeRunnerUsage();
+    await mission.observeQuotaStops();
     await mission.pumpCallbackOutbox();
   })()
     .catch((e) => console.error('[callbacks tick]', e.message))

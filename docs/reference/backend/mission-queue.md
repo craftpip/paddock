@@ -300,6 +300,12 @@ Run is an explicit control intent, separate from whether an instruction may be s
   is still there it refuses with `runner_quota_still_exhausted` (409) and sends nothing; once it
   is gone it records `usage_recovered`, leaves the stop through Pause, and continues as a normal
   Run (idle worker → start prompt; a turn the worker already began → adopted).
+  The watcher also lifts the stop by itself (`observeQuotaStops`, every 20 s callback tick) once
+  the provider has demonstrably answered since the stop: the notice is gone from the worker's
+  screen AND the worker's store shows a turn that finished after the stop. A notice that is only
+  hidden (a dismissed modal) does not count, nor does a turn still running. The lift is a
+  `startRunner` with actor `quota-observer`, so every gate of an explicit Run applies; a runner
+  whose recovery script is in flight is left to it.
 - **Store says the worker is still working, but nothing runs the turn:** on an explicit Run, a
   turn that reads `working` in the store, has not moved for 2 minutes (`WORKER_STALL_MS`), and
   whose live pane does not show the driver's busy marker (`tuiBusyPattern`; opencode's

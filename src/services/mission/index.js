@@ -129,6 +129,7 @@ module.exports = {
   reconcileCallbackOutbox: runnerControl.reconcileCallbackOutbox,
   observeRunnerQueues: scheduler.observeRunnerQueues,
   observeRunnerUsage: scheduler.observeRunnerUsage,
+  observeQuotaStops: scheduler.observeQuotaStops,
   RUNNER_CONTROL_STATES: runners.RUNNER_CONTROL_STATES,
   RUNNER_HEALTH_STATES: runners.RUNNER_HEALTH_STATES,
 };
