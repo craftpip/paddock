@@ -500,6 +500,13 @@ Rule of thumb: **code logic → `docs/`; agent behavior and operational workflow
   (`niyu-*` and anything not named `paddock` / `pad-*`) are not ours. Browser checks: the
   navigator MCP (`cloakbrowser`, headless); `google-chrome --headless=new` over CDP also works.
 
+- **Two Paddock MCP servers are registered in Claude Code (local scope):** `paddock_dev` →
+  meridian (key `orchestrator`, create+exec on `pad-dev` only) and `paddock_live` → the user's
+  live laptop instance `http://10.69.1.164:6789` (key `orchestratorlive`, scope `read`). Test and
+  orchestrate on `paddock_dev`; use `paddock_live` to look at what the user is seeing. Widening
+  the live key is the user's call. Deploy to live: `git push lap:/www2/paddock
+  HEAD:refs/heads/from-meridian`, `git merge --ff-only` there, build the client inside its
+  paddock container, `docker restart paddock`.
 - **The three entries below describe the previous host, `lap` (10.69.1.164), which is out of
   scope since 2026-11-11.** They are kept for when work returns there; on `meridian` use the
   entry above.

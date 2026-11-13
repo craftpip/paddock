@@ -249,8 +249,11 @@ Claude Code (or any MCP client) acts as the orchestrator, with a least-privilege
 tools while it plays the part:
 
 1. Profile → API keys: a key with `tools:create,tools:exec,target:agent:<pad>`.
-2. `claude mcp add --transport http -s local paddock http://<host>:6789/mcp --header
-   "Authorization: Bearer <key>"`, then restart the client (tools load at startup).
+2. `claude mcp add --transport http -s local paddock_dev http://<host>:6789/mcp --header
+   "Authorization: Bearer <key>"`, then restart the client (tools load at startup). Name each
+   server after the instance it reaches (`paddock_dev`, `paddock_live`): the tools of two
+   servers called alike are indistinguishable to the LLM, and a call meant for a test pad must
+   never land on a live one. A key for a live instance starts as `read`.
 3. A project to work in. "Paddock develops Paddock": clone this repo into the PAD's workspace
    (`instances/<pad>/opencode/workspace/paddock-self`) and remove its `origin`, so the worker
    edits real web code without touching the live source the webui runs from.
