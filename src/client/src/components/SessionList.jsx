@@ -722,8 +722,8 @@ export default function SessionList() {
         {rows.length === 0 && (listLoaded || hist) && historyErrors.length === 0 && (
           <Empty>
             {isAll
-              ? 'No conversations in any project yet — start one to begin.'
-              : `No conversations in ${project?.folder} yet — start one to begin.`}
+              ? "A session is a live agent terminal in a project's folder — start one with the New session button."
+              : "A session is a live agent terminal in this project's folder — start one with the New session button."}
           </Empty>
         )}
         {rows.map((row) => (

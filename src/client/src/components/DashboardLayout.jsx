@@ -6,6 +6,7 @@ import { toggleTheme, getTheme } from '../lib/theme'
 import Button from './ui/Button'
 import { useAgents } from '../stores/agents'
 import { useToast } from '../lib/toast'
+import { version as APP_VERSION } from '../../../package.json'
 
 /** One link in the top bar. The current page is marked for the eye (accent
  *  colour) and for a screen reader (aria-current). */
@@ -115,6 +116,7 @@ export default function DashboardLayout({ children, fullHeight, fullWidth }) {
               >
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a 3 3 0 0 1 -3 3H6a 3 3 0 0 1 -3 -3V7a 3 3 0 0 1 3 -3h4a 3 3 0 0 1 3 3v1" /></svg>
               </Button>
+              <span className="shrink-0 px-2 text-xs text-ink-faint" title="Paddock version">v{APP_VERSION}</span>
             </div>
           </div>
         </div>
